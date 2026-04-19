@@ -336,6 +336,17 @@ p {
   font-size: 0.82rem;
 }
 
+.state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.state-actions button.secondary {
+  color: #f5f7fb;
+  background: #2a2f39;
+}
+
 .streams {
   display: grid;
   gap: 8px;

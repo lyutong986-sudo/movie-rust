@@ -1,13 +1,16 @@
 use crate::{
     auth::AuthSession,
     error::AppError,
-    models::{BaseItemDto, ItemsQuery, PlaybackInfoResponse, QueryResult},
-    repository::{self, ItemListOptions},
+    models::{
+        BaseItemDto, ItemsQuery, PlaybackInfoResponse, QueryResult, UpdateUserItemDataRequest,
+        UserItemDataDto, UserItemDataQuery,
+    },
+    repository::{self, ItemListOptions, UpdateUserDataInput},
     state::AppState,
 };
 use axum::{
     extract::{Path, Query, State},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use uuid::Uuid;
@@ -24,6 +27,30 @@ pub fn router() -> Router<AppState> {
         .route(
             "/Items/{item_id}/PlaybackInfo",
             get(playback_info).post(playback_info),
+        )
+        .route(
+            "/UserItems/{item_id}/UserData",
+            get(user_item_data).post(update_user_item_data),
+        )
+        .route(
+            "/Users/{user_id}/Items/{item_id}/UserData",
+            get(legacy_user_item_data).post(legacy_update_user_item_data),
+        )
+        .route(
+            "/UserFavoriteItems/{item_id}",
+            post(mark_favorite).delete(unmark_favorite),
+        )
+        .route(
+            "/Users/{user_id}/FavoriteItems/{item_id}",
+            post(legacy_mark_favorite).delete(legacy_unmark_favorite),
+        )
+        .route(
+            "/UserPlayedItems/{item_id}",
+            post(mark_played).delete(mark_unplayed),
+        )
+        .route(
+            "/Users/{user_id}/PlayedItems/{item_id}",
+            post(legacy_mark_played).delete(legacy_mark_unplayed),
         )
         .route("/Items/{item_id}", get(item_by_id))
         .route("/Users/{user_id}/Items/{item_id}", get(user_item_by_id))
@@ -184,6 +211,206 @@ async fn media_items_to_dto_result(
         total_record_count: result.total_record_count,
         start_index: result.start_index,
     }))
+}
+
+async fn user_item_data(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+    Query(query): Query<UserItemDataQuery>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(Json(
+        repository::get_user_item_data_dto(&state.pool, user_id, item_id).await?,
+    ))
+}
+
+async fn legacy_user_item_data(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    ensure_user_access(&session, user_id)?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(Json(
+        repository::get_user_item_data_dto(&state.pool, user_id, item_id).await?,
+    ))
+}
+
+async fn update_user_item_data(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+    Query(query): Query<UserItemDataQuery>,
+    Json(payload): Json<UpdateUserItemDataRequest>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    update_user_data_for_user(&state, &session, user_id, item_id, payload).await
+}
+
+async fn legacy_update_user_item_data(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Json(payload): Json<UpdateUserItemDataRequest>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    update_user_data_for_user(&state, &session, user_id, item_id, payload).await
+}
+
+async fn mark_favorite(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+    Query(query): Query<UserItemDataQuery>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    set_favorite_for_user(&state, &session, user_id, item_id, true).await
+}
+
+async fn unmark_favorite(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+    Query(query): Query<UserItemDataQuery>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    set_favorite_for_user(&state, &session, user_id, item_id, false).await
+}
+
+async fn legacy_mark_favorite(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    set_favorite_for_user(&state, &session, user_id, item_id, true).await
+}
+
+async fn legacy_unmark_favorite(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    set_favorite_for_user(&state, &session, user_id, item_id, false).await
+}
+
+async fn mark_played(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+    Query(query): Query<UserItemDataQuery>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    set_played_for_user(&state, &session, user_id, item_id, true, query.date_played).await
+}
+
+async fn mark_unplayed(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+    Query(query): Query<UserItemDataQuery>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    set_played_for_user(&state, &session, user_id, item_id, false, None).await
+}
+
+async fn legacy_mark_played(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Query(query): Query<UserItemDataQuery>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    set_played_for_user(&state, &session, user_id, item_id, true, query.date_played).await
+}
+
+async fn legacy_mark_unplayed(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    set_played_for_user(&state, &session, user_id, item_id, false, None).await
+}
+
+async fn update_user_data_for_user(
+    state: &AppState,
+    session: &AuthSession,
+    user_id: Uuid,
+    item_id: Uuid,
+    payload: UpdateUserItemDataRequest,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    ensure_user_access(session, user_id)?;
+    ensure_media_item_exists(state, item_id).await?;
+    let UpdateUserItemDataRequest {
+        playback_position_ticks,
+        play_count,
+        is_favorite,
+        likes: _likes,
+        played,
+        last_played_date,
+        rating: _rating,
+        played_percentage: _played_percentage,
+        unplayed_item_count: _unplayed_item_count,
+    } = payload;
+    Ok(Json(
+        repository::update_user_item_data(
+            &state.pool,
+            user_id,
+            item_id,
+            UpdateUserDataInput {
+                playback_position_ticks,
+                play_count,
+                is_favorite,
+                played,
+                last_played_date,
+            },
+        )
+        .await?,
+    ))
+}
+
+async fn set_favorite_for_user(
+    state: &AppState,
+    session: &AuthSession,
+    user_id: Uuid,
+    item_id: Uuid,
+    is_favorite: bool,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    ensure_user_access(session, user_id)?;
+    ensure_media_item_exists(state, item_id).await?;
+    Ok(Json(
+        repository::set_user_favorite(&state.pool, user_id, item_id, is_favorite).await?,
+    ))
+}
+
+async fn set_played_for_user(
+    state: &AppState,
+    session: &AuthSession,
+    user_id: Uuid,
+    item_id: Uuid,
+    is_played: bool,
+    date_played: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    ensure_user_access(session, user_id)?;
+    ensure_media_item_exists(state, item_id).await?;
+    Ok(Json(
+        repository::set_user_played(&state.pool, user_id, item_id, is_played, date_played).await?,
+    ))
+}
+
+async fn ensure_media_item_exists(state: &AppState, item_id: Uuid) -> Result<(), AppError> {
+    repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    Ok(())
+}
+
+fn ensure_user_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppError> {
+    if session.user_id == user_id || session.is_admin {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
 }
 
 async fn item_by_id(

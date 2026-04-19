@@ -11,6 +11,11 @@ export default defineConfig({
       '/Library': 'http://127.0.0.1:8096',
       '/Videos': 'http://127.0.0.1:8096',
       '/Sessions': 'http://127.0.0.1:8096',
+      '/PlayingItems': 'http://127.0.0.1:8096',
+      '/UserItems': 'http://127.0.0.1:8096',
+      '/UserFavoriteItems': 'http://127.0.0.1:8096',
+      '/UserPlayedItems': 'http://127.0.0.1:8096',
+      '/Branding': 'http://127.0.0.1:8096',
       '/api': 'http://127.0.0.1:8096'
     }
   }

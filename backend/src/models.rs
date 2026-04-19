@@ -247,6 +247,21 @@ pub struct SystemInfo {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
+pub struct EndpointInfo {
+    pub is_local: bool,
+    pub is_in_network: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct BrandingConfiguration {
+    pub login_disclaimer: String,
+    pub custom_css: String,
+    pub splashscreen_enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
 pub struct BaseItemDto {
     pub name: String,
     pub server_id: String,
@@ -308,12 +323,24 @@ pub struct BaseItemDto {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct UserItemDataDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rating: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub played_percentage: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unplayed_item_count: Option<i32>,
     pub playback_position_ticks: i64,
     pub play_count: i32,
     pub is_favorite: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub likes: Option<bool>,
     pub played: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_played_date: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -412,6 +439,40 @@ pub struct ItemsQuery {
     pub limit: Option<i64>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UserItemDataQuery {
+    #[serde(default, alias = "userId")]
+    pub user_id: Option<Uuid>,
+    #[serde(default, alias = "datePlayed")]
+    pub date_played: Option<DateTime<Utc>>,
+    #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
+    pub _api_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateUserItemDataRequest {
+    #[serde(default)]
+    pub playback_position_ticks: Option<i64>,
+    #[serde(default)]
+    pub play_count: Option<i32>,
+    #[serde(default)]
+    pub is_favorite: Option<bool>,
+    #[serde(default)]
+    pub likes: Option<bool>,
+    #[serde(default)]
+    pub played: Option<bool>,
+    #[serde(default)]
+    pub last_played_date: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub rating: Option<f64>,
+    #[serde(default)]
+    pub played_percentage: Option<f64>,
+    #[serde(default)]
+    pub unplayed_item_count: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]

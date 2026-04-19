@@ -36,10 +36,17 @@ export interface BaseItemDto {
   ParentIndexNumber?: number;
   ImageTags?: Record<string, string>;
   UserData: {
+    Rating?: number;
+    PlayedPercentage?: number;
+    UnplayedItemCount?: number;
     PlaybackPositionTicks: number;
     PlayCount: number;
     IsFavorite: boolean;
+    Likes?: boolean;
     Played: boolean;
+    LastPlayedDate?: string;
+    Key?: string;
+    ItemId?: string;
   };
   MediaSources?: Array<{
     Id: string;
@@ -166,6 +173,33 @@ export class EmbyApi {
   async scan() {
     return this.request<ScanSummary>('/api/admin/scan', {
       method: 'POST'
+    });
+  }
+
+  async markFavorite(itemId: string, isFavorite: boolean) {
+    const userId = this.requireUserId();
+    return this.request<BaseItemDto['UserData']>(`/Users/${userId}/FavoriteItems/${itemId}`, {
+      method: isFavorite ? 'POST' : 'DELETE'
+    });
+  }
+
+  async markPlayed(itemId: string, isPlayed: boolean) {
+    const userId = this.requireUserId();
+    return this.request<BaseItemDto['UserData']>(`/Users/${userId}/PlayedItems/${itemId}`, {
+      method: isPlayed ? 'POST' : 'DELETE'
+    });
+  }
+
+  async updateUserData(
+    itemId: string,
+    payload: Partial<
+      Pick<BaseItemDto['UserData'], 'PlaybackPositionTicks' | 'PlayCount' | 'IsFavorite' | 'Played'>
+    >
+  ) {
+    const userId = this.requireUserId();
+    return this.request<BaseItemDto['UserData']>(`/Users/${userId}/Items/${itemId}/UserData`, {
+      method: 'POST',
+      body: payload
     });
   }
 

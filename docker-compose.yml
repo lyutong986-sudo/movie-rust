@@ -16,5 +16,39 @@ services:
       timeout: 5s
       retries: 20
 
+  backend:
+    image: ${DOCKERHUB_NAMESPACE:-your-dockerhub-name}/movie-rust-backend:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: movie-rust-backend
+    environment:
+      DATABASE_URL: postgres://movie:movie@postgres:5432/movie_rust
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8096
+      APP_SERVER_NAME: Movie Rust
+      APP_DEFAULT_ADMIN: ${APP_DEFAULT_ADMIN:-admin}
+      APP_DEFAULT_PASSWORD: ${APP_DEFAULT_PASSWORD:-admin123}
+    ports:
+      - "8096:8096"
+    volumes:
+      - ./media:/media:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: ${DOCKERHUB_NAMESPACE:-your-dockerhub-name}/movie-rust-frontend:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: movie-rust-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
 volumes:
   postgres-data:

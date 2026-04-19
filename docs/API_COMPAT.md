@@ -42,6 +42,12 @@
 | GET | `/Items/{itemId}` | 条目详情 |
 | GET | `/Users/{userId}/Items/{itemId}` | 用户条目详情 |
 | GET/POST | `/Items/{itemId}/PlaybackInfo` | 播放信息 |
+| GET/POST | `/UserItems/{itemId}/UserData` | 当前用户条目状态 |
+| GET/POST | `/Users/{userId}/Items/{itemId}/UserData` | 旧版用户条目状态 |
+| POST/DELETE | `/UserFavoriteItems/{itemId}` | 收藏/取消收藏 |
+| POST/DELETE | `/Users/{userId}/FavoriteItems/{itemId}` | 旧版收藏/取消收藏 |
+| POST/DELETE | `/UserPlayedItems/{itemId}` | 标记已播放/未播放 |
+| POST/DELETE | `/Users/{userId}/PlayedItems/{itemId}` | 旧版标记已播放/未播放 |
 
 已支持常见查询参数：
 
@@ -94,6 +100,15 @@
 | POST | `/Users/{userId}/PlayingItems/{itemId}` | 旧版用户播放开始 |
 | POST | `/Users/{userId}/PlayingItems/{itemId}/Progress` | 旧版用户播放进度 |
 | DELETE | `/Users/{userId}/PlayingItems/{itemId}` | 旧版用户播放停止 |
+
+## 其它兼容接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/System/Endpoint` | 客户端网络位置探测 |
+| GET | `/Branding/Configuration` | 登录页品牌配置 |
+| GET | `/Branding/Css` | 自定义 CSS |
+| GET | `/Branding/Css.css` | 自定义 CSS 兼容路径 |
 
 ## 管理接口
 

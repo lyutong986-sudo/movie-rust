@@ -8,7 +8,7 @@ use crate::{
     },
     naming, security,
 };
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder};
 use std::{
@@ -390,6 +390,127 @@ pub async fn get_user_item_data(
     .await?)
 }
 
+pub async fn get_user_item_data_dto(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    item_id: Uuid,
+) -> Result<UserItemDataDto, AppError> {
+    let data = get_user_item_data(pool, user_id, item_id)
+        .await?
+        .map(|data| user_item_data_to_dto_for_item(data, item_id))
+        .unwrap_or_else(|| empty_user_data_for_item(item_id));
+    Ok(data)
+}
+
+pub async fn set_user_favorite(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    item_id: Uuid,
+    is_favorite: bool,
+) -> Result<UserItemDataDto, AppError> {
+    let data = sqlx::query_as::<_, DbUserItemData>(
+        r#"
+        INSERT INTO user_item_data (user_id, item_id, is_favorite, updated_at)
+        VALUES ($1, $2, $3, now())
+        ON CONFLICT (user_id, item_id)
+        DO UPDATE SET
+            is_favorite = EXCLUDED.is_favorite,
+            updated_at = now()
+        RETURNING playback_position_ticks, play_count, is_favorite, is_played, last_played_date
+        "#,
+    )
+    .bind(user_id)
+    .bind(item_id)
+    .bind(is_favorite)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(user_item_data_to_dto_for_item(data, item_id))
+}
+
+pub async fn set_user_played(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    item_id: Uuid,
+    is_played: bool,
+    date_played: Option<DateTime<Utc>>,
+) -> Result<UserItemDataDto, AppError> {
+    let data = sqlx::query_as::<_, DbUserItemData>(
+        r#"
+        INSERT INTO user_item_data
+            (user_id, item_id, playback_position_ticks, is_played, play_count, last_played_date, updated_at)
+        VALUES
+            ($1, $2, 0, $3, CASE WHEN $3 THEN 1 ELSE 0 END, CASE WHEN $3 THEN COALESCE($4, now()) ELSE NULL END, now())
+        ON CONFLICT (user_id, item_id)
+        DO UPDATE SET
+            playback_position_ticks = CASE WHEN $3 THEN 0 ELSE 0 END,
+            is_played = $3,
+            play_count = CASE WHEN $3 THEN GREATEST(user_item_data.play_count, 1) ELSE 0 END,
+            last_played_date = CASE WHEN $3 THEN COALESCE($4, now()) ELSE NULL END,
+            updated_at = now()
+        RETURNING playback_position_ticks, play_count, is_favorite, is_played, last_played_date
+        "#,
+    )
+    .bind(user_id)
+    .bind(item_id)
+    .bind(is_played)
+    .bind(date_played)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(user_item_data_to_dto_for_item(data, item_id))
+}
+
+pub struct UpdateUserDataInput {
+    pub playback_position_ticks: Option<i64>,
+    pub play_count: Option<i32>,
+    pub is_favorite: Option<bool>,
+    pub played: Option<bool>,
+    pub last_played_date: Option<DateTime<Utc>>,
+}
+
+pub async fn update_user_item_data(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    item_id: Uuid,
+    input: UpdateUserDataInput,
+) -> Result<UserItemDataDto, AppError> {
+    let data = sqlx::query_as::<_, DbUserItemData>(
+        r#"
+        INSERT INTO user_item_data
+            (
+                user_id, item_id, playback_position_ticks, play_count, is_favorite,
+                is_played, last_played_date, updated_at
+            )
+        VALUES
+            (
+                $1, $2, COALESCE($3, 0), COALESCE($4, 0), COALESCE($5, false),
+                COALESCE($6, false), $7, now()
+            )
+        ON CONFLICT (user_id, item_id)
+        DO UPDATE SET
+            playback_position_ticks = COALESCE($3, user_item_data.playback_position_ticks),
+            play_count = COALESCE($4, user_item_data.play_count),
+            is_favorite = COALESCE($5, user_item_data.is_favorite),
+            is_played = COALESCE($6, user_item_data.is_played),
+            last_played_date = COALESCE($7, user_item_data.last_played_date),
+            updated_at = now()
+        RETURNING playback_position_ticks, play_count, is_favorite, is_played, last_played_date
+        "#,
+    )
+    .bind(user_id)
+    .bind(item_id)
+    .bind(input.playback_position_ticks)
+    .bind(input.play_count)
+    .bind(input.is_favorite)
+    .bind(input.played)
+    .bind(input.last_played_date)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(user_item_data_to_dto_for_item(data, item_id))
+}
+
 pub async fn record_playback_event(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -709,7 +830,7 @@ pub async fn media_item_to_dto(
     let user_data = if let Some(user_id) = user_id {
         get_user_item_data(pool, user_id, item.id)
             .await?
-            .map(user_item_data_to_dto)
+            .map(|data| user_item_data_to_dto_for_item(data, item.id))
             .unwrap_or_else(empty_user_data)
     } else {
         empty_user_data()
@@ -948,20 +1069,46 @@ fn provider_ids_to_map(value: &Value) -> BTreeMap<String, String> {
 
 fn user_item_data_to_dto(data: DbUserItemData) -> UserItemDataDto {
     UserItemDataDto {
+        rating: None,
+        played_percentage: None,
+        unplayed_item_count: None,
         playback_position_ticks: data.playback_position_ticks,
         play_count: data.play_count,
         is_favorite: data.is_favorite,
+        likes: None,
         played: data.is_played,
         last_played_date: data.last_played_date,
+        key: None,
+        item_id: None,
     }
 }
 
 fn empty_user_data() -> UserItemDataDto {
     UserItemDataDto {
+        rating: None,
+        played_percentage: None,
+        unplayed_item_count: None,
         playback_position_ticks: 0,
         play_count: 0,
         is_favorite: false,
+        likes: None,
         played: false,
         last_played_date: None,
+        key: None,
+        item_id: None,
     }
+}
+
+fn user_item_data_to_dto_for_item(data: DbUserItemData, item_id: Uuid) -> UserItemDataDto {
+    let mut dto = user_item_data_to_dto(data);
+    dto.key = Some(item_id.to_string());
+    dto.item_id = Some(item_id.to_string());
+    dto
+}
+
+fn empty_user_data_for_item(item_id: Uuid) -> UserItemDataDto {
+    let mut dto = empty_user_data();
+    dto.key = Some(item_id.to_string());
+    dto.item_id = Some(item_id.to_string());
+    dto
 }

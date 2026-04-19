@@ -9,6 +9,7 @@
 - 支持 `/Users/AuthenticateByName` 登录并返回 `AccessToken`。
 - 支持媒体库、媒体条目、图片、直链播放、播放进度上报。
 - 参考 Jellyfin 命名解析，支持电影清洗、剧集 `Series/Season/Episode` 层级和外挂字幕轨。
+- 支持收藏、已播放/未播放和 `UserData` 更新，便于 Emby/Jellyfin 客户端同步用户状态。
 - Vue 前端提供登录、添加媒体库、扫描、浏览和直链播放。
 
 ## 快速启动
@@ -45,6 +46,54 @@ npm run dev
 前端默认地址是 `http://127.0.0.1:5173`。
 
 > 当前环境里 `node.exe` 被系统拒绝执行，前端依赖需要在 Node 可用后安装运行。
+
+## Docker 构建与推送
+
+项目提供两个可推送镜像：
+
+- `backend/Dockerfile`：Rust API 服务，默认监听 `8096`。
+- `frontend/Dockerfile`：Vue 静态资源 + Nginx，默认监听容器内 `80`，并反向代理 API 到 `backend:8096`。
+
+1. 准备 Docker 环境变量：
+
+```powershell
+Copy-Item .env.docker.example .env.docker
+```
+
+编辑 `.env.docker`，把 `DOCKERHUB_NAMESPACE` 改成你的 DockerHub 用户名或组织名。
+
+2. 本地构建并启动：
+
+```powershell
+docker compose --env-file .env.docker up -d --build
+```
+
+前端入口：`http://127.0.0.1:5173`，后端入口：`http://127.0.0.1:8096`。
+
+媒体目录默认示例挂载为 `./media:/media:ro`。如果你的影片在其它目录，需要在 `docker-compose.yml` 的 `backend.volumes` 中改成类似：
+
+```yaml
+- D:/Movies:/media/movies:ro
+```
+
+然后在前端添加媒体库路径时填写容器内路径，例如 `/media/movies`。
+
+3. 推送到 DockerHub：
+
+```powershell
+docker login
+docker compose --env-file .env.docker build
+docker compose --env-file .env.docker push backend frontend
+```
+
+也可以手动构建单个镜像：
+
+```powershell
+docker build -f backend/Dockerfile -t your-dockerhub-name/movie-rust-backend:latest .
+docker build -f frontend/Dockerfile -t your-dockerhub-name/movie-rust-frontend:latest .
+docker push your-dockerhub-name/movie-rust-backend:latest
+docker push your-dockerhub-name/movie-rust-frontend:latest
+```
 
 ## 本地播放器连接
 

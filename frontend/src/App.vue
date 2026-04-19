@@ -131,6 +131,30 @@ function openItem(item: BaseItemDto) {
   selectedItem.value = item;
 }
 
+async function toggleFavorite(item: BaseItemDto) {
+  await run(async () => {
+    const userData = await api.markFavorite(item.Id, !item.UserData.IsFavorite);
+    applyUserData(item.Id, userData);
+  });
+}
+
+async function togglePlayed(item: BaseItemDto) {
+  await run(async () => {
+    const userData = await api.markPlayed(item.Id, !item.UserData.Played);
+    applyUserData(item.Id, userData);
+  });
+}
+
+function applyUserData(itemId: string, userData: BaseItemDto['UserData']) {
+  const item = items.value.find((candidate) => candidate.Id === itemId);
+  if (item) {
+    item.UserData = { ...item.UserData, ...userData };
+  }
+  if (selectedItem.value?.Id === itemId) {
+    selectedItem.value.UserData = { ...selectedItem.value.UserData, ...userData };
+  }
+}
+
 function itemSubtitle(item: BaseItemDto) {
   if (item.Type === 'Episode') {
     const season = item.ParentIndexNumber ? `S${String(item.ParentIndexNumber).padStart(2, '0')}` : '';
@@ -304,6 +328,14 @@ async function run(task: () => Promise<void>, success = '') {
             <span v-if="selectedItem.SeasonName">{{ selectedItem.SeasonName }}</span>
             <span v-if="selectedMediaSource?.Container">{{ selectedMediaSource.Container }}</span>
             <span v-if="fileSize(selectedMediaSource?.Size)">{{ fileSize(selectedMediaSource?.Size) }}</span>
+          </div>
+          <div class="state-actions">
+            <button type="button" :class="{ secondary: !selectedItem.UserData.IsFavorite }" @click="toggleFavorite(selectedItem)">
+              {{ selectedItem.UserData.IsFavorite ? '取消收藏' : '收藏' }}
+            </button>
+            <button type="button" :class="{ secondary: !selectedItem.UserData.Played }" @click="togglePlayed(selectedItem)">
+              {{ selectedItem.UserData.Played ? '标记未看' : '标记已看' }}
+            </button>
           </div>
           <p v-if="selectedItem.Path" class="path">{{ selectedItem.Path }}</p>
           <video v-if="selectedItem.MediaType === 'Video'" controls :src="api.streamUrl(selectedItem)"></video>
