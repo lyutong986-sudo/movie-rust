@@ -181,6 +181,25 @@ p {
   background: rgba(101, 214, 173, 0.12);
 }
 
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -8px 0 20px;
+  color: #c0c7d4;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.crumbs button {
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+  color: #f5f7fb;
+  background: #2a2f39;
+  font-size: 1.4rem;
+}
+
 .notice.error {
   border-color: #ff7a7a;
   background: rgba(255, 122, 122, 0.12);
@@ -230,6 +249,10 @@ p {
   background: linear-gradient(145deg, #d8c56e, #65d6ad);
   font-size: clamp(1.8rem, 7vw, 3.4rem);
   font-weight: 800;
+}
+
+.poster-fallback.folder {
+  background: linear-gradient(145deg, #3f8cc7, #65d6ad);
 }
 
 .poster h3 {
@@ -296,6 +319,40 @@ p {
 .path {
   color: #aab2c3;
   overflow-wrap: anywhere;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.meta span {
+  border: 1px solid #3f4654;
+  border-radius: 6px;
+  padding: 4px 9px;
+  color: #dfe6f2;
+  background: #20242d;
+  font-size: 0.82rem;
+}
+
+.streams {
+  display: grid;
+  gap: 8px;
+}
+
+.streams div {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 10px;
+  border-bottom: 1px solid #2d3340;
+  padding-bottom: 8px;
+  color: #c0c7d4;
+}
+
+.streams strong {
+  color: #f5f7fb;
+  font-size: 0.9rem;
 }
 
 video {

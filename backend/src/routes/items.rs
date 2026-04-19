@@ -114,6 +114,13 @@ async fn list_items_for_user(
     user_id: Uuid,
     query: ItemsQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let recursive = query.recursive.unwrap_or_else(|| {
+        query
+            .search_term
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+
     if let Some(parent_id) = query.parent_id {
         if let Some(library) = repository::get_library(&state.pool, parent_id).await? {
             let result = repository::list_media_items(
@@ -122,7 +129,7 @@ async fn list_items_for_user(
                     library_id: Some(library.id),
                     parent_id: None,
                     include_types: parse_include_types(query.include_item_types.as_deref()),
-                    recursive: query.recursive.unwrap_or(true),
+                    recursive,
                     search_term: query.search_term,
                     sort_by: query.sort_by,
                     sort_order: query.sort_order,
@@ -141,7 +148,7 @@ async fn list_items_for_user(
             library_id: None,
             parent_id: query.parent_id,
             include_types: parse_include_types(query.include_item_types.as_deref()),
-            recursive: query.recursive.unwrap_or(true),
+            recursive,
             search_term: query.search_term,
             sort_by: query.sort_by,
             sort_order: query.sort_order,
@@ -223,6 +230,9 @@ async fn playback_info(
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    if matches!(item.item_type.as_str(), "Series" | "Season" | "Folder") {
+        return Err(AppError::BadRequest("目录条目没有播放源".to_string()));
+    }
     let play_session_id = Uuid::new_v4().simple().to_string();
 
     Ok(Json(PlaybackInfoResponse {

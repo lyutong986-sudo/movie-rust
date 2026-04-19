@@ -1,5 +1,6 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::FromRow;
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -28,6 +29,7 @@ pub struct DbMediaItem {
     pub id: Uuid,
     pub parent_id: Option<Uuid>,
     pub name: String,
+    pub sort_name: String,
     pub item_type: String,
     pub media_type: String,
     pub path: String,
@@ -36,6 +38,17 @@ pub struct DbMediaItem {
     pub production_year: Option<i32>,
     pub runtime_ticks: Option<i64>,
     pub premiere_date: Option<NaiveDate>,
+    pub series_name: Option<String>,
+    pub season_name: Option<String>,
+    pub index_number: Option<i32>,
+    pub index_number_end: Option<i32>,
+    pub parent_index_number: Option<i32>,
+    pub provider_ids: Value,
+    pub genres: Vec<String>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
     pub image_primary_path: Option<String>,
     pub backdrop_path: Option<String>,
     pub date_created: DateTime<Utc>,
@@ -47,6 +60,7 @@ pub struct MediaItemRow {
     pub id: Uuid,
     pub parent_id: Option<Uuid>,
     pub name: String,
+    pub sort_name: String,
     pub item_type: String,
     pub media_type: String,
     pub path: String,
@@ -55,6 +69,17 @@ pub struct MediaItemRow {
     pub production_year: Option<i32>,
     pub runtime_ticks: Option<i64>,
     pub premiere_date: Option<NaiveDate>,
+    pub series_name: Option<String>,
+    pub season_name: Option<String>,
+    pub index_number: Option<i32>,
+    pub index_number_end: Option<i32>,
+    pub parent_index_number: Option<i32>,
+    pub provider_ids: Value,
+    pub genres: Vec<String>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
     pub image_primary_path: Option<String>,
     pub backdrop_path: Option<String>,
     pub date_created: DateTime<Utc>,
@@ -68,6 +93,7 @@ impl From<MediaItemRow> for DbMediaItem {
             id: value.id,
             parent_id: value.parent_id,
             name: value.name,
+            sort_name: value.sort_name,
             item_type: value.item_type,
             media_type: value.media_type,
             path: value.path,
@@ -76,6 +102,17 @@ impl From<MediaItemRow> for DbMediaItem {
             production_year: value.production_year,
             runtime_ticks: value.runtime_ticks,
             premiere_date: value.premiere_date,
+            series_name: value.series_name,
+            season_name: value.season_name,
+            index_number: value.index_number,
+            index_number_end: value.index_number_end,
+            parent_index_number: value.parent_index_number,
+            provider_ids: value.provider_ids,
+            genres: value.genres,
+            width: value.width,
+            height: value.height,
+            video_codec: value.video_codec,
+            audio_codec: value.audio_codec,
             image_primary_path: value.image_primary_path,
             backdrop_path: value.backdrop_path,
             date_created: value.date_created,
@@ -218,9 +255,13 @@ pub struct BaseItemDto {
     pub item_type: String,
     pub is_folder: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub collection_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,6 +276,20 @@ pub struct BaseItemDto {
     pub date_created: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub premiere_date: Option<NaiveDate>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_ids: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub season_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_number: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_number_end: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_index_number: Option<i32>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub image_tags: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -242,6 +297,8 @@ pub struct BaseItemDto {
     pub user_data: UserItemDataDto,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub media_sources: Vec<MediaSourceDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub media_streams: Vec<MediaStreamDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -259,7 +316,7 @@ pub struct UserItemDataDto {
     pub last_played_date: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct MediaSourceDto {
     pub id: String,
@@ -274,12 +331,24 @@ pub struct MediaSourceDto {
     pub supports_direct_stream: bool,
     pub supports_transcoding: bool,
     pub direct_stream_url: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub formats: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub e_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitrate: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_audio_stream_index: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_subtitle_stream_index: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_time_ticks: Option<i64>,
     pub media_streams: Vec<MediaStreamDto>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct MediaStreamDto {
     pub index: i32,
@@ -289,7 +358,28 @@ pub struct MediaStreamDto {
     pub codec: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_title: Option<String>,
     pub is_default: bool,
+    pub is_forced: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bit_rate: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channels: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<i32>,
+    pub is_external: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_url: Option<String>,
+    pub supports_external_stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

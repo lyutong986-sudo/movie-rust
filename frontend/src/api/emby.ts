@@ -18,13 +18,22 @@ export interface BaseItemDto {
   Name: string;
   Type: string;
   IsFolder: boolean;
+  SortName?: string;
   CollectionType?: string;
   MediaType?: string;
+  Container?: string;
   ParentId?: string;
   Path?: string;
   RunTimeTicks?: number;
   ProductionYear?: number;
   Overview?: string;
+  Genres?: string[];
+  ProviderIds?: Record<string, string>;
+  SeriesName?: string;
+  SeasonName?: string;
+  IndexNumber?: number;
+  IndexNumberEnd?: number;
+  ParentIndexNumber?: number;
   ImageTags?: Record<string, string>;
   UserData: {
     PlaybackPositionTicks: number;
@@ -37,8 +46,34 @@ export interface BaseItemDto {
     Path: string;
     Container: string;
     DirectStreamUrl: string;
+    Size?: number;
+    ETag?: string;
+    DefaultAudioStreamIndex?: number;
+    DefaultSubtitleStreamIndex?: number;
+    MediaStreams: MediaStreamDto[];
   }>;
+  MediaStreams?: MediaStreamDto[];
   ChildCount?: number;
+}
+
+export interface MediaStreamDto {
+  Index: number;
+  Type: 'Video' | 'Audio' | 'Subtitle' | string;
+  Codec?: string;
+  Language?: string;
+  DisplayTitle?: string;
+  IsDefault: boolean;
+  IsForced: boolean;
+  Width?: number;
+  Height?: number;
+  BitRate?: number;
+  Channels?: number;
+  SampleRate?: number;
+  IsExternal: boolean;
+  DeliveryMethod?: string;
+  DeliveryUrl?: string;
+  SupportsExternalStream: boolean;
+  Path?: string;
 }
 
 export interface QueryResult<T> {
@@ -104,10 +139,10 @@ export class EmbyApi {
     return this.request<QueryResult<BaseItemDto>>(`/Users/${userId}/Views`);
   }
 
-  async items(parentId?: string, searchTerm = '') {
+  async items(parentId?: string, searchTerm = '', recursive = false) {
     const userId = this.requireUserId();
     const params = new URLSearchParams({
-      Recursive: 'true',
+      Recursive: recursive ? 'true' : 'false',
       SortBy: 'SortName',
       SortOrder: 'Ascending',
       Limit: '120'
@@ -142,6 +177,12 @@ export class EmbyApi {
   }
 
   streamUrl(item: BaseItemDto) {
+    const directUrl = item.MediaSources?.[0]?.DirectStreamUrl;
+    if (directUrl) {
+      const joiner = directUrl.includes('?') ? '&' : '?';
+      return `${this.baseUrl}${directUrl}${joiner}api_key=${encodeURIComponent(this.token)}`;
+    }
+
     return `${this.baseUrl}/Videos/${item.Id}/stream?static=true&api_key=${encodeURIComponent(this.token)}`;
   }
 

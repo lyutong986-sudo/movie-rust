@@ -23,10 +23,14 @@ const user = ref(api.user);
 const libraries = ref<BaseItemDto[]>([]);
 const items = ref<BaseItemDto[]>([]);
 const selectedItem = ref<BaseItemDto | null>(null);
+const parentStack = ref<BaseItemDto[]>([]);
 
 const selectedLibrary = computed(() =>
   libraries.value.find((library) => library.Id === state.selectedLibraryId)
 );
+const currentParentName = computed(() => parentStack.value.at(-1)?.Name || selectedLibrary.value?.Name || '媒体库');
+const selectedMediaSource = computed(() => selectedItem.value?.MediaSources?.[0]);
+const selectedStreams = computed(() => selectedMediaSource.value?.MediaStreams || selectedItem.value?.MediaStreams || []);
 
 onMounted(async () => {
   await loadPublicInfo();
@@ -70,9 +74,22 @@ async function loadItems() {
   }
 
   await run(async () => {
-    const result = await api.items(state.selectedLibraryId, state.search);
+    const parentId = parentStack.value.at(-1)?.Id || state.selectedLibraryId;
+    const result = await api.items(parentId, state.search, Boolean(state.search.trim()));
     items.value = result.Items;
   });
+}
+
+async function selectLibrary(libraryId: string) {
+  state.selectedLibraryId = libraryId;
+  state.search = '';
+  parentStack.value = [];
+  await loadItems();
+}
+
+async function backToParent() {
+  parentStack.value.pop();
+  await loadItems();
 }
 
 async function createLibrary() {
@@ -105,7 +122,52 @@ function logout() {
 }
 
 function openItem(item: BaseItemDto) {
+  if (item.IsFolder) {
+    parentStack.value.push(item);
+    loadItems();
+    return;
+  }
+
   selectedItem.value = item;
+}
+
+function itemSubtitle(item: BaseItemDto) {
+  if (item.Type === 'Episode') {
+    const season = item.ParentIndexNumber ? `S${String(item.ParentIndexNumber).padStart(2, '0')}` : '';
+    const episode = item.IndexNumber ? `E${String(item.IndexNumber).padStart(2, '0')}` : '';
+    return [item.SeriesName, `${season}${episode}`].filter(Boolean).join(' ');
+  }
+
+  if (item.IsFolder) {
+    return `${item.Type} · ${item.ChildCount || 0}`;
+  }
+
+  return item.MediaSources?.[0]?.Container || item.Container || item.MediaType || item.Type;
+}
+
+function streamLabel(type: string) {
+  if (type === 'Video') return '视频';
+  if (type === 'Audio') return '音频';
+  if (type === 'Subtitle') return '字幕';
+  return type;
+}
+
+function streamText(stream: NonNullable<BaseItemDto['MediaStreams']>[number]) {
+  const parts = [
+    stream.DisplayTitle,
+    stream.Codec,
+    stream.Language,
+    stream.Width && stream.Height ? `${stream.Width}x${stream.Height}` : '',
+    stream.IsExternal ? '外挂' : ''
+  ].filter(Boolean);
+  return parts.join(' · ') || '默认轨道';
+}
+
+function fileSize(size?: number) {
+  if (!size) return '';
+  const gb = size / 1024 / 1024 / 1024;
+  if (gb >= 1) return `${gb.toFixed(2)} GB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
 async function run(task: () => Promise<void>, success = '') {
@@ -158,7 +220,7 @@ async function run(task: () => Promise<void>, success = '') {
             :key="library.Id"
             :class="{ active: library.Id === state.selectedLibraryId }"
             type="button"
-            @click="state.selectedLibraryId = library.Id; loadItems()"
+            @click="selectLibrary(library.Id)"
           >
             <span>{{ library.Name }}</span>
             <small>{{ library.ChildCount || 0 }}</small>
@@ -187,13 +249,19 @@ async function run(task: () => Promise<void>, success = '') {
       <header class="toolbar">
         <div>
           <p>{{ selectedLibrary?.CollectionType || 'media' }}</p>
-          <h2>{{ selectedLibrary?.Name || '媒体库' }}</h2>
+          <h2>{{ currentParentName }}</h2>
         </div>
         <div class="search">
           <input v-model="state.search" placeholder="搜索标题" @keydown.enter.prevent="loadItems" />
           <button :disabled="state.busy" type="button" @click="loadItems">搜索</button>
         </div>
       </header>
+
+      <div v-if="parentStack.length" class="crumbs">
+        <button type="button" title="返回上级" @click="backToParent">‹</button>
+        <span>{{ selectedLibrary?.Name }}</span>
+        <span v-for="parent in parentStack" :key="parent.Id">/ {{ parent.Name }}</span>
+      </div>
 
       <p v-if="state.error" class="notice error">{{ state.error }}</p>
       <p v-else-if="state.message" class="notice">{{ state.message }}</p>
@@ -211,9 +279,11 @@ async function run(task: () => Promise<void>, success = '') {
       <div v-else class="grid">
         <article v-for="item in items" :key="item.Id" class="poster" @click="openItem(item)">
           <img v-if="api.itemImageUrl(item)" :src="api.itemImageUrl(item)" :alt="item.Name" />
-          <div v-else class="poster-fallback">{{ item.Name.slice(0, 2) }}</div>
+          <div v-else class="poster-fallback" :class="{ folder: item.IsFolder }">
+            {{ item.IsFolder ? item.Type.slice(0, 2) : item.Name.slice(0, 2) }}
+          </div>
           <h3>{{ item.Name }}</h3>
-          <p>{{ item.MediaSources?.[0]?.Container || item.MediaType || item.Type }}</p>
+          <p>{{ itemSubtitle(item) }}</p>
         </article>
       </div>
     </section>
@@ -228,8 +298,21 @@ async function run(task: () => Promise<void>, success = '') {
         <div class="dialog-body">
           <p>{{ selectedItem.Type }}</p>
           <h2>{{ selectedItem.Name }}</h2>
+          <div class="meta">
+            <span v-if="selectedItem.ProductionYear">{{ selectedItem.ProductionYear }}</span>
+            <span v-if="selectedItem.SeriesName">{{ selectedItem.SeriesName }}</span>
+            <span v-if="selectedItem.SeasonName">{{ selectedItem.SeasonName }}</span>
+            <span v-if="selectedMediaSource?.Container">{{ selectedMediaSource.Container }}</span>
+            <span v-if="fileSize(selectedMediaSource?.Size)">{{ fileSize(selectedMediaSource?.Size) }}</span>
+          </div>
           <p v-if="selectedItem.Path" class="path">{{ selectedItem.Path }}</p>
-          <video controls :src="api.streamUrl(selectedItem)"></video>
+          <video v-if="selectedItem.MediaType === 'Video'" controls :src="api.streamUrl(selectedItem)"></video>
+          <div v-if="selectedStreams.length" class="streams">
+            <div v-for="stream in selectedStreams" :key="`${stream.Type}-${stream.Index}`">
+              <strong>{{ streamLabel(stream.Type) }} {{ stream.Index }}</strong>
+              <span>{{ streamText(stream) }}</span>
+            </div>
+          </div>
           <a class="play-link" :href="api.streamUrl(selectedItem)" target="_blank" rel="noreferrer">打开直链</a>
         </div>
       </article>

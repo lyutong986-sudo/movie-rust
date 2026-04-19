@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod error;
 mod models;
+mod naming;
 mod repository;
 mod routes;
 mod scanner;

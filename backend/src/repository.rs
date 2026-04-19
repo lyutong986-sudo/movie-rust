@@ -6,11 +6,15 @@ use crate::{
         MediaSourceDto, MediaStreamDto, QueryResult, SessionInfoDto, UserConfigurationDto, UserDto,
         UserItemDataDto, UserPolicyDto,
     },
-    security,
+    naming, security,
 };
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
+use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 
 pub async fn ensure_default_admin(pool: &sqlx::PgPool, config: &Config) -> Result<(), AppError> {
@@ -244,6 +248,15 @@ pub async fn count_library_children(
     )
 }
 
+pub async fn count_item_children(pool: &sqlx::PgPool, parent_id: Uuid) -> Result<i64, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM media_items WHERE parent_id = $1")
+            .bind(parent_id)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
 pub struct ItemListOptions {
     pub library_id: Option<Uuid>,
     pub parent_id: Option<Uuid>,
@@ -263,9 +276,11 @@ pub async fn list_media_items(
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT
-            id, parent_id, name, item_type, media_type, path, container,
-            overview, production_year, runtime_ticks, premiere_date, image_primary_path,
-            backdrop_path, date_created, date_modified, COUNT(*) OVER() AS total_count
+            id, parent_id, name, sort_name, item_type, media_type, path, container,
+            overview, production_year, runtime_ticks, premiere_date, series_name, season_name,
+            index_number, index_number_end, parent_index_number, provider_ids, genres,
+            width, height, video_codec, audio_codec, image_primary_path, backdrop_path,
+            date_created, date_modified, COUNT(*) OVER() AS total_count
         FROM media_items
         WHERE 1 = 1
         "#,
@@ -277,7 +292,7 @@ pub async fn list_media_items(
 
     if let Some(parent_id) = options.parent_id {
         builder.push(" AND parent_id = ").push_bind(parent_id);
-    } else if !options.recursive && options.library_id.is_none() {
+    } else if !options.recursive {
         builder.push(" AND parent_id IS NULL");
     }
 
@@ -296,6 +311,7 @@ pub async fn list_media_items(
 
     let sort_column = match options.sort_by.as_deref().unwrap_or("SortName") {
         "DateCreated" | "DateLastContentAdded" => "date_created",
+        "IndexNumber" => "index_number",
         "ProductionYear" => "production_year",
         "Random" => "random()",
         _ => "sort_name",
@@ -342,9 +358,11 @@ pub async fn get_media_item(
     Ok(sqlx::query_as::<_, DbMediaItem>(
         r#"
         SELECT
-            id, parent_id, name, item_type, media_type, path, container,
-            overview, production_year, runtime_ticks, premiere_date, image_primary_path,
-            backdrop_path, date_created, date_modified
+            id, parent_id, name, sort_name, item_type, media_type, path, container,
+            overview, production_year, runtime_ticks, premiere_date, series_name, season_name,
+            index_number, index_number_end, parent_index_number, provider_ids, genres,
+            width, height, video_codec, audio_codec, image_primary_path, backdrop_path,
+            date_created, date_modified
         FROM media_items
         WHERE id = $1
         "#,
@@ -429,44 +447,117 @@ pub async fn record_playback_event(
     Ok(())
 }
 
+pub struct UpsertMediaItem<'a> {
+    pub library_id: Uuid,
+    pub parent_id: Option<Uuid>,
+    pub name: &'a str,
+    pub item_type: &'a str,
+    pub media_type: &'a str,
+    pub path: &'a Path,
+    pub container: Option<&'a str>,
+    pub overview: Option<&'a str>,
+    pub production_year: Option<i32>,
+    pub runtime_ticks: Option<i64>,
+    pub premiere_date: Option<NaiveDate>,
+    pub image_primary_path: Option<&'a Path>,
+    pub backdrop_path: Option<&'a Path>,
+    pub series_name: Option<&'a str>,
+    pub season_name: Option<&'a str>,
+    pub index_number: Option<i32>,
+    pub index_number_end: Option<i32>,
+    pub parent_index_number: Option<i32>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub video_codec: Option<&'a str>,
+    pub audio_codec: Option<&'a str>,
+}
+
 pub async fn upsert_media_item(
     pool: &sqlx::PgPool,
-    library_id: Uuid,
-    name: &str,
-    path: &Path,
-    container: Option<&str>,
-    image_primary_path: Option<&Path>,
-) -> Result<(), AppError> {
-    let path_text = path.to_string_lossy().to_string();
-    let image_text = image_primary_path.map(|value| value.to_string_lossy().to_string());
-    let id = Uuid::new_v5(&library_id, path_text.as_bytes());
-    let sort_name = name.to_lowercase();
+    input: UpsertMediaItem<'_>,
+) -> Result<Uuid, AppError> {
+    let path_text = input.path.to_string_lossy().to_string();
+    let image_text = input
+        .image_primary_path
+        .map(|value| value.to_string_lossy().to_string());
+    let backdrop_text = input
+        .backdrop_path
+        .map(|value| value.to_string_lossy().to_string());
+    let id = Uuid::new_v5(&input.library_id, path_text.as_bytes());
+    let sort_name = sort_name_for_item(&input);
 
     sqlx::query(
         r#"
         INSERT INTO media_items
-            (id, library_id, name, sort_name, item_type, media_type, path, container, image_primary_path, date_modified)
-        VALUES ($1, $2, $3, $4, 'Movie', 'Video', $5, $6, $7, now())
+            (
+                id, library_id, parent_id, name, sort_name, item_type, media_type, path,
+                container, overview, production_year, runtime_ticks, premiere_date,
+                image_primary_path, backdrop_path, series_name, season_name, index_number,
+                index_number_end, parent_index_number, width, height, video_codec, audio_codec,
+                date_modified
+            )
+        VALUES
+            (
+                $1, $2, $3, $4, $5, $6, $7, $8,
+                $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, $18,
+                $19, $20, $21, $22, $23, $24,
+                now()
+            )
         ON CONFLICT (library_id, path)
         DO UPDATE SET
+            parent_id = EXCLUDED.parent_id,
             name = EXCLUDED.name,
             sort_name = EXCLUDED.sort_name,
+            item_type = EXCLUDED.item_type,
+            media_type = EXCLUDED.media_type,
             container = EXCLUDED.container,
+            overview = EXCLUDED.overview,
+            production_year = EXCLUDED.production_year,
+            runtime_ticks = EXCLUDED.runtime_ticks,
+            premiere_date = EXCLUDED.premiere_date,
             image_primary_path = EXCLUDED.image_primary_path,
+            backdrop_path = EXCLUDED.backdrop_path,
+            series_name = EXCLUDED.series_name,
+            season_name = EXCLUDED.season_name,
+            index_number = EXCLUDED.index_number,
+            index_number_end = EXCLUDED.index_number_end,
+            parent_index_number = EXCLUDED.parent_index_number,
+            width = EXCLUDED.width,
+            height = EXCLUDED.height,
+            video_codec = EXCLUDED.video_codec,
+            audio_codec = EXCLUDED.audio_codec,
             date_modified = now()
         "#,
     )
     .bind(id)
-    .bind(library_id)
-    .bind(name)
+    .bind(input.library_id)
+    .bind(input.parent_id)
+    .bind(input.name)
     .bind(sort_name)
+    .bind(input.item_type)
+    .bind(input.media_type)
     .bind(path_text)
-    .bind(container)
+    .bind(input.container)
+    .bind(input.overview)
+    .bind(input.production_year)
+    .bind(input.runtime_ticks)
+    .bind(input.premiere_date)
     .bind(image_text)
+    .bind(backdrop_text)
+    .bind(input.series_name)
+    .bind(input.season_name)
+    .bind(input.index_number)
+    .bind(input.index_number_end)
+    .bind(input.parent_index_number)
+    .bind(input.width)
+    .bind(input.height)
+    .bind(input.video_codec)
+    .bind(input.audio_codec)
     .execute(pool)
     .await?;
 
-    Ok(())
+    Ok(id)
 }
 
 pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
@@ -532,8 +623,10 @@ pub async fn library_to_item_dto(
         id: library.id.to_string(),
         item_type: "CollectionFolder".to_string(),
         is_folder: true,
+        sort_name: Some(library.name.to_lowercase()),
         collection_type: Some(library.collection_type.clone()),
         media_type: None,
+        container: None,
         parent_id: None,
         path: Some(library.path.clone()),
         run_time_ticks: None,
@@ -541,10 +634,18 @@ pub async fn library_to_item_dto(
         overview: None,
         date_created: Some(library.created_at),
         premiere_date: None,
+        genres: Vec::new(),
+        provider_ids: BTreeMap::new(),
+        series_name: None,
+        season_name: None,
+        index_number: None,
+        index_number_end: None,
+        parent_index_number: None,
         image_tags: BTreeMap::new(),
         backdrop_image_tags: Vec::new(),
         user_data: empty_user_data(),
         media_sources: Vec::new(),
+        media_streams: Vec::new(),
         child_count: Some(child_count),
         primary_image_aspect_ratio: None,
     })
@@ -557,8 +658,10 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         id: Uuid::nil().to_string(),
         item_type: "Folder".to_string(),
         is_folder: true,
+        sort_name: Some("root".to_string()),
         collection_type: None,
         media_type: None,
+        container: None,
         parent_id: None,
         path: None,
         run_time_ticks: None,
@@ -566,10 +669,18 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         overview: None,
         date_created: Some(Utc::now()),
         premiere_date: None,
+        genres: Vec::new(),
+        provider_ids: BTreeMap::new(),
+        series_name: None,
+        season_name: None,
+        index_number: None,
+        index_number_end: None,
+        parent_index_number: None,
         image_tags: BTreeMap::new(),
         backdrop_image_tags: Vec::new(),
         user_data: empty_user_data(),
         media_sources: Vec::new(),
+        media_streams: Vec::new(),
         child_count: None,
         primary_image_aspect_ratio: None,
     }
@@ -604,10 +715,20 @@ pub async fn media_item_to_dto(
         empty_user_data()
     };
 
-    let media_sources = if item.media_type.eq_ignore_ascii_case("Video") {
+    let is_folder = is_folder_item(item);
+    let media_sources = if item.media_type.eq_ignore_ascii_case("Video") && !is_folder {
         vec![media_source_for_item(item)]
     } else {
         Vec::new()
+    };
+    let media_streams = media_sources
+        .first()
+        .map(|source| source.media_streams.clone())
+        .unwrap_or_default();
+    let child_count = if is_folder {
+        Some(count_item_children(pool, item.id).await?)
+    } else {
+        None
     };
 
     Ok(BaseItemDto {
@@ -615,9 +736,11 @@ pub async fn media_item_to_dto(
         server_id: server_id.to_string(),
         id: item.id.to_string(),
         item_type: item.item_type.clone(),
-        is_folder: false,
+        is_folder,
+        sort_name: Some(item.sort_name.clone()),
         collection_type: None,
-        media_type: Some(item.media_type.clone()),
+        media_type: (!is_folder).then(|| item.media_type.clone()),
+        container: item.container.clone(),
         parent_id: item.parent_id.map(|value| value.to_string()),
         path: Some(item.path.clone()),
         run_time_ticks: item.runtime_ticks,
@@ -625,11 +748,19 @@ pub async fn media_item_to_dto(
         overview: item.overview.clone(),
         date_created: Some(item.date_created),
         premiere_date: item.premiere_date,
+        genres: item.genres.clone(),
+        provider_ids: provider_ids_to_map(&item.provider_ids),
+        series_name: item.series_name.clone(),
+        season_name: item.season_name.clone(),
+        index_number: item.index_number,
+        index_number_end: item.index_number_end,
+        parent_index_number: item.parent_index_number,
         image_tags,
         backdrop_image_tags,
         user_data,
         media_sources,
-        child_count: None,
+        media_streams,
+        child_count,
         primary_image_aspect_ratio: item.image_primary_path.as_ref().map(|_| 0.666_666_666_7),
     })
 }
@@ -644,6 +775,10 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
                 .map(|ext| ext.to_string_lossy().to_string())
         })
         .unwrap_or_else(|| "mp4".to_string());
+    let media_streams = media_streams_for_item(item);
+    let size = std::fs::metadata(&item.path)
+        .ok()
+        .and_then(|metadata| i64::try_from(metadata.len()).ok());
 
     MediaSourceDto {
         id: item.id.to_string(),
@@ -657,18 +792,158 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         supports_direct_stream: true,
         supports_transcoding: false,
         direct_stream_url: format!(
-            "/Videos/{}/stream?static=true&mediaSourceId={}",
-            item.id, item.id
+            "/Videos/{}/stream.{}?Static=true&mediaSourceId={}",
+            item.id, container, item.id
         ),
+        formats: vec![container.clone()],
+        size,
+        e_tag: Some(item.date_modified.timestamp().to_string()),
+        bitrate: None,
+        default_audio_stream_index: Some(1),
+        default_subtitle_stream_index: None,
         run_time_ticks: item.runtime_ticks,
-        media_streams: vec![MediaStreamDto {
+        media_streams,
+    }
+}
+
+pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
+    let mut streams = vec![
+        MediaStreamDto {
             index: 0,
             stream_type: "Video".to_string(),
-            codec: None,
+            codec: item.video_codec.clone(),
             language: None,
+            display_title: video_display_title(item),
             is_default: true,
-        }],
+            is_forced: false,
+            width: item.width,
+            height: item.height,
+            bit_rate: None,
+            channels: None,
+            sample_rate: None,
+            is_external: false,
+            delivery_method: None,
+            delivery_url: None,
+            supports_external_stream: false,
+            path: None,
+        },
+        MediaStreamDto {
+            index: 1,
+            stream_type: "Audio".to_string(),
+            codec: item.audio_codec.clone(),
+            language: None,
+            display_title: item
+                .audio_codec
+                .clone()
+                .or_else(|| Some("Default".to_string())),
+            is_default: true,
+            is_forced: false,
+            width: None,
+            height: None,
+            bit_rate: None,
+            channels: None,
+            sample_rate: None,
+            is_external: false,
+            delivery_method: None,
+            delivery_url: None,
+            supports_external_stream: false,
+            path: None,
+        },
+    ];
+
+    streams.extend(subtitle_streams_for_item(item));
+    streams
+}
+
+pub fn subtitle_path_for_stream_index(item: &DbMediaItem, stream_index: i32) -> Option<PathBuf> {
+    subtitle_streams_for_item(item)
+        .into_iter()
+        .find(|stream| stream.index == stream_index)
+        .and_then(|stream| stream.path)
+        .map(PathBuf::from)
+}
+
+fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
+    let video_path = Path::new(&item.path);
+    naming::sidecar_subtitles(video_path)
+        .into_iter()
+        .enumerate()
+        .map(|(offset, subtitle)| {
+            let index = 2 + offset as i32;
+            MediaStreamDto {
+                index,
+                stream_type: "Subtitle".to_string(),
+                codec: Some(subtitle.format.clone()),
+                language: subtitle.language,
+                display_title: Some(subtitle.title),
+                is_default: false,
+                is_forced: false,
+                width: None,
+                height: None,
+                bit_rate: None,
+                channels: None,
+                sample_rate: None,
+                is_external: true,
+                delivery_method: Some("External".to_string()),
+                delivery_url: Some(format!(
+                    "/Videos/{}/{}/Subtitles/{}/Stream.{}",
+                    item.id, item.id, index, subtitle.format
+                )),
+                supports_external_stream: true,
+                path: Some(subtitle.path.to_string_lossy().to_string()),
+            }
+        })
+        .collect()
+}
+
+fn video_display_title(item: &DbMediaItem) -> Option<String> {
+    match (item.width, item.height, item.video_codec.as_deref()) {
+        (Some(width), Some(height), Some(codec)) => Some(format!("{width}x{height} {codec}")),
+        (Some(width), Some(height), None) => Some(format!("{width}x{height}")),
+        (None, Some(height), Some(codec)) => Some(format!("{height}p {codec}")),
+        (None, Some(height), None) => Some(format!("{height}p")),
+        (_, _, Some(codec)) => Some(codec.to_string()),
+        _ => None,
     }
+}
+
+fn sort_name_for_item(input: &UpsertMediaItem<'_>) -> String {
+    let normalized = input.name.to_lowercase();
+    match (input.parent_index_number, input.index_number) {
+        (Some(parent_index), Some(index)) if input.item_type.eq_ignore_ascii_case("Episode") => {
+            format!("{parent_index:04}-{index:04}-{normalized}")
+        }
+        (_, Some(index)) => format!("{index:04}-{normalized}"),
+        _ => normalized,
+    }
+}
+
+fn is_folder_item(item: &DbMediaItem) -> bool {
+    matches!(
+        item.item_type.as_str(),
+        "AggregateFolder" | "BoxSet" | "CollectionFolder" | "Folder" | "Season" | "Series"
+    )
+}
+
+fn provider_ids_to_map(value: &Value) -> BTreeMap<String, String> {
+    value
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .filter_map(|(key, value)| {
+                    value
+                        .as_str()
+                        .map(|text| (key.clone(), text.to_string()))
+                        .or_else(|| {
+                            value
+                                .as_i64()
+                                .map(|number| (key.clone(), number.to_string()))
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn user_item_data_to_dto(data: DbUserItemData) -> UserItemDataDto {

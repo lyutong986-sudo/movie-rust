@@ -63,10 +63,23 @@
 | GET/HEAD | `/Items/{itemId}/Images/{imageType}/{imageIndex}` | 图片文件 |
 | GET/HEAD | `/Videos/{itemId}/stream` | 原文件直链播放 |
 | GET/HEAD | `/Videos/{itemId}/stream.{container}` | 带容器扩展名的直链播放 |
+| GET/HEAD | `/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/Stream.{format}` | 外挂字幕直链 |
+| GET/HEAD | `/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/{startPositionTicks}/Stream.{format}` | Jellyfin 字幕流兼容路径 |
 | GET/HEAD | `/Items/{itemId}/File` | 原文件 |
 | GET/HEAD | `/Items/{itemId}/Download` | 下载原文件 |
 
 当前播放接口是 Direct Play / Direct Stream，暂未实现转码。
+
+`PlaybackInfo` 和条目详情会返回 Jellyfin/Emby 常见的 `MediaSources`、`MediaStreams`、`DirectStreamUrl`、`DefaultAudioStreamIndex`、`ETag`、`Size` 等字段。当前媒体流信息来自文件名和外挂字幕推断，后续接入 `ffprobe` 后可以补齐真实码率、时长、声道和内封字幕。
+
+## 命名解析与剧集
+
+扫描器参考 Jellyfin 的命名规则，已支持：
+
+- 常见视频扩展名：`mp4`、`mkv`、`m4v`、`avi`、`mov`、`webm`、`wmv`、`flv`、`ts`、`m2ts`、`iso`、`vob`、`mpg`、`mpeg`、`strm`、`rmvb` 等。
+- 电影标题清洗：移除常见发布组质量/编码标记，如 `1080p`、`2160p`、`UHD`、`HDR`、`x264`、`x265`、`HEVC`、`DTS`、`AC3` 等，并提取年份。
+- 剧集识别：`S01E02`、`S01E02E03`、`1x02`、`2024.04.19` 这类文件名会导入为 `Series -> Season -> Episode` 层级。
+- 外挂字幕：同目录同名或同名前缀的 `srt`、`ass`、`ssa`、`vtt`、`sub`、`smi`、`sup` 等会作为外部字幕轨返回。
 
 ## 播放进度
 
