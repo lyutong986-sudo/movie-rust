@@ -13,6 +13,16 @@ export interface AuthResult {
   ServerId: string;
 }
 
+export interface PublicSystemInfo {
+  LocalAddress: string;
+  ServerName: string;
+  Version: string;
+  ProductName: string;
+  OperatingSystem: string;
+  Id: string;
+  StartupWizardCompleted: boolean;
+}
+
 export interface BaseItemDto {
   Id: string;
   Name: string;
@@ -95,6 +105,18 @@ export interface ScanSummary {
   ImportedItems: number;
 }
 
+export interface StartupConfiguration {
+  ServerName: string;
+  UiCulture: string;
+  MetadataCountryCode: string;
+  PreferredMetadataLanguage: string;
+}
+
+export interface StartupRemoteAccess {
+  EnableRemoteAccess: boolean;
+  EnableAutomaticPortMapping?: boolean;
+}
+
 const TOKEN_KEY = 'movie-rust-token';
 const USER_KEY = 'movie-rust-user';
 
@@ -112,7 +134,50 @@ export class EmbyApi {
   }
 
   async publicInfo() {
-    return this.request('/System/Info/Public', { auth: false });
+    return this.request<PublicSystemInfo>('/System/Info/Public', { auth: false });
+  }
+
+  async publicUsers() {
+    return this.request<UserDto[]>('/Users/Public', { auth: false });
+  }
+
+  async createFirstAdmin(payload: { Name: string; Password: string }) {
+    return this.request<UserDto>('/Startup/User', {
+      method: 'POST',
+      auth: false,
+      body: payload
+    });
+  }
+
+  async firstStartupUser() {
+    return this.request<UserDto | null>('/Startup/User', { auth: false });
+  }
+
+  async startupConfiguration() {
+    return this.request<StartupConfiguration>('/Startup/Configuration', { auth: false });
+  }
+
+  async updateStartupConfiguration(payload: StartupConfiguration) {
+    return this.request<void>('/Startup/Configuration', {
+      method: 'POST',
+      auth: false,
+      body: payload
+    });
+  }
+
+  async updateRemoteAccess(payload: StartupRemoteAccess) {
+    return this.request<void>('/Startup/RemoteAccess', {
+      method: 'POST',
+      auth: false,
+      body: payload
+    });
+  }
+
+  async completeStartup() {
+    return this.request<void>('/Startup/Complete', {
+      method: 'POST',
+      auth: false
+    });
   }
 
   async login(username: string, password: string) {

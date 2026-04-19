@@ -260,6 +260,29 @@ pub struct BrandingConfiguration {
     pub splashscreen_enabled: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct StartupConfiguration {
+    pub server_name: String,
+    pub ui_culture: String,
+    pub metadata_country_code: String,
+    pub preferred_metadata_language: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct StartupUserRequest {
+    pub name: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct StartupRemoteAccessRequest {
+    pub enable_remote_access: bool,
+    pub enable_automatic_port_mapping: Option<bool>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct BaseItemDto {

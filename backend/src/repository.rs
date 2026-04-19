@@ -3,13 +3,13 @@ use crate::{
     error::AppError,
     models::{
         AuthSessionRow, BaseItemDto, DbLibrary, DbMediaItem, DbUser, DbUserItemData, MediaItemRow,
-        MediaSourceDto, MediaStreamDto, QueryResult, SessionInfoDto, UserConfigurationDto, UserDto,
-        UserItemDataDto, UserPolicyDto,
+        MediaSourceDto, MediaStreamDto, QueryResult, SessionInfoDto, StartupConfiguration,
+        StartupRemoteAccessRequest, UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto,
     },
     naming, security,
 };
 use chrono::{DateTime, NaiveDate, Utc};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::{Postgres, QueryBuilder};
 use std::{
     collections::BTreeMap,
@@ -17,30 +17,131 @@ use std::{
 };
 use uuid::Uuid;
 
-pub async fn ensure_default_admin(pool: &sqlx::PgPool, config: &Config) -> Result<(), AppError> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+pub async fn user_count(pool: &sqlx::PgPool) -> Result<i64, AppError> {
+    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
-        .await?;
+        .await?)
+}
 
-    if count == 0 {
-        let password_hash = security::hash_password(&config.default_password)?;
-        sqlx::query(
-            r#"
-            INSERT INTO users (id, name, password_hash, is_admin)
-            VALUES ($1, $2, $3, true)
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(&config.default_admin)
-        .bind(password_hash)
-        .execute(pool)
-        .await?;
-
-        tracing::warn!(
-            "已创建默认管理员用户 '{}'，请首次登录后修改默认密码",
-            config.default_admin
-        );
+pub async fn startup_wizard_completed(pool: &sqlx::PgPool) -> Result<bool, AppError> {
+    if let Some(value) = get_system_setting(pool, "startup_wizard_completed").await? {
+        return Ok(value.as_bool().unwrap_or(false));
     }
+
+    Ok(user_count(pool).await? > 0)
+}
+
+pub async fn set_startup_wizard_completed(
+    pool: &sqlx::PgPool,
+    completed: bool,
+) -> Result<(), AppError> {
+    set_system_setting(pool, "startup_wizard_completed", json!(completed)).await
+}
+
+pub async fn complete_startup_wizard(pool: &sqlx::PgPool) -> Result<(), AppError> {
+    if user_count(pool).await? == 0 {
+        return Err(AppError::BadRequest("请先创建管理员账户".to_string()));
+    }
+
+    set_startup_wizard_completed(pool, true).await
+}
+
+pub async fn startup_configuration(
+    pool: &sqlx::PgPool,
+    config: &Config,
+) -> Result<StartupConfiguration, AppError> {
+    if let Some(value) = get_system_setting(pool, "startup_configuration").await? {
+        if let Ok(configuration) = serde_json::from_value::<StartupConfiguration>(value) {
+            return Ok(configuration);
+        }
+    }
+
+    Ok(default_startup_configuration(config))
+}
+
+pub async fn update_startup_configuration(
+    pool: &sqlx::PgPool,
+    configuration: &StartupConfiguration,
+) -> Result<(), AppError> {
+    set_system_setting(pool, "startup_configuration", json!(configuration)).await
+}
+
+pub async fn update_remote_access(
+    pool: &sqlx::PgPool,
+    configuration: &StartupRemoteAccessRequest,
+) -> Result<(), AppError> {
+    set_system_setting(pool, "startup_remote_access", json!(configuration)).await
+}
+
+pub async fn create_initial_admin(
+    pool: &sqlx::PgPool,
+    name: &str,
+    password: &str,
+) -> Result<DbUser, AppError> {
+    if user_count(pool).await? > 0 {
+        return Err(AppError::Forbidden);
+    }
+
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("管理员名称不能为空".to_string()));
+    }
+    if password.trim().is_empty() {
+        return Err(AppError::BadRequest("管理员密码不能为空".to_string()));
+    }
+
+    let id = Uuid::new_v4();
+    let password_hash = security::hash_password(password)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO users (id, name, password_hash, is_admin)
+        VALUES ($1, $2, $3, true)
+        "#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(password_hash)
+    .execute(pool)
+    .await?;
+
+    get_user_by_id(pool, id)
+        .await?
+        .ok_or_else(|| AppError::Internal("创建管理员后无法读取用户".to_string()))
+}
+
+fn default_startup_configuration(config: &Config) -> StartupConfiguration {
+    StartupConfiguration {
+        server_name: config.server_name.clone(),
+        ui_culture: "zh-CN".to_string(),
+        metadata_country_code: "CN".to_string(),
+        preferred_metadata_language: "zh".to_string(),
+    }
+}
+
+async fn get_system_setting(pool: &sqlx::PgPool, key: &str) -> Result<Option<Value>, AppError> {
+    Ok(
+        sqlx::query_scalar::<_, Value>("SELECT value FROM system_settings WHERE key = $1")
+            .bind(key)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+async fn set_system_setting(pool: &sqlx::PgPool, key: &str, value: Value) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO system_settings (key, value, updated_at)
+        VALUES ($1, $2, now())
+        ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value,
+            updated_at = now()
+        "#,
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await?;
 
     Ok(())
 }

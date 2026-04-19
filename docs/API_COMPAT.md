@@ -28,6 +28,18 @@
 - `Authorization: Emby ... Token="..."`
 - 查询参数 `api_key`
 
+## 首次启动向导
+
+这些路径参考 Jellyfin 的 Startup API，用于首次启动时创建管理员并保存初始偏好。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET/POST | `/Startup/Configuration` | 读取/保存服务器名、界面语言和元数据语言 |
+| GET/POST | `/Startup/User` | 读取首个用户/创建首个管理员 |
+| GET | `/Startup/FirstUser` | 首个用户兼容路径 |
+| POST | `/Startup/RemoteAccess` | 保存远程访问和自动端口映射偏好 |
+| POST | `/Startup/Complete` | 标记首次启动向导完成 |
+
 ## 媒体库与条目
 
 | 方法 | 路径 | 说明 |

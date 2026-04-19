@@ -40,8 +40,6 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("执行数据库迁移失败")?;
 
-    repository::ensure_default_admin(&pool, &config).await?;
-
     let bind_addr = config.bind_addr()?;
     let state = AppState {
         pool,

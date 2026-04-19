@@ -9,8 +9,6 @@ pub struct Config {
     pub port: u16,
     pub server_name: String,
     pub server_id: Uuid,
-    pub default_admin: String,
-    pub default_password: String,
 }
 
 impl Config {
@@ -35,9 +33,6 @@ impl Config {
                 .unwrap_or(8096),
             server_name,
             server_id,
-            default_admin: env::var("APP_DEFAULT_ADMIN").unwrap_or_else(|_| "admin".to_string()),
-            default_password: env::var("APP_DEFAULT_PASSWORD")
-                .unwrap_or_else(|_| "admin123".to_string()),
         })
     }
 

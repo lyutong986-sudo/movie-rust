@@ -33,7 +33,7 @@ cd backend
 cargo run
 ```
 
-默认地址是 `http://127.0.0.1:8096`，默认账号是 `admin`，默认密码是 `admin123`。
+默认地址是 `http://127.0.0.1:8096`。首次启动不会自动创建固定管理员，打开前端后按向导创建管理员账户。
 
 4. 启动前端：
 
@@ -49,28 +49,20 @@ npm run dev
 
 ## Docker 构建与推送
 
-项目提供两个可推送镜像：
+项目现在以单镜像为主：
 
-- `backend/Dockerfile`：Rust API 服务，默认监听 `8096`。
-- `frontend/Dockerfile`：Vue 静态资源 + Nginx，默认监听容器内 `80`，并反向代理 API 到 `backend:8096`。
+- `Dockerfile`：内含 Rust API、Vue 静态资源和 Nginx，推送为 `movie-rust`。
+- `backend/Dockerfile` 和 `frontend/Dockerfile` 保留给拆分部署调试使用，默认 compose 和 GitHub Actions 不再使用它们。
 
-1. 准备 Docker 环境变量：
-
-```powershell
-Copy-Item .env.docker.example .env.docker
-```
-
-编辑 `.env.docker`，把 `DOCKERHUB_NAMESPACE` 改成你的 DockerHub 用户名或组织名。
-
-2. 本地构建并启动：
+1. 本地构建并启动：
 
 ```powershell
-docker compose --env-file .env.docker up -d --build
+docker compose up -d --build
 ```
 
-前端入口：`http://127.0.0.1:5173`，后端入口：`http://127.0.0.1:8096`。
+Docker 入口：`http://127.0.0.1:8096`。Nginx 在同一个容器内代理 Emby/Jellyfin API 到 Rust 后端。
 
-媒体目录默认示例挂载为 `./media:/media:ro`。如果你的影片在其它目录，需要在 `docker-compose.yml` 的 `backend.volumes` 中改成类似：
+媒体目录默认示例挂载为 `./media:/media:ro`。如果你的影片在其它目录，需要在 `docker-compose.yml` 的 `movie-rust.volumes` 中改成类似：
 
 ```yaml
 - D:/Movies:/media/movies:ro
@@ -78,21 +70,29 @@ docker compose --env-file .env.docker up -d --build
 
 然后在前端添加媒体库路径时填写容器内路径，例如 `/media/movies`。
 
-3. 推送到 DockerHub：
+2. 推送到 DockerHub：
 
 ```powershell
 docker login
-docker compose --env-file .env.docker build
-docker compose --env-file .env.docker push backend frontend
+docker build -f Dockerfile -t yuanhu66/movie-rust:latest .
+docker push yuanhu66/movie-rust:latest
 ```
 
-也可以手动构建单个镜像：
+也可以用 buildx 直接构建并推送：
 
 ```powershell
-docker build -f backend/Dockerfile -t your-dockerhub-name/movie-rust-backend:latest .
-docker build -f frontend/Dockerfile -t your-dockerhub-name/movie-rust-frontend:latest .
-docker push your-dockerhub-name/movie-rust-backend:latest
-docker push your-dockerhub-name/movie-rust-frontend:latest
+docker buildx create --use --driver docker-container
+docker buildx build -f Dockerfile -t yuanhu66/movie-rust:latest --push .
+```
+
+单镜像运行时仍然需要 PostgreSQL，例如：
+
+```powershell
+docker run -d --name movie-rust `
+  -p 8096:80 `
+  -e DATABASE_URL=postgres://movie:movie@host.docker.internal:5432/movie_rust `
+  -v D:/Movies:/media/movies:ro `
+  yuanhu66/movie-rust:latest
 ```
 
 ## 本地播放器连接

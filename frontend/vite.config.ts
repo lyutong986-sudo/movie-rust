@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/System': 'http://127.0.0.1:8096',
+      '/Startup': 'http://127.0.0.1:8096',
       '/Users': 'http://127.0.0.1:8096',
       '/Items': 'http://127.0.0.1:8096',
       '/Library': 'http://127.0.0.1:8096',

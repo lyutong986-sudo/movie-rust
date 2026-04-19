@@ -1,6 +1,7 @@
 use crate::{
     auth::AuthSession,
     models::{BrandingConfiguration, EndpointInfo, PublicSystemInfo, SystemInfo},
+    repository,
     state::AppState,
 };
 use axum::{
@@ -22,29 +23,38 @@ pub fn router() -> Router<AppState> {
         .route("/Branding/Css.css", get(branding_css))
 }
 
-async fn public_info(State(state): State<AppState>) -> Json<PublicSystemInfo> {
-    Json(PublicSystemInfo {
+async fn public_info(
+    State(state): State<AppState>,
+) -> Result<Json<PublicSystemInfo>, crate::error::AppError> {
+    let startup_wizard_completed = repository::startup_wizard_completed(&state.pool).await?;
+
+    Ok(Json(PublicSystemInfo {
         local_address: format!("http://{}:{}", state.config.host, state.config.port),
         server_name: state.config.server_name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         product_name: "Movie Rust".to_string(),
         operating_system: std::env::consts::OS.to_string(),
         id: state.config.server_id.to_string(),
-        startup_wizard_completed: true,
-    })
+        startup_wizard_completed,
+    }))
 }
 
-async fn system_info(_session: AuthSession, State(state): State<AppState>) -> Json<SystemInfo> {
-    Json(SystemInfo {
+async fn system_info(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<SystemInfo>, crate::error::AppError> {
+    let startup_wizard_completed = repository::startup_wizard_completed(&state.pool).await?;
+
+    Ok(Json(SystemInfo {
         local_address: format!("http://{}:{}", state.config.host, state.config.port),
         server_name: state.config.server_name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         product_name: "Movie Rust".to_string(),
         operating_system: std::env::consts::OS.to_string(),
         id: state.config.server_id.to_string(),
-        startup_wizard_completed: true,
+        startup_wizard_completed,
         can_self_restart: false,
-    })
+    }))
 }
 
 async fn endpoint_info(_session: AuthSession) -> Json<EndpointInfo> {

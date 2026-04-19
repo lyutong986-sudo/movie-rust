@@ -1,6 +1,7 @@
 .git
 .github
 .env
+.env.*
 **/.env
 **/target
 **/node_modules
