@@ -1522,6 +1522,9 @@ pub fn media_source_for_playback(
         container: container.clone(),
         name: item.name.clone(),
         is_remote,
+        has_mixed_protocols: false,
+        read_at_native_framerate: false,
+        container_start_time_ticks: 0,
         is_infinite_stream: false,
         requires_opening: false,
         requires_closing: false,
@@ -1539,17 +1542,18 @@ pub fn media_source_for_playback(
             .eq_ignore_ascii_case("Video")
             .then(|| "VideoFile".to_string()),
         required_http_headers: BTreeMap::new(),
+        media_attachments: Vec::new(),
         formats: vec![container.clone()],
-        size,
+        size: Some(size.unwrap_or(0)),
         e_tag: Some(item.date_modified.timestamp().to_string()),
-        bitrate: None,
+        bitrate: Some(infer_media_source_bitrate(&media_streams)),
         default_audio_stream_index: Some(if item.media_type.eq_ignore_ascii_case("Audio") {
             0
         } else {
             1
         }),
-        default_subtitle_stream_index: None,
-        run_time_ticks: item.runtime_ticks,
+        default_subtitle_stream_index: Some(-1),
+        run_time_ticks: Some(item.runtime_ticks.unwrap_or(0)),
         media_streams,
     }
 }
@@ -1602,7 +1606,7 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
         return vec![MediaStreamDto {
             index: 0,
             stream_type: "Audio".to_string(),
-            codec: item.audio_codec.clone(),
+            codec: Some(default_audio_codec(item)),
             language: None,
             display_title: item
                 .audio_codec
@@ -1612,9 +1616,9 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             is_forced: false,
             width: None,
             height: None,
-            bit_rate: None,
-            channels: None,
-            sample_rate: None,
+            bit_rate: Some(default_audio_bitrate()),
+            channels: Some(2),
+            sample_rate: Some(48_000),
             is_external: false,
             delivery_method: None,
             delivery_url: None,
@@ -1627,14 +1631,14 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
         MediaStreamDto {
             index: 0,
             stream_type: "Video".to_string(),
-            codec: item.video_codec.clone(),
+            codec: Some(default_video_codec(item)),
             language: None,
             display_title: video_display_title(item),
             is_default: true,
             is_forced: false,
-            width: item.width,
-            height: item.height,
-            bit_rate: None,
+            width: Some(item.width.unwrap_or(0)),
+            height: Some(item.height.unwrap_or(0)),
+            bit_rate: Some(default_video_bitrate()),
             channels: None,
             sample_rate: None,
             is_external: false,
@@ -1646,7 +1650,7 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
         MediaStreamDto {
             index: 1,
             stream_type: "Audio".to_string(),
-            codec: item.audio_codec.clone(),
+            codec: Some(default_audio_codec(item)),
             language: None,
             display_title: item
                 .audio_codec
@@ -1656,9 +1660,9 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             is_forced: false,
             width: None,
             height: None,
-            bit_rate: None,
-            channels: None,
-            sample_rate: None,
+            bit_rate: Some(default_audio_bitrate()),
+            channels: Some(2),
+            sample_rate: Some(48_000),
             is_external: false,
             delivery_method: None,
             delivery_url: None,
@@ -1710,6 +1714,42 @@ fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             }
         })
         .collect()
+}
+
+fn default_video_codec(item: &DbMediaItem) -> String {
+    item.video_codec
+        .clone()
+        .filter(|codec| !codec.trim().is_empty())
+        .unwrap_or_else(|| "h264".to_string())
+}
+
+fn default_audio_codec(item: &DbMediaItem) -> String {
+    item.audio_codec
+        .clone()
+        .filter(|codec| !codec.trim().is_empty())
+        .unwrap_or_else(|| "aac".to_string())
+}
+
+fn default_video_bitrate() -> i32 {
+    8_000_000
+}
+
+fn default_audio_bitrate() -> i32 {
+    128_000
+}
+
+fn infer_media_source_bitrate(streams: &[MediaStreamDto]) -> i32 {
+    let bitrate = streams
+        .iter()
+        .filter(|stream| !stream.is_external)
+        .filter_map(|stream| stream.bit_rate)
+        .sum();
+
+    if bitrate > 0 {
+        bitrate
+    } else {
+        default_video_bitrate() + default_audio_bitrate()
+    }
 }
 
 fn video_display_title(item: &DbMediaItem) -> Option<String> {

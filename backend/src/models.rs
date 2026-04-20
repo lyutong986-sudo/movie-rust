@@ -418,6 +418,9 @@ pub struct MediaSourceDto {
     pub container: String,
     pub name: String,
     pub is_remote: bool,
+    pub has_mixed_protocols: bool,
+    pub read_at_native_framerate: bool,
+    pub container_start_time_ticks: i64,
     pub is_infinite_stream: bool,
     pub requires_opening: bool,
     pub requires_closing: bool,
@@ -435,6 +438,7 @@ pub struct MediaSourceDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_type: Option<String>,
     pub required_http_headers: BTreeMap<String, String>,
+    pub media_attachments: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub formats: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
