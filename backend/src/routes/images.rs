@@ -65,25 +65,22 @@ async fn list_item_images(
 }
 
 async fn get_item_image(
-    session: AuthSession,
     State(state): State<AppState>,
     Path((item_id, image_type)): Path<(Uuid, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    serve_item_image(session, state, item_id, image_type, request).await
+    serve_item_image(state, item_id, image_type, request).await
 }
 
 async fn get_item_image_with_tail(
-    session: AuthSession,
     State(state): State<AppState>,
     Path((item_id, image_type, _image_tail)): Path<(Uuid, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    serve_item_image(session, state, item_id, image_type, request).await
+    serve_item_image(state, item_id, image_type, request).await
 }
 
 async fn serve_item_image(
-    _session: AuthSession,
     state: AppState,
     item_id: Uuid,
     image_type: String,

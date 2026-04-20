@@ -745,6 +745,14 @@ pub struct ItemListOptions {
     pub limit: i64,
 }
 
+pub struct ResumeListOptions {
+    pub library_id: Option<Uuid>,
+    pub parent_id: Option<Uuid>,
+    pub media_types: Vec<String>,
+    pub start_index: i64,
+    pub limit: i64,
+}
+
 pub async fn list_media_items(
     pool: &sqlx::PgPool,
     options: ItemListOptions,
@@ -834,6 +842,89 @@ pub async fn list_media_items(
         .push(" ")
         .push(sort_order)
         .push(" NULLS LAST")
+        .push(" OFFSET ")
+        .push_bind(options.start_index.max(0))
+        .push(" LIMIT ")
+        .push_bind(options.limit.clamp(1, 500));
+
+    let rows = builder
+        .build_query_as::<MediaItemRow>()
+        .fetch_all(pool)
+        .await?;
+    let total_record_count = rows.first().map(|row| row.total_count).unwrap_or(0);
+    let items = rows.into_iter().map(DbMediaItem::from).collect();
+
+    Ok(QueryResult {
+        items,
+        total_record_count,
+        start_index: Some(options.start_index.max(0)),
+    })
+}
+
+pub async fn list_resume_items(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    options: ResumeListOptions,
+) -> Result<QueryResult<DbMediaItem>, AppError> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT
+            mi.id, mi.parent_id, mi.name, mi.sort_name, mi.item_type, mi.media_type,
+            mi.path, mi.container, mi.overview, mi.production_year, mi.runtime_ticks,
+            mi.premiere_date, mi.series_name, mi.season_name, mi.index_number,
+            mi.index_number_end, mi.parent_index_number, mi.provider_ids, mi.genres,
+            mi.width, mi.height, mi.video_codec, mi.audio_codec, mi.image_primary_path,
+            mi.backdrop_path, mi.date_created, mi.date_modified,
+            COUNT(*) OVER() AS total_count
+        FROM media_items mi
+        INNER JOIN user_item_data uid ON uid.item_id = mi.id
+        WHERE uid.user_id =
+        "#,
+    );
+    builder.push_bind(user_id);
+    builder.push(
+        r#"
+            AND uid.playback_position_ticks > 0
+            AND uid.is_played = false
+            AND mi.item_type NOT IN ('Series', 'Season', 'Folder')
+        "#,
+    );
+
+    if let Some(library_id) = options.library_id {
+        builder.push(" AND mi.library_id = ").push_bind(library_id);
+    }
+
+    if let Some(parent_id) = options.parent_id {
+        builder.push(
+            r#"
+            AND mi.id IN (
+                WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM media_items WHERE parent_id =
+            "#,
+        );
+        builder.push_bind(parent_id);
+        builder.push(
+            r#"
+                    UNION ALL
+                    SELECT child.id
+                    FROM media_items child
+                    INNER JOIN descendants d ON child.parent_id = d.id
+                )
+                SELECT id FROM descendants
+            )
+            "#,
+        );
+    }
+
+    if !options.media_types.is_empty() {
+        builder
+            .push(" AND mi.media_type = ANY(")
+            .push_bind(options.media_types)
+            .push(")");
+    }
+
+    builder
+        .push(" ORDER BY uid.updated_at DESC NULLS LAST, mi.date_created DESC NULLS LAST")
         .push(" OFFSET ")
         .push_bind(options.start_index.max(0))
         .push(" LIMIT ")

@@ -5,7 +5,7 @@ use crate::{
         BaseItemDto, ItemsQuery, PlaybackInfoResponse, QueryResult, UpdateUserItemDataRequest,
         UserItemDataDto, UserItemDataQuery,
     },
-    repository::{self, ItemListOptions, UpdateUserDataInput},
+    repository::{self, ItemListOptions, ResumeListOptions, UpdateUserDataInput},
     state::AppState,
 };
 use axum::{
@@ -24,6 +24,7 @@ pub fn router() -> Router<AppState> {
         .route("/Items", get(items))
         .route("/Users/{user_id}/Items", get(user_items))
         .route("/Users/{user_id}/Items/Latest", get(latest_items))
+        .route("/Users/{user_id}/Items/Resume", get(resume_items))
         .route(
             "/Items/{item_id}/PlaybackInfo",
             get(playback_info).post(playback_info),
@@ -134,6 +135,39 @@ async fn latest_items(
 
     let result = list_items_for_user(&state, user_id, query).await?;
     Ok(Json(result.0.items))
+}
+
+async fn resume_items(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    ensure_user_access(&session, user_id)?;
+
+    let mut library_id = None;
+    let mut parent_id = query.parent_id;
+    if let Some(candidate_id) = query.parent_id {
+        if let Some(library) = repository::get_library(&state.pool, candidate_id).await? {
+            library_id = Some(library.id);
+            parent_id = None;
+        }
+    }
+
+    let result = repository::list_resume_items(
+        &state.pool,
+        user_id,
+        ResumeListOptions {
+            library_id,
+            parent_id,
+            media_types: parse_list(query.media_types.as_deref()),
+            start_index: query.start_index.unwrap_or(0),
+            limit: query.limit.unwrap_or(100),
+        },
+    )
+    .await?;
+
+    media_items_to_dto_result(&state, user_id, result).await
 }
 
 async fn list_items_for_user(

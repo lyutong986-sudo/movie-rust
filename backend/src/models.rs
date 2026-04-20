@@ -487,6 +487,8 @@ pub struct ItemsQuery {
     pub parent_id: Option<Uuid>,
     #[serde(default)]
     pub include_item_types: Option<String>,
+    #[serde(default)]
+    pub media_types: Option<String>,
     #[serde(default, alias = "GenreIds", alias = "genreIds")]
     pub genres: Option<String>,
     #[serde(default)]
