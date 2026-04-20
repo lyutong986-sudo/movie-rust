@@ -19,7 +19,7 @@ const currentSourceIndex = ref(0);
 const currentSource = computed(() => item.value?.MediaSources?.[currentSourceIndex.value]);
 const currentStreams = computed(() => currentSource.value?.MediaStreams || item.value?.MediaStreams || []);
 const itemImage = computed(() => (item.value ? api.itemImageUrl(item.value) || api.backdropUrl(item.value) : ''));
-const playable = computed(() => Boolean(item.value && !item.value.IsFolder && item.value.MediaSources?.length));
+const playable = computed(() => Boolean(item.value && isPlayableItem(item.value)));
 const metaChips = computed(() => {
   if (!item.value) {
     return [];
@@ -109,6 +109,14 @@ async function openChild(target: BaseItemDto) {
 
 async function playItem(target: BaseItemDto) {
   await router.push(playbackRoute(target));
+}
+
+function isPlayableItem(target: BaseItemDto) {
+  if (target.IsFolder) {
+    return false;
+  }
+
+  return ['Movie', 'Episode', 'Video', 'Audio', 'MusicVideo'].includes(target.Type) || ['Video', 'Audio'].includes(target.MediaType || '');
 }
 
 async function toggleFavorite() {

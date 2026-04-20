@@ -389,7 +389,20 @@ export class EmbyApi {
   }
 
   async playbackInfo(itemId: string) {
-    return this.request<PlaybackInfoResponse>(`/Items/${itemId}/PlaybackInfo`);
+    const userId = this.requireUserId();
+    const params = new URLSearchParams({
+      UserId: userId,
+      IsPlayback: 'true',
+      AutoOpenLiveStream: 'true',
+      StartTimeTicks: '0'
+    });
+
+    return this.request<PlaybackInfoResponse>(`/Items/${itemId}/PlaybackInfo?${params}`, {
+      method: 'POST',
+      body: {
+        DeviceProfile: browserDeviceProfile()
+      }
+    });
   }
 
   async playbackStarted(payload: PlaybackReportPayload) {
@@ -542,8 +555,19 @@ export class EmbyApi {
       return '';
     }
 
-    const joiner = directUrl.includes('?') ? '&' : '?';
-    return `${this.baseUrl}${directUrl}${joiner}api_key=${encodeURIComponent(this.token)}`;
+    const url = directUrl.startsWith('http://') || directUrl.startsWith('https://')
+      ? new URL(directUrl)
+      : new URL(`${this.baseUrl}${directUrl.startsWith('/') ? directUrl : `/${directUrl}`}`, window.location.origin);
+
+    if (!url.searchParams.has('api_key')) {
+      url.searchParams.set('api_key', this.token);
+    }
+
+    if (!url.searchParams.has('deviceId')) {
+      url.searchParams.set('deviceId', getDeviceId());
+    }
+
+    return url.origin === window.location.origin ? `${url.pathname}${url.search}` : url.toString();
   }
 
   subtitleUrl(deliveryUrl?: string) {
@@ -629,6 +653,39 @@ function getDeviceId() {
   const value = crypto.randomUUID();
   localStorage.setItem(key, value);
   return value;
+}
+
+function browserDeviceProfile() {
+  return {
+    MaxStreamingBitrate: 140000000,
+    MaxStaticBitrate: 140000000,
+    MusicStreamingTranscodingBitrate: 192000,
+    DirectPlayProfiles: [
+      { Type: 'Video', Container: 'mp4,m4v,mov', VideoCodec: 'h264,hevc,av1,vp9', AudioCodec: 'aac,mp3,ac3,eac3,opus,flac' },
+      { Type: 'Video', Container: 'webm', VideoCodec: 'vp8,vp9,av1', AudioCodec: 'vorbis,opus' },
+      { Type: 'Video', Container: 'm3u8', VideoCodec: 'h264,hevc', AudioCodec: 'aac,mp3,ac3,eac3' },
+      { Type: 'Audio', Container: 'mp3,aac,m4a,flac,ogg,opus,wav,webm' }
+    ],
+    TranscodingProfiles: [
+      {
+        Type: 'Video',
+        Context: 'Streaming',
+        Protocol: 'hls',
+        Container: 'ts',
+        VideoCodec: 'h264',
+        AudioCodec: 'aac'
+      }
+    ],
+    CodecProfiles: [],
+    ContainerProfiles: [],
+    SubtitleProfiles: [
+      { Format: 'vtt', Method: 'External' },
+      { Format: 'srt', Method: 'External' },
+      { Format: 'ass', Method: 'External' },
+      { Format: 'ssa', Method: 'External' }
+    ],
+    ResponseProfiles: []
+  };
 }
 
 function normalizeBaseUrl(baseUrl: string) {

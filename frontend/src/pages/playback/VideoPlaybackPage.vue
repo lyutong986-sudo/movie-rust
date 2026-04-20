@@ -989,7 +989,7 @@ function sourceLabel(source: NonNullable<BaseItemDto['MediaSources']>[number], i
             <div class="actions">
               <label class="volume-slider" title="音量">
                 <button class="icon-button inline" type="button" :title="muted ? '取消静音' : '静音'" @click.prevent="toggleMuted">
-                  {{ muted ? '🔇' : '🔊' }}
+                  {{ muted ? 'M' : 'V' }}
                 </button>
                 <input min="0" max="1" step="0.05" type="range" :value="volume" @input="handleVolumeInput" />
               </label>

@@ -26,7 +26,7 @@ const title = computed(() =>
   props.item.Type === 'Episode' && props.item.SeriesName ? props.item.SeriesName : props.item.Name
 );
 const secondary = computed(() => props.subtitle || itemSubtitle(props.item));
-const playable = computed(() => !props.item.IsFolder && Boolean(props.item.MediaSources?.length));
+const playable = computed(() => isPlayableItem(props.item));
 const fallbackLabel = computed(() => {
   if (props.item.IsFolder) {
     return '目录';
@@ -34,6 +34,14 @@ const fallbackLabel = computed(() => {
 
   return props.item.Name.slice(0, 1).toUpperCase();
 });
+
+function isPlayableItem(item: BaseItemDto) {
+  if (item.IsFolder) {
+    return false;
+  }
+
+  return ['Movie', 'Episode', 'Video', 'Audio', 'MusicVideo'].includes(item.Type) || ['Video', 'Audio'].includes(item.MediaType || '');
+}
 </script>
 
 <template>
