@@ -2257,9 +2257,14 @@ pub async fn get_media_streams(
 ) -> Result<Vec<DbMediaStream>, AppError> {
     let streams = sqlx::query_as::<_, DbMediaStream>(
         r#"
-        SELECT id, media_item_id, index, stream_type, codec, codec_tag, language, title, width, height,
-               channels, sample_rate, bit_rate, channel_layout, is_default, is_forced,
-               is_external, is_hearing_impaired, created_at, updated_at
+        SELECT id, media_item_id, index, stream_type, codec, codec_tag, language, title,
+               is_default, is_forced, is_external, is_hearing_impaired, profile, width, height,
+               channels, sample_rate, bit_rate, bit_depth, channel_layout, aspect_ratio,
+               average_frame_rate, real_frame_rate, is_interlaced, color_range, color_space,
+               color_transfer, color_primaries, rotation, hdr10_plus_present_flag,
+               dv_version_major, dv_version_minor, dv_profile, dv_level,
+               dv_bl_signal_compatibility_id, comment, time_base, codec_time_base,
+               created_at, updated_at
         FROM media_streams
         WHERE media_item_id = $1
         ORDER BY index
@@ -2467,15 +2472,103 @@ pub async fn save_media_streams(
             .and_then(|v| v.as_str())
             .map(String::from);
 
+        // 提取其他字段
+        let profile = stream.tags.as_ref()
+            .and_then(|tags| tags.get("profile"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let bit_depth = stream.tags.as_ref()
+            .and_then(|tags| tags.get("bits_per_raw_sample"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i32>().ok());
+        let aspect_ratio = stream.tags.as_ref()
+            .and_then(|tags| tags.get("display_aspect_ratio"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let average_frame_rate = stream.tags.as_ref()
+            .and_then(|tags| tags.get("avg_frame_rate"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f32>().ok());
+        let real_frame_rate = stream.tags.as_ref()
+            .and_then(|tags| tags.get("r_frame_rate"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f32>().ok());
+        let is_interlaced = stream.tags.as_ref()
+            .and_then(|tags| tags.get("field_order"))
+            .and_then(|v| v.as_str())
+            .map(|s| s != "progressive" && s != "unknown")
+            .unwrap_or(false);
+        let color_range = stream.tags.as_ref()
+            .and_then(|tags| tags.get("color_range"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let color_space = stream.tags.as_ref()
+            .and_then(|tags| tags.get("color_space"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let color_transfer = stream.tags.as_ref()
+            .and_then(|tags| tags.get("color_transfer"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let color_primaries = stream.tags.as_ref()
+            .and_then(|tags| tags.get("color_primaries"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let rotation = stream.tags.as_ref()
+            .and_then(|tags| tags.get("rotation"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i32>().ok());
+        let hdr10_plus_present_flag = stream.tags.as_ref()
+            .and_then(|tags| tags.get("hdr10_plus_present_flag"))
+            .and_then(|v| v.as_bool());
+        let dv_version_major = stream.tags.as_ref()
+            .and_then(|tags| tags.get("dv_version_major"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i32>().ok());
+        let dv_version_minor = stream.tags.as_ref()
+            .and_then(|tags| tags.get("dv_version_minor"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i32>().ok());
+        let dv_profile = stream.tags.as_ref()
+            .and_then(|tags| tags.get("dv_profile"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i32>().ok());
+        let dv_level = stream.tags.as_ref()
+            .and_then(|tags| tags.get("dv_level"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i32>().ok());
+        let dv_bl_signal_compatibility_id = stream.tags.as_ref()
+            .and_then(|tags| tags.get("dv_bl_signal_compatibility_id"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i32>().ok());
+        let comment = stream.tags.as_ref()
+            .and_then(|tags| tags.get("comment"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let time_base = stream.tags.as_ref()
+            .and_then(|tags| tags.get("time_base"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let codec_time_base = stream.tags.as_ref()
+            .and_then(|tags| tags.get("codec_time_base"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
         sqlx::query(
             r#"
             INSERT INTO media_streams (
-                id, media_item_id, index, stream_type, codec, codec_tag, language, title, width, height,
-                channels, sample_rate, bit_rate, channel_layout, is_default, is_forced,
-                is_external, is_hearing_impaired, created_at, updated_at
+                id, media_item_id, index, stream_type, codec, codec_tag, language, title,
+                is_default, is_forced, is_external, is_hearing_impaired, profile, width, height,
+                channels, sample_rate, bit_rate, bit_depth, channel_layout, aspect_ratio,
+                average_frame_rate, real_frame_rate, is_interlaced, color_range, color_space,
+                color_transfer, color_primaries, rotation, hdr10_plus_present_flag,
+                dv_version_major, dv_version_minor, dv_profile, dv_level,
+                dv_bl_signal_compatibility_id, comment, time_base, codec_time_base,
+                created_at, updated_at
             ) VALUES (
-                gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                $13, $14, $15, false, false, now(), now()
+                gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, false, false, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
+                $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, now(), now()
             )
             "#,
         )
@@ -2486,14 +2579,34 @@ pub async fn save_media_streams(
         .bind(codec_tag)
         .bind(stream.language.clone())
         .bind(title)
+        .bind(is_default)
+        .bind(is_forced)
+        .bind(profile)
         .bind(stream.width)
         .bind(stream.height)
         .bind(stream.channels)
         .bind(sample_rate)
         .bind(bit_rate)
+        .bind(bit_depth)
         .bind(stream.channel_layout.clone())
-        .bind(is_default)
-        .bind(is_forced)
+        .bind(aspect_ratio)
+        .bind(average_frame_rate)
+        .bind(real_frame_rate)
+        .bind(is_interlaced)
+        .bind(color_range)
+        .bind(color_space)
+        .bind(color_transfer)
+        .bind(color_primaries)
+        .bind(rotation)
+        .bind(hdr10_plus_present_flag)
+        .bind(dv_version_major)
+        .bind(dv_version_minor)
+        .bind(dv_profile)
+        .bind(dv_level)
+        .bind(dv_bl_signal_compatibility_id)
+        .bind(comment)
+        .bind(time_base)
+        .bind(codec_time_base)
         .execute(pool)
         .await?;
     }
