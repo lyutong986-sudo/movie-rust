@@ -28,7 +28,7 @@ services:
       APP_PORT: 8096
       APP_SERVER_NAME: Movie Rust
     ports:
-      - "8096:80"
+      - "8096:8096"
     volumes:
       - ./media:/media:ro
     depends_on:

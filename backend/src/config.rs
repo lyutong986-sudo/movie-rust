@@ -1,4 +1,4 @@
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, path::PathBuf};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -9,6 +9,7 @@ pub struct Config {
     pub port: u16,
     pub server_name: String,
     pub server_id: Uuid,
+    pub static_dir: PathBuf,
 }
 
 impl Config {
@@ -33,6 +34,9 @@ impl Config {
                 .unwrap_or(8096),
             server_name,
             server_id,
+            static_dir: env::var("APP_STATIC_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("frontend/dist")),
         })
     }
 

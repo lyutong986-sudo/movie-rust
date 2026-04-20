@@ -49,10 +49,10 @@ npm run dev
 
 ## Docker 构建与推送
 
-项目现在以单镜像为主：
+项目现在就是单镜像：
 
-- `Dockerfile`：内含 Rust API、Vue 静态资源和 Nginx，推送为 `movie-rust`。
-- `backend/Dockerfile` 和 `frontend/Dockerfile` 保留给拆分部署调试使用，默认 compose 和 GitHub Actions 不再使用它们。
+- `Dockerfile`：先构建 Vue，再构建 Rust，最终镜像只运行 `movie-rust-backend`。
+- Rust 后端直接托管 Vue 静态资源，不再额外运行 Nginx。
 
 1. 本地构建并启动：
 
@@ -60,7 +60,7 @@ npm run dev
 docker compose up -d --build
 ```
 
-Docker 入口：`http://127.0.0.1:8096`。Nginx 在同一个容器内代理 Emby/Jellyfin API 到 Rust 后端。
+Docker 入口：`http://127.0.0.1:8096`。
 
 媒体目录默认示例挂载为 `./media:/media:ro`。如果你的影片在其它目录，需要在 `docker-compose.yml` 的 `movie-rust.volumes` 中改成类似：
 
@@ -89,7 +89,7 @@ docker buildx build -f Dockerfile -t yuanhu66/movie-rust:latest --push .
 
 ```powershell
 docker run -d --name movie-rust `
-  -p 8096:80 `
+  -p 8096:8096 `
   -e DATABASE_URL=postgres://movie:movie@host.docker.internal:5432/movie_rust `
   -v D:/Movies:/media/movies:ro `
   yuanhu66/movie-rust:latest

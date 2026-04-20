@@ -13,7 +13,11 @@ use anyhow::Context;
 use sqlx::postgres::PgPoolOptions;
 use state::AppState;
 use std::sync::Arc;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::CorsLayer,
+    services::{ServeDir, ServeFile},
+    trace::TraceLayer,
+};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -29,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = config::Config::from_env()?;
+    let static_dir = config.static_dir.clone();
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
         .connect(&config.database_url)
@@ -46,7 +51,11 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(config),
     };
 
+    let spa =
+        ServeDir::new(&static_dir).not_found_service(ServeFile::new(static_dir.join("index.html")));
+
     let app = routes::router(state.clone())
+        .fallback_service(spa)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive());
 
