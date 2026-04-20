@@ -203,6 +203,17 @@ p {
   align-items: center;
 }
 
+button.danger {
+  color: #fff4f4;
+  background: #9f2f3f;
+}
+
+.icon-button {
+  width: 42px;
+  min-height: 42px;
+  padding: 0;
+}
+
 .user-picker {
   display: grid;
   gap: 18px;
@@ -811,6 +822,7 @@ p {
 }
 
 .small-dialog,
+.library-dialog,
 .detail-dialog {
   position: relative;
   width: min(620px, 100%);
@@ -826,6 +838,120 @@ p {
   width: min(1080px, 100%);
   max-height: min(88vh, 860px);
   overflow-y: auto;
+}
+
+.library-dialog {
+  width: min(920px, 100%);
+  max-height: min(90vh, 900px);
+  overflow-y: auto;
+}
+
+.form-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.form-grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.form-grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.path-editor,
+.library-form,
+.library-admin-list,
+.library-admin-card {
+  display: grid;
+  gap: 14px;
+}
+
+.section-heading.compact {
+  margin: 0;
+}
+
+.path-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+}
+
+.switch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.switch-grid label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 40px;
+  border: 1px solid #2b323e;
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: #171c25;
+}
+
+.switch-grid input {
+  width: 18px;
+  min-height: 18px;
+  accent-color: #77d7b4;
+}
+
+.settings-heading-row,
+.library-admin-card-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+
+.library-admin-card {
+  border: 1px solid #2b323e;
+  border-radius: 8px;
+  padding: 16px;
+  background: #171c25;
+}
+
+.library-admin-card h3 {
+  margin: 0 0 4px;
+}
+
+.library-admin-card p {
+  color: #a8b2c1;
+}
+
+.library-type-pill {
+  display: grid;
+  place-items: center;
+  min-width: 72px;
+  min-height: 38px;
+  border-radius: 6px;
+  color: #071015;
+  background: #77d7b4;
+  font-weight: 800;
+}
+
+.library-option-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.library-option-grid span {
+  border: 1px solid #35404d;
+  border-radius: 6px;
+  padding: 5px 9px;
+  color: #9aa6b5;
+  background: #10151d;
+}
+
+.library-option-grid span.enabled {
+  color: #dffcf0;
+  border-color: rgba(119, 215, 180, 0.55);
+  background: rgba(119, 215, 180, 0.12);
 }
 
 .close {

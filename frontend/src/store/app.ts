@@ -1,6 +1,13 @@
 import { computed, reactive, ref } from 'vue';
 import { EmbyApi } from '../api/emby';
-import type { BaseItemDto, SystemInfo, UserDto } from '../api/emby';
+import type {
+  BaseItemDto,
+  CreateLibraryPayload,
+  LibraryOptions,
+  SystemInfo,
+  UserDto,
+  VirtualFolderInfo
+} from '../api/emby';
 
 export type AdminPage = 'overview' | 'server' | 'libraries' | 'users' | 'playback' | 'network';
 
@@ -57,6 +64,7 @@ export const user = ref(api.user);
 export const publicUsers = ref<UserDto[]>([]);
 export const adminUsers = ref<UserDto[]>([]);
 export const libraries = ref<BaseItemDto[]>([]);
+export const virtualFolders = ref<VirtualFolderInfo[]>([]);
 export const items = ref<BaseItemDto[]>([]);
 export const homeItems = ref<BaseItemDto[]>([]);
 export const latestByLibrary = ref<Record<string, BaseItemDto[]>>({});
@@ -289,6 +297,15 @@ export async function loadLibraries() {
   libraries.value = result.Items;
 }
 
+export async function loadVirtualFolders() {
+  if (!isAdmin.value) {
+    virtualFolders.value = [];
+    return;
+  }
+
+  virtualFolders.value = await api.virtualFolders();
+}
+
 export async function loadHome() {
   await run(async () => {
     const searching = Boolean(state.search.trim());
@@ -353,6 +370,7 @@ export async function loadAdminData() {
     state.uiCulture = configuration.UiCulture || state.uiCulture;
     state.metadataLanguage = configuration.PreferredMetadataLanguage || state.metadataLanguage;
     state.metadataCountry = configuration.MetadataCountryCode || state.metadataCountry;
+    await loadVirtualFolders();
   });
 }
 
@@ -361,21 +379,76 @@ export async function backToParent() {
   await loadItems();
 }
 
-export async function createLibrary() {
+export function defaultLibraryOptions(paths: string[] = []): LibraryOptions {
+  return {
+    Enabled: true,
+    EnablePhotos: true,
+    EnableRealtimeMonitor: false,
+    EnableChapterImageExtraction: false,
+    ExtractChapterImagesDuringLibraryScan: false,
+    SaveLocalMetadata: true,
+    EnableAutomaticSeriesGrouping: true,
+    EnableEmbeddedTitles: false,
+    EnableEmbeddedEpisodeInfos: true,
+    AutomaticRefreshIntervalDays: 0,
+    PreferredMetadataLanguage: state.metadataLanguage || 'zh',
+    MetadataCountryCode: state.metadataCountry || 'CN',
+    SeasonZeroDisplayName: 'Specials',
+    MetadataSavers: ['Nfo'],
+    DisabledLocalMetadataReaders: [],
+    LocalMetadataReaderOrder: ['Nfo'],
+    PathInfos: paths.filter(Boolean).map((path) => ({ Path: path }))
+  };
+}
+
+export function libraryPayloadFromState(): CreateLibraryPayload {
+  const paths = state.libraryPath
+    .split(/\r?\n|,/)
+    .map((path) => path.trim())
+    .filter(Boolean);
+
+  return {
+    Name: state.libraryName.trim(),
+    CollectionType: state.collectionType,
+    Path: paths[0] || '',
+    Paths: paths,
+    LibraryOptions: defaultLibraryOptions(paths)
+  };
+}
+
+export async function createLibrary(payload = libraryPayloadFromState()) {
   await run(async () => {
-    const library = await api.createLibrary({
-      Name: state.libraryName,
-      Path: state.libraryPath,
-      CollectionType: state.collectionType
-    });
+    const library = await api.createLibrary(payload);
     libraries.value.push(library);
     state.libraryPath = '';
     state.showAddLibrary = false;
     await loadLibraries();
+    await loadVirtualFolders();
     await Promise.all([loadHome(), loadLatestByLibrary()]);
     state.selectedLibraryId = library.Id;
     await loadItems();
   }, '媒体库已创建');
+}
+
+export async function deleteLibrary(library: BaseItemDto | VirtualFolderInfo) {
+  await run(async () => {
+    if ('ItemId' in library) {
+      await api.deleteVirtualFolder(library.Name, false);
+      if (state.selectedLibraryId === library.ItemId) {
+        state.selectedLibraryId = '';
+      }
+    } else {
+      await api.deleteLibrary(library.Id);
+      if (state.selectedLibraryId === library.Id) {
+        state.selectedLibraryId = '';
+      }
+    }
+
+    await loadLibraries();
+    await loadVirtualFolders();
+    await Promise.all([loadHome(), loadLatestByLibrary()]);
+    await loadItems();
+  }, '媒体库已删除');
 }
 
 export async function saveServerSettings() {
@@ -393,6 +466,7 @@ export async function scan() {
   await run(async () => {
     const summary = await api.scan();
     await loadLibraries();
+    await loadVirtualFolders();
     await loadLatestByLibrary();
     await loadItems();
     state.message = `扫描完成，新增 ${summary.ImportedItems} 个条目`;
@@ -423,6 +497,7 @@ function clearClientState(keepInitialized: boolean) {
   homeItems.value = [];
   latestByLibrary.value = {};
   adminUsers.value = [];
+  virtualFolders.value = [];
   selectedItem.value = null;
   parentStack.value = [];
   state.username = '';

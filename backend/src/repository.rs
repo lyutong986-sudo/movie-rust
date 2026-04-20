@@ -3,9 +3,10 @@ use crate::{
     error::AppError,
     models::{
         ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaItem, DbUser,
-        DbUserItemData, LogFileDto, MediaItemRow, MediaSourceDto, MediaStreamDto, QueryResult,
-        SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest, UserConfigurationDto,
-        UserDto, UserItemDataDto, UserPolicyDto,
+        DbUserItemData, LibraryOptionsDto, LogFileDto, MediaItemRow, MediaPathInfoDto,
+        MediaSourceDto, MediaStreamDto, QueryResult, SessionInfoDto, StartupConfiguration,
+        StartupRemoteAccessRequest, UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto,
+        VirtualFolderInfoDto,
     },
     naming, security,
 };
@@ -379,20 +380,35 @@ pub async fn create_library(
     pool: &sqlx::PgPool,
     name: &str,
     collection_type: &str,
-    path: &str,
+    paths: &[String],
+    options: LibraryOptionsDto,
 ) -> Result<DbLibrary, AppError> {
+    let name = name.trim();
+    let collection_type = normalize_collection_type(collection_type);
+    let paths = normalize_library_paths(paths);
+
+    if name.is_empty() {
+        return Err(AppError::BadRequest("媒体库名称不能为空".to_string()));
+    }
+    if paths.is_empty() {
+        return Err(AppError::BadRequest("至少需要添加一个媒体路径".to_string()));
+    }
+
     let id = Uuid::new_v4();
+    let options = normalize_library_options(options, &paths);
+    let options_value = json!(options);
 
     sqlx::query(
         r#"
-        INSERT INTO libraries (id, name, collection_type, path)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO libraries (id, name, collection_type, path, library_options, date_modified)
+        VALUES ($1, $2, $3, $4, $5, now())
         "#,
     )
     .bind(id)
     .bind(name)
-    .bind(collection_type)
-    .bind(path)
+    .bind(collection_type.as_str())
+    .bind(&paths[0])
+    .bind(options_value)
     .execute(pool)
     .await?;
 
@@ -404,7 +420,7 @@ pub async fn create_library(
 pub async fn list_libraries(pool: &sqlx::PgPool) -> Result<Vec<DbLibrary>, AppError> {
     Ok(sqlx::query_as::<_, DbLibrary>(
         r#"
-        SELECT id, name, collection_type, path, created_at
+        SELECT id, name, collection_type, path, library_options, created_at
         FROM libraries
         ORDER BY name
         "#,
@@ -416,7 +432,7 @@ pub async fn list_libraries(pool: &sqlx::PgPool) -> Result<Vec<DbLibrary>, AppEr
 pub async fn get_library(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbLibrary>, AppError> {
     Ok(sqlx::query_as::<_, DbLibrary>(
         r#"
-        SELECT id, name, collection_type, path, created_at
+        SELECT id, name, collection_type, path, library_options, created_at
         FROM libraries
         WHERE id = $1
         "#,
@@ -424,6 +440,167 @@ pub async fn get_library(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbLibra
     .bind(id)
     .fetch_optional(pool)
     .await?)
+}
+
+pub async fn get_library_by_name(
+    pool: &sqlx::PgPool,
+    name: &str,
+) -> Result<Option<DbLibrary>, AppError> {
+    Ok(sqlx::query_as::<_, DbLibrary>(
+        r#"
+        SELECT id, name, collection_type, path, library_options, created_at
+        FROM libraries
+        WHERE lower(name) = lower($1)
+        "#,
+    )
+    .bind(name.trim())
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn delete_library(pool: &sqlx::PgPool, id: Uuid) -> Result<(), AppError> {
+    let result = sqlx::query("DELETE FROM libraries WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("媒体库不存在".to_string()));
+    }
+
+    Ok(())
+}
+
+pub async fn delete_library_by_name(pool: &sqlx::PgPool, name: &str) -> Result<(), AppError> {
+    let library = get_library_by_name(pool, name)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
+    delete_library(pool, library.id).await
+}
+
+pub async fn rename_library(
+    pool: &sqlx::PgPool,
+    current_name: &str,
+    new_name: &str,
+) -> Result<DbLibrary, AppError> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        return Err(AppError::BadRequest("新媒体库名称不能为空".to_string()));
+    }
+
+    let library = get_library_by_name(pool, current_name)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
+
+    sqlx::query("UPDATE libraries SET name = $1, date_modified = now() WHERE id = $2")
+        .bind(new_name)
+        .bind(library.id)
+        .execute(pool)
+        .await?;
+
+    get_library(pool, library.id)
+        .await?
+        .ok_or_else(|| AppError::Internal("重命名后无法读取媒体库".to_string()))
+}
+
+pub async fn update_library_options(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    options: LibraryOptionsDto,
+) -> Result<DbLibrary, AppError> {
+    let library = get_library(pool, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
+    let paths = library_paths(&library);
+    let options = normalize_library_options(options, &paths);
+    let path = options
+        .path_infos
+        .first()
+        .map(|path| path.path.clone())
+        .unwrap_or_else(|| library.path.clone());
+
+    sqlx::query(
+        "UPDATE libraries SET path = $1, library_options = $2, date_modified = now() WHERE id = $3",
+    )
+    .bind(path)
+    .bind(json!(options))
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    get_library(pool, id)
+        .await?
+        .ok_or_else(|| AppError::Internal("更新媒体库选项后无法读取媒体库".to_string()))
+}
+
+pub async fn add_library_path(
+    pool: &sqlx::PgPool,
+    library_name: &str,
+    path: &str,
+) -> Result<DbLibrary, AppError> {
+    let library = get_library_by_name(pool, library_name)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
+    let mut options = library_options(&library);
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(AppError::BadRequest("媒体路径不能为空".to_string()));
+    }
+    if !options
+        .path_infos
+        .iter()
+        .any(|candidate| candidate.path.eq_ignore_ascii_case(path))
+    {
+        options.path_infos.push(MediaPathInfoDto {
+            path: path.to_string(),
+        });
+    }
+    update_library_options(pool, library.id, options).await
+}
+
+pub async fn update_library_path(
+    pool: &sqlx::PgPool,
+    library_name: &str,
+    path_info: MediaPathInfoDto,
+) -> Result<DbLibrary, AppError> {
+    let library = get_library_by_name(pool, library_name)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
+    let mut options = library_options(&library);
+    let path = path_info.path.trim();
+    if path.is_empty() {
+        return Err(AppError::BadRequest("媒体路径不能为空".to_string()));
+    }
+    if options.path_infos.is_empty() {
+        options.path_infos.push(MediaPathInfoDto {
+            path: path.to_string(),
+        });
+    } else {
+        options.path_infos[0].path = path.to_string();
+    }
+    update_library_options(pool, library.id, options).await
+}
+
+pub async fn remove_library_path(
+    pool: &sqlx::PgPool,
+    library_name: &str,
+    path: &str,
+) -> Result<DbLibrary, AppError> {
+    let library = get_library_by_name(pool, library_name)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
+    let mut options = library_options(&library);
+    options
+        .path_infos
+        .retain(|candidate| !candidate.path.eq_ignore_ascii_case(path.trim()));
+
+    if options.path_infos.is_empty() {
+        return Err(AppError::BadRequest(
+            "媒体库至少需要保留一个路径".to_string(),
+        ));
+    }
+
+    update_library_options(pool, library.id, options).await
 }
 
 pub async fn count_library_children(
@@ -445,6 +622,114 @@ pub async fn count_item_children(pool: &sqlx::PgPool, parent_id: Uuid) -> Result
             .fetch_one(pool)
             .await?,
     )
+}
+
+pub fn library_options(library: &DbLibrary) -> LibraryOptionsDto {
+    let mut options = serde_json::from_value::<LibraryOptionsDto>(library.library_options.clone())
+        .unwrap_or_default();
+    if options.path_infos.is_empty() {
+        options.path_infos.push(MediaPathInfoDto {
+            path: library.path.clone(),
+        });
+    }
+    normalize_library_options(
+        options,
+        &library_paths_from_options_or_path(&library.library_options, &library.path),
+    )
+}
+
+pub fn library_paths(library: &DbLibrary) -> Vec<String> {
+    library_paths_from_options_or_path(&library.library_options, &library.path)
+}
+
+pub fn library_to_virtual_folder_dto(library: &DbLibrary) -> VirtualFolderInfoDto {
+    let options = library_options(library);
+    let locations = options
+        .path_infos
+        .iter()
+        .map(|path| path.path.clone())
+        .collect::<Vec<_>>();
+
+    VirtualFolderInfoDto {
+        name: library.name.clone(),
+        collection_type: library.collection_type.clone(),
+        item_id: library.id.to_string(),
+        locations,
+        library_options: options,
+    }
+}
+
+fn normalize_collection_type(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "tvshows" | "series" | "shows" => "tvshows".to_string(),
+        "music" | "audio" => "music".to_string(),
+        "homevideos" | "homevideo" | "videos" => "homevideos".to_string(),
+        "mixed" => "mixed".to_string(),
+        _ => "movies".to_string(),
+    }
+}
+
+fn normalize_library_paths(paths: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for path in paths {
+        let path = path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        if !result
+            .iter()
+            .any(|candidate: &String| candidate.eq_ignore_ascii_case(path))
+        {
+            result.push(path.to_string());
+        }
+    }
+    result
+}
+
+fn normalize_library_options(
+    mut options: LibraryOptionsDto,
+    fallback_paths: &[String],
+) -> LibraryOptionsDto {
+    let option_paths = options
+        .path_infos
+        .iter()
+        .map(|path| path.path.clone())
+        .collect::<Vec<_>>();
+    let paths = normalize_library_paths(if option_paths.is_empty() {
+        fallback_paths
+    } else {
+        &option_paths
+    });
+
+    options.path_infos = paths
+        .into_iter()
+        .map(|path| MediaPathInfoDto { path })
+        .collect();
+
+    if options.season_zero_display_name.trim().is_empty() {
+        options.season_zero_display_name = "Specials".to_string();
+    }
+
+    options
+}
+
+fn library_paths_from_options_or_path(options: &Value, fallback_path: &str) -> Vec<String> {
+    let mut paths = serde_json::from_value::<LibraryOptionsDto>(options.clone())
+        .ok()
+        .map(|options| {
+            options
+                .path_infos
+                .into_iter()
+                .map(|path| path.path)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if paths.is_empty() {
+        paths.push(fallback_path.to_string());
+    }
+
+    normalize_library_paths(&paths)
 }
 
 pub struct ItemListOptions {
@@ -957,6 +1242,7 @@ pub async fn library_to_item_dto(
     server_id: Uuid,
 ) -> Result<BaseItemDto, AppError> {
     let child_count = count_library_children(pool, library.id).await?;
+    let locations = library_paths(library);
 
     Ok(BaseItemDto {
         name: library.name.clone(),
@@ -969,7 +1255,10 @@ pub async fn library_to_item_dto(
         media_type: None,
         container: None,
         parent_id: None,
-        path: Some(library.path.clone()),
+        path: locations
+            .first()
+            .cloned()
+            .or_else(|| Some(library.path.clone())),
         run_time_ticks: None,
         production_year: None,
         overview: None,

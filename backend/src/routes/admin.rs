@@ -1,21 +1,47 @@
 use crate::{
     auth::{self, AuthSession},
     error::AppError,
-    models::{BaseItemDto, CreateLibraryRequest, ScanSummary},
+    models::{
+        AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, MediaPathDto, ScanSummary,
+        UpdateLibraryOptionsDto, UpdateMediaPathRequestDto, VirtualFolderInfoDto,
+        VirtualFolderQuery,
+    },
     repository, scanner,
     state::AppState,
 };
 use axum::{
-    extract::State,
-    routing::{get, post},
+    extract::{Path, Query, State},
+    http::StatusCode,
+    routing::{delete, get, post},
     Json, Router,
 };
+use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
             "/api/admin/libraries",
             get(admin_libraries).post(create_library),
+        )
+        .route("/api/admin/libraries/{library_id}", delete(delete_library))
+        .route(
+            "/Library/VirtualFolders",
+            get(virtual_folders)
+                .post(add_virtual_folder)
+                .delete(remove_virtual_folder),
+        )
+        .route("/Library/VirtualFolders/Name", post(rename_virtual_folder))
+        .route(
+            "/Library/VirtualFolders/Paths",
+            post(add_media_path).delete(remove_media_path),
+        )
+        .route(
+            "/Library/VirtualFolders/Paths/Update",
+            post(update_media_path),
+        )
+        .route(
+            "/Library/VirtualFolders/LibraryOptions",
+            post(update_library_options),
         )
         .route("/api/admin/scan", post(scan_libraries))
 }
@@ -43,16 +69,172 @@ async fn create_library(
     Json(payload): Json<CreateLibraryRequest>,
 ) -> Result<Json<BaseItemDto>, AppError> {
     auth::require_admin(&session)?;
+    let mut paths = if payload.paths.is_empty() {
+        vec![payload.path.clone()]
+    } else {
+        payload.paths.clone()
+    };
+    if paths.iter().all(|path| path.trim().is_empty()) {
+        paths = payload
+            .library_options
+            .path_infos
+            .iter()
+            .map(|path| path.path.clone())
+            .collect();
+    }
     let library = repository::create_library(
         &state.pool,
         payload.name.trim(),
         payload.collection_type.trim(),
-        payload.path.trim(),
+        &paths,
+        payload.library_options,
     )
     .await?;
     Ok(Json(
         repository::library_to_item_dto(&state.pool, &library, state.config.server_id).await?,
     ))
+}
+
+async fn delete_library(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(library_id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    repository::delete_library(&state.pool, library_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn virtual_folders(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<VirtualFolderInfoDto>>, AppError> {
+    auth::require_admin(&session)?;
+    let libraries = repository::list_libraries(&state.pool).await?;
+    Ok(Json(
+        libraries
+            .iter()
+            .map(repository::library_to_virtual_folder_dto)
+            .collect(),
+    ))
+}
+
+async fn add_virtual_folder(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<VirtualFolderQuery>,
+    body: Option<Json<AddVirtualFolderDto>>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+
+    let name = query
+        .name
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("缺少媒体库名称".to_string()))?;
+    let collection_type = query.collection_type.as_deref().unwrap_or("movies");
+    let mut paths = split_query_paths(query.paths.as_deref().or(query.path.as_deref()));
+    let _refresh_library = query.refresh_library.unwrap_or(false);
+    let options = body
+        .and_then(|Json(body)| body.library_options)
+        .unwrap_or_default();
+    if paths.is_empty() {
+        paths = options
+            .path_infos
+            .iter()
+            .map(|path| path.path.clone())
+            .collect();
+    }
+
+    repository::create_library(&state.pool, name, collection_type, &paths, options).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remove_virtual_folder(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<VirtualFolderQuery>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    let name = query
+        .name
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("缺少媒体库名称".to_string()))?;
+    let _refresh_library = query.refresh_library.unwrap_or(false);
+    repository::delete_library_by_name(&state.pool, name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn rename_virtual_folder(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<VirtualFolderQuery>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    let name = query
+        .name
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("缺少媒体库名称".to_string()))?;
+    let new_name = query
+        .new_name
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("缺少新的媒体库名称".to_string()))?;
+    let _refresh_library = query.refresh_library.unwrap_or(false);
+    repository::rename_library(&state.pool, name, new_name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_library_options(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateLibraryOptionsDto>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    repository::update_library_options(&state.pool, payload.id, payload.library_options).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn add_media_path(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<MediaPathDto>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    let path = payload
+        .path_info
+        .map(|info| info.path)
+        .or(payload.path)
+        .ok_or_else(|| AppError::BadRequest("缺少媒体路径".to_string()))?;
+    repository::add_library_path(&state.pool, &payload.name, &path).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_media_path(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateMediaPathRequestDto>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    repository::update_library_path(&state.pool, &payload.name, payload.path_info).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remove_media_path(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<VirtualFolderQuery>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    let name = query
+        .name
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("缺少媒体库名称".to_string()))?;
+    let path = query
+        .path
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("缺少媒体路径".to_string()))?;
+    let _refresh_library = query.refresh_library.unwrap_or(false);
+    repository::remove_library_path(&state.pool, name, path).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn scan_libraries(
@@ -61,4 +243,14 @@ async fn scan_libraries(
 ) -> Result<Json<ScanSummary>, AppError> {
     auth::require_admin(&session)?;
     Ok(Json(scanner::scan_all_libraries(&state.pool).await?))
+}
+
+fn split_query_paths(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }

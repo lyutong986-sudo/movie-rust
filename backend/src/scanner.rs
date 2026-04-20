@@ -37,22 +37,24 @@ pub async fn scan_all_libraries(pool: &sqlx::PgPool) -> Result<ScanSummary, AppE
     let mut imported_items = 0_i64;
 
     for library in &libraries {
-        let path = PathBuf::from(&library.path);
-        if !path.exists() {
-            tracing::warn!("媒体库路径不存在: {}", library.path);
-            continue;
-        }
-
-        let files = collect_video_files(path).await?;
-        scanned_files += files.len() as i64;
-
-        for file in files {
-            if library.collection_type.eq_ignore_ascii_case("tvshows") {
-                import_tv_file(pool, library, &file).await?;
-            } else {
-                import_movie_file(pool, library, &file).await?;
+        for library_path in repository::library_paths(library) {
+            let path = PathBuf::from(&library_path);
+            if !path.exists() {
+                tracing::warn!("媒体库路径不存在: {}", library_path);
+                continue;
             }
-            imported_items += 1;
+
+            let files = collect_video_files(path.clone()).await?;
+            scanned_files += files.len() as i64;
+
+            for file in files {
+                if library.collection_type.eq_ignore_ascii_case("tvshows") {
+                    import_tv_file(pool, library, &path, &file).await?;
+                } else {
+                    import_movie_file(pool, library, &file).await?;
+                }
+                imported_items += 1;
+            }
         }
     }
 
@@ -141,6 +143,7 @@ async fn import_movie_file(
 async fn import_tv_file(
     pool: &sqlx::PgPool,
     library: &DbLibrary,
+    library_root: &Path,
     file: &Path,
 ) -> Result<(), AppError> {
     let parsed = naming::parse_media_path(file);
@@ -151,7 +154,7 @@ async fn import_tv_file(
         .as_deref()
         .or(parsed.series_name.as_deref());
     let preliminary_series_name = series_name_for_file(file, preliminary_series_name);
-    let preliminary_series_path = series_virtual_path(library, file, &preliminary_series_name);
+    let preliminary_series_path = series_virtual_path(library_root, file, &preliminary_series_name);
     let series_nfo = read_nfo_file(&preliminary_series_path.join("tvshow.nfo")).unwrap_or_default();
 
     let series_name = series_nfo
@@ -161,14 +164,14 @@ async fn import_tv_file(
         .or(parsed.series_name.as_deref())
         .map(ToOwned::to_owned)
         .unwrap_or(preliminary_series_name);
-    let series_path = series_virtual_path(library, file, &series_name);
+    let series_path = series_virtual_path(library_root, file, &series_name);
 
     let season_number = episode_nfo
         .season_number
         .or(parsed.season_number)
         .or_else(|| season_number_from_file(file))
         .unwrap_or(1);
-    let season_path = season_virtual_path(library, file, &series_path, season_number);
+    let season_path = season_virtual_path(library_root, file, &series_path, season_number);
     let season_nfo = read_nfo_file(&season_path.join("season.nfo")).unwrap_or_default();
     let season_name = season_nfo
         .title
@@ -509,9 +512,8 @@ fn series_name_for_file(file: &Path, parsed_series_name: Option<&str>) -> String
         .unwrap_or_else(|| "Unknown Series".to_string())
 }
 
-fn series_virtual_path(library: &DbLibrary, file: &Path, series_name: &str) -> PathBuf {
-    let parent = file.parent().unwrap_or_else(|| Path::new(&library.path));
-    let library_root = Path::new(&library.path);
+fn series_virtual_path(library_root: &Path, file: &Path, series_name: &str) -> PathBuf {
+    let parent = file.parent().unwrap_or(library_root);
     if parent
         .file_name()
         .and_then(OsStr::to_str)
@@ -520,7 +522,7 @@ fn series_virtual_path(library: &DbLibrary, file: &Path, series_name: &str) -> P
         return parent
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from(&library.path).join(series_name));
+            .unwrap_or_else(|| library_root.join(series_name));
     }
 
     if parent == library_root {
@@ -531,12 +533,12 @@ fn series_virtual_path(library: &DbLibrary, file: &Path, series_name: &str) -> P
 }
 
 fn season_virtual_path(
-    library: &DbLibrary,
+    library_root: &Path,
     file: &Path,
     series_path: &Path,
     season_number: i32,
 ) -> PathBuf {
-    let parent = file.parent().unwrap_or_else(|| Path::new(&library.path));
+    let parent = file.parent().unwrap_or(library_root);
     if parent
         .file_name()
         .and_then(OsStr::to_str)

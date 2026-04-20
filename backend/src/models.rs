@@ -21,6 +21,7 @@ pub struct DbLibrary {
     pub name: String,
     pub collection_type: String,
     pub path: String,
+    pub library_options: Value,
     pub created_at: DateTime<Utc>,
 }
 
@@ -578,13 +579,155 @@ pub struct LegacyPlaybackQuery {
 #[serde(rename_all = "PascalCase")]
 pub struct CreateLibraryRequest {
     pub name: String,
+    #[serde(default)]
     pub path: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
     #[serde(default = "default_collection_type")]
     pub collection_type: String,
+    #[serde(default)]
+    pub library_options: LibraryOptionsDto,
 }
 
 fn default_collection_type() -> String {
     "movies".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct MediaPathInfoDto {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibraryOptionsDto {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub enable_photos: bool,
+    #[serde(default)]
+    pub enable_realtime_monitor: bool,
+    #[serde(default)]
+    pub enable_chapter_image_extraction: bool,
+    #[serde(default)]
+    pub extract_chapter_images_during_library_scan: bool,
+    #[serde(default)]
+    pub save_local_metadata: bool,
+    #[serde(default = "default_true")]
+    pub enable_automatic_series_grouping: bool,
+    #[serde(default)]
+    pub enable_embedded_titles: bool,
+    #[serde(default)]
+    pub enable_embedded_episode_infos: bool,
+    #[serde(default)]
+    pub automatic_refresh_interval_days: i32,
+    #[serde(default)]
+    pub preferred_metadata_language: Option<String>,
+    #[serde(default)]
+    pub metadata_country_code: Option<String>,
+    #[serde(default = "default_specials_name")]
+    pub season_zero_display_name: String,
+    #[serde(default)]
+    pub metadata_savers: Vec<String>,
+    #[serde(default)]
+    pub disabled_local_metadata_readers: Vec<String>,
+    #[serde(default)]
+    pub local_metadata_reader_order: Vec<String>,
+    #[serde(default)]
+    pub path_infos: Vec<MediaPathInfoDto>,
+}
+
+impl Default for LibraryOptionsDto {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            enable_photos: true,
+            enable_realtime_monitor: false,
+            enable_chapter_image_extraction: false,
+            extract_chapter_images_during_library_scan: false,
+            save_local_metadata: false,
+            enable_automatic_series_grouping: true,
+            enable_embedded_titles: false,
+            enable_embedded_episode_infos: false,
+            automatic_refresh_interval_days: 0,
+            preferred_metadata_language: Some("zh".to_string()),
+            metadata_country_code: Some("CN".to_string()),
+            season_zero_display_name: default_specials_name(),
+            metadata_savers: vec!["Nfo".to_string()],
+            disabled_local_metadata_readers: Vec::new(),
+            local_metadata_reader_order: vec!["Nfo".to_string()],
+            path_infos: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct VirtualFolderInfoDto {
+    pub name: String,
+    pub collection_type: String,
+    pub item_id: String,
+    pub locations: Vec<String>,
+    pub library_options: LibraryOptionsDto,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct AddVirtualFolderDto {
+    #[serde(default)]
+    pub library_options: Option<LibraryOptionsDto>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateLibraryOptionsDto {
+    pub id: Uuid,
+    pub library_options: LibraryOptionsDto,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct MediaPathDto {
+    pub name: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub path_info: Option<MediaPathInfoDto>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateMediaPathRequestDto {
+    pub name: String,
+    pub path_info: MediaPathInfoDto,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct VirtualFolderQuery {
+    #[serde(default, alias = "Name", alias = "name")]
+    pub name: Option<String>,
+    #[serde(default, alias = "NewName", alias = "newName")]
+    pub new_name: Option<String>,
+    #[serde(default, alias = "CollectionType", alias = "collectionType")]
+    pub collection_type: Option<String>,
+    #[serde(default, alias = "Paths", alias = "paths")]
+    pub paths: Option<String>,
+    #[serde(default, alias = "Path", alias = "path")]
+    pub path: Option<String>,
+    #[serde(default, alias = "RefreshLibrary", alias = "refreshLibrary")]
+    pub refresh_library: Option<bool>,
+    #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
+    pub _api_key: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_specials_name() -> String {
+    "Specials".to_string()
 }
 
 #[derive(Debug, Serialize)]

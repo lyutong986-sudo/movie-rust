@@ -156,6 +156,46 @@ export interface StartupRemoteAccess {
   EnableAutomaticPortMapping?: boolean;
 }
 
+export interface MediaPathInfo {
+  Path: string;
+}
+
+export interface LibraryOptions {
+  Enabled: boolean;
+  EnablePhotos: boolean;
+  EnableRealtimeMonitor: boolean;
+  EnableChapterImageExtraction: boolean;
+  ExtractChapterImagesDuringLibraryScan: boolean;
+  SaveLocalMetadata: boolean;
+  EnableAutomaticSeriesGrouping: boolean;
+  EnableEmbeddedTitles: boolean;
+  EnableEmbeddedEpisodeInfos: boolean;
+  AutomaticRefreshIntervalDays: number;
+  PreferredMetadataLanguage?: string;
+  MetadataCountryCode?: string;
+  SeasonZeroDisplayName: string;
+  MetadataSavers: string[];
+  DisabledLocalMetadataReaders: string[];
+  LocalMetadataReaderOrder: string[];
+  PathInfos: MediaPathInfo[];
+}
+
+export interface VirtualFolderInfo {
+  Name: string;
+  CollectionType: string;
+  ItemId: string;
+  Locations: string[];
+  LibraryOptions: LibraryOptions;
+}
+
+export interface CreateLibraryPayload {
+  Name: string;
+  CollectionType: string;
+  Path?: string;
+  Paths: string[];
+  LibraryOptions: LibraryOptions;
+}
+
 export interface ItemQueryOptions {
   includeTypes?: string[];
   genres?: string[];
@@ -367,10 +407,61 @@ export class EmbyApi {
     });
   }
 
-  async createLibrary(payload: { Name: string; Path: string; CollectionType: string }) {
+  async adminLibraries() {
+    return this.request<BaseItemDto[]>('/api/admin/libraries');
+  }
+
+  async virtualFolders() {
+    return this.request<VirtualFolderInfo[]>('/Library/VirtualFolders');
+  }
+
+  async createLibrary(payload: CreateLibraryPayload) {
     return this.request<BaseItemDto>('/api/admin/libraries', {
       method: 'POST',
       body: payload
+    });
+  }
+
+  async deleteLibrary(libraryId: string) {
+    return this.request<void>(`/api/admin/libraries/${libraryId}`, {
+      method: 'DELETE'
+    });
+  }
+
+  async createVirtualFolder(payload: CreateLibraryPayload, refreshLibrary = false) {
+    const params = new URLSearchParams({
+      name: payload.Name,
+      collectionType: payload.CollectionType,
+      paths: payload.Paths.join(','),
+      refreshLibrary: refreshLibrary ? 'true' : 'false'
+    });
+
+    return this.request<void>(`/Library/VirtualFolders?${params}`, {
+      method: 'POST',
+      body: {
+        LibraryOptions: payload.LibraryOptions
+      }
+    });
+  }
+
+  async deleteVirtualFolder(name: string, refreshLibrary = false) {
+    const params = new URLSearchParams({
+      name,
+      refreshLibrary: refreshLibrary ? 'true' : 'false'
+    });
+
+    return this.request<void>(`/Library/VirtualFolders?${params}`, {
+      method: 'DELETE'
+    });
+  }
+
+  async updateLibraryOptions(id: string, libraryOptions: LibraryOptions) {
+    return this.request<void>('/Library/VirtualFolders/LibraryOptions', {
+      method: 'POST',
+      body: {
+        Id: id,
+        LibraryOptions: libraryOptions
+      }
     });
   }
 
