@@ -2,6 +2,8 @@
 
 本项目后端以 Jellyfin 的现代控制器路径和 Emby 的老式 ServiceStack 路径为参考，实现本地播放器最常用的一组接口。
 
+所有兼容接口同时支持根路径、`/emby` 前缀和 `/mediabrowser` 前缀。例如 `/System/Info/Public`、`/emby/system/info/public`、`/mediabrowser/System/Info/Public` 都会进入同一套路由。
+
 ## 系统
 
 | 方法 | 路径 | 说明 |
@@ -9,6 +11,8 @@
 | GET | `/System/Info/Public` | 登录前服务器信息 |
 | GET | `/System/Info` | 登录后服务器信息 |
 | GET/POST | `/System/Ping` | 健康检查 |
+
+已补 Emby 客户端常用小写探测路径：`/system/info/public`、`/system/info`、`/system/ping`。
 
 ## 用户与认证
 
@@ -19,11 +23,15 @@
 | GET | `/Users/{userId}` | 用户详情 |
 | GET | `/Users/Me` | 当前用户 |
 | POST | `/Users/AuthenticateByName` | 用户名密码认证，返回 `AccessToken` |
+| POST | `/Users/{userId}/Authenticate` | 用户 ID + 密码认证，返回 `AccessToken` |
+
+登录接口同时支持 `/Users/AuthenticateByName`、`/Users/authenticatebyname`、`/users/authenticatebyname`，请求正文支持 `application/json` 和 `application/x-www-form-urlencoded`。密码字段优先读取 `Pw`，兼容读取 `Password`。
 
 支持的 Token 传递方式：
 
 - `X-Emby-Token`
 - `X-MediaBrowser-Token`
+- `X-Emby-Authorization: MediaBrowser ... Token="..."`
 - `Authorization: MediaBrowser ... Token="..."`
 - `Authorization: Emby ... Token="..."`
 - 查询参数 `api_key`

@@ -11,6 +11,16 @@ pub mod users;
 pub mod videos;
 
 pub fn router(state: AppState) -> Router {
+    let api = api_router();
+
+    Router::new()
+        .merge(api.clone())
+        .nest("/emby", api.clone())
+        .nest("/mediabrowser", api)
+        .with_state(state)
+}
+
+fn api_router() -> Router<AppState> {
     Router::new()
         .merge(system::router())
         .merge(startup::router())
@@ -20,5 +30,4 @@ pub fn router(state: AppState) -> Router {
         .merge(videos::router())
         .merge(sessions::router())
         .merge(admin::router())
-        .with_state(state)
 }

@@ -15,12 +15,19 @@ use axum::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/System/Info/Public", get(public_info))
+        .route("/system/info/public", get(public_info))
         .route("/System/Info", get(system_info))
+        .route("/system/info", get(system_info))
         .route("/System/Endpoint", get(endpoint_info))
+        .route("/system/endpoint", get(endpoint_info))
         .route("/System/Ping", get(ping).post(ping))
+        .route("/system/ping", get(ping).post(ping))
         .route("/Branding/Configuration", get(branding_configuration))
+        .route("/branding/configuration", get(branding_configuration))
         .route("/Branding/Css", get(branding_css))
         .route("/Branding/Css.css", get(branding_css))
+        .route("/branding/css", get(branding_css))
+        .route("/branding/css.css", get(branding_css))
 }
 
 async fn public_info(

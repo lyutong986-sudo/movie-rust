@@ -66,10 +66,7 @@ pub fn extract_token(headers: &HeaderMap, query: Option<&str>) -> Option<String>
 }
 
 pub fn client_value(headers: &HeaderMap, key: &str) -> Option<String> {
-    headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| parse_kv_header(value, key))
+    authorization_header(headers).and_then(|value| parse_kv_header(value, key))
 }
 
 fn header_value(headers: &HeaderMap, key: &str) -> Option<String> {
@@ -91,7 +88,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 fn media_browser_token(headers: &HeaderMap) -> Option<String> {
-    let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let value = authorization_header(headers)?;
     parse_kv_header(value, "Token")
 }
 
@@ -124,4 +121,44 @@ fn parse_kv_header(value: &str, key: &str) -> Option<String> {
             None
         }
     })
+}
+
+fn authorization_header(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("X-Emby-Authorization")
+        .or_else(|| headers.get(AUTHORIZATION))
+        .and_then(|value| value.to_str().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn extracts_token_from_x_emby_authorization() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Emby-Authorization",
+            HeaderValue::from_static(
+                "MediaBrowser Client=\"Emby\", Device=\"Player\", DeviceId=\"device-1\", Version=\"4.0\", Token=\"abc123\"",
+            ),
+        );
+
+        assert_eq!(extract_token(&headers, None).as_deref(), Some("abc123"));
+        assert_eq!(
+            client_value(&headers, "DeviceId").as_deref(),
+            Some("device-1")
+        );
+    }
+
+    #[test]
+    fn extracts_token_from_emby_query_aliases() {
+        let headers = HeaderMap::new();
+
+        assert_eq!(
+            extract_token(&headers, Some("api_key=abc123")).as_deref(),
+            Some("abc123")
+        );
+    }
 }

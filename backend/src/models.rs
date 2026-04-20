@@ -201,13 +201,17 @@ pub struct SessionInfoDto {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct AuthenticateByNameRequest {
-    #[serde(alias = "Name")]
+    #[serde(alias = "Name", alias = "username", alias = "UserName")]
     pub username: Option<String>,
+    #[serde(alias = "pw")]
     pub pw: Option<String>,
+    #[serde(alias = "password")]
     pub password: Option<String>,
+    #[serde(alias = "DeviceId", alias = "deviceId")]
     pub device_id: Option<String>,
     #[serde(alias = "Device")]
     pub device_name: Option<String>,
+    #[serde(alias = "Client")]
     pub client: Option<String>,
 }
 

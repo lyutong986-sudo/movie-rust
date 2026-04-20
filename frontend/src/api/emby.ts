@@ -23,6 +23,10 @@ export interface PublicSystemInfo {
   StartupWizardCompleted: boolean;
 }
 
+export interface SystemInfo extends PublicSystemInfo {
+  CanSelfRestart: boolean;
+}
+
 export interface BaseItemDto {
   Id: string;
   Name: string;
@@ -139,6 +143,14 @@ export class EmbyApi {
 
   async publicUsers() {
     return this.request<UserDto[]>('/Users/Public', { auth: false });
+  }
+
+  async systemInfo() {
+    return this.request<SystemInfo>('/System/Info');
+  }
+
+  async users() {
+    return this.request<UserDto[]>('/Users');
   }
 
   async createFirstAdmin(payload: { Name: string; Password: string }) {

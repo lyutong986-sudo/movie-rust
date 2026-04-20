@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
 import { EmbyApi } from './api/emby';
-import type { BaseItemDto, UserDto } from './api/emby';
+import type { BaseItemDto, SystemInfo, UserDto } from './api/emby';
+
+type AppPage = 'home' | 'admin';
+type AdminPage = 'overview' | 'server' | 'libraries' | 'users' | 'playback' | 'network';
 
 const api = new EmbyApi(import.meta.env.VITE_API_BASE || '');
 
@@ -28,6 +31,8 @@ const state = reactive({
   busy: false,
   message: '',
   error: '',
+  appPage: 'home' as AppPage,
+  adminPage: 'overview' as AdminPage,
   startupWizardCompleted: true,
   wizardStep: 1,
   showAddLibrary: false,
@@ -36,15 +41,29 @@ const state = reactive({
 
 const user = ref(api.user);
 const publicUsers = ref<UserDto[]>([]);
+const adminUsers = ref<UserDto[]>([]);
 const libraries = ref<BaseItemDto[]>([]);
 const items = ref<BaseItemDto[]>([]);
 const homeItems = ref<BaseItemDto[]>([]);
+const systemInfo = ref<SystemInfo | null>(null);
 const selectedItem = ref<BaseItemDto | null>(null);
 const parentStack = ref<BaseItemDto[]>([]);
 
+const isAdmin = computed(() => Boolean(user.value?.Policy?.IsAdministrator));
 const selectedLibrary = computed(() =>
   libraries.value.find((library) => library.Id === state.selectedLibraryId)
 );
+const adminTitle = computed(() => {
+  const titles = {
+    overview: '控制台',
+    server: '服务器',
+    libraries: '媒体库',
+    users: '用户',
+    playback: '播放',
+    network: '网络'
+  };
+  return titles[state.adminPage];
+});
 const currentParentName = computed(() => parentStack.value.at(-1)?.Name || selectedLibrary.value?.Name || '首页');
 const selectedMediaSource = computed(() => selectedItem.value?.MediaSources?.[0]);
 const selectedStreams = computed(() => selectedMediaSource.value?.MediaStreams || selectedItem.value?.MediaStreams || []);
@@ -55,6 +74,7 @@ const continueWatching = computed(() =>
 const favorites = computed(() => homeItems.value.filter((item) => item.UserData?.IsFavorite).slice(0, 12));
 const latest = computed(() => homeItems.value.filter((item) => !item.IsFolder).slice(0, 18));
 const libraryCards = computed(() => libraries.value);
+const totalLibraryItems = computed(() => libraries.value.reduce((sum, library) => sum + (library.ChildCount || 0), 0));
 
 onMounted(async () => {
   await loadPublicInfo();
@@ -182,6 +202,7 @@ async function login(name = state.username, password = state.password) {
 }
 
 async function enterHome() {
+  state.appPage = 'home';
   state.selectedLibraryId = '';
   parentStack.value = [];
   await loadLibraries();
@@ -214,6 +235,7 @@ async function loadItems() {
 }
 
 async function selectLibrary(libraryId: string) {
+  state.appPage = 'home';
   state.selectedLibraryId = libraryId;
   state.search = '';
   parentStack.value = [];
@@ -221,10 +243,40 @@ async function selectLibrary(libraryId: string) {
 }
 
 async function backToHome() {
+  state.appPage = 'home';
   state.selectedLibraryId = '';
   state.search = '';
   parentStack.value = [];
   await loadHome();
+}
+
+async function openAdmin(page: AdminPage = 'overview') {
+  if (!isAdmin.value) {
+    state.error = '当前用户没有管理员权限';
+    return;
+  }
+
+  state.appPage = 'admin';
+  state.adminPage = page;
+  state.selectedLibraryId = '';
+  parentStack.value = [];
+  await loadAdminData();
+}
+
+async function loadAdminData() {
+  await run(async () => {
+    const [info, users, configuration] = await Promise.all([
+      api.systemInfo(),
+      api.users(),
+      api.startupConfiguration()
+    ]);
+    systemInfo.value = info;
+    adminUsers.value = users;
+    state.serverName = configuration.ServerName || state.serverName;
+    state.uiCulture = configuration.UiCulture || state.uiCulture;
+    state.metadataLanguage = configuration.PreferredMetadataLanguage || state.metadataLanguage;
+    state.metadataCountry = configuration.MetadataCountryCode || state.metadataCountry;
+  });
 }
 
 async function backToParent() {
@@ -240,11 +292,28 @@ async function createLibrary() {
       CollectionType: state.collectionType
     });
     libraries.value.push(library);
-    state.selectedLibraryId = library.Id;
     state.libraryPath = '';
     state.showAddLibrary = false;
+    if (state.appPage === 'admin') {
+      await loadLibraries();
+      await loadHome();
+      return;
+    }
+
+    state.selectedLibraryId = library.Id;
     await loadItems();
   }, '媒体库已创建');
+}
+
+async function saveServerSettings() {
+  await run(async () => {
+    await api.updateStartupConfiguration(startupConfigurationPayload());
+    await api.updateRemoteAccess({
+      EnableRemoteAccess: state.allowRemoteAccess,
+      EnableAutomaticPortMapping: state.enableUPNP
+    });
+    systemInfo.value = await api.systemInfo();
+  }, '服务器设置已保存');
 }
 
 async function scan() {
@@ -267,12 +336,16 @@ async function search() {
 function logout() {
   api.logout();
   user.value = null;
+  systemInfo.value = null;
   libraries.value = [];
   items.value = [];
   homeItems.value = [];
+  adminUsers.value = [];
   selectedItem.value = null;
   state.username = '';
   state.password = '';
+  state.appPage = 'home';
+  state.adminPage = 'overview';
 }
 
 function openItem(item: BaseItemDto) {
@@ -527,16 +600,20 @@ async function run(task: () => Promise<void>, success = '') {
           </div>
         </div>
         <nav class="nav-list">
-          <button :class="{ active: !state.selectedLibraryId }" type="button" @click="backToHome">⌂ 首页</button>
+          <button :class="{ active: state.appPage === 'home' && !state.selectedLibraryId }" type="button" @click="backToHome">⌂ 首页</button>
           <button
             v-for="library in libraries"
             :key="library.Id"
-            :class="{ active: library.Id === state.selectedLibraryId }"
+            :class="{ active: state.appPage === 'home' && library.Id === state.selectedLibraryId }"
             type="button"
             @click="selectLibrary(library.Id)"
           >
             <span>{{ library.CollectionType === 'tvshows' ? '▤' : '▥' }} {{ library.Name }}</span>
             <small>{{ library.ChildCount || 0 }}</small>
+          </button>
+          <button v-if="isAdmin" :class="{ active: state.appPage === 'admin' }" type="button" @click="openAdmin()">
+            <span>⚙ 控制台</span>
+            <small>Admin</small>
           </button>
         </nav>
         <div class="drawer-actions">
@@ -548,17 +625,23 @@ async function run(task: () => Promise<void>, success = '') {
       <section class="main-view">
         <header class="top-bar">
           <div>
-            <p>{{ selectedLibrary?.CollectionType || 'home' }}</p>
-            <h2>{{ currentParentName }}</h2>
+            <p>{{ state.appPage === 'admin' ? 'administrator' : selectedLibrary?.CollectionType || 'home' }}</p>
+            <h2>{{ state.appPage === 'admin' ? adminTitle : currentParentName }}</h2>
           </div>
-          <form class="search" @submit.prevent="search">
+          <div v-if="state.appPage === 'admin'" class="admin-tabs">
+            <button :class="{ active: state.adminPage === 'overview' }" type="button" @click="openAdmin('overview')">概览</button>
+            <button :class="{ active: state.adminPage === 'server' }" type="button" @click="openAdmin('server')">服务器</button>
+            <button :class="{ active: state.adminPage === 'libraries' }" type="button" @click="openAdmin('libraries')">媒体库</button>
+            <button :class="{ active: state.adminPage === 'users' }" type="button" @click="openAdmin('users')">用户</button>
+          </div>
+          <form v-else class="search" @submit.prevent="search">
             <input v-model="state.search" placeholder="搜索媒体" />
             <button :disabled="state.busy" type="submit">搜索</button>
           </form>
           <button class="icon-button" :disabled="state.busy" type="button" title="扫描媒体库" @click="scan">↻</button>
         </header>
 
-        <div v-if="parentStack.length" class="crumbs">
+        <div v-if="state.appPage === 'home' && parentStack.length" class="crumbs">
           <button type="button" title="返回上级" @click="backToParent">‹</button>
           <span>{{ selectedLibrary?.Name }}</span>
           <span v-for="parent in parentStack" :key="parent.Id">/ {{ parent.Name }}</span>
@@ -567,7 +650,173 @@ async function run(task: () => Promise<void>, success = '') {
         <p v-if="state.error" class="notice error">{{ state.error }}</p>
         <p v-else-if="state.message" class="notice">{{ state.message }}</p>
 
-        <section v-if="!state.selectedLibraryId" class="home-sections">
+        <section v-if="state.appPage === 'admin'" class="settings-shell">
+          <aside class="settings-nav">
+            <button :class="{ active: state.adminPage === 'overview' }" type="button" @click="openAdmin('overview')">⌁ 控制台概览</button>
+            <button :class="{ active: state.adminPage === 'server' }" type="button" @click="openAdmin('server')">▣ 服务器设置</button>
+            <button :class="{ active: state.adminPage === 'libraries' }" type="button" @click="openAdmin('libraries')">▤ 媒体库</button>
+            <button :class="{ active: state.adminPage === 'users' }" type="button" @click="openAdmin('users')">☻ 用户</button>
+            <button :class="{ active: state.adminPage === 'playback' }" type="button" @click="openAdmin('playback')">▶ 播放</button>
+            <button :class="{ active: state.adminPage === 'network' }" type="button" @click="openAdmin('network')">◇ 网络</button>
+          </aside>
+
+          <div class="settings-content">
+            <section v-if="state.adminPage === 'overview'" class="settings-page">
+              <div class="stat-grid">
+                <article>
+                  <span>服务器</span>
+                  <strong>{{ systemInfo?.ServerName || state.serverName }}</strong>
+                  <small>{{ systemInfo?.ProductName || 'Movie Rust' }} {{ systemInfo?.Version || '' }}</small>
+                </article>
+                <article>
+                  <span>媒体库</span>
+                  <strong>{{ libraries.length }}</strong>
+                  <small>{{ totalLibraryItems }} 个条目</small>
+                </article>
+                <article>
+                  <span>用户</span>
+                  <strong>{{ adminUsers.length }}</strong>
+                  <small>{{ adminUsers.filter((item) => item.Policy.IsAdministrator).length }} 个管理员</small>
+                </article>
+              </div>
+
+              <div class="settings-list">
+                <button type="button" @click="openAdmin('server')">
+                  <span>▣</span>
+                  <div>
+                    <h3>服务器</h3>
+                    <p>服务器名称、语言、元数据首选项和远程访问。</p>
+                  </div>
+                </button>
+                <button type="button" @click="openAdmin('libraries')">
+                  <span>▤</span>
+                  <div>
+                    <h3>媒体库</h3>
+                    <p>添加媒体库、查看路径并触发全库扫描。</p>
+                  </div>
+                </button>
+                <button type="button" @click="openAdmin('users')">
+                  <span>☻</span>
+                  <div>
+                    <h3>用户</h3>
+                    <p>查看公开用户和管理员状态，后续会补用户编辑页。</p>
+                  </div>
+                </button>
+                <button type="button" @click="openAdmin('playback')">
+                  <span>▶</span>
+                  <div>
+                    <h3>播放</h3>
+                    <p>Direct Play、字幕、转码和播放会话配置入口。</p>
+                  </div>
+                </button>
+              </div>
+            </section>
+
+            <form v-else-if="state.adminPage === 'server'" class="settings-page settings-form" @submit.prevent="saveServerSettings">
+              <h3>常规</h3>
+              <label>
+                服务器名称
+                <input v-model="state.serverName" />
+              </label>
+              <label>
+                首选显示语言
+                <select v-model="state.uiCulture">
+                  <option value="zh-CN">简体中文</option>
+                  <option value="en-US">English</option>
+                </select>
+              </label>
+              <h3>元数据</h3>
+              <label>
+                元数据语言
+                <select v-model="state.metadataLanguage">
+                  <option value="zh">中文</option>
+                  <option value="en">English</option>
+                  <option value="ja">日本語</option>
+                  <option value="ko">한국어</option>
+                </select>
+              </label>
+              <label>
+                元数据国家/地区
+                <select v-model="state.metadataCountry">
+                  <option value="CN">中国</option>
+                  <option value="US">United States</option>
+                  <option value="JP">日本</option>
+                  <option value="KR">韩国</option>
+                </select>
+              </label>
+              <h3>远程访问</h3>
+              <label class="check-row">
+                <input v-model="state.allowRemoteAccess" type="checkbox" />
+                允许远程连接到服务器
+              </label>
+              <label class="check-row">
+                <input v-model="state.enableUPNP" type="checkbox" />
+                自动端口映射
+              </label>
+              <button :disabled="state.busy" type="submit">保存</button>
+            </form>
+
+            <section v-else-if="state.adminPage === 'libraries'" class="settings-page">
+              <div class="section-heading">
+                <h3>媒体库</h3>
+                <button type="button" @click="state.showAddLibrary = true">＋ 添加媒体库</button>
+              </div>
+              <div class="admin-table">
+                <div class="admin-row head">
+                  <span>名称</span>
+                  <span>类型</span>
+                  <span>条目</span>
+                </div>
+                <button v-for="library in libraries" :key="library.Id" class="admin-row" type="button" @click="selectLibrary(library.Id)">
+                  <span>{{ library.Name }}</span>
+                  <span>{{ library.CollectionType || 'mixed' }}</span>
+                  <span>{{ library.ChildCount || 0 }}</span>
+                </button>
+              </div>
+              <div class="button-row">
+                <button :disabled="state.busy" type="button" @click="scan">扫描全部媒体库</button>
+              </div>
+            </section>
+
+            <section v-else-if="state.adminPage === 'users'" class="settings-page">
+              <div class="section-heading">
+                <h3>用户</h3>
+                <span>{{ adminUsers.length }}</span>
+              </div>
+              <div class="user-admin-grid">
+                <article v-for="adminUser in adminUsers" :key="adminUser.Id">
+                  <span>{{ adminUser.Name.slice(0, 1).toUpperCase() }}</span>
+                  <div>
+                    <h3>{{ adminUser.Name }}</h3>
+                    <p>{{ adminUser.Policy.IsAdministrator ? '管理员' : '普通用户' }}</p>
+                  </div>
+                </article>
+              </div>
+            </section>
+
+            <section v-else-if="state.adminPage === 'playback'" class="settings-page">
+              <h3>播放</h3>
+              <p>当前实现以 Direct Play / Direct Stream 为主。这里会继续复刻 Jellyfin 的播放、字幕、转码和会话设置页。</p>
+              <div class="placeholder-grid">
+                <article>转码设置</article>
+                <article>字幕设置</article>
+                <article>播放会话</article>
+              </div>
+            </section>
+
+            <section v-else class="settings-page">
+              <h3>网络</h3>
+              <p>这里会继续补齐端口、远程访问、服务发现和客户端连接配置。</p>
+              <div class="placeholder-grid">
+                <article>远程访问</article>
+                <article>服务发现</article>
+                <article>客户端兼容</article>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section v-else-if="!state.selectedLibraryId" class="home-sections">
           <div class="hero-strip" v-if="latest[0]">
             <img v-if="api.itemImageUrl(latest[0])" :src="api.itemImageUrl(latest[0])" :alt="latest[0].Name" />
             <div>

@@ -54,13 +54,13 @@ npm run dev
 - `Dockerfile`：先构建 Vue，再构建 Rust，最终镜像只运行 `movie-rust-backend`。
 - Rust 后端直接托管 Vue 静态资源，不再额外运行 Nginx。
 
-1. 本地构建并启动：
+1. 使用 compose 启动：
 
 ```powershell
-docker compose up -d --build
+docker compose up -d
 ```
 
-Docker 入口：`http://127.0.0.1:8096`。
+当前 `docker-compose.yml` 使用固定镜像 `yuanhu66/movie-rust:latest`，并发布到 `http://127.0.0.1:10004`。
 
 媒体目录默认示例挂载为 `./media:/media:ro`。如果你的影片在其它目录，需要在 `docker-compose.yml` 的 `movie-rust.volumes` 中改成类似：
 
@@ -70,7 +70,7 @@ Docker 入口：`http://127.0.0.1:8096`。
 
 然后在前端添加媒体库路径时填写容器内路径，例如 `/media/movies`。
 
-2. 推送到 DockerHub：
+2. 需要构建并推送镜像时：
 
 ```powershell
 docker login
@@ -104,6 +104,8 @@ http://127.0.0.1:8096
 ```
 
 已经实现的兼容接口见 [API_COMPAT.md](./docs/API_COMPAT.md)。
+
+Jellyfin 前端页面复刻进度见 [JELLYFIN_FRONTEND_PARITY.md](./docs/JELLYFIN_FRONTEND_PARITY.md)。
 
 ## 媒体库扫描
 
