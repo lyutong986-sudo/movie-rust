@@ -812,11 +812,16 @@ function shouldProbeStreamType(container: string, url: string, path: string) {
     return false;
   }
 
+  const knownExtensions = ['m3u8', 'flv', 'ts', 'm2ts', 'mts', 'mp4', 'm4v', 'mov', 'webm', 'ogv', 'ogg'];
   if (!container || container === 'strm') {
     return true;
   }
 
-  return !hasAnyExtension([url, path], ['m3u8', 'flv', 'ts', 'm2ts', 'mts', 'mp4', 'm4v', 'mov', 'webm', 'ogv', 'ogg']);
+  if (!hasAnyExtension([path], knownExtensions)) {
+    return true;
+  }
+
+  return !hasAnyExtension([url, path], knownExtensions);
 }
 
 async function probeStreamContentType(url: string) {

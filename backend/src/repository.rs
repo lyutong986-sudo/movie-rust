@@ -1501,16 +1501,7 @@ pub fn media_source_for_playback(
     let strm_target = naming::is_strm(local_path)
         .then(|| naming::read_strm_target(local_path))
         .flatten();
-    let container = strm_target
-        .as_deref()
-        .and_then(naming::extension_from_url)
-        .or_else(|| item.container.clone())
-        .or_else(|| {
-            local_path
-                .extension()
-                .map(|ext| ext.to_string_lossy().to_string())
-        })
-        .unwrap_or_else(|| "mp4".to_string());
+    let container = playable_container(item, local_path, strm_target.as_deref());
     let media_streams = media_streams_for_item(item);
     let is_remote = strm_target.is_some();
     let size = if is_remote {
@@ -1536,7 +1527,7 @@ pub fn media_source_for_playback(
         requires_closing: false,
         requires_looping: false,
         supports_probing: true,
-        supports_direct_play: true,
+        supports_direct_play: !is_remote,
         supports_direct_stream: true,
         supports_transcoding: false,
         add_api_key_to_direct_stream_url: true,
@@ -1561,6 +1552,24 @@ pub fn media_source_for_playback(
         run_time_ticks: item.runtime_ticks,
         media_streams,
     }
+}
+
+fn playable_container(item: &DbMediaItem, local_path: &Path, strm_target: Option<&str>) -> String {
+    strm_target
+        .and_then(naming::extension_from_url)
+        .filter(|container| !container.eq_ignore_ascii_case("strm"))
+        .or_else(|| {
+            item.container
+                .clone()
+                .filter(|container| !container.eq_ignore_ascii_case("strm"))
+        })
+        .or_else(|| {
+            local_path
+                .extension()
+                .map(|ext| ext.to_string_lossy().to_string())
+                .filter(|container| !container.eq_ignore_ascii_case("strm"))
+        })
+        .unwrap_or_else(|| "mp4".to_string())
 }
 
 fn direct_stream_url(
