@@ -1,5 +1,14 @@
+-- 首先，创建更新时间戳函数（如果不存在）
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
 -- 媒体流表，存储视频、音频、字幕轨道信息
-CREATE TABLE media_streams (
+CREATE TABLE IF NOT EXISTS media_streams (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     media_item_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
     index INTEGER NOT NULL,  -- 流索引
@@ -44,13 +53,14 @@ CREATE TABLE media_streams (
     UNIQUE(media_item_id, index, stream_type)
 );
 
--- 创建索引以加速查询
-CREATE INDEX idx_media_streams_media_item_id ON media_streams(media_item_id);
-CREATE INDEX idx_media_streams_stream_type ON media_streams(stream_type);
-CREATE INDEX idx_media_streams_language ON media_streams(language);
-CREATE INDEX idx_media_streams_codec ON media_streams(codec);
+-- 创建索引以加速查询（如果不存在）
+CREATE INDEX IF NOT EXISTS idx_media_streams_media_item_id ON media_streams(media_item_id);
+CREATE INDEX IF NOT EXISTS idx_media_streams_stream_type ON media_streams(stream_type);
+CREATE INDEX IF NOT EXISTS idx_media_streams_language ON media_streams(language);
+CREATE INDEX IF NOT EXISTS idx_media_streams_codec ON media_streams(codec);
 
--- 更新时间戳触发器
+-- 更新时间戳触发器（先删除再创建以确保幂等性）
+DROP TRIGGER IF EXISTS update_media_streams_updated_at ON media_streams;
 CREATE TRIGGER update_media_streams_updated_at
     BEFORE UPDATE ON media_streams
     FOR EACH ROW

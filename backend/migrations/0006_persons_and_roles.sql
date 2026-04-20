@@ -1,5 +1,14 @@
+-- 首先，创建更新时间戳函数（如果不存在）
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
 -- 人物表，存储演员、导演、编剧等信息
-CREATE TABLE persons (
+CREATE TABLE IF NOT EXISTS persons (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     sort_name TEXT,
@@ -23,7 +32,7 @@ CREATE TABLE persons (
 );
 
 -- 人物角色关联表，关联人物和媒体项，并指定角色类型
-CREATE TABLE person_roles (
+CREATE TABLE IF NOT EXISTS person_roles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     person_id UUID NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
     media_item_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
@@ -42,20 +51,22 @@ CREATE TABLE person_roles (
     CONSTRAINT check_role_not_empty CHECK (role IS NULL OR trim(role) != '')
 );
 
--- 创建索引以加速查询
-CREATE INDEX idx_persons_name ON persons(name);
-CREATE INDEX idx_persons_sort_name ON persons(sort_name);
-CREATE INDEX idx_persons_production_year ON persons(production_year);
-CREATE INDEX idx_person_roles_person_id ON person_roles(person_id);
-CREATE INDEX idx_person_roles_media_item_id ON person_roles(media_item_id);
-CREATE INDEX idx_person_roles_role_type ON person_roles(role_type);
+-- 创建索引以加速查询（如果不存在）
+CREATE INDEX IF NOT EXISTS idx_persons_name ON persons(name);
+CREATE INDEX IF NOT EXISTS idx_persons_sort_name ON persons(sort_name);
+CREATE INDEX IF NOT EXISTS idx_persons_production_year ON persons(production_year);
+CREATE INDEX IF NOT EXISTS idx_person_roles_person_id ON person_roles(person_id);
+CREATE INDEX IF NOT EXISTS idx_person_roles_media_item_id ON person_roles(media_item_id);
+CREATE INDEX IF NOT EXISTS idx_person_roles_role_type ON person_roles(role_type);
 
--- 更新时间戳触发器
+-- 更新时间戳触发器（先删除再创建以确保幂等性）
+DROP TRIGGER IF EXISTS update_persons_updated_at ON persons;
 CREATE TRIGGER update_persons_updated_at
     BEFORE UPDATE ON persons
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
+DROP TRIGGER IF EXISTS update_person_roles_updated_at ON person_roles;
 CREATE TRIGGER update_person_roles_updated_at
     BEFORE UPDATE ON person_roles
     FOR EACH ROW
