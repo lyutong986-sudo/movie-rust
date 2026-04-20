@@ -781,12 +781,14 @@ pub struct VideoStreamQuery {
     pub _api_key: Option<String>,
 }
 
+
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsQuery {
     #[serde(default)]
     pub user_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     pub parent_id: Option<Uuid>,
     #[serde(default)]
     pub include_item_types: Option<String>,
@@ -1216,4 +1218,23 @@ pub fn uuid_to_emby_guid(uuid: &Uuid) -> String {
 /// 将Option<Uuid>转换为Option<Emby GUID字符串>
 pub fn optional_uuid_to_emby_guid(uuid: Option<Uuid>) -> Option<String> {
     uuid.map(|u| uuid_to_emby_guid(&u))
+}
+
+fn deserialize_optional_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    
+    // 先尝试作为字符串反序列化
+    let opt_str: Option<String> = Option::deserialize(deserializer)?;
+    
+    match opt_str {
+        Some(s) if s.trim().is_empty() => Ok(None), // 空字符串视为None
+        Some(s) => {
+            // 尝试解析UUID
+            Uuid::parse_str(&s).map(Some).map_err(serde::de::Error::custom)
+        }
+        None => Ok(None),
+    }
 }

@@ -134,6 +134,11 @@ async fn latest_items(
     query.sort_by = Some("DateCreated".to_string());
     query.sort_order = Some("Descending".to_string());
     query.limit = query.limit.or(Some(20));
+    
+    // 如果没有指定包含的类型，默认显示Movie和Series，不显示Episode
+    if query.include_item_types.is_none() {
+        query.include_item_types = Some("Movie,Series".to_string());
+    }
 
     let result = list_items_for_user(&state, user_id, query).await?;
     Ok(Json(result.0.items))
@@ -153,12 +158,18 @@ async fn list_items_for_user(
 
     if let Some(parent_id) = query.parent_id {
         if let Some(library) = repository::get_library(&state.pool, parent_id).await? {
+            // 对于电视剧库，如果没有指定包含的类型，默认只显示Series
+            let mut include_types = parse_include_types(query.include_item_types.as_deref());
+            if include_types.is_empty() && library.collection_type.eq_ignore_ascii_case("tvshows") {
+                include_types = vec!["Series".to_string()];
+            }
+            
             let result = repository::list_media_items(
                 &state.pool,
                 ItemListOptions {
                     library_id: Some(library.id),
                     parent_id: None,
-                    include_types: parse_include_types(query.include_item_types.as_deref()),
+                    include_types,
                     genres: parse_list(query.genres.as_deref()),
                     recursive,
                     search_term: query.search_term,
@@ -521,11 +532,22 @@ async fn user_resume_items(
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     query.user_id = Some(user_id);
-    // 简化实现：暂时返回空列表，后续可添加恢复播放项的逻辑
-    // TODO: 查询用户未完成的媒体项（playback_position_ticks > 0）
+    
+    // 使用repository中的get_user_resume_items函数
+    let limit = query.limit.unwrap_or(50);
+    let start_index = query.start_index.unwrap_or(0);
+    
+    let (items, total_count) = repository::get_user_resume_items(
+        &state.pool,
+        user_id,
+        Some(limit),
+        Some(start_index),
+        state.config.server_id,
+    ).await?;
+    
     Ok(Json(QueryResult {
-        items: Vec::new(),
-        total_record_count: 0,
-        start_index: Some(0),
+        items,
+        total_record_count: total_count,
+        start_index: Some(start_index),
     }))
 }

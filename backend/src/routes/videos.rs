@@ -104,10 +104,61 @@ async fn serve_media_item(
             || q.max_height.is_some()
             || q.max_framerate.is_some();
         if has_transcoding_params {
-            tracing::warn!(
-                item_id = %item_id,
-                "视频转码请求暂未实现，使用直接播放"
-            );
+            // 尝试获取用户ID和设备ID（简化实现）
+            // 在实际实现中，这些信息应从认证会话中获取
+            let user_id = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap(); // 默认用户ID
+            let device_id = "default-device".to_string();
+            
+            // 检查是否启用转码
+            if state.config.enable_transcoding {
+                tracing::info!(
+                    item_id = %item_id,
+                    user_id = %user_id,
+                    "视频转码请求，启动转码会话"
+                );
+                
+                // 尝试启动转码会话
+                match state.transcoder.start_transcoding(
+                    item_id,
+                    user_id,
+                    &device_id,
+                    q.clone(),
+                    &path,
+                ).await {
+                    Ok(session) => {
+                        tracing::info!(
+                            session_id = %session.id,
+                            protocol = %session.protocol,
+                            "转码会话已启动"
+                        );
+                        // 对于HLS/DASH协议，应该返回播放列表文件
+                        // 简化实现：返回一个指示转码已启动的响应
+                        if session.protocol == "hls" {
+                            let playlist_path = session.playlist_path;
+                            if playlist_path.exists() {
+                                return ServeFile::new(playlist_path)
+                                    .oneshot(request)
+                                    .await
+                                    .map(IntoResponse::into_response)
+                                    .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)));
+                            }
+                        }
+                        tracing::warn!("转码会话已启动，但播放列表尚未生成，使用直接播放");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            item_id = %item_id,
+                            error = %e,
+                            "启动转码会话失败，使用直接播放"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    item_id = %item_id,
+                    "视频转码请求，但转码功能已禁用，使用直接播放"
+                );
+            }
         }
     }
 
