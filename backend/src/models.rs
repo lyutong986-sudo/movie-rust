@@ -481,9 +481,9 @@ pub struct PlaybackInfoResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsQuery {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_uuid_as_none")]
     pub user_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_uuid_as_none")]
     pub parent_id: Option<Uuid>,
     #[serde(default)]
     pub include_item_types: Option<String>,
@@ -510,7 +510,7 @@ pub struct ItemsQuery {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct UserItemDataQuery {
-    #[serde(default, alias = "userId")]
+    #[serde(default, alias = "userId", deserialize_with = "empty_uuid_as_none")]
     pub user_id: Option<Uuid>,
     #[serde(default, alias = "datePlayed")]
     pub date_played: Option<DateTime<Utc>>,
@@ -544,9 +544,9 @@ pub struct UpdateUserItemDataRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlaybackReport {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_uuid_as_none")]
     pub item_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_uuid_as_none")]
     pub user_id: Option<Uuid>,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -839,9 +839,9 @@ pub struct EpisodeDto {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct SeasonsQuery {
-    #[serde(default, alias = "userId")]
+    #[serde(default, alias = "userId", deserialize_with = "empty_uuid_as_none")]
     pub user_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_uuid_as_none")]
     pub series_id: Option<Uuid>,
     #[serde(default)]
     pub fields: Option<String>,
@@ -852,9 +852,9 @@ pub struct SeasonsQuery {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct EpisodesQuery {
-    #[serde(default, alias = "userId")]
+    #[serde(default, alias = "userId", deserialize_with = "empty_uuid_as_none")]
     pub user_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_uuid_as_none")]
     pub season_id: Option<Uuid>,
     #[serde(default)]
     pub fields: Option<String>,
@@ -864,4 +864,21 @@ pub struct EpisodesQuery {
     pub limit: Option<i64>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
+}
+
+fn empty_uuid_as_none<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    let Some(value) = value.map(|value| value.trim().to_string()) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    Uuid::parse_str(&value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
