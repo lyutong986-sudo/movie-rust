@@ -27,6 +27,32 @@ export interface SystemInfo extends PublicSystemInfo {
   CanSelfRestart: boolean;
 }
 
+export interface SessionInfo {
+  Id: string;
+  UserId: string;
+  UserName: string;
+  Client: string;
+  DeviceId: string;
+  DeviceName: string;
+  ApplicationVersion: string;
+  IsActive: boolean;
+  LastActivityDate: string;
+}
+
+export interface ActivityLogEntry {
+  Id: string;
+  Name: string;
+  Type: string;
+  ShortOverview?: string;
+  Severity: string;
+  Date: string;
+}
+
+export interface LogFileDto {
+  Name: string;
+  DateModified: string;
+}
+
 export interface BaseItemDto {
   Id: string;
   Name: string;
@@ -137,16 +163,24 @@ const TOKEN_KEY = 'movie-rust-token';
 const USER_KEY = 'movie-rust-user';
 
 export class EmbyApi {
-  readonly baseUrl: string;
+  baseUrl: string;
   token = localStorage.getItem(TOKEN_KEY) || '';
   user: UserDto | null = readJson<UserDto>(USER_KEY);
 
   constructor(baseUrl = '') {
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.baseUrl = normalizeBaseUrl(baseUrl);
   }
 
   get isAuthenticated() {
     return Boolean(this.token && this.user);
+  }
+
+  setBaseUrl(baseUrl: string) {
+    this.baseUrl = normalizeBaseUrl(baseUrl);
+  }
+
+  async publicInfoAt(baseUrl: string) {
+    return this.requestAtBaseUrl<PublicSystemInfo>(baseUrl, '/System/Info/Public', { auth: false });
   }
 
   async publicInfo() {
@@ -163,6 +197,22 @@ export class EmbyApi {
 
   async users() {
     return this.request<UserDto[]>('/Users');
+  }
+
+  async me() {
+    return this.request<UserDto>('/Users/Me');
+  }
+
+  async sessions() {
+    return this.request<SessionInfo[]>('/Sessions');
+  }
+
+  async activity(limit = 50) {
+    return this.request<QueryResult<ActivityLogEntry>>(`/System/ActivityLog/Entries?Limit=${limit}`);
+  }
+
+  async serverLogs() {
+    return this.request<LogFileDto[]>('/System/Logs');
   }
 
   async createFirstAdmin(payload: { Name: string; Password: string }) {
@@ -314,6 +364,13 @@ export class EmbyApi {
     });
   }
 
+  async changePassword(userId: string, payload: { CurrentPw?: string; CurrentPassword?: string; NewPw: string }) {
+    return this.request<void>(`/Users/${userId}/Password`, {
+      method: 'POST',
+      body: payload
+    });
+  }
+
   itemImageUrl(item: BaseItemDto) {
     return this.imageUrl(item, 'Primary', item.ImageTags?.Primary);
   }
@@ -348,17 +405,25 @@ export class EmbyApi {
   }
 
   private async request<T>(path: string, options: RequestOptions = {}) {
+    return this.requestAtBaseUrl<T>(this.baseUrl, path, options);
+  }
+
+  private async requestAtBaseUrl<T>(baseUrl: string, path: string, options: RequestOptions = {}) {
     const headers = new Headers(options.headers);
     headers.set('Content-Type', 'application/json');
     if (options.auth !== false && this.token) {
       headers.set('X-Emby-Token', this.token);
+      headers.set(
+        'X-Emby-Authorization',
+        `MediaBrowser Client="Movie Rust Vue", Device="${navigator.userAgent}", DeviceId="${getDeviceId()}", Version="0.1.0", Token="${this.token}"`
+      );
       headers.set(
         'Authorization',
         `MediaBrowser Client="Movie Rust Vue", Device="${navigator.userAgent}", DeviceId="${getDeviceId()}", Version="0.1.0", Token="${this.token}"`
       );
     }
 
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, {
       method: options.method || 'GET',
       headers,
       body: options.body ? JSON.stringify(options.body) : undefined
@@ -406,4 +471,13 @@ function getDeviceId() {
   const value = crypto.randomUUID();
   localStorage.setItem(key, value);
   return value;
+}
+
+function normalizeBaseUrl(baseUrl: string) {
+  const value = baseUrl.trim();
+  if (!value) {
+    return '';
+  }
+
+  return value.replace(/\/(emby|mediabrowser)\/?$/i, '').replace(/\/$/, '');
 }

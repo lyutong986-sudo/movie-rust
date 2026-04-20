@@ -31,7 +31,13 @@ export const router = createRouter({
       path: '/settings',
       name: 'settings',
       component: () => import('../pages/settings/SettingsIndex.vue'),
-      meta: { title: '控制台', section: 'admin', admin: true }
+      meta: { title: '设置', section: 'settings' }
+    },
+    {
+      path: '/settings/account',
+      name: 'settings-account',
+      component: () => import('../pages/settings/AccountSettings.vue'),
+      meta: { title: '账户', section: 'settings' }
     },
     {
       path: '/settings/server',
@@ -55,7 +61,31 @@ export const router = createRouter({
       path: '/settings/playback',
       name: 'settings-playback',
       component: () => import('../pages/settings/PlaybackSettings.vue'),
-      meta: { title: '播放', section: 'admin', admin: true }
+      meta: { title: '播放', section: 'settings' }
+    },
+    {
+      path: '/settings/subtitles',
+      name: 'settings-subtitles',
+      component: () => import('../pages/settings/SubtitlesSettings.vue'),
+      meta: { title: '字幕', section: 'settings' }
+    },
+    {
+      path: '/settings/devices',
+      name: 'settings-devices',
+      component: () => import('../pages/settings/DevicesSettings.vue'),
+      meta: { title: '设备', section: 'admin', admin: true }
+    },
+    {
+      path: '/settings/apikeys',
+      name: 'settings-apikeys',
+      component: () => import('../pages/settings/ApiKeysSettings.vue'),
+      meta: { title: 'API Key', section: 'admin', admin: true }
+    },
+    {
+      path: '/settings/logs-and-activity',
+      name: 'settings-logs-and-activity',
+      component: () => import('../pages/settings/LogsActivitySettings.vue'),
+      meta: { title: '日志与活动', section: 'admin', admin: true }
     },
     {
       path: '/settings/network',
@@ -68,6 +98,18 @@ export const router = createRouter({
       name: 'server-login',
       component: () => import('../pages/server/LoginPage.vue'),
       meta: { title: '登录', layout: 'server' }
+    },
+    {
+      path: '/server/select',
+      name: 'server-select',
+      component: () => import('../pages/server/SelectServerPage.vue'),
+      meta: { title: '选择服务器', layout: 'server' }
+    },
+    {
+      path: '/server/add',
+      name: 'server-add',
+      component: () => import('../pages/server/AddServerPage.vue'),
+      meta: { title: '添加服务器', layout: 'server' }
     },
     {
       path: '/wizard',

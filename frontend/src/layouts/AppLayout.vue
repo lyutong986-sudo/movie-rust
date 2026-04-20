@@ -75,6 +75,10 @@ async function goSettings() {
   await router.push('/settings');
 }
 
+async function goAdminConsole() {
+  await router.push('/settings/server');
+}
+
 async function openLibrary(libraryId: string) {
   await router.push(`/library/${libraryId}`);
 }
@@ -117,13 +121,21 @@ async function handleLogout() {
           <small>Home</small>
         </button>
         <button
-          v-if="isAdmin"
           type="button"
           :class="{ active: route.path.startsWith('/settings') }"
           @click="goSettings"
         >
+          <span>设置</span>
+          <small>{{ isAdmin ? 'Admin' : 'User' }}</small>
+        </button>
+        <button
+          v-if="isAdmin"
+          type="button"
+          :class="{ active: route.path.startsWith('/settings/server') || route.path.startsWith('/settings/users') || route.path.startsWith('/settings/network') }"
+          @click="goAdminConsole"
+        >
           <span>控制台</span>
-          <small>Admin</small>
+          <small>Server</small>
         </button>
         <button
           v-for="library in libraries"
@@ -159,14 +171,7 @@ async function handleLogout() {
         </div>
 
         <div class="button-row">
-          <button
-            v-if="isAdmin && !isAdminSection"
-            class="secondary"
-            type="button"
-            @click="goSettings"
-          >
-            控制台
-          </button>
+          <button v-if="!isAdminSection" class="secondary" type="button" @click="goSettings">设置</button>
           <button class="icon-button secondary" type="button" title="返回上一页" @click="router.back()">
             ←
           </button>

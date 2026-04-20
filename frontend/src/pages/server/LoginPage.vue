@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useRouter } from 'vue-router';
-import { login, publicUsers, state, user } from '../../store/app';
+import { currentServer, login, publicUsers, state, user } from '../../store/app';
 
 const router = useRouter();
 
@@ -18,6 +18,7 @@ async function submitLogin(name = state.username, password = state.password) {
       <div class="server-brand centered">
         <div class="mark">MR</div>
         <h1>{{ state.serverName }}</h1>
+        <p>{{ currentServer?.Url || '当前服务器' }}</p>
       </div>
       <div v-if="publicUsers.length && !state.loginAsOther" class="user-picker">
         <h2>选择用户</h2>
@@ -27,7 +28,11 @@ async function submitLogin(name = state.username, password = state.password) {
             {{ publicUser.Name }}
           </button>
         </div>
-        <button class="secondary" type="button" @click="state.loginAsOther = true">手动登录</button>
+        <div class="button-row">
+          <button class="secondary" type="button" @click="state.loginAsOther = true">手动登录</button>
+          <button class="secondary" type="button" @click="router.push('/server/select')">切换服务器</button>
+          <button class="secondary" type="button" @click="router.push('/server/add')">添加服务器</button>
+        </div>
       </div>
       <form v-else class="form-stack" @submit.prevent="submitLogin()">
         <h2>登录</h2>
@@ -46,6 +51,7 @@ async function submitLogin(name = state.username, password = state.password) {
         </label>
         <div class="button-row">
           <button v-if="publicUsers.length" class="secondary" type="button" @click="state.loginAsOther = false">返回</button>
+          <button class="secondary" type="button" @click="router.push('/server/select')">服务器</button>
           <button :disabled="state.busy" type="submit">登录</button>
         </div>
       </form>

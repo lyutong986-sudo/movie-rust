@@ -2,20 +2,33 @@ use crate::{
     config::Config,
     error::AppError,
     models::{
-        AuthSessionRow, BaseItemDto, DbLibrary, DbMediaItem, DbUser, DbUserItemData, MediaItemRow,
-        MediaSourceDto, MediaStreamDto, QueryResult, SessionInfoDto, StartupConfiguration,
-        StartupRemoteAccessRequest, UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto,
+        ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaItem, DbUser,
+        DbUserItemData, LogFileDto, MediaItemRow, MediaSourceDto, MediaStreamDto, QueryResult,
+        SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest, UserConfigurationDto,
+        UserDto, UserItemDataDto, UserPolicyDto,
     },
     naming, security,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{json, Value};
-use sqlx::{Postgres, QueryBuilder};
+use sqlx::{FromRow, Postgres, QueryBuilder};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
+
+#[derive(Debug, FromRow)]
+struct ActivityLogRow {
+    id: Uuid,
+    event_type: String,
+    position_ticks: Option<i64>,
+    is_paused: Option<bool>,
+    played_to_completion: Option<bool>,
+    created_at: DateTime<Utc>,
+    user_name: String,
+    item_name: Option<String>,
+}
 
 pub async fn user_count(pool: &sqlx::PgPool) -> Result<i64, AppError> {
     Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users")
@@ -172,6 +185,28 @@ pub async fn get_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbUs
     .await?)
 }
 
+pub async fn change_user_password(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    new_password: &str,
+) -> Result<(), AppError> {
+    let password = new_password.trim();
+    if password.len() < 4 {
+        return Err(AppError::BadRequest(
+            "新密码至少需要 4 个字符".to_string(),
+        ));
+    }
+
+    let password_hash = security::hash_password(password)?;
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(password_hash)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
 pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<DbUser>, AppError> {
     let users = if public_only {
         sqlx::query_as::<_, DbUser>(
@@ -284,6 +319,62 @@ pub async fn list_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, A
     )
     .fetch_all(pool)
     .await?)
+}
+
+pub async fn list_server_logs(_pool: &sqlx::PgPool) -> Result<Vec<LogFileDto>, AppError> {
+    Ok(Vec::new())
+}
+
+pub async fn list_activity_logs(
+    pool: &sqlx::PgPool,
+    limit: i64,
+) -> Result<Vec<ActivityLogEntryDto>, AppError> {
+    let rows = sqlx::query_as::<_, ActivityLogRow>(
+        r#"
+        SELECT
+            e.id,
+            e.event_type,
+            e.position_ticks,
+            e.is_paused,
+            e.played_to_completion,
+            e.created_at,
+            u.name AS user_name,
+            m.name AS item_name
+        FROM playback_events e
+        INNER JOIN users u ON u.id = e.user_id
+        LEFT JOIN media_items m ON m.id = e.item_id
+        ORDER BY e.created_at DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit.clamp(1, 200))
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let entry_type = row.event_type.clone();
+            let item_name = row.item_name.unwrap_or_else(|| "未知媒体".to_string());
+            let short_overview = Some(format_activity_overview(
+                &row.user_name,
+                &item_name,
+                &row.event_type,
+                row.position_ticks,
+                row.is_paused,
+                row.played_to_completion,
+            ));
+
+            ActivityLogEntryDto {
+                id: row.id.to_string(),
+                name: format!("{} · {}", row.user_name, item_name),
+                entry_type,
+                short_overview,
+                severity: "Info".to_string(),
+                date: row.created_at,
+            }
+        })
+        .collect())
 }
 
 pub async fn create_library(
@@ -1181,6 +1272,37 @@ fn user_item_data_to_dto(data: DbUserItemData) -> UserItemDataDto {
         last_played_date: data.last_played_date,
         key: None,
         item_id: None,
+    }
+}
+
+fn format_activity_overview(
+    user_name: &str,
+    item_name: &str,
+    event_type: &str,
+    position_ticks: Option<i64>,
+    is_paused: Option<bool>,
+    played_to_completion: Option<bool>,
+) -> String {
+    let position = position_ticks
+        .map(|ticks| {
+            let total_seconds = ticks / 10_000_000;
+            let minutes = total_seconds / 60;
+            let seconds = total_seconds % 60;
+            format!("{minutes}:{seconds:02}")
+        })
+        .unwrap_or_else(|| "0:00".to_string());
+
+    match event_type {
+        "Started" => format!("{user_name} 开始播放 {item_name}"),
+        "Progress" if is_paused.unwrap_or(false) => {
+            format!("{user_name} 暂停了 {item_name}，位置 {position}")
+        }
+        "Progress" => format!("{user_name} 正在观看 {item_name}，位置 {position}"),
+        "Stopped" if played_to_completion.unwrap_or(false) => {
+            format!("{user_name} 播放完成 {item_name}")
+        }
+        "Stopped" => format!("{user_name} 停止播放 {item_name}，位置 {position}"),
+        _ => format!("{user_name} 发生了播放事件：{item_name}"),
     }
 }
 

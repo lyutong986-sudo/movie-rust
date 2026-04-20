@@ -3,8 +3,18 @@ import { EmbyApi } from '../api/emby';
 import type { BaseItemDto, SystemInfo, UserDto } from '../api/emby';
 
 export type AdminPage = 'overview' | 'server' | 'libraries' | 'users' | 'playback' | 'network';
+export interface ServerEntry {
+  Id: string;
+  Name: string;
+  Url: string;
+  Version?: string;
+  ProductName?: string;
+  LastConnected?: string;
+}
 
 export const api = new EmbyApi(import.meta.env.VITE_API_BASE || '');
+const SERVERS_KEY = 'movie-rust-servers';
+const CURRENT_SERVER_KEY = 'movie-rust-current-server';
 
 export const state = reactive({
   serverName: 'Movie Rust',
@@ -39,6 +49,8 @@ export const state = reactive({
   initialized: false
 });
 
+export const servers = ref<ServerEntry[]>(readJson<ServerEntry[]>(SERVERS_KEY) || []);
+export const currentServerUrl = ref(readText(CURRENT_SERVER_KEY) || defaultServerUrl());
 export const user = ref(api.user);
 export const publicUsers = ref<UserDto[]>([]);
 export const adminUsers = ref<UserDto[]>([]);
@@ -51,6 +63,9 @@ export const selectedItem = ref<BaseItemDto | null>(null);
 export const parentStack = ref<BaseItemDto[]>([]);
 
 export const isAdmin = computed(() => Boolean(user.value?.Policy?.IsAdministrator));
+export const currentServer = computed(() =>
+  servers.value.find((server) => normalizeServerUrl(server.Url) === normalizeServerUrl(currentServerUrl.value)) || null
+);
 export const selectedLibrary = computed(() =>
   libraries.value.find((library) => library.Id === state.selectedLibraryId)
 );
@@ -66,11 +81,14 @@ export const latest = computed(() => homeItems.value.filter((item) => !item.IsFo
 export const libraryCards = computed(() => libraries.value);
 export const totalLibraryItems = computed(() => libraries.value.reduce((sum, library) => sum + (library.ChildCount || 0), 0));
 
-export async function initialize() {
-  if (state.initialized) {
+export async function initialize(force = false) {
+  if (state.initialized && !force) {
     return;
   }
 
+  state.initialized = false;
+  ensureDefaultServer();
+  api.setBaseUrl(currentServerUrl.value);
   await loadPublicInfo();
   if (!state.startupWizardCompleted) {
     await loadStartupWizard();
@@ -91,6 +109,14 @@ export async function loadPublicInfo() {
     const info = await api.publicInfo();
     state.serverName = info.ServerName || state.serverName;
     state.startupWizardCompleted = info.StartupWizardCompleted;
+    upsertServer({
+      Id: info.Id || normalizeServerUrl(currentServerUrl.value),
+      Name: info.ServerName || currentServer.value?.Name || 'Movie Rust',
+      Url: normalizeServerUrl(currentServerUrl.value),
+      Version: info.Version,
+      ProductName: info.ProductName,
+      LastConnected: new Date().toISOString()
+    });
   } catch {
     state.serverName = 'Movie Rust';
   }
@@ -202,6 +228,41 @@ export async function enterHome() {
   parentStack.value = [];
   await loadLibraries();
   await Promise.all([loadHome(), loadLatestByLibrary()]);
+}
+
+export async function addServer(url: string) {
+  const normalized = normalizeServerUrl(url);
+  const info = await api.publicInfoAt(normalized);
+  upsertServer({
+    Id: info.Id || normalized,
+    Name: info.ServerName || normalized,
+    Url: normalized,
+    Version: info.Version,
+    ProductName: info.ProductName,
+    LastConnected: new Date().toISOString()
+  });
+  await switchServer(normalized);
+}
+
+export async function switchServer(url: string) {
+  currentServerUrl.value = normalizeServerUrl(url);
+  localStorage.setItem(CURRENT_SERVER_KEY, currentServerUrl.value);
+  api.logout();
+  clearClientState(false);
+  api.setBaseUrl(currentServerUrl.value);
+  await initialize(true);
+}
+
+export function removeServer(url: string) {
+  const normalized = normalizeServerUrl(url);
+  servers.value = servers.value.filter((server) => normalizeServerUrl(server.Url) !== normalized);
+  persistServers();
+
+  if (normalizeServerUrl(currentServerUrl.value) === normalized) {
+    const fallback = servers.value[0]?.Url || defaultServerUrl();
+    currentServerUrl.value = fallback;
+    localStorage.setItem(CURRENT_SERVER_KEY, fallback);
+  }
 }
 
 export async function loadLibraries() {
@@ -329,8 +390,15 @@ export async function search() {
 
 export function logout() {
   api.logout();
+  clearClientState(true);
+}
+
+function clearClientState(keepInitialized: boolean) {
   user.value = null;
   systemInfo.value = null;
+  if (!keepInitialized) {
+    publicUsers.value = [];
+  }
   libraries.value = [];
   items.value = [];
   homeItems.value = [];
@@ -345,6 +413,10 @@ export function logout() {
   state.libraryViewType = '';
   state.librarySortBy = 'SortName';
   state.librarySortAscending = true;
+  state.message = '';
+  state.error = '';
+  state.loginAsOther = false;
+  state.initialized = keepInitialized;
 }
 
 export function openItem(item: BaseItemDto) {
@@ -446,4 +518,81 @@ export async function run(task: () => Promise<void>, success = '') {
   } finally {
     state.busy = false;
   }
+}
+
+function upsertServer(server: ServerEntry) {
+  const normalized = normalizeServerUrl(server.Url);
+  const next = { ...server, Url: normalized };
+  const index = servers.value.findIndex((entry) => normalizeServerUrl(entry.Url) === normalized);
+  if (index >= 0) {
+    servers.value[index] = {
+      ...servers.value[index],
+      ...next
+    };
+  } else {
+    servers.value.push(next);
+  }
+  persistServers();
+}
+
+function ensureDefaultServer() {
+  const fallback = defaultServerUrl();
+  if (!currentServerUrl.value) {
+    currentServerUrl.value = fallback;
+    localStorage.setItem(CURRENT_SERVER_KEY, fallback);
+  }
+  if (!servers.value.some((server) => normalizeServerUrl(server.Url) === normalizeServerUrl(currentServerUrl.value))) {
+    upsertServer({
+      Id: normalizeServerUrl(currentServerUrl.value),
+      Name: '当前服务器',
+      Url: currentServerUrl.value
+    });
+  }
+}
+
+function persistServers() {
+  localStorage.setItem(SERVERS_KEY, JSON.stringify(servers.value));
+}
+
+function normalizeServerUrl(url: string) {
+  const value = url.trim();
+  if (!value) {
+    return defaultServerUrl();
+  }
+
+  return value.replace(/\/(emby|mediabrowser)\/?$/i, '').replace(/\/$/, '');
+}
+
+function defaultServerUrl() {
+  const configured = import.meta.env.VITE_API_BASE || '';
+  if (!configured) {
+    return window.location.origin;
+  }
+
+  if (/^https?:\/\//i.test(configured)) {
+    return normalizeConfiguredUrl(configured);
+  }
+
+  return normalizeConfiguredUrl(new URL(configured, window.location.origin).toString());
+}
+
+function normalizeConfiguredUrl(url: string) {
+  return url.replace(/\/(emby|mediabrowser)\/?$/i, '').replace(/\/$/, '');
+}
+
+function readJson<T>(key: string): T | null {
+  const raw = localStorage.getItem(key);
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function readText(key: string) {
+  return localStorage.getItem(key) || '';
 }

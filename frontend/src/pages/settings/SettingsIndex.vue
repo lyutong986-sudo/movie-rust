@@ -2,11 +2,32 @@
 import { computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import SettingsNav from '../../components/SettingsNav.vue';
-import { adminUsers, isAdmin, libraries, loadAdminData, state, systemInfo, totalLibraryItems } from '../../store/app';
+import { adminUsers, currentServer, isAdmin, libraries, loadAdminData, state, systemInfo, totalLibraryItems, user } from '../../store/app';
 
 const router = useRouter();
 
-const entries = computed(() => [
+const userEntries = computed(() => [
+  {
+    icon: '账',
+    title: '账户',
+    description: '查看当前登录用户并修改密码',
+    to: '/settings/account'
+  },
+  {
+    icon: '播',
+    title: '播放',
+    description: '本地播放器、直链和会话兼容状态',
+    to: '/settings/playback'
+  },
+  {
+    icon: '字',
+    title: '字幕',
+    description: '客户端字幕样式预设',
+    to: '/settings/subtitles'
+  }
+]);
+
+const adminEntries = computed(() => [
   {
     icon: '服',
     title: '服务器',
@@ -26,10 +47,22 @@ const entries = computed(() => [
     to: '/settings/users'
   },
   {
-    icon: '播',
-    title: '播放',
-    description: '本地播放器、直链和字幕兼容状态',
-    to: '/settings/playback'
+    icon: '设',
+    title: '设备',
+    description: '查看已建立的会话设备',
+    to: '/settings/devices'
+  },
+  {
+    icon: '钥',
+    title: 'API Key',
+    description: '当前版本的令牌和接口兼容说明',
+    to: '/settings/apikeys'
+  },
+  {
+    icon: '志',
+    title: '日志活动',
+    description: '近期播放活动和服务状态',
+    to: '/settings/logs-and-activity'
   },
   {
     icon: '网',
@@ -51,33 +84,27 @@ onMounted(async () => {
     <SettingsNav />
 
     <div class="settings-content">
-      <div v-if="!isAdmin" class="empty">
-        <p>控制台</p>
-        <h2>需要管理员权限</h2>
-        <p>只有管理员用户才能进入 Jellyfin 风格的后台控制台。</p>
-      </div>
-
-      <div v-else class="settings-page">
+      <div class="settings-page">
         <div class="stat-grid">
           <article>
-            <small>服务器名称</small>
+            <small>当前用户</small>
+            <strong>{{ user?.Name || '未登录' }}</strong>
+            <span>{{ isAdmin ? '管理员账户' : '标准账户' }}</span>
+          </article>
+          <article>
+            <small>服务器</small>
             <strong>{{ state.serverName }}</strong>
-            <span>{{ systemInfo?.Version || '0.1.0' }}</span>
+            <span>{{ currentServer?.Url || systemInfo?.LocalAddress || '-' }}</span>
           </article>
           <article>
-            <small>媒体库</small>
-            <strong>{{ libraries.length }}</strong>
-            <span>{{ totalLibraryItems }} 个条目</span>
-          </article>
-          <article>
-            <small>用户</small>
-            <strong>{{ adminUsers.length }}</strong>
-            <span>管理员和普通用户</span>
+            <small>版本</small>
+            <strong>{{ systemInfo?.Version || '0.1.0' }}</strong>
+            <span>{{ libraries.length }} 个媒体库 / {{ totalLibraryItems }} 个条目</span>
           </article>
         </div>
 
         <div class="settings-list">
-          <button v-for="entry in entries" :key="entry.to" type="button" @click="router.push(entry.to)">
+          <button v-for="entry in userEntries" :key="entry.to" type="button" @click="router.push(entry.to)">
             <span>{{ entry.icon }}</span>
             <div>
               <h3>{{ entry.title }}</h3>
@@ -85,6 +112,24 @@ onMounted(async () => {
             </div>
           </button>
         </div>
+
+        <div v-if="isAdmin" class="settings-list">
+          <button v-for="entry in adminEntries" :key="entry.to" type="button" @click="router.push(entry.to)">
+            <span>{{ entry.icon }}</span>
+            <div>
+              <h3>{{ entry.title }}</h3>
+              <p>{{ entry.description }}</p>
+            </div>
+          </button>
+        </div>
+
+        <div v-if="isAdmin" class="placeholder-grid">
+          <article>
+            <h3>管理员概览</h3>
+            <p>共有 {{ adminUsers.length }} 个用户，当前服务器版本 {{ systemInfo?.Version || '0.1.0' }}。</p>
+          </article>
+        </div>
+
       </div>
     </div>
   </section>

@@ -1,11 +1,14 @@
 use crate::{
     auth::AuthSession,
-    models::{BrandingConfiguration, EndpointInfo, PublicSystemInfo, SystemInfo},
+    models::{
+        ActivityLogQuery, BrandingConfiguration, EndpointInfo, LogFileDto, PublicSystemInfo,
+        QueryResult, SystemInfo,
+    },
     repository,
     state::AppState,
 };
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{header::CONTENT_TYPE, StatusCode},
     response::IntoResponse,
     routing::get,
@@ -28,6 +31,10 @@ pub fn router() -> Router<AppState> {
         .route("/Branding/Css.css", get(branding_css))
         .route("/branding/css", get(branding_css))
         .route("/branding/css.css", get(branding_css))
+        .route("/System/Logs", get(server_logs))
+        .route("/system/logs", get(server_logs))
+        .route("/System/ActivityLog/Entries", get(activity_log_entries))
+        .route("/system/activitylog/entries", get(activity_log_entries))
 }
 
 async fn public_info(
@@ -81,6 +88,26 @@ async fn branding_configuration() -> Json<BrandingConfiguration> {
 
 async fn branding_css() -> impl IntoResponse {
     ([(CONTENT_TYPE, "text/css; charset=utf-8")], "")
+}
+
+async fn server_logs(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<LogFileDto>>, crate::error::AppError> {
+    Ok(Json(repository::list_server_logs(&state.pool).await?))
+}
+
+async fn activity_log_entries(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<ActivityLogQuery>,
+) -> Result<Json<QueryResult<crate::models::ActivityLogEntryDto>>, crate::error::AppError> {
+    let items = repository::list_activity_logs(&state.pool, query.limit.unwrap_or(50)).await?;
+    Ok(Json(QueryResult {
+        total_record_count: items.len() as i64,
+        start_index: Some(0),
+        items,
+    }))
 }
 
 async fn ping() -> StatusCode {

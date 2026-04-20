@@ -200,6 +200,21 @@ pub struct SessionInfoDto {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
+pub struct UpdateUserPasswordRequest {
+    #[serde(default)]
+    pub current_pw: Option<String>,
+    #[serde(default)]
+    pub current_password: Option<String>,
+    #[serde(default)]
+    pub new_pw: Option<String>,
+    #[serde(default)]
+    pub new_password: Option<String>,
+    #[serde(default)]
+    pub reset_password: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub struct AuthenticateByNameRequest {
     #[serde(alias = "Name", alias = "username", alias = "UserName")]
     pub username: Option<String>,
@@ -247,6 +262,25 @@ pub struct SystemInfo {
     pub id: String,
     pub startup_wizard_completed: bool,
     pub can_self_restart: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct LogFileDto {
+    pub name: String,
+    pub date_modified: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ActivityLogEntryDto {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "Type")]
+    pub entry_type: String,
+    pub short_overview: Option<String>,
+    pub severity: String,
+    pub date: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -566,4 +600,11 @@ pub struct ImageInfoDto {
     pub image_index: Option<i32>,
     pub image_tag: String,
     pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ActivityLogQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
 }

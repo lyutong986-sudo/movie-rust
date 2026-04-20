@@ -214,6 +214,30 @@ p {
   gap: 12px;
 }
 
+.server-list,
+.activity-list,
+.log-list {
+  display: grid;
+  gap: 12px;
+}
+
+.server-entry,
+.settings-panel,
+.activity-list article,
+.log-list article {
+  border: 1px solid #2b323e;
+  border-radius: 8px;
+  padding: 16px;
+  background: #171c25;
+}
+
+.server-entry {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 14px;
+  align-items: center;
+}
+
 .user-grid button {
   display: grid;
   justify-items: center;
@@ -418,6 +442,12 @@ p {
   gap: 20px;
 }
 
+.split-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -542,6 +572,47 @@ p {
   min-height: 96px;
   padding: 18px;
   color: #dfe7f3;
+}
+
+.table-card {
+  overflow-x: auto;
+}
+
+.token-box {
+  display: block;
+  margin-top: 12px;
+  border: 1px solid #303642;
+  border-radius: 8px;
+  padding: 12px;
+  overflow-wrap: anywhere;
+  background: #10141c;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.caption-preview {
+  position: relative;
+  min-height: 220px;
+  border: 1px solid #2b323e;
+  border-radius: 8px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(8, 12, 18, 0.1), rgba(8, 12, 18, 0.7)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1600' height='900' viewBox='0 0 1600 900'%3E%3Crect width='1600' height='900' fill='%2311171f'/%3E%3Cpath d='M0 700c140-80 300-90 470-20s330 90 500 10 360-100 630 30v180H0z' fill='%231d2430'/%3E%3Ccircle cx='1260' cy='180' r='80' fill='%232a3342'/%3E%3C/svg%3E")
+      center/cover no-repeat;
+}
+
+.caption-preview-text {
+  position: absolute;
+  left: 50%;
+  max-width: calc(100% - 40px);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: #fff;
+  transform: translateX(-50%);
+  text-align: center;
 }
 
 .hero-strip {
@@ -856,7 +927,9 @@ video {
   .detail-hero,
   .hero-strip,
   .settings-shell,
-  .stat-grid {
+  .stat-grid,
+  .split-grid,
+  .server-entry {
     grid-template-columns: 1fr;
   }
 

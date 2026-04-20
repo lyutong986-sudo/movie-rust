@@ -1,14 +1,16 @@
 use crate::{
     auth::{self, AuthSession},
     error::AppError,
-    models::{AuthenticateByNameRequest, AuthenticationResult, UserDto},
+    models::{
+        AuthenticateByNameRequest, AuthenticationResult, UpdateUserPasswordRequest, UserDto,
+    },
     repository, security,
     state::AppState,
 };
 use axum::{
     body::Bytes,
     extract::{Path, State},
-    http::{header::CONTENT_TYPE, HeaderMap},
+    http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
     routing::{get, post},
     Json, Router,
 };
@@ -27,6 +29,9 @@ pub fn router() -> Router<AppState> {
         .route("/Users/{user_id}/Authenticate", post(authenticate_by_id))
         .route("/Users/{user_id}/authenticate", post(authenticate_by_id))
         .route("/users/{user_id}/authenticate", post(authenticate_by_id))
+        .route("/Users/{user_id}/Password", post(update_password))
+        .route("/Users/{user_id}/password", post(update_password))
+        .route("/users/{user_id}/password", post(update_password))
         .route("/Users/Me", get(me))
         .route("/users/me", get(me))
         .route("/Users/{user_id}", get(user_by_id))
@@ -152,6 +157,50 @@ async fn authenticate(
         access_token: session.access_token,
         server_id: state.config.server_id.to_string(),
     }))
+}
+
+async fn update_password(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Json(payload): Json<UpdateUserPasswordRequest>,
+) -> Result<StatusCode, AppError> {
+    if session.user_id != user_id && !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+
+    if payload.reset_password.unwrap_or(false) {
+        return Err(AppError::BadRequest(
+            "当前版本暂不支持无密码重置，请直接设置新密码".to_string(),
+        ));
+    }
+
+    let new_password = payload
+        .new_pw
+        .as_deref()
+        .or(payload.new_password.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("缺少新密码".to_string()))?;
+
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+
+    if session.user_id == user_id && !session.is_admin {
+        let current_password = payload
+            .current_pw
+            .as_deref()
+            .or(payload.current_password.as_deref())
+            .unwrap_or_default();
+
+        if !security::verify_password(&user.password_hash, current_password) {
+            return Err(AppError::Unauthorized);
+        }
+    }
+
+    repository::change_user_password(&state.pool, user_id, new_password).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn parse_authenticate_request(
