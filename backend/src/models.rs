@@ -13,6 +13,7 @@ pub struct DbUser {
     pub is_admin: bool,
     pub is_hidden: bool,
     pub is_disabled: bool,
+    pub policy: Value,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -54,6 +55,83 @@ pub struct DbMediaItem {
     pub backdrop_path: Option<String>,
     pub date_created: DateTime<Utc>,
     pub date_modified: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct DbMediaStream {
+    pub id: Uuid,
+    pub media_item_id: Uuid,
+    pub index: i32,
+    pub stream_type: String,
+    pub codec: Option<String>,
+    pub codec_tag: Option<String>,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub is_default: bool,
+    pub is_forced: bool,
+    pub is_external: bool,
+    pub is_hearing_impaired: bool,
+    pub profile: Option<String>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub channels: Option<i32>,
+    pub sample_rate: Option<i32>,
+    pub bit_rate: Option<i32>,
+    pub bit_depth: Option<i32>,
+    pub channel_layout: Option<String>,
+    pub aspect_ratio: Option<String>,
+    pub average_frame_rate: Option<f32>,
+    pub real_frame_rate: Option<f32>,
+    pub is_interlaced: bool,
+    pub color_range: Option<String>,
+    pub color_space: Option<String>,
+    pub color_transfer: Option<String>,
+    pub color_primaries: Option<String>,
+    pub rotation: Option<i32>,
+    pub hdr10_plus_present_flag: Option<bool>,
+    pub dv_version_major: Option<i32>,
+    pub dv_version_minor: Option<i32>,
+    pub dv_profile: Option<i32>,
+    pub dv_level: Option<i32>,
+    pub dv_bl_signal_compatibility_id: Option<i32>,
+    pub comment: Option<String>,
+    pub time_base: Option<String>,
+    pub codec_time_base: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct DbPerson {
+    pub id: Uuid,
+    pub name: String,
+    pub sort_name: Option<String>,
+    pub overview: Option<String>,
+    pub external_url: Option<String>,
+    pub provider_ids: Value,  // JSONB
+    pub premiere_date: Option<DateTime<Utc>>,
+    pub production_year: Option<i32>,
+    pub primary_image_path: Option<String>,
+    pub backdrop_image_path: Option<String>,
+    pub logo_image_path: Option<String>,
+    pub favorite_count: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct DbPersonRole {
+    pub id: Uuid,
+    pub person_id: Uuid,
+    pub media_item_id: Uuid,
+    pub role_type: String,
+    pub role: Option<String>,
+    pub sort_order: i32,
+    pub is_featured: bool,
+    pub is_leading_role: bool,
+    pub is_recurring: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -752,6 +830,43 @@ pub struct ImageInfoDto {
 pub struct ActivityLogQuery {
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct GenreDto {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_tags: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PersonDto {
+    pub name: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(rename = "Type", skip_serializing_if = "Option::is_none")]
+    pub person_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub premiere_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub production_year: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_tags: Option<std::collections::HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_ids: Option<std::collections::HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub favorite: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]

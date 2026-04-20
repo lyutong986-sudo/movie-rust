@@ -484,8 +484,9 @@ async fn playback_info(
 
     let play_session_id = Uuid::new_v4().simple().to_string();
 
+    let media_source = repository::get_media_source_with_streams(&state.pool, &item).await?;
     Ok(Json(PlaybackInfoResponse {
-        media_sources: vec![repository::media_source_for_item(&item)],
+        media_sources: vec![media_source],
         play_session_id,
     }))
 }

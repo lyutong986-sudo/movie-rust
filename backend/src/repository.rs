@@ -2,17 +2,17 @@ use crate::{
     config::Config,
     error::AppError,
     models::{
-        ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaItem, DbUser,
-        DbUserItemData, LibraryOptionsDto, LogFileDto, MediaItemRow, MediaPathInfoDto,
-        MediaSourceDto, MediaStreamDto, QueryResult, SessionInfoDto, StartupConfiguration,
-        StartupRemoteAccessRequest, UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto,
-        VirtualFolderInfoDto,
+        ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaItem, DbMediaStream,
+        DbPerson, DbPersonRole, DbUser, DbUserItemData, GenreDto, LibraryOptionsDto, LogFileDto,
+        MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto, PersonDto, QueryResult,
+        SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest, UserConfigurationDto,
+        UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
     },
     naming, security,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{json, Value};
-use sqlx::{FromRow, Postgres, QueryBuilder};
+use sqlx::{FromRow, Postgres, QueryBuilder, Row};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -159,6 +159,89 @@ async fn set_system_setting(pool: &sqlx::PgPool, key: &str, value: Value) -> Res
 
     Ok(())
 }
+
+pub async fn get_genres(
+    pool: &sqlx::PgPool,
+    _start_index: Option<i32>,
+    _limit: Option<i32>,
+) -> Result<Vec<GenreDto>, AppError> {
+    let query = "SELECT DISTINCT unnest(genres) as name FROM media_items WHERE array_length(genres, 1) > 0 ORDER BY name";
+    
+    let rows = sqlx::query(query)
+        .fetch_all(pool)
+        .await?;
+    
+    let genres: Vec<GenreDto> = rows.iter()
+        .map(|row| GenreDto {
+            name: row.get::<String, _>("name"),
+            id: None,
+            image_tags: None,
+        })
+        .collect();
+    
+    Ok(genres)
+}
+
+pub async fn get_items_by_genre(
+    pool: &sqlx::PgPool,
+    genre_name: &str,
+    _start_index: Option<i32>,
+    _limit: Option<i32>,
+) -> Result<Vec<BaseItemDto>, AppError> {
+    let query = "
+        SELECT * FROM media_items 
+        WHERE $1 = ANY(genres)
+        ORDER BY sort_name
+    ";
+    
+    let items = sqlx::query_as::<_, DbMediaItem>(query)
+        .bind(genre_name)
+        .fetch_all(pool)
+        .await?;
+    
+    // 获取server_id（这里使用虚拟值，实际应从配置获取）
+    let server_id = Uuid::new_v4();
+    
+    let mut item_dtos = Vec::new();
+    for item in items {
+        let dto = media_item_to_dto(pool, &item, None, server_id).await?;
+        item_dtos.push(dto);
+    }
+    
+    Ok(item_dtos)
+}
+
+// 人物相关函数
+
+pub async fn get_persons(
+    pool: &sqlx::PgPool,
+    _start_index: Option<i32>,
+    _limit: Option<i32>,
+    _name_starts_with: Option<String>,
+) -> Result<Vec<PersonDto>, AppError> {
+    // 暂时返回空列表
+    Ok(vec![])
+}
+
+pub async fn get_person_by_id(
+    pool: &sqlx::PgPool,
+    person_id: &str,
+) -> Result<PersonDto, AppError> {
+    // 暂时返回错误
+    Err(AppError::NotFound("Person not found".to_string()))
+}
+
+pub async fn get_items_by_person(
+    pool: &sqlx::PgPool,
+    person_id: &str,
+    _start_index: Option<i32>,
+    _limit: Option<i32>,
+) -> Result<Vec<BaseItemDto>, AppError> {
+    // 暂时返回空列表
+    Ok(vec![])
+}
+
+
 
 pub async fn get_user_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Option<DbUser>, AppError> {
     Ok(sqlx::query_as::<_, DbUser>(
@@ -1439,12 +1522,18 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         size,
         e_tag: Some(item.date_modified.timestamp().to_string()),
         bitrate: None,
-        default_audio_stream_index: Some(if item.media_type.eq_ignore_ascii_case("Audio") {
-            0
-        } else {
-            1
-        }),
-        default_subtitle_stream_index: None,
+        default_audio_stream_index: media_streams.iter()
+            .position(|s| s.stream_type == "Audio" && s.is_default)
+            .map(|i| i as i32)
+            .or_else(|| media_streams.iter()
+                .position(|s| s.stream_type == "Audio")
+                .map(|i| i as i32)),
+        default_subtitle_stream_index: media_streams.iter()
+            .position(|s| s.stream_type == "Subtitle" && s.is_default)
+            .map(|i| i as i32)
+            .or_else(|| media_streams.iter()
+                .position(|s| s.stream_type == "Subtitle")
+                .map(|i| i as i32)),
         run_time_ticks: item.runtime_ticks,
         media_streams,
     }
@@ -1731,6 +1820,218 @@ pub async fn update_media_item_metadata(
     .bind(item_id)
     .execute(pool)
     .await?;
+
+    // 保存媒体流信息到media_streams表
+    save_media_streams(pool, item_id, analysis).await?;
+
+    Ok(())
+}
+
+pub async fn get_media_streams(
+    pool: &sqlx::PgPool,
+    media_item_id: Uuid,
+) -> Result<Vec<DbMediaStream>, AppError> {
+    let streams = sqlx::query_as::<_, DbMediaStream>(
+        r#"
+        SELECT id, media_item_id, index, stream_type, codec, language, width, height,
+               channels, sample_rate, bit_rate, channel_layout, is_default, is_forced,
+               is_external, is_hearing_impaired, created_at, updated_at
+        FROM media_streams
+        WHERE media_item_id = $1
+        ORDER BY index
+        "#,
+    )
+    .bind(media_item_id)
+    .fetch_all(pool)
+    .await?;
+    
+    Ok(streams)
+}
+
+pub async fn get_media_source_with_streams(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+) -> Result<MediaSourceDto, AppError> {
+    // 获取媒体流
+    let db_streams = get_media_streams(pool, item.id).await?;
+    
+    // 转换DbMediaStream为MediaStreamDto
+    let mut media_streams = Vec::new();
+    for stream in db_streams.iter() {
+        let stream_type = match stream.stream_type.as_str() {
+            "video" => "Video".to_string(),
+            "audio" => "Audio".to_string(),
+            "subtitle" => "Subtitle".to_string(),
+            _ => stream.stream_type.clone(),
+        };
+        
+        // 生成显示标题
+        let display_title = if stream_type == "Subtitle" {
+            if let Some(lang) = &stream.language {
+                Some(format!("{} - {}", lang, stream.codec.as_deref().unwrap_or("Unknown")))
+            } else {
+                Some("Unknown".to_string())
+            }
+        } else if stream_type == "Audio" {
+            if let Some(lang) = &stream.language {
+                Some(format!("{} - {} ({})", lang, stream.codec.as_deref().unwrap_or("Unknown"), stream.channels.unwrap_or(2)))
+            } else {
+                Some(stream.codec.clone().unwrap_or_else(|| "Unknown".to_string()))
+            }
+        } else {
+            None
+        };
+        
+        media_streams.push(MediaStreamDto {
+            index: stream.index,
+            stream_type,
+            codec: stream.codec.clone(),
+            language: stream.language.clone(),
+            display_title,
+            is_default: stream.is_default,
+            is_forced: stream.is_forced,
+            width: stream.width,
+            height: stream.height,
+            bit_rate: stream.bit_rate,
+            channels: stream.channels,
+            sample_rate: stream.sample_rate,
+            is_external: stream.is_external,
+            delivery_method: None,
+            delivery_url: None,
+            supports_external_stream: false,
+            path: None,
+        });
+    }
+    
+    // 如果没有媒体流，则回退到旧的逻辑
+    if media_streams.is_empty() {
+        return Ok(media_source_for_item(item));
+    }
+    
+    let local_path = Path::new(&item.path);
+    let strm_target = naming::is_strm(local_path)
+        .then(|| naming::read_strm_target(local_path))
+        .flatten();
+    let container = strm_target
+        .as_deref()
+        .and_then(naming::extension_from_url)
+        .or_else(|| item.container.clone())
+        .or_else(|| {
+            local_path
+                .extension()
+                .map(|ext| ext.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "mp4".to_string());
+    let is_remote = strm_target.is_some();
+    let size = if is_remote {
+        None
+    } else {
+        std::fs::metadata(&item.path)
+            .ok()
+            .and_then(|metadata| i64::try_from(metadata.len()).ok())
+    };
+
+    Ok(MediaSourceDto {
+        id: item.id.to_string(),
+        path: strm_target.unwrap_or_else(|| item.path.clone()),
+        protocol: if is_remote { "Http" } else { "File" }.to_string(),
+        source_type: "Default".to_string(),
+        container: container.clone(),
+        name: item.name.clone(),
+        is_remote,
+        supports_direct_play: true,
+        supports_direct_stream: true,
+        supports_transcoding: false,
+        direct_stream_url: format!(
+            "/Videos/{}/stream.{}?Static=true&mediaSourceId={}",
+            item.id, container, item.id
+        ),
+        formats: vec![container.clone()],
+        size,
+        e_tag: Some(item.date_modified.timestamp().to_string()),
+        bitrate: None,
+        default_audio_stream_index: media_streams.iter()
+            .position(|s| s.stream_type == "Audio" && s.is_default)
+            .map(|i| i as i32)
+            .or_else(|| media_streams.iter()
+                .position(|s| s.stream_type == "Audio")
+                .map(|i| i as i32)),
+        default_subtitle_stream_index: media_streams.iter()
+            .position(|s| s.stream_type == "Subtitle" && s.is_default)
+            .map(|i| i as i32)
+            .or_else(|| media_streams.iter()
+                .position(|s| s.stream_type == "Subtitle")
+                .map(|i| i as i32)),
+        run_time_ticks: item.runtime_ticks,
+        media_streams,
+    })
+}
+
+pub async fn save_media_streams(
+    pool: &sqlx::PgPool,
+    media_item_id: Uuid,
+    analysis: &crate::media_analyzer::MediaAnalysisResult,
+) -> Result<(), crate::error::AppError> {
+    // 先删除该媒体项的所有现有流
+    sqlx::query("DELETE FROM media_streams WHERE media_item_id = $1")
+        .bind(media_item_id)
+        .execute(pool)
+        .await?;
+
+    for stream in &analysis.streams {
+        let stream_type = match stream.codec_type.as_str() {
+            "video" => "video",
+            "audio" => "audio",
+            "subtitle" => "subtitle",
+            "data" => "data",
+            "attachment" => "attachment",
+            _ => "unknown",
+        };
+
+        let bit_rate = stream.bit_rate.as_deref().and_then(|br| br.parse::<i32>().ok());
+        let sample_rate = stream.sample_rate.as_deref().and_then(|sr| sr.parse::<i32>().ok());
+
+        // 检查是否为默认轨道（从tags中获取）
+        let is_default = stream.tags.as_ref()
+            .and_then(|tags| tags.get("default"))
+            .and_then(|v| v.as_str())
+            .map(|s| s == "yes" || s == "1")
+            .unwrap_or(false);
+
+        let is_forced = stream.tags.as_ref()
+            .and_then(|tags| tags.get("forced"))
+            .and_then(|v| v.as_str())
+            .map(|s| s == "yes" || s == "1")
+            .unwrap_or(false);
+
+        sqlx::query(
+            r#"
+            INSERT INTO media_streams (
+                id, media_item_id, index, stream_type, codec, language, width, height,
+                channels, sample_rate, bit_rate, channel_layout, is_default, is_forced,
+                is_external, is_hearing_impaired, created_at, updated_at
+            ) VALUES (
+                gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                $12, $13, false, false, now(), now()
+            )
+            "#,
+        )
+        .bind(media_item_id)
+        .bind(stream.index)  // 使用流的原始索引
+        .bind(stream_type)
+        .bind(stream.codec_name.clone())
+        .bind(stream.language.clone())
+        .bind(stream.width)
+        .bind(stream.height)
+        .bind(stream.channels)
+        .bind(sample_rate)
+        .bind(bit_rate)
+        .bind(stream.channel_layout.clone())
+        .bind(is_default)
+        .bind(is_forced)
+        .execute(pool)
+        .await?;
+    }
 
     Ok(())
 }

@@ -2,8 +2,10 @@ use crate::state::AppState;
 use axum::Router;
 
 pub mod admin;
+pub mod genres;
 pub mod images;
 pub mod items;
+pub mod persons;
 pub mod sessions;
 pub mod shows;
 pub mod startup;
@@ -32,6 +34,8 @@ fn api_router() -> Router<AppState> {
         .merge(shows::router())
         .merge(sessions::router())
         .merge(admin::router())
+        .merge(genres::router())
+        .merge(persons::router())
 }
 
 #[cfg(test)]
