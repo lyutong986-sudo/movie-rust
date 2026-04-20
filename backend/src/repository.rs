@@ -1348,11 +1348,12 @@ pub async fn get_user_resume_items(
     user_id: Uuid,
     limit: Option<i64>,
     start_index: Option<i64>,
+    server_id: Uuid,
 ) -> Result<(Vec<BaseItemDto>, i64), AppError> {
     let limit = limit.unwrap_or(50).clamp(1, 100);
     let start_index = start_index.unwrap_or(0).max(0);
     
-    let total_count = sqlx::query_scalar!(
+    let total_count: i64 = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*) as count
         FROM user_item_data uid
@@ -1361,14 +1362,12 @@ pub async fn get_user_resume_items(
           AND uid.playback_position_ticks > 0
           AND (uid.is_played = false OR uid.playback_position_ticks < mi.runtime_ticks)
         "#,
-        user_id
     )
+    .bind(user_id)
     .fetch_one(pool)
-    .await?
-    .unwrap_or(0);
+    .await?;
     
-    let items = sqlx::query_as!(
-        DbMediaItem,
+    let items = sqlx::query_as::<_, DbMediaItem>(
         r#"
         SELECT mi.*,
                uid.playback_position_ticks as user_playback_position_ticks,
@@ -1384,14 +1383,18 @@ pub async fn get_user_resume_items(
         ORDER BY uid.last_played_date DESC NULLS LAST
         LIMIT $2 OFFSET $3
         "#,
-        user_id,
-        limit,
-        start_index
     )
+    .bind(user_id)
+    .bind(limit)
+    .bind(start_index)
     .fetch_all(pool)
     .await?;
     
-    let dtos = items.into_iter().map(|item| media_item_to_dto(item, Some(user_id))).collect();
+    let mut dtos = Vec::new();
+    for item in items {
+        let dto = media_item_to_dto(pool, &item, Some(user_id), server_id).await?;
+        dtos.push(dto);
+    }
     Ok((dtos, total_count))
 }
 

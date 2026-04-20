@@ -16,6 +16,8 @@ use anyhow::Context;
 use sqlx::postgres::PgPoolOptions;
 use state::AppState;
 use std::sync::Arc;
+
+use crate::transcoder::Transcoder;
 use tower_http::{
     cors::CorsLayer,
     services::{ServeDir, ServeFile},

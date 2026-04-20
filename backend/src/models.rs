@@ -697,7 +697,7 @@ pub struct PlaybackInfoResponse {
     pub transcoding_bit_depth: Option<i32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct VideoStreamQuery {
     #[serde(default)]
