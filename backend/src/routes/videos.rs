@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 use uuid::Uuid;
+use reqwest;
+use reqwest::header;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -75,8 +77,33 @@ async fn serve_media_item(
         let url = content.lines().next().map(str::trim).filter(|line| !line.is_empty());
         if let Some(url) = url {
             if url.starts_with("http://") || url.starts_with("https://") {
-                // 返回 302 重定向到真实 URL
-                return Ok(Redirect::to(url).into_response());
+                // 代理远程流
+                let client = reqwest::Client::new();
+                let mut remote_request = client.get(url);
+                // 复制 Range 头
+                if let Some(range) = request.headers().get(header::RANGE) {
+                    remote_request = remote_request.header(header::RANGE, range);
+                }
+                // 可选：复制 User-Agent 头
+                if let Some(user_agent) = request.headers().get(header::USER_AGENT) {
+                    remote_request = remote_request.header(header::USER_AGENT, user_agent);
+                }
+                let remote_response = remote_request.send().await
+                    .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                // 构建 axum 响应
+                let mut response_builder = Response::builder().status(remote_response.status());
+                // 复制响应头
+                for (key, value) in remote_response.headers() {
+                    // 跳过不需要的标头，如 Transfer-Encoding
+                    if key != header::TRANSFER_ENCODING {
+                        response_builder = response_builder.header(key, value);
+                    }
+                }
+                // 设置响应体
+                let body = Body::from_stream(remote_response.bytes_stream());
+                let response = response_builder.body(body)
+                    .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                return Ok(response);
             }
         }
         // 如果不是有效的 URL，回退到普通文件服务
