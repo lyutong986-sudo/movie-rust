@@ -13,6 +13,7 @@ pub mod startup;
 pub mod system;
 pub mod users;
 pub mod videos;
+pub mod websocket;
 
 pub fn router(state: AppState) -> Router {
     let api = api_router();
@@ -26,6 +27,7 @@ pub fn router(state: AppState) -> Router {
 
 fn api_router() -> Router<AppState> {
     Router::new()
+        .route("/embywebsocket", axum::routing::get(websocket::emby_websocket_handler))
         .merge(system::router())
         .merge(startup::router())
         .merge(users::router())

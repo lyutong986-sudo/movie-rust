@@ -627,11 +627,154 @@ pub struct MediaStreamDto {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlaybackInfoResponse {
     pub media_sources: Vec<MediaSourceDto>,
     pub play_session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_source_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_stream_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_play_protocols: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_sub_protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_container: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_offset: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_framerate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_bitrate: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_audio_codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_video_codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_video_bit_depth: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_audio_bit_depth: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_audio_channels: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_audio_sample_rate: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_max_audio_channels: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_is_avc: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_is_interlaced: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_is_anamorphic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_cabac: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_ref_frames: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_level: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_video_range_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_color_primaries: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_color_transfer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_color_space: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_matrix_coefficients: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_chroma_subsampling: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_bit_depth: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct VideoStreamQuery {
+    #[serde(default)]
+    pub container: Option<String>,
+    #[serde(default, rename = "Static")]
+    pub static_param: Option<bool>,
+    #[serde(default)]
+    pub video_codec: Option<String>,
+    #[serde(default)]
+    pub audio_codec: Option<String>,
+    #[serde(default)]
+    pub audio_stream_index: Option<i32>,
+    #[serde(default)]
+    pub subtitle_stream_index: Option<i32>,
+    #[serde(default)]
+    pub video_bitrate: Option<i64>,
+    #[serde(default)]
+    pub audio_bitrate: Option<i64>,
+    #[serde(default)]
+    pub max_audio_channels: Option<i32>,
+    #[serde(default)]
+    pub max_framerate: Option<f64>,
+    #[serde(default)]
+    pub max_width: Option<i32>,
+    #[serde(default)]
+    pub max_height: Option<i32>,
+    #[serde(default)]
+    pub max_ref_frames: Option<i32>,
+    #[serde(default)]
+    pub max_video_bit_depth: Option<i32>,
+    #[serde(default)]
+    pub max_audio_bit_depth: Option<i32>,
+    #[serde(default)]
+    pub audio_sample_rate: Option<i32>,
+    #[serde(default)]
+    pub play_session_id: Option<String>,
+    #[serde(default)]
+    pub copy_timestamps: Option<bool>,
+    #[serde(default)]
+    pub start_time_ticks: Option<i64>,
+    #[serde(default)]
+    pub width: Option<i32>,
+    #[serde(default)]
+    pub height: Option<i32>,
+    #[serde(default)]
+    pub max_video_bitrate: Option<i64>,
+    #[serde(default)]
+    pub subtitle_method: Option<String>,
+    #[serde(default)]
+    pub require_avc: Option<bool>,
+    #[serde(default)]
+    pub de_interlace: Option<bool>,
+    #[serde(default)]
+    pub require_non_anamorphic: Option<bool>,
+    #[serde(default)]
+    pub transcoding_max_audio_channels: Option<i32>,
+    #[serde(default)]
+    pub cpu_core_limit: Option<i32>,
+    #[serde(default)]
+    pub live_stream_id: Option<String>,
+    #[serde(default)]
+    pub enable_mpegts_m2_ts_mode: Option<bool>,
+    #[serde(default)]
+    pub video_stream_index: Option<i32>,
+    #[serde(default)]
+    pub transcoding_protocol: Option<String>,
+    #[serde(default)]
+    pub segment_container: Option<String>,
+    #[serde(default)]
+    pub segment_length: Option<i32>,
+    #[serde(default)]
+    pub min_segments: Option<i32>,
+    #[serde(default)]
+    pub break_on_non_key_frames: Option<bool>,
+    #[serde(default)]
+    pub manifest_subtitles: Option<String>,
+    #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
+    pub _api_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -653,6 +796,10 @@ pub struct ItemsQuery {
     pub sort_by: Option<String>,
     #[serde(default)]
     pub sort_order: Option<String>,
+    #[serde(default)]
+    pub filters: Option<String>,
+    #[serde(default)]
+    pub fields: Option<String>,
     #[serde(default)]
     pub start_index: Option<i64>,
     #[serde(default)]

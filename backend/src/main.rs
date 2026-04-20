@@ -63,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
         pool,
         config: Arc::new(config),
         metadata_manager: Some(Arc::new(metadata_manager)),
+        websocket_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     let spa =

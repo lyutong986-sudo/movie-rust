@@ -1,7 +1,7 @@
-use crate::{auth, error::AppError, naming, repository, state::AppState};
+use crate::{auth, error::AppError, models::VideoStreamQuery, naming, repository, state::AppState};
 use axum::{
     body::Body,
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{header, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -30,6 +30,7 @@ struct VideoPath {
 async fn stream_video(
     State(state): State<AppState>,
     Path(path): Path<VideoPath>,
+    Query(query): Query<VideoStreamQuery>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let stream_path = path.stream_path.trim_start_matches('/');
@@ -43,7 +44,17 @@ async fn stream_video(
     }
 
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-    serve_media_item(&state, path.item_id, request).await
+    
+    tracing::debug!(
+        item_id = %path.item_id,
+        container = ?query.container,
+        video_codec = ?query.video_codec,
+        audio_codec = ?query.audio_codec,
+        max_video_bitrate = ?query.max_video_bitrate,
+        "视频流请求参数"
+    );
+    
+    serve_media_item(&state, path.item_id, request, Some(query)).await
 }
 
 async fn stream_file(
@@ -52,13 +63,14 @@ async fn stream_file(
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-    serve_media_item(&state, item_id, request).await
+    serve_media_item(&state, item_id, request, None).await
 }
 
 async fn serve_media_item(
     state: &AppState,
     item_id: Uuid,
     request: Request<Body>,
+    query: Option<VideoStreamQuery>,
 ) -> Result<Response, AppError> {
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
@@ -81,6 +93,22 @@ async fn serve_media_item(
             "代理 STRM 远程播放流"
         );
         return proxy_remote_stream(&target, request).await;
+    }
+
+    if let Some(ref q) = query {
+        let has_transcoding_params = q.video_codec.is_some()
+            || q.audio_codec.is_some()
+            || q.max_video_bitrate.is_some()
+            || q.max_audio_channels.is_some()
+            || q.max_width.is_some()
+            || q.max_height.is_some()
+            || q.max_framerate.is_some();
+        if has_transcoding_params {
+            tracing::warn!(
+                item_id = %item_id,
+                "视频转码请求暂未实现，使用直接播放"
+            );
+        }
     }
 
     ServeFile::new(path)

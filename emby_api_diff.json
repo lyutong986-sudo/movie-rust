@@ -1,0 +1,223 @@
+{
+  "version": "1.0",
+  "generated_at": "2026-04-20T20:29:05Z",
+  "git_commit": "8b2c503",
+  "emby_api_version": "4.9.3.0",
+  "summary": {
+    "total_endpoints_analyzed": 78,
+    "fully_implemented": 28,
+    "partially_implemented": 32,
+    "not_implemented": 18,
+    "compliance_score": 35.2
+  },
+  "endpoints": [
+    {
+      "path": "/Users/AuthenticateByName",
+      "method": "POST",
+      "implementation_status": "full",
+      "differences": {
+        "request_body": {
+          "official_fields": ["Username", "Pw"],
+          "current_fields": ["Username", "Pw", "Password", "DeviceId", "DeviceName", "Client"],
+          "extra_fields": ["Password", "DeviceId", "DeviceName", "Client"],
+          "missing_fields": [],
+          "type_mismatches": []
+        },
+        "request_headers": {
+          "official_required": ["X-Emby-Authorization"],
+          "current_required": [],
+          "difference": "设备信息应通过X-Emby-Authorization头部传递，当前实现支持请求体字段"
+        },
+        "response_body": {
+          "official_schema": "AuthenticationResult",
+          "current_schema": "AuthenticationResult",
+          "field_coverage": "100%",
+          "notes": "响应结构匹配良好"
+        }
+      },
+      "example_request_official": {
+        "method": "POST",
+        "headers": {
+          "X-Emby-Authorization": "MediaBrowser Client=\"Emby Web\", Device=\"Chrome\", DeviceId=\"client-id\", Version=\"4.9.3.0\""
+        },
+        "body": {
+          "Username": "user",
+          "Pw": "password"
+        }
+      },
+      "example_request_current": {
+        "method": "POST",
+        "headers": {},
+        "body": {
+          "Username": "user",
+          "Pw": "password",
+          "DeviceId": "client-id",
+          "DeviceName": "Chrome",
+          "Client": "Emby Web"
+        }
+      },
+      "example_response": {
+        "AccessToken": "token123",
+        "User": {
+          "Id": "uuid",
+          "Name": "user",
+          "Policy": {}
+        },
+        "SessionInfo": {
+          "Id": "session-uuid"
+        }
+      }
+    },
+    {
+      "path": "/Library/VirtualFolders",
+      "method": "GET",
+      "implementation_status": "full",
+      "differences": {
+        "query_parameters": {
+          "official": ["startIndex", "limit", "sortBy", "sortOrder"],
+          "current": ["includeLibraryOptions"],
+          "missing": ["startIndex", "limit", "sortBy", "sortOrder"],
+          "extra": ["includeLibraryOptions"]
+        },
+        "response_body": {
+          "official_schema": "VirtualFolderInfo[]",
+          "current_schema": "VirtualFolderInfoDto[]",
+          "field_coverage": "85%",
+          "missing_fields": ["LibraryOptions", "LastScanDate", "LastRefreshDate"],
+          "extra_fields": []
+        }
+      }
+    },
+    {
+      "path": "/Items/{Id}/PlaybackInfo",
+      "method": "GET",
+      "implementation_status": "partial",
+      "differences": {
+        "query_parameters": {
+          "official": ["userId", "maxStreamingBitrate", "startTimeTicks", "audioStreamIndex", "subtitleStreamIndex", "mediaSourceId", "liveStreamId", "deviceProfile", "enableDirectPlay", "enableDirectStream", "enableTranscoding", "allowVideoStreamCopy", "allowAudioStreamCopy", "playSessionId", "copyTimestamps", "requireAvc", "requireNonAnamorphic", "deInterlace", "requireClosedCaptions", "deviceId", "maxAudioChannels", "maxVideoBitDepth", "videoCodec", "audioCodec", "maxAudioBitDepth", "audioSampleRate", "maxVideoBitrate", "subtitleMethod", "maxRefFrames", "maxVideoHeight", "maxVideoWidth", "enableSubtitlesInManifest", "requireH264Profile", "level", "framerate", "maxFramerate", "cabac", "videoRangeType", "requireMpeg2Variant", "requireAv1Profile", "requireVp9Profile", "requireHevcProfile", "require10Bit", "require4K", "requireHdr", "requireDovi", "requireVision", "h264Level", "hevcLevel", "vp9Level", "av1Level"],
+          "current": ["userId", "mediaSourceId"],
+          "missing": "大多数转码相关参数",
+          "extra": []
+        },
+        "response_body": {
+          "official_schema": "PlaybackInfoResponse",
+          "current_schema": "PlaybackInfoResponse",
+          "field_coverage": "40%",
+          "missing_fields": ["MediaSources", "PlaySessionId", "ErrorCode", "MediaSourceId", "LiveStreamId", "DirectPlayProtocols", "TranscodingUrl", "TranscodingSubProtocol", "TranscodingContainer", "TranscodingOffset", "TranscodingSize", "TranscodingFramerate", "TranscodingBitrate", "TranscodingAudioCodec", "TranscodingVideoCodec", "TranscodingVideoBitDepth", "TranscodingAudioBitDepth", "TranscodingAudioChannels", "TranscodingAudioSampleRate", "TranscodingMaxAudioChannels", "TranscodingIsAvc", "TranscodingIsInterlaced", "TranscodingIsAnamorphic", "TranscodingCabac", "TranscodingRefFrames", "TranscodingLevel", "TranscodingFramerate", "TranscodingVideoRangeType", "TranscodingColorPrimaries", "TranscodingColorTransfer", "TranscodingColorSpace", "TranscodingMatrixCoefficients", "TranscodingChromaSubsampling", "TranscodingBitDepth", "TranscodingRefFrames", "TranscodingCabac", "TranscodingIsAvc", "TranscodingIsInterlaced", "TranscodingIsAnamorphic"],
+          "extra_fields": []
+        }
+      }
+    },
+    {
+      "path": "/Videos/{Id}/stream",
+      "method": "GET",
+      "implementation_status": "partial",
+      "differences": {
+        "query_parameters": {
+          "official": ["Container", "Static", "VideoCodec", "AudioCodec", "AudioStreamIndex", "SubtitleStreamIndex", "VideoBitrate", "AudioBitrate", "MaxAudioChannels", "MaxFramerate", "MaxWidth", "MaxHeight", "MaxRefFrames", "MaxVideoBitDepth", "MaxAudioBitDepth", "AudioSampleRate", "PlaySessionId", "CopyTimestamps", "StartTimeTicks", "Width", "Height", "MaxWidth", "MaxHeight", "VideoBitrate", "SubtitleMethod", "MaxVideoBitrate", "RequireAvc", "DeInterlace", "RequireNonAnamorphic", "TranscodingMaxAudioChannels", "CPUCoreLimit", "LiveStreamId", "EnableMpegtsM2TsMode", "VideoStreamIndex", "SubtitleStreamIndex", "TranscodingProtocol", "SegmentContainer", "SegmentLength", "MinSegments", "BreakOnNonKeyFrames", "ManifestSubtitles", "RequireAv1Profile", "RequireHevcProfile", "RequireVp9Profile", "Require10Bit", "Require4K", "RequireHdr", "RequireDovi", "RequireVision", "H264Level", "HevcLevel", "Vp9Level", "Av1Level"],
+          "current": [],
+          "missing": "所有转码参数",
+          "extra": []
+        },
+        "functionality": {
+          "official": "支持转码、直接播放、HLS/DASH流",
+          "current": "仅支持直接文件流",
+          "difference": "关键功能缺失"
+        }
+      }
+    },
+    {
+      "path": "/embywebsocket",
+      "method": "GET",
+      "implementation_status": "missing",
+      "differences": {
+        "status": "未实现",
+        "impact": "客户端无法接收实时通知，影响播放同步、库更新通知等"
+      }
+    }
+  ],
+  "data_format_issues": [
+    {
+      "issue": "GUID格式",
+      "description": "官方使用大写带连字符的GUID，当前实现使用小写",
+      "example_official": "A3B4C5D6-E7F8-4A9B-BCDE-F01234567890",
+      "example_current": "a3b4c5d6-e7f8-4a9b-bcde-f01234567890",
+      "severity": "low"
+    },
+    {
+      "issue": "时间戳格式",
+      "description": "官方使用ISO 8601 UTC格式，当前实现使用RFC 3339",
+      "example_official": "2026-04-20T20:29:05.1234567Z",
+      "example_current": "2026-04-20T20:29:05Z",
+      "severity": "low"
+    },
+    {
+      "issue": "错误响应格式",
+      "description": "官方使用结构化错误响应，当前使用简单消息",
+      "example_official": {
+        "ErrorCode": "ItemNotFound",
+        "ErrorMessage": "Item not found",
+        "ErrorDetails": "The requested item does not exist"
+      },
+      "example_current": {
+        "Message": "资源不存在: 项目不存在"
+      },
+      "severity": "medium"
+    }
+  ],
+  "authentication_gaps": [
+    {
+      "method": "API Key",
+      "status": "missing",
+      "description": "无法使用API Key进行服务端认证"
+    },
+    {
+      "method": "QuickConnect",
+      "status": "missing",
+      "description": "不支持Emby QuickConnect简化登录"
+    },
+    {
+      "method": "Token Refresh",
+      "status": "missing",
+      "description": "无令牌刷新机制，会话过期后需重新登录"
+    }
+  ],
+  "priority_fixes": {
+    "p0_critical": [
+      {
+        "endpoint": "/Videos/{Id}/stream",
+        "issue": "缺少转码支持",
+        "impact": "客户端无法播放不兼容格式的视频",
+        "official_docs": "https://emby.media/community/index.php?/topic/110054-emby-server-api-documentation/#videostream"
+      },
+      {
+        "endpoint": "/embywebsocket",
+        "issue": "WebSocket未实现",
+        "impact": "客户端无法接收实时更新",
+        "official_docs": "https://emby.media/community/index.php?/topic/110054-emby-server-api-documentation/#websocket"
+      }
+    ],
+    "p1_important": [
+      {
+        "endpoint": "/Items/{Id}/PlaybackInfo",
+        "issue": "缺少转码参数支持",
+        "impact": "客户端无法请求特定转码配置",
+        "official_docs": "https://emby.media/community/index.php?/topic/110054-emby-server-api-documentation/#playbackinfo"
+      },
+      {
+        "endpoint": "/Users/AuthenticateByName",
+        "issue": "认证头部不规范",
+        "impact": "可能影响客户端兼容性",
+        "official_docs": "https://emby.media/community/index.php?/topic/110054-emby-server-api-documentation/#authentication"
+      }
+    ],
+    "p2_enhancement": [
+      {
+        "endpoint": "/Library/VirtualFolders/Query",
+        "issue": "虚拟文件夹查询缺失",
+        "impact": "客户端无法筛选虚拟文件夹",
+        "official_docs": "https://emby.media/community/index.php?/topic/110054-emby-server-api-documentation/#library"
+      }
+    ]
+  }
+}

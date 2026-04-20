@@ -167,14 +167,15 @@ impl MetadataProvider for TmdbProvider {
             provider_ids.insert("imdb".to_string(), imdb_id.clone());
         }
 
-        let birth_date = person_details.birthday.and_then(|date| {
+        let birth_date = person_details.birthday.clone().and_then(|date| {
             chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()
         });
 
-        let death_date = person_details.deathday.and_then(|date| {
+        let death_date = person_details.deathday.clone().and_then(|date| {
             chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()
         });
 
+        let metadata = serde_json::to_value(&person_details).unwrap_or_default();
         let external_person = ExternalPerson {
             external_id: person_details.id.to_string(),
             provider: "tmdb".to_string(),
@@ -190,7 +191,7 @@ impl MetadataProvider for TmdbProvider {
             popularity: Some(person_details.popularity),
             adult: Some(person_details.adult),
             provider_ids,
-            metadata: serde_json::to_value(&person_details).unwrap_or_default(),
+            metadata,
         };
 
         Ok(external_person)
@@ -287,7 +288,7 @@ struct TmdbPersonSearchResult {
     known_for: Option<Vec<TmdbKnownFor>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct TmdbKnownFor {
     title: Option<String>,
     name: Option<String>,

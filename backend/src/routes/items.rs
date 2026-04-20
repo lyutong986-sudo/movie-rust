@@ -488,6 +488,7 @@ async fn playback_info(
     Ok(Json(PlaybackInfoResponse {
         media_sources: vec![media_source],
         play_session_id,
+        ..Default::default()
     }))
 }
 
