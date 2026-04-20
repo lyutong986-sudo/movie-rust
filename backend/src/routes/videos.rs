@@ -1,7 +1,7 @@
 use crate::{auth, error::AppError, naming, repository, state::AppState};
 use axum::{
     body::Body,
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{header, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -12,10 +12,12 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
+use url::{form_urlencoded, Url};
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/Videos/{item_id}/hls-proxy", get(proxy_hls_resource))
         .route("/Videos/{item_id}/{*stream_path}", get(stream_video))
         .route("/Items/{item_id}/File", get(stream_file))
         .route("/Items/{item_id}/Download", get(stream_file))
@@ -25,6 +27,24 @@ pub fn router() -> Router<AppState> {
 struct VideoPath {
     item_id: Uuid,
     stream_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HlsProxyQuery {
+    target: String,
+    #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
+    _api_key: Option<String>,
+}
+
+async fn proxy_hls_resource(
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+    Query(query): Query<HlsProxyQuery>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    ensure_http_url(&query.target)?;
+    proxy_remote_stream(item_id, &query.target, request).await
 }
 
 async fn stream_video(
@@ -80,7 +100,7 @@ async fn serve_media_item(
             target = %target,
             "代理 STRM 远程播放流"
         );
-        return proxy_remote_stream(&target, request).await;
+        return proxy_remote_stream(item.id, &target, request).await;
     }
 
     ServeFile::new(path)
@@ -90,8 +110,15 @@ async fn serve_media_item(
         .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))
 }
 
-async fn proxy_remote_stream(url: &str, request: Request<Body>) -> Result<Response, AppError> {
+async fn proxy_remote_stream(
+    item_id: Uuid,
+    url: &str,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
     let method = request.method().clone();
+    let api_key = query_value(request.uri().query(), "api_key")
+        .or_else(|| query_value(request.uri().query(), "ApiKey"))
+        .or_else(|| query_value(request.uri().query(), "apiKey"));
     let client = Client::new();
     let mut remote_request = if method == Method::HEAD {
         client.head(url)
@@ -128,6 +155,20 @@ async fn proxy_remote_stream(url: &str, request: Request<Body>) -> Result<Respon
         status = %status,
         "STRM 远程流已响应"
     );
+
+    if method != Method::HEAD && is_hls_manifest(url, &headers) {
+        let text = remote_response
+            .text()
+            .await
+            .map_err(|error| AppError::Internal(format!("读取 HLS 播放列表失败: {error}")))?;
+        let rewritten = rewrite_hls_manifest(&text, url, item_id, api_key.as_deref())?;
+        return Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::from(rewritten))
+            .map_err(|error| AppError::Internal(format!("构建 HLS 播放列表响应失败: {error}")));
+    }
 
     let mut response_builder = Response::builder().status(status);
     for (key, value) in headers.iter() {
@@ -199,4 +240,99 @@ fn is_hop_by_hop_header(name: &str) -> bool {
             | "transfer-encoding"
             | "upgrade"
     )
+}
+
+fn ensure_http_url(value: &str) -> Result<(), AppError> {
+    let url = Url::parse(value)
+        .map_err(|_| AppError::BadRequest("HLS 代理地址不是有效 URL".to_string()))?;
+    if matches!(url.scheme(), "http" | "https") {
+        return Ok(());
+    }
+
+    Err(AppError::BadRequest("HLS 代理只允许 http/https 地址".to_string()))
+}
+
+fn query_value(query: Option<&str>, key: &str) -> Option<String> {
+    form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+        .find_map(|(candidate, value)| (candidate == key).then(|| value.into_owned()))
+}
+
+fn is_hls_manifest(url: &str, headers: &header::HeaderMap) -> bool {
+    if naming::extension_from_url(url).is_some_and(|extension| extension == "m3u8") {
+        return true;
+    }
+
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|value| value.contains("mpegurl") || value.contains("m3u8"))
+}
+
+fn rewrite_hls_manifest(
+    manifest: &str,
+    manifest_url: &str,
+    item_id: Uuid,
+    api_key: Option<&str>,
+) -> Result<String, AppError> {
+    let base_url = Url::parse(manifest_url)
+        .map_err(|_| AppError::BadRequest("HLS 播放列表地址不是有效 URL".to_string()))?;
+    let mut rewritten = String::with_capacity(manifest.len());
+
+    for line in manifest.lines() {
+        if line.trim_start().starts_with("#EXT-X-") && line.contains("URI=\"") {
+            rewritten.push_str(&rewrite_hls_tag_uri(line, &base_url, item_id, api_key));
+        } else if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            rewritten.push_str(line);
+        } else {
+            rewritten.push_str(&proxied_hls_url(
+                &resolve_hls_url(&base_url, line.trim())?,
+                item_id,
+                api_key,
+            ));
+        }
+        rewritten.push('\n');
+    }
+
+    Ok(rewritten)
+}
+
+fn rewrite_hls_tag_uri(line: &str, base_url: &Url, item_id: Uuid, api_key: Option<&str>) -> String {
+    let Some(uri_index) = line.find("URI=\"") else {
+        return line.to_string();
+    };
+    let value_start = uri_index + 5;
+    let Some(value_end_offset) = line[value_start..].find('"') else {
+        return line.to_string();
+    };
+    let value_end = value_start + value_end_offset;
+    let Ok(resolved) = resolve_hls_url(base_url, &line[value_start..value_end]) else {
+        return line.to_string();
+    };
+
+    format!(
+        "{}{}{}",
+        &line[..value_start],
+        proxied_hls_url(&resolved, item_id, api_key),
+        &line[value_end..]
+    )
+}
+
+fn resolve_hls_url(base_url: &Url, value: &str) -> Result<String, AppError> {
+    let url = base_url
+        .join(value)
+        .map_err(|_| AppError::BadRequest("HLS 播放列表包含无效资源地址".to_string()))?;
+    Ok(url.to_string())
+}
+
+fn proxied_hls_url(target: &str, item_id: Uuid, api_key: Option<&str>) -> String {
+    let encoded_target: String = form_urlencoded::byte_serialize(target.as_bytes()).collect();
+    let mut url = format!("/Videos/{item_id}/hls-proxy?target={encoded_target}");
+    if let Some(api_key) = api_key {
+        let encoded_key: String = form_urlencoded::byte_serialize(api_key.as_bytes()).collect();
+        url.push_str("&api_key=");
+        url.push_str(&encoded_key);
+    }
+
+    url
 }

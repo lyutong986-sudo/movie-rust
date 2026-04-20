@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Hls, { ErrorTypes, Events, type ErrorData } from 'hls.js';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { BaseItemDto } from '../../api/emby';
@@ -14,6 +15,30 @@ interface SubtitleOption {
   srclang: string;
   streamIndex: number;
   isDefault: boolean;
+}
+
+type PlaybackEngine = 'hls' | 'mpegts' | 'native';
+
+interface MpegtsRuntime {
+  isSupported?: () => boolean;
+  getFeatureList?: () => {
+    msePlayback?: boolean;
+    mseLivePlayback?: boolean;
+    networkStreamIO?: boolean;
+  };
+  createPlayer: (
+    mediaDataSource: Record<string, unknown>,
+    config?: Record<string, unknown>
+  ) => MpegtsPlayer;
+}
+
+interface MpegtsPlayer {
+  attachMediaElement: (element: HTMLMediaElement) => void;
+  load: () => void;
+  play?: () => Promise<void> | void;
+  unload?: () => void;
+  detachMediaElement?: () => void;
+  destroy: () => void;
 }
 
 const route = useRoute();
@@ -43,6 +68,8 @@ let hasStopped = false;
 let lastProgressSecond = -10;
 let pendingSeekSeconds = 0;
 let rememberedVolume = 1;
+let hls: Hls | null = null;
+let mpegtsPlayer: MpegtsPlayer | null = null;
 
 const currentSource = computed(() => item.value?.MediaSources?.[currentSourceIndex.value]);
 const sourceUrl = computed(() => {
@@ -156,7 +183,7 @@ watch(
     currentTime.value = pendingSeekSeconds;
     waiting.value = true;
     panelMode.value = null;
-    player.load();
+    await attachPlaybackSource();
 
     try {
       await player.play();
@@ -223,6 +250,7 @@ onBeforeUnmount(async () => {
   window.clearTimeout(overlayTimer);
   document.removeEventListener('fullscreenchange', syncFullscreenState);
   window.removeEventListener('keydown', handleKeydown);
+  destroyStreamingPlayers();
   await stopPlayback();
 });
 
@@ -258,7 +286,7 @@ async function loadPlayback(nextItemId: string) {
     await nextTick();
     syncVolumeState();
     if (videoRef.value) {
-      videoRef.value.load();
+      await attachPlaybackSource();
       try {
         await videoRef.value.play();
       } catch {
@@ -377,6 +405,8 @@ function handleTimeUpdate() {
     lastProgressSecond = second;
     void reportProgress(false).catch(() => undefined);
   }
+
+  validateVideoFrame();
 }
 
 function handleLoadedMetadata() {
@@ -412,6 +442,198 @@ function handleDurationChange() {
   }
 
   duration.value = Number.isFinite(player.duration) ? player.duration : 0;
+}
+
+function handleMediaError(_event?: Event) {
+  const player = videoRef.value;
+  const mediaError = player?.error;
+  const container = currentSource.value?.Container?.toUpperCase() || 'UNKNOWN';
+  const codec = videoStream.value?.Codec ? ` / ${videoStream.value.Codec}` : '';
+
+  if (!mediaError) {
+    return;
+  }
+
+  if (mediaError.code === MediaError.MEDIA_ERR_NETWORK) {
+    error.value = '播放网络连接失败，请查看容器日志里的 STRM 代理请求和上游响应状态。';
+    return;
+  }
+
+  if (mediaError.code === MediaError.MEDIA_ERR_DECODE) {
+    error.value = `浏览器无法解码当前视频流（${container}${codec}），这通常是容器或视频编码不被 Web 播放器支持。`;
+    return;
+  }
+
+  if (mediaError.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
+    error.value = `浏览器不支持当前播放源（${container}${codec}）。MP4/WebM/HLS/FLV/TS 会优先直连或 MSE 播放，MKV/AVI/WMV 等仍取决于浏览器自身能力。`;
+  }
+}
+
+function validateVideoFrame(_event?: Event) {
+  const player = videoRef.value;
+  if (!player || error.value || item.value?.MediaType !== 'Video' || !videoStream.value) {
+    return;
+  }
+
+  if (player.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || player.currentTime < 1) {
+    return;
+  }
+
+  if (player.videoWidth > 0 || player.videoHeight > 0) {
+    return;
+  }
+
+  const container = currentSource.value?.Container?.toUpperCase() || 'UNKNOWN';
+  const codec = videoStream.value.Codec ? ` / ${videoStream.value.Codec}` : '';
+  error.value = `已经收到音频但没有视频画面，当前视频轨道可能不被浏览器解码器支持（${container}${codec}）。`;
+}
+
+async function attachPlaybackSource() {
+  const player = videoRef.value;
+  const url = sourceUrl.value;
+  if (!player || !url) {
+    return;
+  }
+
+  destroyStreamingPlayers();
+  error.value = '';
+  player.removeAttribute('src');
+  player.load();
+
+  const engine = await detectPlaybackEngine(url);
+  if (engine === 'hls' && Hls.isSupported() && !canPlayNativeHls(player)) {
+    await attachHlsSource(player, url);
+    return;
+  }
+
+  if (engine === 'mpegts') {
+    const handledByMse = await attachMpegtsSource(player, url);
+    if (handledByMse) {
+      return;
+    }
+  }
+
+  player.src = url;
+  player.load();
+}
+
+async function attachHlsSource(player: HTMLVideoElement, url: string) {
+  const instance = new Hls({
+    testBandwidth: false,
+    manifestLoadingTimeOut: 20000
+  });
+  hls = instance;
+  instance.on(Events.ERROR, onHlsError);
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      window.clearTimeout(timer);
+      instance.off(Events.MANIFEST_PARSED, done);
+      resolve();
+    };
+    const timer = window.setTimeout(done, 3000);
+
+    instance.on(Events.MANIFEST_PARSED, done);
+    instance.on(Events.MEDIA_ATTACHED, () => {
+      instance.loadSource(url);
+    });
+    instance.attachMedia(player);
+  });
+}
+
+async function attachMpegtsSource(player: HTMLVideoElement, url: string) {
+  const runtime = await loadMpegtsRuntime();
+  if (!runtime) {
+    return false;
+  }
+
+  const featureList = runtime.getFeatureList?.();
+  const supported = runtime.isSupported?.() || featureList?.msePlayback || featureList?.mseLivePlayback;
+  if (!supported) {
+    return false;
+  }
+
+  const container = normalizedContainer();
+  const type = container === 'flv' || /\.flv(?:$|[?#])/i.test(url) ? 'flv' : 'mpegts';
+  mpegtsPlayer = runtime.createPlayer(
+    {
+      type,
+      isLive: !currentSource.value?.RunTimeTicks,
+      url
+    },
+    {
+      enableWorker: true,
+      lazyLoad: false
+    }
+  );
+  mpegtsPlayer.attachMediaElement(player);
+  mpegtsPlayer.load();
+  void Promise.resolve(mpegtsPlayer.play?.()).catch(() => undefined);
+  return true;
+}
+
+async function loadMpegtsRuntime() {
+  try {
+    const imported = (await import('mpegts.js')) as unknown as MpegtsRuntime & {
+      default?: MpegtsRuntime;
+    };
+    return imported.default || imported;
+  } catch {
+    return null;
+  }
+}
+
+function destroyStreamingPlayers() {
+  destroyHlsPlayer();
+  destroyMpegtsPlayer();
+}
+
+function destroyMpegtsPlayer() {
+  if (!mpegtsPlayer) {
+    return;
+  }
+
+  try {
+    mpegtsPlayer.unload?.();
+    mpegtsPlayer.detachMediaElement?.();
+    mpegtsPlayer.destroy();
+  } finally {
+    mpegtsPlayer = null;
+  }
+}
+
+function destroyHlsPlayer() {
+  if (!hls) {
+    return;
+  }
+
+  hls.off(Events.ERROR, onHlsError);
+  hls.destroy();
+  hls = null;
+}
+
+function onHlsError(_event: typeof Events.ERROR, data: ErrorData) {
+  if (!data.fatal || !hls) {
+    return;
+  }
+
+  if (data.type === ErrorTypes.NETWORK_ERROR) {
+    hls.startLoad();
+    return;
+  }
+
+  if (data.type === ErrorTypes.MEDIA_ERROR) {
+    hls.recoverMediaError();
+    return;
+  }
+
+  error.value = 'HLS 播放失败，请检查 STRM 远程地址是否可访问';
 }
 
 function handleWaiting() {
@@ -681,6 +903,108 @@ function formatClock(value: Date) {
 function sourceLabel(source: NonNullable<BaseItemDto['MediaSources']>[number], index: number) {
   return source.Container ? `${source.Container.toUpperCase()} 源 ${index + 1}` : `播放源 ${index + 1}`;
 }
+
+async function detectPlaybackEngine(url: string): Promise<PlaybackEngine> {
+  const container = normalizedContainer();
+  const path = currentSource.value?.Path || '';
+
+  if (looksLikeHls(container, url, path)) {
+    return 'hls';
+  }
+
+  if (looksLikeMpegts(container, url, path)) {
+    return 'mpegts';
+  }
+
+  if (shouldProbeStreamType(container, url, path)) {
+    const contentType = await probeStreamContentType(url);
+    if (isHlsMime(contentType)) {
+      return 'hls';
+    }
+
+    if (isMpegtsMime(contentType)) {
+      return 'mpegts';
+    }
+  }
+
+  return 'native';
+}
+
+function normalizedContainer() {
+  return (currentSource.value?.Container || '').trim().replace(/^\./, '').toLowerCase();
+}
+
+function looksLikeHls(container: string, url: string, path: string) {
+  return container === 'm3u8' || container === 'hls' || hasAnyExtension([url, path], ['m3u8']);
+}
+
+function looksLikeMpegts(container: string, url: string, path: string) {
+  return (
+    ['flv', 'ts', 'm2ts', 'mts'].includes(container) ||
+    hasAnyExtension([url, path], ['flv', 'ts', 'm2ts', 'mts'])
+  );
+}
+
+function hasAnyExtension(values: string[], extensions: string[]) {
+  return values.some((value) => {
+    const cleanValue = value.split('#')[0].split('?')[0].toLowerCase();
+    return extensions.some((extension) => cleanValue.endsWith(`.${extension}`));
+  });
+}
+
+function shouldProbeStreamType(container: string, url: string, path: string) {
+  if (!currentSource.value?.IsRemote) {
+    return false;
+  }
+
+  if (!container || container === 'strm') {
+    return true;
+  }
+
+  return !hasAnyExtension([url, path], [
+    'm3u8',
+    'flv',
+    'ts',
+    'm2ts',
+    'mts',
+    'mp4',
+    'm4v',
+    'mov',
+    'webm',
+    'ogv',
+    'ogg'
+  ]);
+}
+
+async function probeStreamContentType(url: string) {
+  try {
+    const response = await fetch(url, { method: 'HEAD' });
+    if (!response.ok) {
+      return '';
+    }
+
+    return response.headers.get('content-type') || '';
+  } catch {
+    return '';
+  }
+}
+
+function isHlsMime(contentType: string) {
+  const value = contentType.toLowerCase();
+  return value.includes('mpegurl') || value.includes('m3u8');
+}
+
+function isMpegtsMime(contentType: string) {
+  const value = contentType.toLowerCase();
+  return value.includes('video/x-flv') || value.includes('video/mp2t') || value.includes('mp2t');
+}
+
+function canPlayNativeHls(player: HTMLVideoElement) {
+  return Boolean(
+    player.canPlayType('application/vnd.apple.mpegurl').replace('no', '') ||
+      player.canPlayType('application/x-mpegURL').replace('no', '')
+  );
+}
 </script>
 
 <template>
@@ -706,7 +1030,6 @@ function sourceLabel(source: NonNullable<BaseItemDto['MediaSources']>[number], i
     <video
       ref="videoRef"
       class="jelly-video-player__surface"
-      :src="sourceUrl"
       :poster="posterImage"
       autoplay
       playsinline
@@ -717,9 +1040,11 @@ function sourceLabel(source: NonNullable<BaseItemDto['MediaSources']>[number], i
       @ended="handleEnded"
       @timeupdate="handleTimeUpdate"
       @loadedmetadata="handleLoadedMetadata"
+      @loadeddata="validateVideoFrame"
       @durationchange="handleDurationChange"
       @waiting="handleWaiting"
       @playing="handlePlaying"
+      @error="handleMediaError"
     >
       <track
         v-for="track in subtitleOptions"

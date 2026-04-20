@@ -100,10 +100,16 @@ export interface BaseItemDto {
   MediaSources?: Array<{
     Id: string;
     Path: string;
+    IsRemote?: boolean;
     Container: string;
     DirectStreamUrl: string;
+    SupportsDirectPlay?: boolean;
+    SupportsDirectStream?: boolean;
+    SupportsTranscoding?: boolean;
+    Formats?: string[];
     Size?: number;
     ETag?: string;
+    RunTimeTicks?: number;
     DefaultAudioStreamIndex?: number;
     DefaultSubtitleStreamIndex?: number;
     MediaStreams: MediaStreamDto[];

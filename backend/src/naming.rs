@@ -142,11 +142,57 @@ pub fn strm_target_from_text(content: &str) -> Option<String> {
 
 pub fn extension_from_url(value: &str) -> Option<String> {
     let url = Url::parse(value).ok()?;
-    let path = Path::new(url.path());
-    path.extension()
+    extension_from_path_text(url.path()).or_else(|| {
+        url.query_pairs()
+            .find_map(|(key, value)| extension_from_query_value(&key, &value))
+    })
+}
+
+fn extension_from_query_value(key: &str, value: &str) -> Option<String> {
+    let key = key.to_lowercase();
+    let direct_value = value.trim().trim_start_matches('.').to_lowercase();
+    if matches!(
+        key.as_str(),
+        "container" | "format" | "formatname" | "ext" | "extension" | "type"
+    ) && looks_like_stream_extension(&direct_value)
+    {
+        return Some(direct_value);
+    }
+
+    Url::parse(value)
+        .ok()
+        .and_then(|url| extension_from_path_text(url.path()))
+        .or_else(|| extension_from_path_text(value))
+}
+
+fn extension_from_path_text(value: &str) -> Option<String> {
+    Path::new(value)
+        .extension()
         .and_then(OsStr::to_str)
         .map(str::to_lowercase)
         .filter(|extension| !extension.is_empty())
+}
+
+fn looks_like_stream_extension(value: &str) -> bool {
+    matches!(
+        value,
+        "m3u8"
+            | "mpd"
+            | "flv"
+            | "ts"
+            | "m2ts"
+            | "mts"
+            | "mp4"
+            | "m4v"
+            | "mov"
+            | "mkv"
+            | "webm"
+            | "avi"
+            | "wmv"
+            | "rmvb"
+            | "mpg"
+            | "mpeg"
+    )
 }
 
 pub fn find_sidecar_image(video: &Path) -> Option<PathBuf> {
