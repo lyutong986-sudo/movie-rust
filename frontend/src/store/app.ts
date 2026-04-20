@@ -67,6 +67,7 @@ export const libraries = ref<BaseItemDto[]>([]);
 export const virtualFolders = ref<VirtualFolderInfo[]>([]);
 export const items = ref<BaseItemDto[]>([]);
 export const homeItems = ref<BaseItemDto[]>([]);
+export const recentlyAddedTitles = ref<BaseItemDto[]>([]);
 export const latestByLibrary = ref<Record<string, BaseItemDto[]>>({});
 export const systemInfo = ref<SystemInfo | null>(null);
 export const selectedItem = ref<BaseItemDto | null>(null);
@@ -98,7 +99,7 @@ export const continueWatching = computed(() =>
 export const favorites = computed(() =>
   homeItems.value.filter((item) => item.UserData?.IsFavorite).slice(0, 12)
 );
-export const latest = computed(() => homeItems.value.filter((item) => !item.IsFolder).slice(0, 18));
+export const latest = computed(() => recentlyAddedTitles.value.slice(0, 18));
 export const libraryCards = computed(() => libraries.value);
 export const totalLibraryItems = computed(() =>
   libraries.value.reduce((sum, library) => sum + (library.ChildCount || 0), 0)
@@ -254,7 +255,7 @@ export async function enterHome() {
   state.selectedLibraryId = '';
   parentStack.value = [];
   await loadLibraries();
-  await Promise.all([loadHome(), loadLatestByLibrary()]);
+  await Promise.all([loadHome(), loadRecentlyAddedTitles(), loadLatestByLibrary()]);
 }
 
 export async function addServer(url: string) {
@@ -320,9 +321,75 @@ export async function loadHome() {
 
 export async function loadLatestByLibrary() {
   const entries = await Promise.all(
-    libraries.value.map(async (library) => [library.Id, await api.latest(library.Id, 18)] as const)
+    libraries.value.map(async (library) => [library.Id, await loadLibraryHomeItems(library)] as const)
   );
   latestByLibrary.value = Object.fromEntries(entries);
+}
+
+export async function loadRecentlyAddedTitles() {
+  const entries = await Promise.all(
+    libraries.value.map(async (library) => {
+      if (library.CollectionType === 'tvshows') {
+        const result = await api.items(library.Id, '', false, {
+          includeTypes: ['Series'],
+          sortBy: 'DateCreated',
+          sortOrder: 'Descending',
+          limit: 36
+        });
+        return result.Items;
+      }
+
+      if (library.CollectionType === 'movies') {
+        const result = await api.items(library.Id, '', false, {
+          includeTypes: ['Movie'],
+          sortBy: 'DateCreated',
+          sortOrder: 'Descending',
+          limit: 36
+        });
+        return result.Items;
+      }
+
+      return [] as BaseItemDto[];
+    })
+  );
+
+  recentlyAddedTitles.value = dedupeItemsById(entries.flat())
+    .sort(compareDateCreatedDesc)
+    .slice(0, 36);
+}
+
+async function loadLibraryHomeItems(library: BaseItemDto) {
+  if (library.CollectionType === 'tvshows') {
+    const result = await api.items(library.Id, '', false, {
+      includeTypes: ['Series'],
+      sortBy: 'SortName',
+      sortOrder: 'Ascending',
+      limit: 36
+    });
+    return result.Items;
+  }
+
+  if (library.CollectionType === 'movies') {
+    const result = await api.items(library.Id, '', false, {
+      includeTypes: ['Movie'],
+      sortBy: 'DateCreated',
+      sortOrder: 'Descending',
+      limit: 36
+    });
+    return result.Items;
+  }
+
+  if (library.CollectionType === 'music') {
+    const result = await api.items(library.Id, '', true, {
+      includeTypes: ['Audio'],
+      sortBy: 'DateCreated',
+      sortOrder: 'Descending',
+      limit: 36
+    });
+    return result.Items;
+  }
+
+  return api.latest(library.Id, 18);
 }
 
 export async function loadItems() {
@@ -354,7 +421,7 @@ export async function backToHome() {
   state.selectedLibraryId = '';
   state.search = '';
   parentStack.value = [];
-  await loadHome();
+  await Promise.all([loadHome(), loadRecentlyAddedTitles(), loadLatestByLibrary()]);
 }
 
 export async function loadAdminData() {
@@ -424,7 +491,7 @@ export async function createLibrary(payload = libraryPayloadFromState()) {
     state.showAddLibrary = false;
     await loadLibraries();
     await loadVirtualFolders();
-    await Promise.all([loadHome(), loadLatestByLibrary()]);
+    await Promise.all([loadHome(), loadRecentlyAddedTitles(), loadLatestByLibrary()]);
     state.selectedLibraryId = library.Id;
     await loadItems();
   }, '媒体库已创建');
@@ -446,7 +513,7 @@ export async function deleteLibrary(library: BaseItemDto | VirtualFolderInfo) {
 
     await loadLibraries();
     await loadVirtualFolders();
-    await Promise.all([loadHome(), loadLatestByLibrary()]);
+    await Promise.all([loadHome(), loadRecentlyAddedTitles(), loadLatestByLibrary()]);
     await loadItems();
   }, '媒体库已删除');
 }
@@ -467,6 +534,7 @@ export async function scan() {
     const summary = await api.scan();
     await loadLibraries();
     await loadVirtualFolders();
+    await loadRecentlyAddedTitles();
     await loadLatestByLibrary();
     await loadItems();
     state.message = `扫描完成，新增 ${summary.ImportedItems} 个条目`;
@@ -495,6 +563,7 @@ function clearClientState(keepInitialized: boolean) {
   libraries.value = [];
   items.value = [];
   homeItems.value = [];
+  recentlyAddedTitles.value = [];
   latestByLibrary.value = {};
   adminUsers.value = [];
   virtualFolders.value = [];
@@ -671,6 +740,31 @@ function normalizeServerUrl(url: string) {
   }
 
   return value.replace(/\/(emby|mediabrowser)\/?$/i, '').replace(/\/$/, '');
+}
+
+function compareDateCreatedDesc(left: BaseItemDto, right: BaseItemDto) {
+  return parseDateValue(right.DateCreated) - parseDateValue(left.DateCreated);
+}
+
+function dedupeItemsById(items: BaseItemDto[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (seen.has(item.Id)) {
+      return false;
+    }
+
+    seen.add(item.Id);
+    return true;
+  });
+}
+
+function parseDateValue(value?: string) {
+  if (!value) {
+    return 0;
+  }
+
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
 function defaultServerUrl() {

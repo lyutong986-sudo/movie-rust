@@ -16,6 +16,7 @@ const latestSections = computed(() =>
   libraries.value
     .map((library) => ({
       library,
+      label: librarySectionLabel(library.CollectionType),
       items: latestByLibrary.value[library.Id] || []
     }))
     .filter((section) => section.items.length)
@@ -41,6 +42,13 @@ function libraryIcon(collectionType?: string) {
 
 async function openItem(item: BaseItemDto) {
   await router.push(itemRoute(item));
+}
+
+function librarySectionLabel(collectionType?: string) {
+  if (collectionType === 'tvshows') return '电视剧';
+  if (collectionType === 'movies') return '最新电影';
+  if (collectionType === 'music') return '最新音乐';
+  return '最新内容';
 }
 
 async function playItem(item: BaseItemDto) {
@@ -141,7 +149,7 @@ async function playItem(item: BaseItemDto) {
     <section v-for="section in latestSections" :key="section.library.Id" class="media-row">
       <div class="section-heading">
         <h3>{{ section.library.Name }}</h3>
-        <span>最新内容</span>
+        <span>{{ section.label }}</span>
       </div>
       <div class="rail poster-rail">
         <MediaCard
