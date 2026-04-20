@@ -214,7 +214,7 @@ impl MetadataProvider for TmdbProvider {
             };
 
             let year = cast.release_date.or(cast.first_air_date)
-                .and_then(|date| date.split('-').next())
+                .and_then(|date| date.split('-').next().map(str::to_string))
                 .and_then(|year_str| year_str.parse::<i32>().ok());
 
             results.push(ExternalPersonCredit {
@@ -248,7 +248,7 @@ impl MetadataProvider for TmdbProvider {
             };
 
             let year = crew.release_date.or(crew.first_air_date)
-                .and_then(|date| date.split('-').next())
+                .and_then(|date| date.split('-').next().map(str::to_string))
                 .and_then(|year_str| year_str.parse::<i32>().ok());
 
             results.push(ExternalPersonCredit {
@@ -277,7 +277,7 @@ struct TmdbPersonSearchResponse {
     total_results: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct TmdbPersonSearchResult {
     id: i32,
     name: String,
@@ -294,7 +294,7 @@ struct TmdbKnownFor {
     media_type: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct TmdbPersonDetails {
     id: i32,
     name: String,

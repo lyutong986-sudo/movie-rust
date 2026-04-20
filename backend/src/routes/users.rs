@@ -34,9 +34,9 @@ pub fn router() -> Router<AppState> {
         .route("/users/me", get(me))
         .route("/Users/{user_id}", get(user_by_id))
         .route("/users/{user_id}", get(user_by_id))
-        .route("/Users/{user_id}/Policy", put(update_user_policy))
-        .route("/Users/{user_id}/policy", put(update_user_policy))
-        .route("/users/{user_id}/policy", put(update_user_policy))
+        .route("/Users/{user_id}/Policy", post(update_user_policy))
+        .route("/Users/{user_id}/policy", post(update_user_policy))
+        .route("/users/{user_id}/policy", post(update_user_policy))
 }
 
 async fn public_users(State(state): State<AppState>) -> Result<Json<Vec<UserDto>>, AppError> {

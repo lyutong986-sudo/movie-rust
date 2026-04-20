@@ -3,6 +3,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::{
     error::AppError,
@@ -12,6 +13,7 @@ use crate::{
 };
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub struct GetPersonsQuery {
     user_id: Option<String>,
     start_index: Option<i32>,
@@ -38,9 +40,18 @@ pub async fn get_persons(
 
 pub async fn get_person(
     State(state): State<AppState>,
-    Path(person_id): Path<String>,
+    Path(person_id_or_name): Path<String>,
 ) -> Result<Json<PersonDto>, AppError> {
-    let person = repository::get_person_by_id(&state.pool, &person_id).await?;
+    // 尝试解析为UUID
+    if let Ok(uuid) = Uuid::parse_str(&person_id_or_name) {
+        // 按ID查找
+        if let Some(person) = repository::get_person_by_uuid(&state.pool, uuid).await? {
+            return Ok(Json(person));
+        }
+    }
+    
+    // 按名称查找
+    let person = repository::get_person_by_name(&state.pool, &person_id_or_name).await?;
     Ok(Json(person))
 }
 

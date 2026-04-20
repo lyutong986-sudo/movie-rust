@@ -293,16 +293,10 @@ pub async fn get_persons(
     Ok(person_dtos)
 }
 
-pub async fn get_person_by_id(
+pub async fn get_person_by_uuid(
     pool: &sqlx::PgPool,
-    person_id: &str,
-) -> Result<PersonDto, AppError> {
-    // 尝试解析为UUID
-    let id = match Uuid::parse_str(person_id) {
-        Ok(uuid) => uuid,
-        Err(_) => return Err(AppError::NotFound("Invalid person ID".to_string())),
-    };
-    
+    person_id: Uuid,
+) -> Result<Option<PersonDto>, AppError> {
     let person = sqlx::query_as::<_, DbPerson>(
         r#"
         SELECT *
@@ -310,7 +304,56 @@ pub async fn get_person_by_id(
         WHERE id = $1
         "#,
     )
-    .bind(id)
+    .bind(person_id)
+    .fetch_optional(pool)
+    .await?;
+    
+    if let Some(person) = person {
+        // 将provider_ids JSON转换为HashMap
+        let provider_ids: Option<std::collections::HashMap<String, String>> = 
+            if person.provider_ids.is_null() {
+                None
+            } else {
+                match serde_json::from_value(person.provider_ids.clone()) {
+                    Ok(map) => Some(map),
+                    Err(_) => None,
+                }
+            };
+        
+        let person_dto = PersonDto {
+            name: person.name,
+            id: person.id.to_string(),
+            role: None,
+            person_type: None,
+            sort_name: person.sort_name,
+            overview: person.overview,
+            external_url: person.external_url,
+            premiere_date: person.premiere_date.map(|dt| dt.to_rfc3339()),
+            production_year: person.production_year,
+            image_tags: None, // 暂时为空
+            provider_ids,
+            favorite: Some(false),
+        };
+        
+        Ok(Some(person_dto))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn get_person_by_name(
+    pool: &sqlx::PgPool,
+    name: &str,
+) -> Result<PersonDto, AppError> {
+    let person = sqlx::query_as::<_, DbPerson>(
+        r#"
+        SELECT *
+        FROM persons
+        WHERE name = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(name)
     .fetch_optional(pool)
     .await?;
     
@@ -343,21 +386,51 @@ pub async fn get_person_by_id(
         
         Ok(person_dto)
     } else {
-        Err(AppError::NotFound("Person not found".to_string()))
+        Err(AppError::NotFound(format!("Person not found: {}", name)))
     }
 }
 
 pub async fn get_items_by_person(
     pool: &sqlx::PgPool,
-    person_id: &str,
+    person_id_or_name: &str,
     _start_index: Option<i32>,
     _limit: Option<i32>,
 ) -> Result<Vec<BaseItemDto>, AppError> {
     // 尝试解析为UUID
-    let id = match Uuid::parse_str(person_id) {
-        Ok(uuid) => uuid,
-        Err(_) => return Ok(vec![]),
-    };
+    if let Ok(uuid) = Uuid::parse_str(person_id_or_name) {
+        // 按UUID查找人物
+        let person = sqlx::query_as::<_, DbPerson>(
+            r#"
+            SELECT *
+            FROM persons
+            WHERE id = $1
+            "#,
+        )
+        .bind(uuid)
+        .fetch_optional(pool)
+        .await?;
+        
+        if person.is_none() {
+            return Ok(vec![]);
+        }
+    } else {
+        // 按名称查找人物
+        let person = sqlx::query_as::<_, DbPerson>(
+            r#"
+            SELECT *
+            FROM persons
+            WHERE name = $1
+            LIMIT 1
+            "#,
+        )
+        .bind(person_id_or_name)
+        .fetch_optional(pool)
+        .await?;
+        
+        if person.is_none() {
+            return Ok(vec![]);
+        }
+    }
     
     // 查询与人物相关的项目
     // 注意：person_roles表还没有填充，暂时返回空列表

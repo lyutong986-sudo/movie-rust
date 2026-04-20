@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     error::AppError,
     metadata::{
@@ -12,12 +14,12 @@ use uuid::Uuid;
 /// 人物数据服务
 pub struct PersonService {
     pool: PgPool,
-    metadata_manager: MetadataProviderManager,
+    metadata_manager: Arc<MetadataProviderManager>,
 }
 
 impl PersonService {
     /// 创建新的人物数据服务
-    pub fn new(pool: PgPool, metadata_manager: MetadataProviderManager) -> Self {
+    pub fn new(pool: PgPool, metadata_manager: Arc<MetadataProviderManager>) -> Self {
         Self {
             pool,
             metadata_manager,
