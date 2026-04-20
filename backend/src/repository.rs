@@ -1168,7 +1168,7 @@ pub async fn list_media_items(
             id, parent_id, name, sort_name, item_type, media_type, path, container,
             overview, production_year, runtime_ticks, premiere_date, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
-            width, height, video_codec, audio_codec, image_primary_path, backdrop_path,
+            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
             date_created, date_modified, COUNT(*) OVER() AS total_count
         FROM media_items
         WHERE 1 = 1
@@ -1276,7 +1276,7 @@ pub async fn get_media_item(
             id, parent_id, name, sort_name, item_type, media_type, path, container,
             overview, production_year, runtime_ticks, premiere_date, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
-            width, height, video_codec, audio_codec, image_primary_path, backdrop_path,
+            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
             date_created, date_modified
         FROM media_items
         WHERE id = $1
@@ -1913,7 +1913,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         formats: vec![container.clone()],
         size,
         e_tag: Some(item.date_modified.timestamp().to_string()),
-        bitrate: None,
+        bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
         default_audio_stream_index: media_streams.iter()
             .position(|s| s.stream_type == "Audio" && s.is_default)
             .map(|i| i as i32)
@@ -2191,6 +2191,10 @@ pub async fn update_media_item_metadata(
         .as_deref()
         .and_then(|dur| dur.parse::<f64>().ok())
         .map(|seconds| (seconds * 10_000_000.0).round() as i64);
+    let bit_rate = format
+        .bit_rate
+        .as_deref()
+        .and_then(|br| br.parse::<i64>().ok());
 
     sqlx::query(
         r#"
@@ -2200,8 +2204,9 @@ pub async fn update_media_item_metadata(
             width = COALESCE($3, width),
             height = COALESCE($4, height),
             runtime_ticks = COALESCE($5, runtime_ticks),
+            bit_rate = COALESCE($6, bit_rate),
             date_modified = now()
-        WHERE id = $6
+        WHERE id = $7
         "#,
     )
     .bind(video_codec)
@@ -2209,6 +2214,7 @@ pub async fn update_media_item_metadata(
     .bind(width)
     .bind(height)
     .bind(runtime_ticks)
+    .bind(bit_rate)
     .bind(item_id)
     .execute(pool)
     .await?;
