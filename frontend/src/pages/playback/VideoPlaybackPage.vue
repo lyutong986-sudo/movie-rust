@@ -916,7 +916,7 @@ function sourceLabel(source: NonNullable<BaseItemDto['MediaSources']>[number], i
       :poster="posterUrl"
       autoplay
       playsinline
-      crossorigin
+      :crossorigin="'anonymous'"
       preload="auto"
       @click="togglePlayback"
       @loadeddata="handleLoadedData"
