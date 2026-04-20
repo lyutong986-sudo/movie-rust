@@ -4,11 +4,12 @@ use crate::{
 use axum::{
     body::Body,
     extract::{Path, Request, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
+use reqwest::Client;
 use std::path::PathBuf;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
@@ -22,6 +23,7 @@ pub fn router() -> Router<AppState> {
             "/Items/{item_id}/Images/{image_type}/{image_index}",
             get(get_item_image_by_index),
         )
+        .route("/Images/Remote", get(get_remote_image))
         .route(
             "/Users/{user_id}/Images/{image_type}",
             get(user_image_placeholder),
@@ -94,14 +96,33 @@ async fn serve_item_image(
     }
     .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
 
-    serve_path(PathBuf::from(path), request).await
+    serve_image(&path, request).await
+}
+
+async fn get_remote_image(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let image_url = params
+        .get("ImageUrl")
+        .ok_or_else(|| AppError::BadRequest("Missing ImageUrl parameter".to_string()))?;
+
+    serve_remote_image(image_url, request).await
 }
 
 async fn user_image_placeholder() -> StatusCode {
     StatusCode::NOT_FOUND
 }
 
-async fn serve_path(path: PathBuf, request: Request<Body>) -> Result<Response, AppError> {
+async fn serve_image(path: &str, request: Request<Body>) -> Result<Response, AppError> {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        serve_remote_image(path, request).await
+    } else {
+        serve_local_path(PathBuf::from(path), request).await
+    }
+}
+
+async fn serve_local_path(path: PathBuf, request: Request<Body>) -> Result<Response, AppError> {
     if !path.exists() {
         return Err(AppError::NotFound("文件不存在".to_string()));
     }
@@ -111,4 +132,39 @@ async fn serve_path(path: PathBuf, request: Request<Body>) -> Result<Response, A
         .await
         .map(IntoResponse::into_response)
         .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))
+}
+
+async fn serve_remote_image(url: &str, _request: Request<Body>) -> Result<Response, AppError> {
+    let client = Client::new();
+    let response = client.get(url).send().await.map_err(|e| {
+        AppError::Internal(format!("Failed to fetch remote image: {}", e))
+    })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::NotFound(format!(
+            "Remote image not found: {}",
+            status
+        )));
+    }
+
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v: &header::HeaderValue| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let body_bytes = response.bytes().await.map_err(|e| {
+        AppError::Internal(format!("Failed to read remote image body: {}", e))
+    })?;
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "public, max-age=86400") // 缓存24小时
+        .body(Body::from(body_bytes))
+        .map_err(|e| AppError::Internal(format!("Failed to build response: {}", e)))?;
+
+    Ok(response)
 }

@@ -68,6 +68,9 @@
 | POST/DELETE | `/Users/{userId}/FavoriteItems/{itemId}` | 旧版收藏/取消收藏 |
 | POST/DELETE | `/UserPlayedItems/{itemId}` | 标记已播放/未播放 |
 | POST/DELETE | `/Users/{userId}/PlayedItems/{itemId}` | 旧版标记已播放/未播放 |
+| GET | `/Shows/{seriesId}/Seasons` | 获取剧集的季列表 |
+| GET | `/Shows/{seriesId}/Episodes` | 获取剧集的剧集列表 |
+| GET | `/Seasons/{seasonId}/Episodes` | 获取指定季的剧集列表 |
 
 已支持常见查询参数：
 
@@ -79,15 +82,17 @@
 - `SortOrder`
 - `StartIndex`
 - `Limit`
+- `UserId` (季/集查询)
 
 ## 图片与播放
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/Items/{itemId}/Images` | 图片列表 |
-| GET/HEAD | `/Items/{itemId}/Images/{imageType}` | 图片文件 |
+| GET/HEAD | `/Items/{itemId}/Images/{imageType}` | 图片文件（支持本地文件路径和远程URL代理） |
 | GET/HEAD | `/Items/{itemId}/Images/{imageType}/{imageIndex}` | 图片文件 |
-| GET/HEAD | `/Videos/{itemId}/stream` | 原文件直链播放 |
+| GET | `/Images/Remote` | 远程图片代理（ImageUrl参数） |
+| GET/HEAD | `/Videos/{itemId}/stream` | 原文件直链播放（支持.strm文件代理） |
 | GET/HEAD | `/Videos/{itemId}/stream.{container}` | 带容器扩展名的直链播放 |
 | GET/HEAD | `/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/Stream.{format}` | 外挂字幕直链 |
 | GET/HEAD | `/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/{startPositionTicks}/Stream.{format}` | Jellyfin 字幕流兼容路径 |
@@ -95,6 +100,11 @@
 | GET/HEAD | `/Items/{itemId}/Download` | 下载原文件 |
 
 当前播放接口是 Direct Play / Direct Stream，暂未实现转码。
+
+### 代理功能说明
+- **STRM文件代理**：当请求播放.strm文件时，后端会读取文件中的URL（第一行），并通过代理方式获取远程流媒体内容，支持Range头传递，实现边下边播。
+- **图片代理**：图片路径支持本地文件路径和远程URL。当`image_primary_path`或`backdrop_path`字段包含`http://`或`https://`开头的URL时，后端会代理获取远程图片并返回，支持缓存控制。
+- **远程图片代理**：`/Images/Remote`端点可用于直接代理任意远程图片，需要提供`ImageUrl`查询参数。
 
 `PlaybackInfo` 和条目详情会返回 Jellyfin/Emby 常见的 `MediaSources`、`MediaStreams`、`DirectStreamUrl`、`DefaultAudioStreamIndex`、`ETag`、`Size` 等字段。当前媒体流信息来自文件名和外挂字幕推断，后续接入 `ffprobe` 后可以补齐真实码率、时长、声道和内封字幕。
 
