@@ -2,7 +2,7 @@ use crate::{auth, error::AppError, repository, state::AppState};
 use axum::{
     body::Body,
     extract::{Path, Request, State},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -100,7 +100,9 @@ async fn serve_media_item(
                     }
                 }
                 // 设置响应体
-                let body = Body::from_stream(remote_response.bytes_stream());
+                let body_bytes = remote_response.bytes().await
+                    .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                let body = Body::from(body_bytes);
                 let response = response_builder.body(body)
                     .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
                 return Ok(response);

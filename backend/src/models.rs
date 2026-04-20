@@ -610,3 +610,113 @@ pub struct ActivityLogQuery {
     #[serde(default)]
     pub limit: Option<i64>,
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SeasonDto {
+    pub name: String,
+    pub server_id: String,
+    pub id: String,
+    #[serde(rename = "Type")]
+    pub item_type: String,
+    pub is_folder: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_number: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_index_number: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub premiere_date: Option<NaiveDate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub production_year: Option<i32>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub image_tags: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_primary_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_data: Option<UserItemDataDto>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct EpisodeDto {
+    pub name: String,
+    pub server_id: String,
+    pub id: String,
+    #[serde(rename = "Type")]
+    pub item_type: String,
+    pub is_folder: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_number: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_number_end: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_index_number: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub season_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub season_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub premiere_date: Option<NaiveDate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub production_year: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_time_ticks: Option<i64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub image_tags: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_primary_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_data: Option<UserItemDataDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_sources: Option<Vec<MediaSourceDto>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_streams: Option<Vec<MediaStreamDto>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct SeasonsQuery {
+    #[serde(default, alias = "userId")]
+    pub user_id: Option<Uuid>,
+    #[serde(default)]
+    pub series_id: Option<Uuid>,
+    #[serde(default)]
+    pub fields: Option<String>,
+    #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
+    pub _api_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct EpisodesQuery {
+    #[serde(default, alias = "userId")]
+    pub user_id: Option<Uuid>,
+    #[serde(default)]
+    pub season_id: Option<Uuid>,
+    #[serde(default)]
+    pub fields: Option<String>,
+    #[serde(default)]
+    pub start_index: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
+    pub _api_key: Option<String>,
+}

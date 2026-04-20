@@ -1,0 +1,1 @@
+必须使用 UTF-8 中文编码。使用rust+vue+pg数据库开发一个流媒体平台，需要参考模板项目里的jellyfin后端和项目jellyfin前端项目并且适配emby模板的api调用方法，不要猜想而是查看模板项目文件夹里的实际模板项目，查看模板项目文件夹里的jellyfin后端模板和jellyfin前端模板

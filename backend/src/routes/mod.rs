@@ -5,6 +5,7 @@ pub mod admin;
 pub mod images;
 pub mod items;
 pub mod sessions;
+pub mod shows;
 pub mod startup;
 pub mod system;
 pub mod users;
@@ -28,6 +29,7 @@ fn api_router() -> Router<AppState> {
         .merge(items::router())
         .merge(images::router())
         .merge(videos::router())
+        .merge(shows::router())
         .merge(sessions::router())
         .merge(admin::router())
 }
