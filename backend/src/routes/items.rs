@@ -486,7 +486,7 @@ async fn item_dto(
 }
 
 async fn playback_info(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(item_id): Path<Uuid>,
 ) -> Result<Json<PlaybackInfoResponse>, AppError> {
@@ -499,7 +499,12 @@ async fn playback_info(
     let play_session_id = Uuid::new_v4().simple().to_string();
 
     Ok(Json(PlaybackInfoResponse {
-        media_sources: vec![repository::media_source_for_item(&item)],
+        media_sources: vec![repository::media_source_for_playback(
+            &item,
+            state.config.server_id,
+            Some(&play_session_id),
+            Some(&session.access_token),
+        )],
         play_session_id,
     }))
 }

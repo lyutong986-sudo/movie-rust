@@ -17,6 +17,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
+use url::form_urlencoded;
 use uuid::Uuid;
 
 #[derive(Debug, FromRow)]
@@ -1438,7 +1439,7 @@ pub async fn media_item_to_dto(
 
     let is_folder = is_folder_item(item);
     let media_sources = if !is_folder {
-        vec![media_source_for_item(item)]
+        vec![media_source_for_item(item, server_id)]
     } else {
         Vec::new()
     };
@@ -1486,7 +1487,16 @@ pub async fn media_item_to_dto(
     })
 }
 
-pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
+pub fn media_source_for_item(item: &DbMediaItem, server_id: Uuid) -> MediaSourceDto {
+    media_source_for_playback(item, server_id, None, None)
+}
+
+pub fn media_source_for_playback(
+    item: &DbMediaItem,
+    server_id: Uuid,
+    play_session_id: Option<&str>,
+    access_token: Option<&str>,
+) -> MediaSourceDto {
     let local_path = Path::new(&item.path);
     let strm_target = naming::is_strm(local_path)
         .then(|| naming::read_strm_target(local_path))
@@ -1513,19 +1523,31 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
 
     MediaSourceDto {
         id: item.id.to_string(),
+        item_id: item.id.to_string(),
+        server_id: server_id.to_string(),
         path: strm_target.unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),
         container: container.clone(),
         name: item.name.clone(),
         is_remote,
+        is_infinite_stream: false,
+        requires_opening: false,
+        requires_closing: false,
+        requires_looping: false,
+        supports_probing: true,
         supports_direct_play: true,
         supports_direct_stream: true,
         supports_transcoding: false,
-        direct_stream_url: format!(
-            "/Videos/{}/stream.{}?Static=true&mediaSourceId={}",
-            item.id, container, item.id
-        ),
+        add_api_key_to_direct_stream_url: true,
+        direct_stream_url: direct_stream_url(item.id, &container, play_session_id, access_token),
+        transcoding_url: None,
+        play_session_id: play_session_id.map(ToOwned::to_owned),
+        video_type: item
+            .media_type
+            .eq_ignore_ascii_case("Video")
+            .then(|| "VideoFile".to_string()),
+        required_http_headers: BTreeMap::new(),
         formats: vec![container.clone()],
         size,
         e_tag: Some(item.date_modified.timestamp().to_string()),
@@ -1539,6 +1561,31 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         run_time_ticks: item.runtime_ticks,
         media_streams,
     }
+}
+
+fn direct_stream_url(
+    item_id: Uuid,
+    container: &str,
+    play_session_id: Option<&str>,
+    access_token: Option<&str>,
+) -> String {
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    query.append_pair("Static", "true");
+    query.append_pair("MediaSourceId", &item_id.to_string());
+    query.append_pair("mediaSourceId", &item_id.to_string());
+    if let Some(play_session_id) = play_session_id {
+        query.append_pair("PlaySessionId", play_session_id);
+    }
+    if let Some(access_token) = access_token {
+        query.append_pair("api_key", access_token);
+    }
+
+    format!(
+        "/Videos/{}/stream.{}?{}",
+        item_id,
+        container,
+        query.finish()
+    )
 }
 
 pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {

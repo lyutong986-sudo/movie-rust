@@ -409,6 +409,8 @@ pub struct UserItemDataDto {
 #[serde(rename_all = "PascalCase")]
 pub struct MediaSourceDto {
     pub id: String,
+    pub item_id: String,
+    pub server_id: String,
     pub path: String,
     pub protocol: String,
     #[serde(rename = "Type")]
@@ -416,10 +418,23 @@ pub struct MediaSourceDto {
     pub container: String,
     pub name: String,
     pub is_remote: bool,
+    pub is_infinite_stream: bool,
+    pub requires_opening: bool,
+    pub requires_closing: bool,
+    pub requires_looping: bool,
+    pub supports_probing: bool,
     pub supports_direct_play: bool,
     pub supports_direct_stream: bool,
     pub supports_transcoding: bool,
+    pub add_api_key_to_direct_stream_url: bool,
     pub direct_stream_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub play_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_type: Option<String>,
+    pub required_http_headers: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub formats: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

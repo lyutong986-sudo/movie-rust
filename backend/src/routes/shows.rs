@@ -235,7 +235,10 @@ async fn episode_to_dto(
         .ok();
 
     // 获取媒体源和媒体流
-    let media_sources = Some(vec![repository::media_source_for_item(episode)]);
+    let media_sources = Some(vec![repository::media_source_for_item(
+        episode,
+        state.config.server_id,
+    )]);
     let media_streams = Some(repository::media_streams_for_item(episode));
 
     // 构建图片标签
