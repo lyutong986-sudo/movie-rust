@@ -129,13 +129,17 @@ pub fn read_strm_target(path: &Path) -> Option<String> {
 }
 
 pub fn strm_target_from_text(content: &str) -> Option<String> {
+    let valid_protocols = [
+        "http://", "https://", "rtsp://", "rtp://", "rtmp://", "mms://",
+    ];
+    
     content
         .lines()
         .map(str::trim)
         .find(|line| {
             !line.is_empty()
                 && !line.starts_with('#')
-                && (line.starts_with("http://") || line.starts_with("https://"))
+                && valid_protocols.iter().any(|proto| line.starts_with(proto))
         })
         .map(ToOwned::to_owned)
 }

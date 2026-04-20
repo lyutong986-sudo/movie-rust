@@ -2433,3 +2433,115 @@ pub async fn save_media_streams(
 
     Ok(())
 }
+
+pub async fn find_similar_items(
+    pool: &sqlx::PgPool,
+    target_item: &DbMediaItem,
+    limit: i64,
+    server_id: Uuid,
+) -> Result<Vec<BaseItemDto>, AppError> {
+    // 简单的相似性算法：基于类型和标签查找相似项目
+    // 1. 排除目标项目自身
+    // 2. 匹配相同类型（电影、电视剧等）
+    // 3. 匹配共同标签（genres）
+    // 4. 按生产年份相近排序
+    
+    // 如果目标项目没有标签，则只按类型和年份查找
+    if target_item.genres.is_empty() {
+        let similar_items = sqlx::query_as::<_, DbMediaItem>(
+            r#"
+            SELECT *
+            FROM media_items
+            WHERE id != $1
+              AND item_type = $2
+              AND media_type = $3
+            ORDER BY ABS(COALESCE(production_year, 0) - COALESCE($4, 0)) ASC
+            LIMIT $5
+            "#,
+        )
+        .bind(&target_item.id)
+        .bind(&target_item.item_type)
+        .bind(&target_item.media_type)
+        .bind(target_item.production_year)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+        
+        let mut result = Vec::new();
+        for item in similar_items {
+            result.push(media_item_to_dto(pool, &item, None, server_id.clone()).await?);
+        }
+        return Ok(result);
+    }
+    
+    // 查找有共同标签的项目
+    // 使用数组重叠操作符 && 来查找有共同标签的项目
+    let similar_items = sqlx::query_as::<_, DbMediaItem>(
+        r#"
+        SELECT mi.*
+        FROM media_items mi
+        WHERE mi.id != $1
+          AND mi.item_type = $2
+          AND mi.media_type = $3
+          AND mi.genres && $4  -- 有重叠的标签
+        ORDER BY (
+            -- 计算相似度分数：共同标签数量 + 年份相近度
+            (SELECT COUNT(*) FROM unnest(mi.genres) AS g WHERE g = ANY($4)) * 10 +
+            CASE 
+                WHEN ABS(COALESCE(mi.production_year, 0) - COALESCE($5, 0)) <= 5 THEN 5
+                WHEN ABS(COALESCE(mi.production_year, 0) - COALESCE($5, 0)) <= 10 THEN 2
+                ELSE 0
+            END
+        ) DESC
+        LIMIT $6
+        "#,
+    )
+    .bind(&target_item.id)
+    .bind(&target_item.item_type)
+    .bind(&target_item.media_type)
+    .bind(&target_item.genres)
+    .bind(target_item.production_year)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    
+    let mut result = Vec::new();
+    for item in similar_items {
+        result.push(media_item_to_dto(pool, &item, None, server_id.clone()).await?);
+    }
+    
+    // 如果找到的项目不足限制数量，则用相同类型的其他项目补充
+    if result.len() < limit as usize {
+        let remaining_limit = limit - result.len() as i64;
+        let exclude_ids: Vec<Uuid> = result.iter()
+            .filter_map(|dto| Uuid::parse_str(&dto.id).ok())
+            .collect();
+        
+        let additional_items = sqlx::query_as::<_, DbMediaItem>(
+            r#"
+            SELECT *
+            FROM media_items
+            WHERE id != $1
+              AND item_type = $2
+              AND media_type = $3
+              AND NOT (id = ANY($4))
+            ORDER BY ABS(COALESCE(production_year, 0) - COALESCE($5, 0)) ASC
+            LIMIT $6
+            "#,
+        )
+        .bind(&target_item.id)
+        .bind(&target_item.item_type)
+        .bind(&target_item.media_type)
+        .bind(&exclude_ids)
+        .bind(target_item.production_year)
+        .bind(remaining_limit)
+        .fetch_all(pool)
+        .await?;
+        
+        for item in additional_items {
+            result.push(media_item_to_dto(pool, &item, None, server_id.clone()).await?);
+        }
+    }
+    
+    Ok(result)
+}

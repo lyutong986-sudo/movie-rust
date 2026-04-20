@@ -203,6 +203,8 @@ impl From<MediaItemRow> for DbMediaItem {
     }
 }
 
+
+
 #[derive(Debug, Clone, FromRow)]
 pub struct DbUserItemData {
     pub playback_position_ticks: i64,
@@ -1237,4 +1239,24 @@ where
         }
         None => Ok(None),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetSimilarItems {
+    #[serde(skip)]
+    pub id: Option<String>, // 从路径参数提取，不由查询字符串解析
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub fields: Option<String>,
+    #[serde(default)]
+    pub enable_images: Option<bool>,
+    #[serde(default)]
+    pub enable_user_data: Option<bool>,
+    #[serde(default)]
+    pub image_type_limit: Option<i64>,
+    #[serde(default)]
+    pub enable_image_types: Option<String>,
 }

@@ -3,7 +3,7 @@ use crate::{
     error::AppError,
     media_analyzer,
     models::{
-        BaseItemDto, ItemsQuery, PlaybackInfoResponse, QueryResult, UpdateUserItemDataRequest,
+        BaseItemDto, GetSimilarItems, ItemsQuery, PlaybackInfoResponse, QueryResult, UpdateUserItemDataRequest,
         UserItemDataDto, UserItemDataQuery,
     },
     naming,
@@ -57,6 +57,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Items/{item_id}", get(item_by_id))
         .route("/Users/{user_id}/Items/{item_id}", get(user_item_by_id))
+        .route("/Items/{item_id}/Similar", get(get_similar_items))
 }
 
 async fn user_views(
@@ -483,21 +484,51 @@ async fn playback_info(
 
     let needs_metadata = item.video_codec.is_none() || item.audio_codec.is_none() || item.runtime_ticks.is_none();
     if needs_metadata {
-        let path = std::path::Path::new(&item.path);
-        if path.exists() && !naming::is_strm(path) {
-            match media_analyzer::analyze_media_file(path).await {
-                Ok(analysis) => {
-                    repository::update_media_item_metadata(&state.pool, item_id, &analysis).await?;
-                    item = repository::get_media_item(&state.pool, item_id)
-                        .await?
-                        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+        let item_path = item.path.clone();
+        let path = std::path::Path::new(&item_path);
+        if path.exists() {
+            if naming::is_strm(path) {
+                // 对于.strm文件，尝试分析远程URL
+                match std::fs::read_to_string(path) {
+                    Ok(content) => {
+                        if let Some(target_url) = naming::strm_target_from_text(&content) {
+                            tracing::debug!("分析.strm文件远程URL: {}", target_url);
+                            match media_analyzer::analyze_remote_media(&target_url).await {
+                                Ok(analysis) => {
+                                    repository::update_media_item_metadata(&state.pool, item_id, &analysis).await?;
+                                    item = repository::get_media_item(&state.pool, item_id)
+                                        .await?
+                                        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+                                    tracing::info!("已更新.strm文件远程媒体元数据: {}", path.display());
+                                }
+                                Err(e) => {
+                                    tracing::warn!("无法分析.strm远程媒体 {}: {}", target_url, e);
+                                }
+                            }
+                        } else {
+                            tracing::debug!(".strm文件中未找到有效URL: {}", path.display());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("无法读取.strm文件 {}: {}", path.display(), e);
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("无法分析媒体文件 {}: {}", path.display(), e);
+            } else {
+                // 对于普通文件，进行本地分析
+                match media_analyzer::analyze_media_file(path).await {
+                    Ok(analysis) => {
+                        repository::update_media_item_metadata(&state.pool, item_id, &analysis).await?;
+                        item = repository::get_media_item(&state.pool, item_id)
+                            .await?
+                            .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+                    }
+                    Err(e) => {
+                        tracing::warn!("无法分析媒体文件 {}: {}", path.display(), e);
+                    }
                 }
             }
         } else {
-            tracing::debug!("跳过媒体文件分析（文件不存在或为.strm文件）: {}", path.display());
+            tracing::debug!("跳过媒体文件分析（文件不存在）: {}", path.display());
         }
     }
 
@@ -549,5 +580,32 @@ async fn user_resume_items(
         items,
         total_record_count: total_count,
         start_index: Some(start_index),
+    }))
+}
+
+async fn get_similar_items(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id): Path<Uuid>,
+    Query(query): Query<GetSimilarItems>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    // 获取目标项目
+    let target_item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    
+    // 简单的相似性算法：基于类型和标签查找相似项目
+    let similar_items = repository::find_similar_items(
+        &state.pool,
+        &target_item,
+        query.limit.unwrap_or(20),
+        state.config.server_id,
+    ).await?;
+    
+    let total_record_count = similar_items.len() as i64;
+    Ok(Json(QueryResult {
+        items: similar_items,
+        total_record_count,
+        start_index: Some(0),
     }))
 }
