@@ -2257,7 +2257,7 @@ pub async fn get_media_streams(
 ) -> Result<Vec<DbMediaStream>, AppError> {
     let streams = sqlx::query_as::<_, DbMediaStream>(
         r#"
-        SELECT id, media_item_id, index, stream_type, codec, language, width, height,
+        SELECT id, media_item_id, index, stream_type, codec, codec_tag, language, title, width, height,
                channels, sample_rate, bit_rate, channel_layout, is_default, is_forced,
                is_external, is_hearing_impaired, created_at, updated_at
         FROM media_streams
@@ -2457,15 +2457,25 @@ pub async fn save_media_streams(
             .map(|s| s == "yes" || s == "1")
             .unwrap_or(false);
 
+        // 提取codec_tag和title
+        let codec_tag = stream.tags.as_ref()
+            .and_then(|tags| tags.get("codec_tag_string"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let title = stream.tags.as_ref()
+            .and_then(|tags| tags.get("title"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
         sqlx::query(
             r#"
             INSERT INTO media_streams (
-                id, media_item_id, index, stream_type, codec, language, width, height,
+                id, media_item_id, index, stream_type, codec, codec_tag, language, title, width, height,
                 channels, sample_rate, bit_rate, channel_layout, is_default, is_forced,
                 is_external, is_hearing_impaired, created_at, updated_at
             ) VALUES (
-                gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                $12, $13, false, false, now(), now()
+                gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                $13, $14, $15, false, false, now(), now()
             )
             "#,
         )
@@ -2473,7 +2483,9 @@ pub async fn save_media_streams(
         .bind(stream.index)  // 使用流的原始索引
         .bind(stream_type)
         .bind(stream.codec_name.clone())
+        .bind(codec_tag)
         .bind(stream.language.clone())
+        .bind(title)
         .bind(stream.width)
         .bind(stream.height)
         .bind(stream.channels)
