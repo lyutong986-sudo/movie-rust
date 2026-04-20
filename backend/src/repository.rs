@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     error::AppError,
     models::{
-        ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaItem, DbMediaStream,
+        uuid_to_emby_guid, optional_uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaItem, DbMediaStream,
         DbPerson, DbPersonRole, DbUser, DbUserItemData, GenreDto, LibraryOptionsDto, LogFileDto,
         MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto, PersonDto, QueryResult,
         SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest, UserConfigurationDto,
@@ -275,7 +275,7 @@ pub async fn get_persons(
             
             PersonDto {
                 name: person.name,
-                id: person.id.to_string(),
+                id: uuid_to_emby_guid(&person.id),
                 role: None,
                 person_type: None,
                 sort_name: person.sort_name,
@@ -322,7 +322,7 @@ pub async fn get_person_by_uuid(
         
         let person_dto = PersonDto {
             name: person.name,
-            id: person.id.to_string(),
+            id: uuid_to_emby_guid(&person.id),
             role: None,
             person_type: None,
             sort_name: person.sort_name,
@@ -371,7 +371,7 @@ pub async fn get_person_by_name(
         
         let person_dto = PersonDto {
             name: person.name,
-            id: person.id.to_string(),
+            id: uuid_to_emby_guid(&person.id),
             role: None,
             person_type: None,
             sort_name: person.sort_name,
@@ -775,7 +775,7 @@ pub async fn list_activity_logs(
             ));
 
             ActivityLogEntryDto {
-                id: row.id.to_string(),
+                id: uuid_to_emby_guid(&row.id),
                 name: format!("{} · {}", row.user_name, item_name),
                 entry_type,
                 short_overview,
@@ -1063,7 +1063,7 @@ pub fn library_to_virtual_folder_dto(library: &DbLibrary) -> VirtualFolderInfoDt
     VirtualFolderInfoDto {
         name: library.name.clone(),
         collection_type: library.collection_type.clone(),
-        item_id: library.id.to_string(),
+        item_id: uuid_to_emby_guid(&library.id),
         locations,
         library_options: options,
     }
@@ -1151,6 +1151,8 @@ pub struct ItemListOptions {
     pub search_term: Option<String>,
     pub sort_by: Option<String>,
     pub sort_order: Option<String>,
+    pub filters: Option<String>,
+    pub fields: Option<String>,
     pub start_index: i64,
     pub limit: i64,
 }
@@ -1614,8 +1616,8 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
     
     UserDto {
         name: user.name.clone(),
-        server_id: server_id.to_string(),
-        id: user.id.to_string(),
+        server_id: uuid_to_emby_guid(&server_id),
+        id: uuid_to_emby_guid(&user.id),
         has_password: true,
         has_configured_password: true,
         has_configured_easy_password: false,
@@ -1663,8 +1665,8 @@ pub async fn library_to_item_dto(
 
     Ok(BaseItemDto {
         name: library.name.clone(),
-        server_id: server_id.to_string(),
-        id: library.id.to_string(),
+        server_id: uuid_to_emby_guid(&server_id),
+        id: uuid_to_emby_guid(&library.id),
         item_type: "CollectionFolder".to_string(),
         is_folder: true,
         sort_name: Some(library.name.to_lowercase()),
@@ -1701,8 +1703,8 @@ pub async fn library_to_item_dto(
 pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
     BaseItemDto {
         name: "Root".to_string(),
-        server_id: server_id.to_string(),
-        id: Uuid::nil().to_string(),
+        server_id: uuid_to_emby_guid(&server_id),
+        id: uuid_to_emby_guid(&Uuid::nil()),
         item_type: "Folder".to_string(),
         is_folder: true,
         sort_name: Some("root".to_string()),
@@ -1780,8 +1782,8 @@ pub async fn media_item_to_dto(
 
     Ok(BaseItemDto {
         name: item.name.clone(),
-        server_id: server_id.to_string(),
-        id: item.id.to_string(),
+        server_id: uuid_to_emby_guid(&server_id),
+        id: uuid_to_emby_guid(&item.id),
         item_type: item.item_type.clone(),
         is_folder,
         sort_name: Some(item.sort_name.clone()),
@@ -1838,7 +1840,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
     };
 
     MediaSourceDto {
-        id: item.id.to_string(),
+        id: uuid_to_emby_guid(&item.id),
         path: strm_target.unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),
@@ -2266,7 +2268,7 @@ pub async fn get_media_source_with_streams(
     };
 
     Ok(MediaSourceDto {
-        id: item.id.to_string(),
+        id: uuid_to_emby_guid(&item.id),
         path: strm_target.unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),

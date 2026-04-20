@@ -1,7 +1,7 @@
 use crate::{
     auth::AuthSession,
     models::{
-        ActivityLogQuery, BrandingConfiguration, EndpointInfo, LogFileDto, PublicSystemInfo,
+        uuid_to_emby_guid, ActivityLogQuery, BrandingConfiguration, EndpointInfo, LogFileDto, PublicSystemInfo,
         QueryResult, SystemInfo,
     },
     repository,
@@ -48,7 +48,7 @@ async fn public_info(
         version: env!("CARGO_PKG_VERSION").to_string(),
         product_name: "Movie Rust".to_string(),
         operating_system: std::env::consts::OS.to_string(),
-        id: state.config.server_id.to_string(),
+        id: uuid_to_emby_guid(&state.config.server_id),
         startup_wizard_completed,
     }))
 }
@@ -65,7 +65,7 @@ async fn system_info(
         version: env!("CARGO_PKG_VERSION").to_string(),
         product_name: "Movie Rust".to_string(),
         operating_system: std::env::consts::OS.to_string(),
-        id: state.config.server_id.to_string(),
+        id: uuid_to_emby_guid(&state.config.server_id),
         startup_wizard_completed,
         can_self_restart: false,
     }))

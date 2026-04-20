@@ -1,7 +1,7 @@
 use crate::{
     auth::AuthSession,
     error::AppError,
-    models::{EpisodeDto, EpisodesQuery, QueryResult, SeasonDto, SeasonsQuery},
+    models::{uuid_to_emby_guid, optional_uuid_to_emby_guid, EpisodeDto, EpisodesQuery, QueryResult, SeasonDto, SeasonsQuery},
     repository::{self, ItemListOptions},
     state::AppState,
 };
@@ -49,6 +49,8 @@ async fn get_seasons(
             search_term: None,
             sort_by: Some("SortName".to_string()),
             sort_order: Some("Ascending".to_string()),
+            filters: None,
+            fields: None,
             start_index: 0,
             limit: 1000, // 假设季的数量不会太多
         },
@@ -113,6 +115,8 @@ async fn get_episodes(
             search_term: None,
             sort_by: Some("SortName".to_string()),
             sort_order: Some("Ascending".to_string()),
+            filters: None,
+            fields: None,
             start_index: query.start_index.unwrap_or(0),
             limit: query.limit.unwrap_or(100),
         },
@@ -161,6 +165,8 @@ async fn get_episodes_by_season(
             search_term: None,
             sort_by: Some("SortName".to_string()),
             sort_order: Some("Ascending".to_string()),
+            filters: None,
+            fields: None,
             start_index: query.start_index.unwrap_or(0),
             limit: query.limit.unwrap_or(100),
         },
@@ -205,15 +211,15 @@ async fn season_to_dto(
 
     Ok(SeasonDto {
         name: season.name.clone(),
-        server_id: state.config.server_id.to_string(),
-        id: season.id.to_string(),
+        server_id: uuid_to_emby_guid(&state.config.server_id),
+        id: uuid_to_emby_guid(&season.id),
         item_type: "Season".to_string(),
         is_folder: true,
         sort_name: Some(season.sort_name.clone()),
         index_number: season.index_number,
         parent_index_number: season.parent_index_number,
         series_name: season.series_name.clone(),
-        series_id: season.parent_id.map(|id| id.to_string()),
+        series_id: optional_uuid_to_emby_guid(season.parent_id),
         overview: season.overview.clone(),
         premiere_date: season.premiere_date,
         production_year: season.production_year,
@@ -255,9 +261,9 @@ async fn episode_to_dto(
         // 尝试找到系列ID（可能是祖父级）
         if let Some(parent_item) = repository::get_media_item(&state.pool, parent_id).await? {
             if parent_item.item_type == "Season" {
-                parent_item.parent_id.map(|id| id.to_string())
+                optional_uuid_to_emby_guid(parent_item.parent_id)
             } else {
-                Some(parent_id.to_string())
+                Some(uuid_to_emby_guid(&parent_id))
             }
         } else {
             None
@@ -266,12 +272,12 @@ async fn episode_to_dto(
         None
     };
 
-    let season_id = episode.parent_id.map(|id| id.to_string());
+    let season_id = optional_uuid_to_emby_guid(episode.parent_id);
 
     Ok(EpisodeDto {
         name: episode.name.clone(),
-        server_id: state.config.server_id.to_string(),
-        id: episode.id.to_string(),
+        server_id: uuid_to_emby_guid(&state.config.server_id),
+        id: uuid_to_emby_guid(&episode.id),
         item_type: "Episode".to_string(),
         is_folder: false,
         sort_name: Some(episode.sort_name.clone()),

@@ -11,6 +11,7 @@ pub struct Config {
     pub server_id: Uuid,
     pub static_dir: PathBuf,
     pub tmdb_api_key: Option<String>,
+    pub api_key: Option<String>,
 }
 
 impl Config {
@@ -39,6 +40,7 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("frontend/dist")),
             tmdb_api_key: env::var("TMDB_API_KEY").ok(),
+            api_key: env::var("EMBY_API_KEY").ok(),
         })
     }
 

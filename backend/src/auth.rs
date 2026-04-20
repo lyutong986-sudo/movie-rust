@@ -43,6 +43,17 @@ pub async fn require_auth(
     query: Option<&str>,
 ) -> Result<AuthSession, AppError> {
     let token = extract_token(headers, query).ok_or(AppError::Unauthorized)?;
+    
+    if let Some(api_key) = &state.config.api_key {
+        if token == *api_key {
+            return Ok(AuthSession {
+                access_token: token,
+                user_id: state.config.server_id,
+                is_admin: true,
+            });
+        }
+    }
+    
     let session = repository::get_session(&state.pool, &token)
         .await?
         .ok_or(AppError::Unauthorized)?;

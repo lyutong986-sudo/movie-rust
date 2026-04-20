@@ -1203,3 +1203,13 @@ pub struct EpisodesQuery {
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
 }
+
+/// 将UUID转换为Emby API兼容的大写GUID格式
+pub fn uuid_to_emby_guid(uuid: &Uuid) -> String {
+    uuid.to_string().to_uppercase()
+}
+
+/// 将Option<Uuid>转换为Option<Emby GUID字符串>
+pub fn optional_uuid_to_emby_guid(uuid: Option<Uuid>) -> Option<String> {
+    uuid.map(|u| uuid_to_emby_guid(&u))
+}

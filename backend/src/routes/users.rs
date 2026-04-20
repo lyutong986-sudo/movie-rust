@@ -1,7 +1,7 @@
 use crate::{
     auth::{self, AuthSession},
     error::AppError,
-    models::{AuthenticateByNameRequest, AuthenticationResult, UpdateUserPasswordRequest, UserDto, UserPolicyDto},
+    models::{uuid_to_emby_guid, AuthenticateByNameRequest, AuthenticationResult, UpdateUserPasswordRequest, UserDto, UserPolicyDto},
     repository, security,
     state::AppState,
 };
@@ -131,15 +131,12 @@ async fn authenticate(
         return Err(AppError::Unauthorized);
     }
 
-    let device_id = payload
-        .device_id
-        .or_else(|| auth::client_value(&headers, "DeviceId"));
-    let device_name = payload
-        .device_name
-        .or_else(|| auth::client_value(&headers, "Device"));
-    let client = payload
-        .client
-        .or_else(|| auth::client_value(&headers, "Client"));
+    let device_id = auth::client_value(&headers, "DeviceId")
+        .or(payload.device_id);
+    let device_name = auth::client_value(&headers, "Device")
+        .or(payload.device_name);
+    let client = auth::client_value(&headers, "Client")
+        .or(payload.client);
     let application_version = auth::client_value(&headers, "Version");
 
     let session = repository::create_session(
@@ -156,7 +153,7 @@ async fn authenticate(
         user: repository::user_to_dto(&user, state.config.server_id),
         session_info: repository::session_to_dto(&session),
         access_token: session.access_token,
-        server_id: state.config.server_id.to_string(),
+        server_id: uuid_to_emby_guid(&state.config.server_id),
     }))
 }
 
