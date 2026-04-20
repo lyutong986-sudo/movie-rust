@@ -11,7 +11,9 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    extract::{Path, Query, State},
+    body::to_bytes,
+    extract::{Path, Query, Request, State},
+    http,
     routing::{get, post},
     Json, Router,
 };
@@ -475,21 +477,39 @@ async fn playback_info(
     State(state): State<AppState>,
     Path(item_id): Path<Uuid>,
     Query(query_info): Query<PlaybackInfoDto>,
-    body: Option<Json<PlaybackInfoDto>>,
+    request: Request,
 ) -> Result<Json<PlaybackInfoResponse>, AppError> {
-    // 合并查询参数和请求体，请求体优先
-    let info = if let Some(body_info) = body {
-        let mut merged = body_info.0;
-        // 如果查询参数中有值而请求体中没有，则使用查询参数的值
-        if merged.user_id.is_none() && query_info.user_id.is_some() {
-            merged.user_id = query_info.user_id;
+    // 根据请求方法处理
+    let info = if request.method() == http::Method::POST {
+        // POST请求：尝试从请求体解析JSON
+        let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024) // 10MB限制
+            .await
+            .map_err(|e| AppError::BadRequest(format!("无法读取请求体: {}", e)))?;
+        
+        if body_bytes.is_empty() {
+            // 空请求体，使用查询参数
+            query_info
+        } else {
+            match serde_json::from_slice::<PlaybackInfoDto>(&body_bytes) {
+                Ok(mut body_info) => {
+                    // 合并查询参数和请求体，请求体优先
+                    if body_info.user_id.is_none() && query_info.user_id.is_some() {
+                        body_info.user_id = query_info.user_id;
+                    }
+                    if body_info.max_streaming_bitrate.is_none() && query_info.max_streaming_bitrate.is_some() {
+                        body_info.max_streaming_bitrate = query_info.max_streaming_bitrate;
+                    }
+                    body_info
+                }
+                Err(e) => {
+                    // JSON解析失败，只使用查询参数
+                    tracing::debug!("无法解析PlaybackInfo请求体JSON: {}, 使用查询参数", e);
+                    query_info
+                }
+            }
         }
-        if merged.max_streaming_bitrate.is_none() && query_info.max_streaming_bitrate.is_some() {
-            merged.max_streaming_bitrate = query_info.max_streaming_bitrate;
-        }
-        // 可以继续合并其他字段，但为简化起见，仅合并关键字段
-        merged
     } else {
+        // GET请求：只使用查询参数
         query_info
     };
     
