@@ -1,9 +1,7 @@
 use crate::{
     auth::{self, AuthSession},
     error::AppError,
-    models::{
-        AuthenticateByNameRequest, AuthenticationResult, UpdateUserPasswordRequest, UserDto,
-    },
+    models::{AuthenticateByNameRequest, AuthenticationResult, UpdateUserPasswordRequest, UserDto},
     repository, security,
     state::AppState,
 };

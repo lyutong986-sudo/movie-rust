@@ -27,7 +27,7 @@ struct ErrorBody {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        let status = match self {
+        let status = match &self {
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
@@ -36,6 +36,12 @@ impl IntoResponse for AppError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
+
+        if status.is_server_error() {
+            tracing::error!(error = %self, "请求处理失败");
+        } else {
+            tracing::warn!(status = %status, error = %self, "请求未成功");
+        }
 
         let body = Json(ErrorBody {
             message: self.to_string(),

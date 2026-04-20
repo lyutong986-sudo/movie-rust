@@ -20,12 +20,16 @@ pub fn router() -> Router<AppState> {
         .route("/Items/{item_id}/Images", get(list_item_images))
         .route("/Items/{item_id}/Images/{image_type}", get(get_item_image))
         .route(
-            "/Items/{item_id}/Images/{image_type}/{image_index}",
-            get(get_item_image_by_index),
+            "/Items/{item_id}/Images/{image_type}/{*image_tail}",
+            get(get_item_image_with_tail),
         )
         .route("/Images/Remote", get(get_remote_image))
         .route(
             "/Users/{user_id}/Images/{image_type}",
+            get(user_image_placeholder),
+        )
+        .route(
+            "/Users/{user_id}/Images/{image_type}/{*image_tail}",
             get(user_image_placeholder),
         )
 }
@@ -69,10 +73,10 @@ async fn get_item_image(
     serve_item_image(session, state, item_id, image_type, request).await
 }
 
-async fn get_item_image_by_index(
+async fn get_item_image_with_tail(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((item_id, image_type, _image_index)): Path<(Uuid, String, i32)>,
+    Path((item_id, image_type, _image_tail)): Path<(Uuid, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     serve_item_image(session, state, item_id, image_type, request).await
@@ -136,9 +140,11 @@ async fn serve_local_path(path: PathBuf, request: Request<Body>) -> Result<Respo
 
 async fn serve_remote_image(url: &str, _request: Request<Body>) -> Result<Response, AppError> {
     let client = Client::new();
-    let response = client.get(url).send().await.map_err(|e| {
-        AppError::Internal(format!("Failed to fetch remote image: {}", e))
-    })?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch remote image: {}", e)))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -155,9 +161,10 @@ async fn serve_remote_image(url: &str, _request: Request<Body>) -> Result<Respon
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    let body_bytes = response.bytes().await.map_err(|e| {
-        AppError::Internal(format!("Failed to read remote image body: {}", e))
-    })?;
+    let body_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read remote image body: {}", e)))?;
 
     let response = Response::builder()
         .status(StatusCode::OK)

@@ -1,18 +1,18 @@
-use crate::{auth, error::AppError, repository, state::AppState};
+use crate::{auth, error::AppError, naming, repository, state::AppState};
 use axum::{
     body::Body,
     extract::{Path, Request, State},
+    http::{header, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Router,
 };
+use reqwest::Client;
 use serde::Deserialize;
 use std::path::PathBuf;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 use uuid::Uuid;
-use reqwest;
-use reqwest::header;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -64,51 +64,23 @@ async fn serve_media_item(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
-    let path = PathBuf::from(item.path);
+    let path = PathBuf::from(&item.path);
     if !path.exists() {
         return Err(AppError::NotFound("媒体文件不存在".to_string()));
     }
 
-    // 检查是否是 .strm 文件
-    if path.extension().and_then(|ext| ext.to_str()).map_or(false, |ext| ext.eq_ignore_ascii_case("strm")) {
-        // 读取 .strm 文件内容（第一行）
-        let content = tokio::fs::read_to_string(&path).await
-            .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-        let url = content.lines().next().map(str::trim).filter(|line| !line.is_empty());
-        if let Some(url) = url {
-            if url.starts_with("http://") || url.starts_with("https://") {
-                // 代理远程流
-                let client = reqwest::Client::new();
-                let mut remote_request = client.get(url);
-                // 复制 Range 头
-                if let Some(range) = request.headers().get(header::RANGE) {
-                    remote_request = remote_request.header(header::RANGE, range);
-                }
-                // 可选：复制 User-Agent 头
-                if let Some(user_agent) = request.headers().get(header::USER_AGENT) {
-                    remote_request = remote_request.header(header::USER_AGENT, user_agent);
-                }
-                let remote_response = remote_request.send().await
-                    .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-                // 构建 axum 响应
-                let mut response_builder = Response::builder().status(remote_response.status());
-                // 复制响应头
-                for (key, value) in remote_response.headers() {
-                    // 跳过不需要的标头，如 Transfer-Encoding
-                    if key != header::TRANSFER_ENCODING {
-                        response_builder = response_builder.header(key, value);
-                    }
-                }
-                // 设置响应体
-                let body_bytes = remote_response.bytes().await
-                    .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-                let body = Body::from(body_bytes);
-                let response = response_builder.body(body)
-                    .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-                return Ok(response);
-            }
-        }
-        // 如果不是有效的 URL，回退到普通文件服务
+    if naming::is_strm(&path) {
+        let content = tokio::fs::read_to_string(&path).await?;
+        let target = naming::strm_target_from_text(&content)
+            .ok_or_else(|| AppError::BadRequest("STRM 文件没有有效的远程播放地址".to_string()))?;
+
+        tracing::info!(
+            item_id = %item.id,
+            item_name = %item.name,
+            target = %target,
+            "代理 STRM 远程播放流"
+        );
+        return proxy_remote_stream(&target, request).await;
     }
 
     ServeFile::new(path)
@@ -116,6 +88,67 @@ async fn serve_media_item(
         .await
         .map(IntoResponse::into_response)
         .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))
+}
+
+async fn proxy_remote_stream(url: &str, request: Request<Body>) -> Result<Response, AppError> {
+    let method = request.method().clone();
+    let client = Client::new();
+    let mut remote_request = if method == Method::HEAD {
+        client.head(url)
+    } else {
+        client.get(url)
+    };
+
+    for name in [
+        header::RANGE,
+        header::IF_RANGE,
+        header::USER_AGENT,
+        header::ACCEPT,
+        header::ACCEPT_LANGUAGE,
+    ] {
+        if let Some(value) = request
+            .headers()
+            .get(&name)
+            .and_then(|value| value.to_str().ok())
+        {
+            remote_request = remote_request.header(name.as_str(), value);
+        }
+    }
+
+    let remote_response = remote_request
+        .send()
+        .await
+        .map_err(|error| AppError::Internal(format!("请求 STRM 远程流失败: {error}")))?;
+    let status =
+        StatusCode::from_u16(remote_response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let headers = remote_response.headers().clone();
+
+    tracing::info!(
+        url = %url,
+        status = %status,
+        "STRM 远程流已响应"
+    );
+
+    let mut response_builder = Response::builder().status(status);
+    for (key, value) in headers.iter() {
+        if is_hop_by_hop_header(key.as_str()) {
+            continue;
+        }
+
+        if let Ok(value) = value.to_str() {
+            response_builder = response_builder.header(key.as_str(), value);
+        }
+    }
+
+    let body = if method == Method::HEAD {
+        Body::empty()
+    } else {
+        Body::from_stream(remote_response.bytes_stream())
+    };
+
+    response_builder
+        .body(body)
+        .map_err(|error| AppError::Internal(format!("构建 STRM 播放响应失败: {error}")))
 }
 
 async fn serve_subtitle(
@@ -152,4 +185,18 @@ fn parse_subtitle_stream_index(stream_path: &str) -> Option<i32> {
     }
 
     parts.get(2)?.parse().ok()
+}
+
+fn is_hop_by_hop_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }

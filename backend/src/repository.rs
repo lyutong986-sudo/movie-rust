@@ -192,9 +192,7 @@ pub async fn change_user_password(
 ) -> Result<(), AppError> {
     let password = new_password.trim();
     if password.len() < 4 {
-        return Err(AppError::BadRequest(
-            "新密码至少需要 4 个字符".to_string(),
-        ));
+        return Err(AppError::BadRequest("新密码至少需要 4 个字符".to_string()));
     }
 
     let password_hash = security::hash_password(password)?;
@@ -484,7 +482,29 @@ pub async fn list_media_items(
     }
 
     if let Some(parent_id) = options.parent_id {
-        builder.push(" AND parent_id = ").push_bind(parent_id);
+        if options.recursive {
+            builder.push(
+                r#"
+                AND id IN (
+                    WITH RECURSIVE descendants(id) AS (
+                        SELECT id FROM media_items WHERE parent_id =
+                "#,
+            );
+            builder.push_bind(parent_id);
+            builder.push(
+                r#"
+                        UNION ALL
+                        SELECT child.id
+                        FROM media_items child
+                        INNER JOIN descendants d ON child.parent_id = d.id
+                    )
+                    SELECT id FROM descendants
+                )
+                "#,
+            );
+        } else {
+            builder.push(" AND parent_id = ").push_bind(parent_id);
+        }
     } else if !options.recursive {
         builder.push(" AND parent_id IS NULL");
     }
@@ -777,6 +797,7 @@ pub struct UpsertMediaItem<'a> {
     pub production_year: Option<i32>,
     pub runtime_ticks: Option<i64>,
     pub premiere_date: Option<NaiveDate>,
+    pub genres: &'a [String],
     pub image_primary_path: Option<&'a Path>,
     pub backdrop_path: Option<&'a Path>,
     pub series_name: Option<&'a str>,
@@ -810,7 +831,7 @@ pub async fn upsert_media_item(
             (
                 id, library_id, parent_id, name, sort_name, item_type, media_type, path,
                 container, overview, production_year, runtime_ticks, premiere_date,
-                image_primary_path, backdrop_path, series_name, season_name, index_number,
+                genres, image_primary_path, backdrop_path, series_name, season_name, index_number,
                 index_number_end, parent_index_number, width, height, video_codec, audio_codec,
                 date_modified
             )
@@ -818,8 +839,8 @@ pub async fn upsert_media_item(
             (
                 $1, $2, $3, $4, $5, $6, $7, $8,
                 $9, $10, $11, $12, $13,
-                $14, $15, $16, $17, $18,
-                $19, $20, $21, $22, $23, $24,
+                $14, $15, $16, $17, $18, $19,
+                $20, $21, $22, $23, $24, $25,
                 now()
             )
         ON CONFLICT (library_id, path)
@@ -834,6 +855,7 @@ pub async fn upsert_media_item(
             production_year = EXCLUDED.production_year,
             runtime_ticks = EXCLUDED.runtime_ticks,
             premiere_date = EXCLUDED.premiere_date,
+            genres = EXCLUDED.genres,
             image_primary_path = EXCLUDED.image_primary_path,
             backdrop_path = EXCLUDED.backdrop_path,
             series_name = EXCLUDED.series_name,
@@ -861,6 +883,7 @@ pub async fn upsert_media_item(
     .bind(input.production_year)
     .bind(input.runtime_ticks)
     .bind(input.premiere_date)
+    .bind(input.genres)
     .bind(image_text)
     .bind(backdrop_text)
     .bind(input.series_name)
@@ -1084,28 +1107,38 @@ pub async fn media_item_to_dto(
 }
 
 pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
-    let container = item
-        .container
-        .clone()
+    let local_path = Path::new(&item.path);
+    let strm_target = naming::is_strm(local_path)
+        .then(|| naming::read_strm_target(local_path))
+        .flatten();
+    let container = strm_target
+        .as_deref()
+        .and_then(naming::extension_from_url)
+        .or_else(|| item.container.clone())
         .or_else(|| {
-            Path::new(&item.path)
+            local_path
                 .extension()
                 .map(|ext| ext.to_string_lossy().to_string())
         })
         .unwrap_or_else(|| "mp4".to_string());
     let media_streams = media_streams_for_item(item);
-    let size = std::fs::metadata(&item.path)
-        .ok()
-        .and_then(|metadata| i64::try_from(metadata.len()).ok());
+    let is_remote = strm_target.is_some();
+    let size = if is_remote {
+        None
+    } else {
+        std::fs::metadata(&item.path)
+            .ok()
+            .and_then(|metadata| i64::try_from(metadata.len()).ok())
+    };
 
     MediaSourceDto {
         id: item.id.to_string(),
-        path: item.path.clone(),
-        protocol: "File".to_string(),
+        path: strm_target.unwrap_or_else(|| item.path.clone()),
+        protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),
         container: container.clone(),
         name: item.name.clone(),
-        is_remote: false,
+        is_remote,
         supports_direct_play: true,
         supports_direct_stream: true,
         supports_transcoding: false,

@@ -16,8 +16,9 @@ use std::sync::Arc;
 use tower_http::{
     cors::CorsLayer,
     services::{ServeDir, ServeFile},
-    trace::TraceLayer,
+    trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnResponse, TraceLayer},
 };
+use tracing::Level;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -54,9 +55,14 @@ async fn main() -> anyhow::Result<()> {
     let spa =
         ServeDir::new(&static_dir).not_found_service(ServeFile::new(static_dir.join("index.html")));
 
+    let http_trace = TraceLayer::new_for_http()
+        .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+        .on_response(DefaultOnResponse::new().level(Level::INFO))
+        .on_failure(DefaultOnFailure::new().level(Level::ERROR));
+
     let app = routes::router(state.clone())
         .fallback_service(spa)
-        .layer(TraceLayer::new_for_http())
+        .layer(http_trace)
         .layer(CorsLayer::permissive());
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;

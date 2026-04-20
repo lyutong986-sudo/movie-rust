@@ -33,3 +33,11 @@ fn api_router() -> Router<AppState> {
         .merge(sessions::router())
         .merge(admin::router())
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn api_router_builds_without_route_conflicts() {
+        let _router = super::api_router();
+    }
+}

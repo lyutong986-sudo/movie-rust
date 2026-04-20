@@ -2,9 +2,11 @@ use chrono::{Datelike, NaiveDate};
 use regex::Regex;
 use std::{
     ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
+use url::Url;
 
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "3g2", "3gp", "asf", "avi", "divx", "dv", "dvr-ms", "f4v", "flv", "ifo", "iso", "m2t", "m2ts",
@@ -111,8 +113,40 @@ pub fn is_video(path: &Path) -> bool {
     extension_matches(path, VIDEO_EXTENSIONS)
 }
 
+pub fn is_strm(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("strm"))
+}
+
 pub fn is_subtitle(path: &Path) -> bool {
     extension_matches(path, SUBTITLE_EXTENSIONS)
+}
+
+pub fn read_strm_target(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    strm_target_from_text(&content)
+}
+
+pub fn strm_target_from_text(content: &str) -> Option<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty()
+                && !line.starts_with('#')
+                && (line.starts_with("http://") || line.starts_with("https://"))
+        })
+        .map(ToOwned::to_owned)
+}
+
+pub fn extension_from_url(value: &str) -> Option<String> {
+    let url = Url::parse(value).ok()?;
+    let path = Path::new(url.path());
+    path.extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_lowercase)
+        .filter(|extension| !extension.is_empty())
 }
 
 pub fn find_sidecar_image(video: &Path) -> Option<PathBuf> {
@@ -122,6 +156,10 @@ pub fn find_sidecar_image(video: &Path) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     for extension in IMAGE_EXTENSIONS {
         candidates.push(parent.join(format!("{stem}.{extension}")));
+        candidates.push(parent.join(format!("{stem}-poster.{extension}")));
+        candidates.push(parent.join(format!("{stem}.poster.{extension}")));
+        candidates.push(parent.join(format!("{stem}-thumb.{extension}")));
+        candidates.push(parent.join(format!("{stem}.thumb.{extension}")));
     }
 
     candidates.extend(folder_image_candidates(parent));
@@ -130,6 +168,12 @@ pub fn find_sidecar_image(video: &Path) -> Option<PathBuf> {
 
 pub fn find_folder_image(folder: &Path) -> Option<PathBuf> {
     folder_image_candidates(folder)
+        .into_iter()
+        .find(|candidate| candidate.exists())
+}
+
+pub fn find_backdrop_image(folder: &Path) -> Option<PathBuf> {
+    folder_backdrop_candidates(folder)
         .into_iter()
         .find(|candidate| candidate.exists())
 }
@@ -196,7 +240,19 @@ fn extension_matches(path: &Path, candidates: &[&str]) -> bool {
 
 fn folder_image_candidates(folder: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    for name in ["poster", "folder", "cover"] {
+    for name in [
+        "poster", "folder", "cover", "series", "tvshow", "movie", "season",
+    ] {
+        for extension in IMAGE_EXTENSIONS {
+            candidates.push(folder.join(format!("{name}.{extension}")));
+        }
+    }
+    candidates
+}
+
+fn folder_backdrop_candidates(folder: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for name in ["backdrop", "fanart", "background", "landscape"] {
         for extension in IMAGE_EXTENSIONS {
             candidates.push(folder.join(format!("{name}.{extension}")));
         }

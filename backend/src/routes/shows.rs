@@ -1,7 +1,7 @@
 use crate::{
     auth::AuthSession,
     error::AppError,
-    models::{EpisodeDto, QueryResult, SeasonDto, SeasonsQuery, EpisodesQuery},
+    models::{EpisodeDto, EpisodesQuery, QueryResult, SeasonDto, SeasonsQuery},
     repository::{self, ItemListOptions},
     state::AppState,
 };
@@ -86,17 +86,19 @@ async fn get_episodes(
     }
 
     let mut parent_id = Some(series_id);
-    // 如果提供了season_id，则获取该季下的剧集
+    let mut recursive = true;
+    // 如果提供了 SeasonId，则只获取该季；否则递归获取整部剧下的分集。
     if let Some(season_id) = query.season_id {
         let season = repository::get_media_item(&state.pool, season_id)
             .await?
             .ok_or_else(|| AppError::NotFound("Season not found".to_string()))?;
-        
+
         if season.item_type != "Season" {
             return Err(AppError::BadRequest("Item is not a season".to_string()));
         }
 
         parent_id = Some(season_id);
+        recursive = false;
     }
 
     // 获取剧集
@@ -107,7 +109,7 @@ async fn get_episodes(
             parent_id,
             include_types: vec!["Episode".to_string()],
             genres: vec![],
-            recursive: false,
+            recursive,
             search_term: None,
             sort_by: Some("SortName".to_string()),
             sort_order: Some("Ascending".to_string()),
@@ -183,15 +185,22 @@ async fn season_to_dto(
     season: &crate::models::DbMediaItem,
 ) -> Result<SeasonDto, AppError> {
     // 获取用户数据
-    let user_data = repository::get_user_item_data_dto(&state.pool, user_id, season.id).await.ok();
+    let user_data = repository::get_user_item_data_dto(&state.pool, user_id, season.id)
+        .await
+        .ok();
 
     // 获取子项数量（剧集数量）
-    let child_count = repository::count_item_children(&state.pool, season.id).await.unwrap_or(0);
+    let child_count = repository::count_item_children(&state.pool, season.id)
+        .await
+        .unwrap_or(0);
 
     // 构建图片标签
     let mut image_tags = std::collections::BTreeMap::new();
     if season.image_primary_path.is_some() {
-        image_tags.insert("Primary".to_string(), "".to_string()); // 实际应用中应该生成tag
+        image_tags.insert(
+            "Primary".to_string(),
+            season.date_modified.timestamp().to_string(),
+        );
     }
 
     Ok(SeasonDto {
@@ -221,7 +230,9 @@ async fn episode_to_dto(
     episode: &crate::models::DbMediaItem,
 ) -> Result<EpisodeDto, AppError> {
     // 获取用户数据
-    let user_data = repository::get_user_item_data_dto(&state.pool, user_id, episode.id).await.ok();
+    let user_data = repository::get_user_item_data_dto(&state.pool, user_id, episode.id)
+        .await
+        .ok();
 
     // 获取媒体源和媒体流
     let media_sources = Some(vec![repository::media_source_for_item(episode)]);
@@ -230,13 +241,16 @@ async fn episode_to_dto(
     // 构建图片标签
     let mut image_tags = std::collections::BTreeMap::new();
     if episode.image_primary_path.is_some() {
-        image_tags.insert("Primary".to_string(), "".to_string());
+        image_tags.insert(
+            "Primary".to_string(),
+            episode.date_modified.timestamp().to_string(),
+        );
     }
 
     // 获取系列和季信息
     let series_name = episode.series_name.clone();
     let season_name = episode.season_name.clone();
-    
+
     let series_id = if let Some(parent_id) = episode.parent_id {
         // 尝试找到系列ID（可能是祖父级）
         if let Some(parent_item) = repository::get_media_item(&state.pool, parent_id).await? {
