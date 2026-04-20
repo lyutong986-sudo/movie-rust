@@ -1,0 +1,449 @@
+import { computed, reactive, ref } from 'vue';
+import { EmbyApi } from '../api/emby';
+import type { BaseItemDto, SystemInfo, UserDto } from '../api/emby';
+
+export type AdminPage = 'overview' | 'server' | 'libraries' | 'users' | 'playback' | 'network';
+
+export const api = new EmbyApi(import.meta.env.VITE_API_BASE || '');
+
+export const state = reactive({
+  serverName: 'Movie Rust',
+  username: '',
+  password: '',
+  adminName: 'admin',
+  adminPassword: '',
+  adminPasswordConfirm: '',
+  adminCreated: false,
+  uiCulture: 'zh-CN',
+  metadataLanguage: 'zh',
+  metadataCountry: 'CN',
+  allowRemoteAccess: false,
+  enableUPNP: false,
+  showWizardPassword: false,
+  showLoginPassword: false,
+  libraryName: '电影',
+  libraryPath: '',
+  collectionType: 'movies',
+  selectedLibraryId: '',
+  libraryViewType: '',
+  librarySortBy: 'SortName',
+  librarySortAscending: true,
+  search: '',
+  busy: false,
+  message: '',
+  error: '',
+  startupWizardCompleted: true,
+  wizardStep: 1,
+  showAddLibrary: false,
+  loginAsOther: false,
+  initialized: false
+});
+
+export const user = ref(api.user);
+export const publicUsers = ref<UserDto[]>([]);
+export const adminUsers = ref<UserDto[]>([]);
+export const libraries = ref<BaseItemDto[]>([]);
+export const items = ref<BaseItemDto[]>([]);
+export const homeItems = ref<BaseItemDto[]>([]);
+export const latestByLibrary = ref<Record<string, BaseItemDto[]>>({});
+export const systemInfo = ref<SystemInfo | null>(null);
+export const selectedItem = ref<BaseItemDto | null>(null);
+export const parentStack = ref<BaseItemDto[]>([]);
+
+export const isAdmin = computed(() => Boolean(user.value?.Policy?.IsAdministrator));
+export const selectedLibrary = computed(() =>
+  libraries.value.find((library) => library.Id === state.selectedLibraryId)
+);
+export const selectedMediaSource = computed(() => selectedItem.value?.MediaSources?.[0]);
+export const selectedStreams = computed(() => selectedMediaSource.value?.MediaStreams || selectedItem.value?.MediaStreams || []);
+export const currentItems = computed(() => (state.selectedLibraryId ? items.value : homeItems.value));
+export const currentParentName = computed(() => parentStack.value.at(-1)?.Name || selectedLibrary.value?.Name || '首页');
+export const continueWatching = computed(() =>
+  homeItems.value.filter((item) => item.UserData?.PlaybackPositionTicks > 0 && !item.UserData?.Played).slice(0, 12)
+);
+export const favorites = computed(() => homeItems.value.filter((item) => item.UserData?.IsFavorite).slice(0, 12));
+export const latest = computed(() => homeItems.value.filter((item) => !item.IsFolder).slice(0, 18));
+export const libraryCards = computed(() => libraries.value);
+export const totalLibraryItems = computed(() => libraries.value.reduce((sum, library) => sum + (library.ChildCount || 0), 0));
+
+export async function initialize() {
+  if (state.initialized) {
+    return;
+  }
+
+  await loadPublicInfo();
+  if (!state.startupWizardCompleted) {
+    await loadStartupWizard();
+    state.initialized = true;
+    return;
+  }
+
+  publicUsers.value = await safePublicUsers();
+  if (api.isAuthenticated) {
+    user.value = api.user;
+    await enterHome();
+  }
+  state.initialized = true;
+}
+
+export async function loadPublicInfo() {
+  try {
+    const info = await api.publicInfo();
+    state.serverName = info.ServerName || state.serverName;
+    state.startupWizardCompleted = info.StartupWizardCompleted;
+  } catch {
+    state.serverName = 'Movie Rust';
+  }
+}
+
+export async function safePublicUsers() {
+  try {
+    return await api.publicUsers();
+  } catch {
+    return [];
+  }
+}
+
+export async function loadStartupWizard() {
+  await run(async () => {
+    const configuration = await api.startupConfiguration();
+    state.serverName = configuration.ServerName || state.serverName;
+    state.uiCulture = configuration.UiCulture || state.uiCulture;
+    state.metadataLanguage = configuration.PreferredMetadataLanguage || state.metadataLanguage;
+    state.metadataCountry = configuration.MetadataCountryCode || state.metadataCountry;
+
+    const firstUser = await api.firstStartupUser();
+    if (firstUser) {
+      state.adminName = firstUser.Name;
+      state.adminCreated = true;
+      state.wizardStep = Math.max(state.wizardStep, 3);
+    }
+  });
+}
+
+export function startupConfigurationPayload() {
+  return {
+    ServerName: state.serverName,
+    UiCulture: state.uiCulture,
+    MetadataCountryCode: state.metadataCountry,
+    PreferredMetadataLanguage: state.metadataLanguage
+  };
+}
+
+export async function saveLanguageAndContinue() {
+  await run(async () => {
+    await api.updateStartupConfiguration(startupConfigurationPayload());
+    state.wizardStep = 2;
+  });
+}
+
+export async function createWizardAdmin() {
+  await run(async () => {
+    const adminName = state.adminName.trim();
+    if (!adminName) {
+      throw new Error('管理员名称不能为空');
+    }
+
+    if (!state.adminCreated) {
+      if (state.adminPassword.length < 4) {
+        throw new Error('管理员密码至少需要 4 个字符');
+      }
+      if (state.adminPassword !== state.adminPasswordConfirm) {
+        throw new Error('两次输入的密码不一致');
+      }
+
+      await api.createFirstAdmin({
+        Name: adminName,
+        Password: state.adminPassword
+      });
+      state.adminCreated = true;
+    }
+    state.adminName = adminName;
+    state.wizardStep = 3;
+  }, '管理员已创建');
+}
+
+export async function saveMetadataAndContinue() {
+  await run(async () => {
+    await api.updateStartupConfiguration(startupConfigurationPayload());
+    state.wizardStep = 4;
+  });
+}
+
+export async function completeWizard() {
+  await run(async () => {
+    await api.updateRemoteAccess({
+      EnableRemoteAccess: state.allowRemoteAccess,
+      EnableAutomaticPortMapping: state.enableUPNP
+    });
+    await api.completeStartup();
+    state.startupWizardCompleted = true;
+    publicUsers.value = await safePublicUsers();
+
+    if (state.adminPassword) {
+      const result = await api.login(state.adminName.trim(), state.adminPassword);
+      user.value = result.User;
+      await enterHome();
+    }
+  }, state.adminPassword ? '设置完成' : '设置完成，请登录');
+}
+
+export async function login(name = state.username, password = state.password) {
+  await run(async () => {
+    const result = await api.login(name, password);
+    user.value = result.User;
+    state.loginAsOther = false;
+    await enterHome();
+  }, '已登录');
+}
+
+export async function enterHome() {
+  state.selectedLibraryId = '';
+  parentStack.value = [];
+  await loadLibraries();
+  await Promise.all([loadHome(), loadLatestByLibrary()]);
+}
+
+export async function loadLibraries() {
+  const result = await api.libraries();
+  libraries.value = result.Items;
+}
+
+export async function loadHome() {
+  await run(async () => {
+    const searching = Boolean(state.search.trim());
+    const result = await api.items(undefined, state.search, true, {
+      sortBy: searching ? 'SortName' : 'DateCreated',
+      sortOrder: searching ? 'Ascending' : 'Descending',
+      limit: 180
+    });
+    homeItems.value = result.Items;
+  });
+}
+
+export async function loadLatestByLibrary() {
+  const entries = await Promise.all(
+    libraries.value.map(async (library) => [library.Id, await api.latest(library.Id, 18)] as const)
+  );
+  latestByLibrary.value = Object.fromEntries(entries);
+}
+
+export async function loadItems() {
+  if (!state.selectedLibraryId) {
+    await loadHome();
+    return;
+  }
+
+  await run(async () => {
+    const parentId = parentStack.value.at(-1)?.Id || state.selectedLibraryId;
+    const result = await api.items(parentId, state.search, Boolean(state.search.trim()), {
+      includeTypes: state.libraryViewType ? [state.libraryViewType] : undefined,
+      sortBy: state.librarySortBy || 'SortName',
+      sortOrder: state.librarySortAscending ? 'Ascending' : 'Descending',
+      limit: 180
+    });
+    items.value = result.Items;
+  });
+}
+
+export async function selectLibrary(libraryId: string) {
+  state.selectedLibraryId = libraryId;
+  state.search = '';
+  parentStack.value = [];
+  await loadItems();
+}
+
+export async function backToHome() {
+  state.selectedLibraryId = '';
+  state.search = '';
+  parentStack.value = [];
+  await loadHome();
+}
+
+export async function loadAdminData() {
+  await run(async () => {
+    const [info, users, configuration] = await Promise.all([
+      api.systemInfo(),
+      api.users(),
+      api.startupConfiguration()
+    ]);
+    systemInfo.value = info;
+    adminUsers.value = users;
+    state.serverName = configuration.ServerName || state.serverName;
+    state.uiCulture = configuration.UiCulture || state.uiCulture;
+    state.metadataLanguage = configuration.PreferredMetadataLanguage || state.metadataLanguage;
+    state.metadataCountry = configuration.MetadataCountryCode || state.metadataCountry;
+  });
+}
+
+export async function backToParent() {
+  parentStack.value.pop();
+  await loadItems();
+}
+
+export async function createLibrary() {
+  await run(async () => {
+    const library = await api.createLibrary({
+      Name: state.libraryName,
+      Path: state.libraryPath,
+      CollectionType: state.collectionType
+    });
+    libraries.value.push(library);
+    state.libraryPath = '';
+    state.showAddLibrary = false;
+    await loadLibraries();
+    await Promise.all([loadHome(), loadLatestByLibrary()]);
+    state.selectedLibraryId = library.Id;
+    await loadItems();
+  }, '媒体库已创建');
+}
+
+export async function saveServerSettings() {
+  await run(async () => {
+    await api.updateStartupConfiguration(startupConfigurationPayload());
+    await api.updateRemoteAccess({
+      EnableRemoteAccess: state.allowRemoteAccess,
+      EnableAutomaticPortMapping: state.enableUPNP
+    });
+    systemInfo.value = await api.systemInfo();
+  }, '服务器设置已保存');
+}
+
+export async function scan() {
+  await run(async () => {
+    const summary = await api.scan();
+    await loadLibraries();
+    await loadLatestByLibrary();
+    await loadItems();
+    state.message = `扫描完成：${summary.ImportedItems} 个条目`;
+  });
+}
+
+export async function search() {
+  if (state.selectedLibraryId) {
+    await loadItems();
+  } else {
+    await loadHome();
+  }
+}
+
+export function logout() {
+  api.logout();
+  user.value = null;
+  systemInfo.value = null;
+  libraries.value = [];
+  items.value = [];
+  homeItems.value = [];
+  latestByLibrary.value = {};
+  adminUsers.value = [];
+  selectedItem.value = null;
+  parentStack.value = [];
+  state.username = '';
+  state.password = '';
+  state.search = '';
+  state.selectedLibraryId = '';
+  state.libraryViewType = '';
+  state.librarySortBy = 'SortName';
+  state.librarySortAscending = true;
+}
+
+export function openItem(item: BaseItemDto) {
+  if (item.Type === 'CollectionFolder') {
+    selectLibrary(item.Id);
+    return;
+  }
+
+  if (item.IsFolder) {
+    parentStack.value.push(item);
+    loadItems();
+    return;
+  }
+
+  selectedItem.value = item;
+}
+
+export async function toggleFavorite(item: BaseItemDto) {
+  await run(async () => {
+    const userData = await api.markFavorite(item.Id, !item.UserData.IsFavorite);
+    applyUserData(item.Id, userData);
+  });
+}
+
+export async function togglePlayed(item: BaseItemDto) {
+  await run(async () => {
+    const userData = await api.markPlayed(item.Id, !item.UserData.Played);
+    applyUserData(item.Id, userData);
+  });
+}
+
+export function applyUserData(itemId: string, userData: BaseItemDto['UserData']) {
+  for (const collection of [items.value, homeItems.value]) {
+    const item = collection.find((candidate) => candidate.Id === itemId);
+    if (item) {
+      item.UserData = { ...item.UserData, ...userData };
+    }
+  }
+  if (selectedItem.value?.Id === itemId) {
+    selectedItem.value.UserData = { ...selectedItem.value.UserData, ...userData };
+  }
+}
+
+export function itemSubtitle(item: BaseItemDto) {
+  if (item.Type === 'Episode') {
+    const season = item.ParentIndexNumber ? `S${String(item.ParentIndexNumber).padStart(2, '0')}` : '';
+    const episode = item.IndexNumber ? `E${String(item.IndexNumber).padStart(2, '0')}` : '';
+    return [item.SeriesName, `${season}${episode}`].filter(Boolean).join(' ');
+  }
+
+  if (item.IsFolder) {
+    return `${item.Type} · ${item.ChildCount || 0}`;
+  }
+
+  return [item.ProductionYear, item.MediaSources?.[0]?.Container || item.Container || item.MediaType || item.Type]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+export function streamLabel(type: string) {
+  if (type === 'Video') return '视频';
+  if (type === 'Audio') return '音频';
+  if (type === 'Subtitle') return '字幕';
+  return type;
+}
+
+export function streamText(stream: NonNullable<BaseItemDto['MediaStreams']>[number]) {
+  const parts = [
+    stream.DisplayTitle,
+    stream.Codec,
+    stream.Language,
+    stream.Width && stream.Height ? `${stream.Width}x${stream.Height}` : '',
+    stream.IsExternal ? '外挂' : ''
+  ].filter(Boolean);
+  return parts.join(' · ') || '默认轨道';
+}
+
+export function fileSize(size?: number) {
+  if (!size) return '';
+  const gb = size / 1024 / 1024 / 1024;
+  if (gb >= 1) return `${gb.toFixed(2)} GB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+export async function run(task: () => Promise<void>, success = '') {
+  state.busy = true;
+  state.error = '';
+  if (success) {
+    state.message = '';
+  }
+
+  try {
+    await task();
+    if (success) {
+      state.message = success;
+    }
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.busy = false;
+  }
+}

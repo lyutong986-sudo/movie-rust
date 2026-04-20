@@ -48,7 +48,11 @@ export interface BaseItemDto {
   IndexNumber?: number;
   IndexNumberEnd?: number;
   ParentIndexNumber?: number;
+  DateCreated?: string;
+  PremiereDate?: string;
   ImageTags?: Record<string, string>;
+  BackdropImageTags?: string[];
+  PrimaryImageAspectRatio?: number;
   UserData: {
     Rating?: number;
     PlayedPercentage?: number;
@@ -119,6 +123,14 @@ export interface StartupConfiguration {
 export interface StartupRemoteAccess {
   EnableRemoteAccess: boolean;
   EnableAutomaticPortMapping?: boolean;
+}
+
+export interface ItemQueryOptions {
+  includeTypes?: string[];
+  sortBy?: string;
+  sortOrder?: 'Ascending' | 'Descending';
+  limit?: number;
+  startIndex?: number;
 }
 
 const TOKEN_KEY = 'movie-rust-token';
@@ -223,21 +235,43 @@ export class EmbyApi {
     return this.request<QueryResult<BaseItemDto>>(`/Users/${userId}/Views`);
   }
 
-  async items(parentId?: string, searchTerm = '', recursive = false) {
+  async items(parentId?: string, searchTerm = '', recursive = false, options: ItemQueryOptions = {}) {
     const userId = this.requireUserId();
     const params = new URLSearchParams({
       Recursive: recursive ? 'true' : 'false',
-      SortBy: 'SortName',
-      SortOrder: 'Ascending',
-      Limit: '120'
+      SortBy: options.sortBy || 'SortName',
+      SortOrder: options.sortOrder || 'Ascending',
+      Limit: String(options.limit || 120)
     });
+    if (options.startIndex !== undefined) {
+      params.set('StartIndex', String(options.startIndex));
+    }
     if (parentId) {
       params.set('ParentId', parentId);
     }
     if (searchTerm.trim()) {
       params.set('SearchTerm', searchTerm.trim());
     }
+    if (options.includeTypes?.length) {
+      params.set('IncludeItemTypes', options.includeTypes.join(','));
+    }
     return this.request<QueryResult<BaseItemDto>>(`/Users/${userId}/Items?${params}`);
+  }
+
+  async item(itemId: string) {
+    const userId = this.requireUserId();
+    return this.request<BaseItemDto>(`/Users/${userId}/Items/${itemId}`);
+  }
+
+  async latest(parentId?: string, limit = 12) {
+    const userId = this.requireUserId();
+    const params = new URLSearchParams({
+      Limit: String(limit)
+    });
+    if (parentId) {
+      params.set('ParentId', parentId);
+    }
+    return this.request<BaseItemDto[]>(`/Users/${userId}/Items/Latest?${params}`);
   }
 
   async createLibrary(payload: { Name: string; Path: string; CollectionType: string }) {
@@ -281,10 +315,19 @@ export class EmbyApi {
   }
 
   itemImageUrl(item: BaseItemDto) {
-    if (!item.ImageTags?.Primary) {
+    return this.imageUrl(item, 'Primary', item.ImageTags?.Primary);
+  }
+
+  backdropUrl(item: BaseItemDto) {
+    return this.imageUrl(item, 'Backdrop', item.BackdropImageTags?.[0], 0);
+  }
+
+  private imageUrl(item: BaseItemDto, imageType: string, tag?: string, imageIndex?: number) {
+    if (!tag) {
       return '';
     }
-    return `${this.baseUrl}/Items/${item.Id}/Images/Primary?api_key=${encodeURIComponent(this.token)}`;
+    const indexSegment = imageIndex === undefined ? '' : `/${imageIndex}`;
+    return `${this.baseUrl}/Items/${item.Id}/Images/${imageType}${indexSegment}?api_key=${encodeURIComponent(this.token)}&tag=${encodeURIComponent(tag)}`;
   }
 
   streamUrl(item: BaseItemDto) {
