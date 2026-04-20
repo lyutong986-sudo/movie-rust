@@ -16,7 +16,11 @@
     "vite": "^7.1.12",
     "vue": "^3.5.22",
     "vue-router": "^4.5.1",
-    "vue-tsc": "^3.1.1"
+    "vue-tsc": "^3.1.1",
+    "@vueuse/core": "^10.0.0",
+    "@jellyfin/sdk": "0.13.0",
+    "i18next": "^23.0.0",
+    "i18next-vue": "^1.0.0"
   },
   "devDependencies": {}
 }
