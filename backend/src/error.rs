@@ -56,3 +56,15 @@ impl From<anyhow::Error> for AppError {
         AppError::Internal(value.to_string())
     }
 }
+
+impl From<reqwest::Error> for AppError {
+    fn from(value: reqwest::Error) -> Self {
+        AppError::Internal(format!("HTTP请求错误: {}", value))
+    }
+}
+
+impl From<serde_json::Error> for AppError {
+    fn from(value: serde_json::Error) -> Self {
+        AppError::Internal(format!("JSON解析错误: {}", value))
+    }
+}

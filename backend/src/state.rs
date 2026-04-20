@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::{config::Config, metadata::provider::MetadataProviderManager};
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -6,4 +6,5 @@ use std::sync::Arc;
 pub struct AppState {
     pub pool: PgPool,
     pub config: Arc<Config>,
+    pub metadata_manager: Option<Arc<MetadataProviderManager>>,
 }

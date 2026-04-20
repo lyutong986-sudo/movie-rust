@@ -1,7 +1,7 @@
 use crate::{
     auth::{self, AuthSession},
     error::AppError,
-    models::{AuthenticateByNameRequest, AuthenticationResult, UpdateUserPasswordRequest, UserDto},
+    models::{AuthenticateByNameRequest, AuthenticationResult, UpdateUserPasswordRequest, UserDto, UserPolicyDto},
     repository, security,
     state::AppState,
 };
@@ -9,7 +9,7 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use url::form_urlencoded;
@@ -34,6 +34,9 @@ pub fn router() -> Router<AppState> {
         .route("/users/me", get(me))
         .route("/Users/{user_id}", get(user_by_id))
         .route("/users/{user_id}", get(user_by_id))
+        .route("/Users/{user_id}/Policy", put(update_user_policy))
+        .route("/Users/{user_id}/policy", put(update_user_policy))
+        .route("/users/{user_id}/policy", put(update_user_policy))
 }
 
 async fn public_users(State(state): State<AppState>) -> Result<Json<Vec<UserDto>>, AppError> {
@@ -260,4 +263,46 @@ fn form_value(values: &[(String, String)], names: &[&str]) -> Option<String> {
             None
         }
     })
+}
+
+async fn update_user_policy(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Json(policy): Json<UserPolicyDto>,
+) -> Result<StatusCode, AppError> {
+    // 只有管理员可以更新用户策略
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+
+    // 如果移除管理员权限，检查是否至少还有一个管理员
+    if !policy.is_administrator && user.is_admin {
+        let admin_count = repository::count_admin_users(&state.pool).await?;
+        if admin_count <= 1 {
+            return Err(AppError::BadRequest("系统中必须至少有一个管理员用户".to_string()));
+        }
+    }
+
+    // 管理员不能被禁用
+    if policy.is_disabled && user.is_admin {
+        return Err(AppError::BadRequest("管理员用户不能被禁用".to_string()));
+    }
+
+    // 如果禁用用户，检查是否至少还有一个启用用户
+    if policy.is_disabled && !user.is_disabled {
+        let enabled_count = repository::count_enabled_users(&state.pool).await?;
+        if enabled_count <= 1 {
+            return Err(AppError::BadRequest("系统中必须至少有一个启用用户".to_string()));
+        }
+    }
+
+    // 更新用户策略
+    repository::update_user_policy(&state.pool, user_id, &policy).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

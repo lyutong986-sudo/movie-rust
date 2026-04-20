@@ -5,6 +5,7 @@ pub mod admin;
 pub mod genres;
 pub mod images;
 pub mod items;
+pub mod metadata_routes;
 pub mod persons;
 pub mod sessions;
 pub mod shows;
@@ -36,6 +37,7 @@ fn api_router() -> Router<AppState> {
         .merge(admin::router())
         .merge(genres::router())
         .merge(persons::router())
+        .merge(metadata_routes::router())
 }
 
 #[cfg(test)]

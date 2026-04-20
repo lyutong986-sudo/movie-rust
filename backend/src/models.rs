@@ -244,8 +244,8 @@ pub struct UserDto {
     pub configuration: UserConfigurationDto,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase", default)]
 pub struct UserPolicyDto {
     pub is_administrator: bool,
     pub is_hidden: bool,
@@ -253,7 +253,85 @@ pub struct UserPolicyDto {
     pub enable_remote_access: bool,
     pub enable_media_playback: bool,
     pub enable_content_deletion: bool,
-    pub enable_downloads: bool,
+    pub enable_content_downloading: bool,
+    pub enable_sync_transcoding: bool,
+    pub enable_media_conversion: bool,
+    pub enable_collection_management: bool,
+    pub enable_subtitle_management: bool,
+    pub enable_lyric_management: bool,
+    pub enable_live_tv_access: bool,
+    pub enable_live_tv_management: bool,
+    pub enable_audio_playback_transcoding: bool,
+    pub enable_video_playback_transcoding: bool,
+    pub enable_playback_remuxing: bool,
+    pub enable_remote_control_of_other_users: bool,
+    pub enable_shared_device_control: bool,
+    pub enable_public_sharing: bool,
+    pub enable_user_preference_access: bool,
+    pub max_parental_rating: Option<i32>,
+    pub max_parental_sub_rating: Option<i32>,
+    pub max_active_sessions: i32,
+    pub login_attempts_before_lockout: i32,
+    pub remote_client_bitrate_limit: i32,
+    pub blocked_tags: Vec<String>,
+    pub allowed_tags: Vec<String>,
+    pub enabled_folders: Vec<Uuid>,
+    pub enable_all_folders: bool,
+    pub enabled_channels: Vec<Uuid>,
+    pub enable_all_channels: bool,
+    pub enabled_devices: Vec<String>,
+    pub enable_all_devices: bool,
+    pub blocked_media_folders: Vec<Uuid>,
+    pub blocked_channels: Vec<Uuid>,
+    pub authentication_provider_id: String,
+    pub password_reset_provider_id: String,
+    pub sync_play_access: String,
+}
+
+impl Default for UserPolicyDto {
+    fn default() -> Self {
+        Self {
+            is_administrator: false,
+            is_hidden: false,
+            is_disabled: false,
+            enable_remote_access: true,
+            enable_media_playback: true,
+            enable_content_deletion: false,
+            enable_content_downloading: true,
+            enable_sync_transcoding: false,
+            enable_media_conversion: false,
+            enable_collection_management: false,
+            enable_subtitle_management: false,
+            enable_lyric_management: false,
+            enable_live_tv_access: false,
+            enable_live_tv_management: false,
+            enable_audio_playback_transcoding: true,
+            enable_video_playback_transcoding: true,
+            enable_playback_remuxing: true,
+            enable_remote_control_of_other_users: false,
+            enable_shared_device_control: false,
+            enable_public_sharing: true,
+            enable_user_preference_access: true,
+            max_parental_rating: None,
+            max_parental_sub_rating: None,
+            max_active_sessions: 0,
+            login_attempts_before_lockout: -1,
+            remote_client_bitrate_limit: 0,
+            blocked_tags: Vec::new(),
+            allowed_tags: Vec::new(),
+            enabled_folders: Vec::new(),
+            enable_all_folders: true,
+            enabled_channels: Vec::new(),
+            enable_all_channels: true,
+            enabled_devices: Vec::new(),
+            enable_all_devices: true,
+            blocked_media_folders: Vec::new(),
+            blocked_channels: Vec::new(),
+            authentication_provider_id: "".to_string(),
+            password_reset_provider_id: "".to_string(),
+            sync_play_access: "CreateAndJoinGroups".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

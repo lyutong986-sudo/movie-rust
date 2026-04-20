@@ -215,20 +215,136 @@ pub async fn get_items_by_genre(
 
 pub async fn get_persons(
     pool: &sqlx::PgPool,
-    _start_index: Option<i32>,
-    _limit: Option<i32>,
-    _name_starts_with: Option<String>,
+    start_index: Option<i32>,
+    limit: Option<i32>,
+    name_starts_with: Option<String>,
 ) -> Result<Vec<PersonDto>, AppError> {
-    // 暂时返回空列表
-    Ok(vec![])
+    let start_index = start_index.unwrap_or(0);
+    let limit = limit.unwrap_or(100).min(200); // 限制最大返回200条
+    
+    let mut query = sqlx::query_as::<_, DbPerson>(
+        r#"
+        SELECT *
+        FROM persons
+        WHERE 1=1
+        "#,
+    );
+    
+    if let Some(name_prefix) = name_starts_with {
+        let name_pattern = format!("{}%", name_prefix);
+        query = sqlx::query_as::<_, DbPerson>(
+            r#"
+            SELECT *
+            FROM persons
+            WHERE name ILIKE $1
+            ORDER BY name
+            LIMIT $2 OFFSET $3
+            "#
+        )
+        .bind(name_pattern)
+        .bind(limit as i64)
+        .bind(start_index as i64);
+    } else {
+        query = sqlx::query_as::<_, DbPerson>(
+            r#"
+            SELECT *
+            FROM persons
+            ORDER BY name
+            LIMIT $1 OFFSET $2
+            "#
+        )
+        .bind(limit as i64)
+        .bind(start_index as i64);
+    }
+    
+    let persons = query.fetch_all(pool).await?;
+    
+    let person_dtos = persons
+        .into_iter()
+        .map(|person| {
+            // 将provider_ids JSON转换为HashMap
+            let provider_ids: Option<std::collections::HashMap<String, String>> = 
+                if person.provider_ids.is_null() {
+                    None
+                } else {
+                    match serde_json::from_value(person.provider_ids.clone()) {
+                        Ok(map) => Some(map),
+                        Err(_) => None,
+                    }
+                };
+            
+            PersonDto {
+                name: person.name,
+                id: person.id.to_string(),
+                role: None,
+                person_type: None,
+                sort_name: person.sort_name,
+                overview: person.overview,
+                external_url: person.external_url,
+                premiere_date: person.premiere_date.map(|dt| dt.to_rfc3339()),
+                production_year: person.production_year,
+                image_tags: None, // 暂时为空
+                provider_ids,
+                favorite: Some(false),
+            }
+        })
+        .collect();
+    
+    Ok(person_dtos)
 }
 
 pub async fn get_person_by_id(
     pool: &sqlx::PgPool,
     person_id: &str,
 ) -> Result<PersonDto, AppError> {
-    // 暂时返回错误
-    Err(AppError::NotFound("Person not found".to_string()))
+    // 尝试解析为UUID
+    let id = match Uuid::parse_str(person_id) {
+        Ok(uuid) => uuid,
+        Err(_) => return Err(AppError::NotFound("Invalid person ID".to_string())),
+    };
+    
+    let person = sqlx::query_as::<_, DbPerson>(
+        r#"
+        SELECT *
+        FROM persons
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    
+    if let Some(person) = person {
+        // 将provider_ids JSON转换为HashMap
+        let provider_ids: Option<std::collections::HashMap<String, String>> = 
+            if person.provider_ids.is_null() {
+                None
+            } else {
+                match serde_json::from_value(person.provider_ids.clone()) {
+                    Ok(map) => Some(map),
+                    Err(_) => None,
+                }
+            };
+        
+        let person_dto = PersonDto {
+            name: person.name,
+            id: person.id.to_string(),
+            role: None,
+            person_type: None,
+            sort_name: person.sort_name,
+            overview: person.overview,
+            external_url: person.external_url,
+            premiere_date: person.premiere_date.map(|dt| dt.to_rfc3339()),
+            production_year: person.production_year,
+            image_tags: None, // 暂时为空
+            provider_ids,
+            favorite: Some(false),
+        };
+        
+        Ok(person_dto)
+    } else {
+        Err(AppError::NotFound("Person not found".to_string()))
+    }
 }
 
 pub async fn get_items_by_person(
@@ -237,16 +353,116 @@ pub async fn get_items_by_person(
     _start_index: Option<i32>,
     _limit: Option<i32>,
 ) -> Result<Vec<BaseItemDto>, AppError> {
-    // 暂时返回空列表
+    // 尝试解析为UUID
+    let id = match Uuid::parse_str(person_id) {
+        Ok(uuid) => uuid,
+        Err(_) => return Ok(vec![]),
+    };
+    
+    // 查询与人物相关的项目
+    // 注意：person_roles表还没有填充，暂时返回空列表
     Ok(vec![])
 }
 
+pub async fn get_person_by_external_id(
+    pool: &sqlx::PgPool,
+    provider: &str,
+    external_id: &str,
+) -> Result<Option<DbPerson>, AppError> {
+    Ok(sqlx::query_as::<_, DbPerson>(
+        r#"
+        SELECT *
+        FROM persons
+        WHERE provider_ids->>$1 = $2
+        LIMIT 1
+        "#,
+    )
+    .bind(provider)
+    .bind(external_id)
+    .fetch_optional(pool)
+    .await?)
+}
 
+pub async fn create_person(
+    pool: &sqlx::PgPool,
+    person: &DbPerson,
+) -> Result<Uuid, AppError> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO persons (
+            id, name, sort_name, overview, external_url,
+            provider_ids, premiere_date, production_year,
+            primary_image_path, backdrop_image_path, logo_image_path,
+            favorite_count, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        RETURNING id
+        "#,
+    )
+    .bind(person.id)
+    .bind(&person.name)
+    .bind(&person.sort_name)
+    .bind(&person.overview)
+    .bind(&person.external_url)
+    .bind(&person.provider_ids)
+    .bind(person.premiere_date)
+    .bind(person.production_year)
+    .bind(&person.primary_image_path)
+    .bind(&person.backdrop_image_path)
+    .bind(&person.logo_image_path)
+    .bind(person.favorite_count)
+    .bind(person.created_at)
+    .bind(person.updated_at)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result.get(0))
+}
+
+pub async fn update_person(
+    pool: &sqlx::PgPool,
+    person_id: Uuid,
+    person: &DbPerson,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE persons
+        SET name = $2,
+            sort_name = $3,
+            overview = $4,
+            external_url = $5,
+            provider_ids = $6,
+            premiere_date = $7,
+            production_year = $8,
+            primary_image_path = $9,
+            backdrop_image_path = $10,
+            logo_image_path = $11,
+            updated_at = $12
+        WHERE id = $1
+        "#,
+    )
+    .bind(person_id)
+    .bind(&person.name)
+    .bind(&person.sort_name)
+    .bind(&person.overview)
+    .bind(&person.external_url)
+    .bind(&person.provider_ids)
+    .bind(person.premiere_date)
+    .bind(person.production_year)
+    .bind(&person.primary_image_path)
+    .bind(&person.backdrop_image_path)
+    .bind(&person.logo_image_path)
+    .bind(chrono::Utc::now())
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
 
 pub async fn get_user_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Option<DbUser>, AppError> {
     Ok(sqlx::query_as::<_, DbUser>(
         r#"
-        SELECT id, name, password_hash, is_admin, is_hidden, is_disabled
+        SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy
         FROM users
         WHERE lower(name) = lower($1)
         "#,
@@ -259,7 +475,7 @@ pub async fn get_user_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Option<
 pub async fn get_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbUser>, AppError> {
     Ok(sqlx::query_as::<_, DbUser>(
         r#"
-        SELECT id, name, password_hash, is_admin, is_hidden, is_disabled
+        SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy
         FROM users
         WHERE id = $1
         "#,
@@ -289,11 +505,49 @@ pub async fn change_user_password(
     Ok(())
 }
 
+pub async fn count_admin_users(pool: &sqlx::PgPool) -> Result<i64, AppError> {
+    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_admin = true AND is_disabled = false")
+        .fetch_one(pool)
+        .await?)
+}
+
+pub async fn count_enabled_users(pool: &sqlx::PgPool) -> Result<i64, AppError> {
+    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_disabled = false")
+        .fetch_one(pool)
+        .await?)
+}
+
+pub async fn update_user_policy(pool: &sqlx::PgPool, user_id: Uuid, policy: &UserPolicyDto) -> Result<(), AppError> {
+    // 将策略转换为JSON
+    let policy_json = serde_json::to_value(policy)?;
+    
+    // 更新用户策略字段
+    sqlx::query(
+        r#"
+        UPDATE users 
+        SET policy = $1,
+            is_admin = $2,
+            is_hidden = $3,
+            is_disabled = $4
+        WHERE id = $5
+        "#,
+    )
+    .bind(policy_json)
+    .bind(policy.is_administrator)
+    .bind(policy.is_hidden)
+    .bind(policy.is_disabled)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<DbUser>, AppError> {
     let users = if public_only {
         sqlx::query_as::<_, DbUser>(
             r#"
-            SELECT id, name, password_hash, is_admin, is_hidden, is_disabled
+            SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy
             FROM users
             WHERE is_hidden = false AND is_disabled = false
             ORDER BY name
@@ -304,7 +558,7 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
     } else {
         sqlx::query_as::<_, DbUser>(
             r#"
-            SELECT id, name, password_hash, is_admin, is_hidden, is_disabled
+            SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy
             FROM users
             ORDER BY name
             "#,
@@ -1270,6 +1524,21 @@ pub async fn upsert_media_item(
 }
 
 pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
+    // 尝试从数据库的policy字段反序列化UserPolicyDto
+    let mut policy = if !user.policy.is_null() {
+        match serde_json::from_value::<UserPolicyDto>(user.policy.clone()) {
+            Ok(p) => p,
+            Err(_) => UserPolicyDto::default(),
+        }
+    } else {
+        UserPolicyDto::default()
+    };
+    
+    // 覆盖关键字段以确保与数据库状态一致
+    policy.is_administrator = user.is_admin;
+    policy.is_hidden = user.is_hidden;
+    policy.is_disabled = user.is_disabled;
+    
     UserDto {
         name: user.name.clone(),
         server_id: server_id.to_string(),
@@ -1277,15 +1546,7 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
         has_password: true,
         has_configured_password: true,
         has_configured_easy_password: false,
-        policy: UserPolicyDto {
-            is_administrator: user.is_admin,
-            is_hidden: user.is_hidden,
-            is_disabled: user.is_disabled,
-            enable_remote_access: true,
-            enable_media_playback: true,
-            enable_content_deletion: user.is_admin,
-            enable_downloads: true,
-        },
+        policy,
         configuration: UserConfigurationDto {
             play_default_audio_track: true,
             subtitle_mode: "Default".to_string(),

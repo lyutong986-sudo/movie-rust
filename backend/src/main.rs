@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod error;
 mod media_analyzer;
+mod metadata;
 mod models;
 mod naming;
 mod repository;
@@ -47,10 +48,21 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("执行数据库迁移失败")?;
 
+    // 创建元数据提供者管理器
+    let mut metadata_manager = metadata::provider::MetadataProviderManager::new();
+    
+    // 如果配置了TMDB API密钥，添加TMDB提供者
+    if let Some(tmdb_api_key) = &config.tmdb_api_key {
+        let tmdb_provider = metadata::tmdb::TmdbProvider::new(tmdb_api_key.clone());
+        metadata_manager.register_provider(Box::new(tmdb_provider));
+        tracing::info!("TMDB元数据提供者已注册");
+    }
+
     let bind_addr = config.bind_addr()?;
     let state = AppState {
         pool,
         config: Arc::new(config),
+        metadata_manager: Some(Arc::new(metadata_manager)),
     };
 
     let spa =

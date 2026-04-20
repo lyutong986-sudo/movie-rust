@@ -10,6 +10,7 @@ pub struct Config {
     pub server_name: String,
     pub server_id: Uuid,
     pub static_dir: PathBuf,
+    pub tmdb_api_key: Option<String>,
 }
 
 impl Config {
@@ -37,6 +38,7 @@ impl Config {
             static_dir: env::var("APP_STATIC_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("frontend/dist")),
+            tmdb_api_key: env::var("TMDB_API_KEY").ok(),
         })
     }
 
