@@ -3,7 +3,7 @@ use crate::{
     error::AppError,
     media_analyzer,
     models::{
-        BaseItemDto, GetSimilarItems, ItemsQuery, PlaybackInfoResponse, QueryResult, UpdateUserItemDataRequest,
+        BaseItemDto, GetSimilarItems, ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult, UpdateUserItemDataRequest,
         UserItemDataDto, UserItemDataQuery,
     },
     naming,
@@ -474,7 +474,25 @@ async fn playback_info(
     _session: AuthSession,
     State(state): State<AppState>,
     Path(item_id): Path<Uuid>,
+    Query(query_info): Query<PlaybackInfoDto>,
+    body: Option<Json<PlaybackInfoDto>>,
 ) -> Result<Json<PlaybackInfoResponse>, AppError> {
+    // 合并查询参数和请求体，请求体优先
+    let info = if let Some(body_info) = body {
+        let mut merged = body_info.0;
+        // 如果查询参数中有值而请求体中没有，则使用查询参数的值
+        if merged.user_id.is_none() && query_info.user_id.is_some() {
+            merged.user_id = query_info.user_id;
+        }
+        if merged.max_streaming_bitrate.is_none() && query_info.max_streaming_bitrate.is_some() {
+            merged.max_streaming_bitrate = query_info.max_streaming_bitrate;
+        }
+        // 可以继续合并其他字段，但为简化起见，仅合并关键字段
+        merged
+    } else {
+        query_info
+    };
+    
     let mut item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
@@ -534,7 +552,30 @@ async fn playback_info(
 
     let play_session_id = Uuid::new_v4().simple().to_string();
 
-    let media_source = repository::get_media_source_with_streams(&state.pool, &item).await?;
+    let mut media_source = repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id).await?;
+    
+    // 设备配置文件处理
+    if let Some(device_profile) = &info.device_profile {
+        // 根据最大流比特率决定是否支持转码
+        if let Some(max_bitrate) = device_profile.max_streaming_bitrate {
+            // 如果媒体比特率大于最大流比特率，则可能需要转码
+            if let Some(media_bitrate) = media_source.bitrate {
+                if media_bitrate > max_bitrate as i32 {
+                    media_source.supports_transcoding = true;
+                }
+            }
+        }
+        
+        // 检查设备是否支持直接播放
+        if !device_profile.direct_play_profiles.is_empty() {
+            // 简化：如果存在直接播放配置文件，则支持直接播放
+            media_source.supports_direct_play = true;
+        }
+        
+        // 检查是否支持直接流
+        media_source.supports_direct_stream = true;
+    }
+    
     Ok(Json(PlaybackInfoResponse {
         media_sources: vec![media_source],
         play_session_id,

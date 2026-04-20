@@ -1903,13 +1903,19 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         container: container.clone(),
         name: item.name.clone(),
         is_remote,
+        sort_name: None,
+        encoder_path: None,
+        encoder_protocol: None,
+        probe_path: None,
+        probe_protocol: None,
+        has_mixed_protocols: Some(false),
         supports_direct_play: true,
         supports_direct_stream: true,
         supports_transcoding: false,
-        direct_stream_url: format!(
+        direct_stream_url: Some(format!(
             "/Videos/{}/stream.{}?Static=true&mediaSourceId={}",
             item.id, container, item.id
-        ),
+        )),
         formats: vec![container.clone()],
         size,
         e_tag: Some(item.date_modified.timestamp().to_string()),
@@ -1927,6 +1933,26 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
                 .position(|s| s.stream_type == "Subtitle")
                 .map(|i| i as i32)),
         run_time_ticks: item.runtime_ticks,
+        container_start_time_ticks: None,
+        is_infinite_stream: Some(false),
+        requires_opening: Some(false),
+        open_token: None,
+        requires_closing: Some(false),
+        live_stream_id: None,
+        buffer_ms: None,
+        requires_looping: Some(false),
+        supports_probing: Some(true),
+        video_3d_format: None,
+        timestamp: None,
+        required_http_headers: BTreeMap::new(),
+        add_api_key_to_direct_stream_url: Some(false),
+        transcoding_url: None,
+        transcoding_sub_protocol: None,
+        transcoding_container: None,
+        analyze_duration_ms: None,
+        read_at_native_framerate: Some(false),
+        item_id: Some(uuid_to_emby_guid(&item.id)),
+        server_id: None,
         media_streams,
     }
 }
@@ -2249,6 +2275,7 @@ pub async fn get_media_streams(
 pub async fn get_media_source_with_streams(
     pool: &sqlx::PgPool,
     item: &DbMediaItem,
+    server_id: Uuid,
 ) -> Result<MediaSourceDto, AppError> {
     // 获取媒体流
     let db_streams = get_media_streams(pool, item.id).await?;
@@ -2303,7 +2330,9 @@ pub async fn get_media_source_with_streams(
     
     // 如果没有媒体流，则回退到旧的逻辑
     if media_streams.is_empty() {
-        return Ok(media_source_for_item(item));
+        let mut dto = media_source_for_item(item);
+        dto.server_id = Some(uuid_to_emby_guid(&server_id));
+        return Ok(dto);
     }
     
     let local_path = Path::new(&item.path);
@@ -2336,18 +2365,24 @@ pub async fn get_media_source_with_streams(
         source_type: "Default".to_string(),
         container: container.clone(),
         name: item.name.clone(),
+        sort_name: None,
         is_remote,
+        encoder_path: None,
+        encoder_protocol: None,
+        probe_path: None,
+        probe_protocol: None,
+        has_mixed_protocols: Some(false),
         supports_direct_play: true,
         supports_direct_stream: true,
         supports_transcoding: false,
-        direct_stream_url: format!(
+        direct_stream_url: Some(format!(
             "/Videos/{}/stream.{}?Static=true&mediaSourceId={}",
             item.id, container, item.id
-        ),
+        )),
         formats: vec![container.clone()],
         size,
         e_tag: Some(item.date_modified.timestamp().to_string()),
-        bitrate: None,
+        bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
         default_audio_stream_index: media_streams.iter()
             .position(|s| s.stream_type == "Audio" && s.is_default)
             .map(|i| i as i32)
@@ -2361,6 +2396,26 @@ pub async fn get_media_source_with_streams(
                 .position(|s| s.stream_type == "Subtitle")
                 .map(|i| i as i32)),
         run_time_ticks: item.runtime_ticks,
+        container_start_time_ticks: None,
+        is_infinite_stream: Some(false),
+        requires_opening: Some(false),
+        open_token: None,
+        requires_closing: Some(false),
+        live_stream_id: None,
+        buffer_ms: None,
+        requires_looping: Some(false),
+        supports_probing: Some(true),
+        video_3d_format: None,
+        timestamp: None,
+        required_http_headers: BTreeMap::new(),
+        add_api_key_to_direct_stream_url: Some(false),
+        transcoding_url: None,
+        transcoding_sub_protocol: None,
+        transcoding_container: None,
+        analyze_duration_ms: None,
+        read_at_native_framerate: Some(false),
+        item_id: Some(uuid_to_emby_guid(&item.id)),
+        server_id: Some(uuid_to_emby_guid(&server_id)),
         media_streams,
     })
 }

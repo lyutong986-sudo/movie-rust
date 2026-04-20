@@ -577,11 +577,24 @@ pub struct MediaSourceDto {
     pub source_type: String,
     pub container: String,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_name: Option<String>,
     pub is_remote: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoder_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoder_protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_mixed_protocols: Option<bool>,
     pub supports_direct_play: bool,
     pub supports_direct_stream: bool,
     pub supports_transcoding: bool,
-    pub direct_stream_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_stream_url: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub formats: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -596,6 +609,46 @@ pub struct MediaSourceDto {
     pub default_subtitle_stream_index: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_time_ticks: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_start_time_ticks: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_infinite_stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_opening: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_closing: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_stream_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buffer_ms: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_looping: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_probing: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_3d_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub required_http_headers: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub add_api_key_to_direct_stream_url: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_sub_protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_container: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analyze_duration_ms: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_at_native_framerate: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
     pub media_streams: Vec<MediaStreamDto>,
 }
 
@@ -1195,6 +1248,34 @@ pub struct SeasonsQuery {
     pub _api_key: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DirectPlayProfile {
+    #[serde(default)]
+    pub r#type: Option<String>,
+    #[serde(default)]
+    pub container: Option<String>,
+    #[serde(default)]
+    pub video_codec: Option<String>,
+    #[serde(default)]
+    pub audio_codec: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct TranscodingProfile {
+    #[serde(default)]
+    pub r#type: Option<String>,
+    #[serde(default)]
+    pub container: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub video_codec: Option<String>,
+    #[serde(default)]
+    pub audio_codec: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct EpisodesQuery {
@@ -1259,4 +1340,65 @@ pub struct GetSimilarItems {
     pub image_type_limit: Option<i64>,
     #[serde(default)]
     pub enable_image_types: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PlaybackInfoDto {
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
+    #[serde(default)]
+    pub max_streaming_bitrate: Option<i64>,
+    #[serde(default)]
+    pub start_time_ticks: Option<i64>,
+    #[serde(default)]
+    pub audio_stream_index: Option<i32>,
+    #[serde(default)]
+    pub subtitle_stream_index: Option<i32>,
+    #[serde(default)]
+    pub max_audio_channels: Option<i32>,
+    #[serde(default)]
+    pub media_source_id: Option<String>,
+    #[serde(default)]
+    pub live_stream_id: Option<String>,
+    #[serde(default)]
+    pub device_profile: Option<DeviceProfile>,
+    #[serde(default)]
+    pub enable_direct_play: Option<bool>,
+    #[serde(default)]
+    pub enable_direct_stream: Option<bool>,
+    #[serde(default)]
+    pub enable_transcoding: Option<bool>,
+    #[serde(default)]
+    pub allow_video_stream_copy: Option<bool>,
+    #[serde(default)]
+    pub allow_audio_stream_copy: Option<bool>,
+    #[serde(default)]
+    pub auto_open_live_stream: Option<bool>,
+    #[serde(default)]
+    pub always_burn_in_subtitle_when_transcoding: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct DeviceProfile {
+    // 简化设备配置，后续可扩展
+    #[serde(default)]
+    pub max_streaming_bitrate: Option<i64>,
+    #[serde(default)]
+    pub max_static_bitrate: Option<i64>,
+    #[serde(default)]
+    pub direct_play_protocols: Vec<String>,
+    #[serde(default)]
+    pub direct_play_profiles: Vec<DirectPlayProfile>,
+    #[serde(default)]
+    pub transcoding_profiles: Vec<TranscodingProfile>,
+    #[serde(default)]
+    pub container_profiles: Vec<String>,
+    #[serde(default)]
+    pub codec_profiles: Vec<String>,
+    #[serde(default)]
+    pub response_profiles: Vec<String>,
+    #[serde(default)]
+    pub subtitle_profiles: Vec<String>,
 }
