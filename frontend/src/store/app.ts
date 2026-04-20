@@ -3,6 +3,7 @@ import { EmbyApi } from '../api/emby';
 import type { BaseItemDto, SystemInfo, UserDto } from '../api/emby';
 
 export type AdminPage = 'overview' | 'server' | 'libraries' | 'users' | 'playback' | 'network';
+
 export interface ServerEntry {
   Id: string;
   Name: string;
@@ -13,6 +14,7 @@ export interface ServerEntry {
 }
 
 export const api = new EmbyApi(import.meta.env.VITE_API_BASE || '');
+
 const SERVERS_KEY = 'movie-rust-servers';
 const CURRENT_SERVER_KEY = 'movie-rust-current-server';
 
@@ -63,23 +65,36 @@ export const selectedItem = ref<BaseItemDto | null>(null);
 export const parentStack = ref<BaseItemDto[]>([]);
 
 export const isAdmin = computed(() => Boolean(user.value?.Policy?.IsAdministrator));
-export const currentServer = computed(() =>
-  servers.value.find((server) => normalizeServerUrl(server.Url) === normalizeServerUrl(currentServerUrl.value)) || null
+export const currentServer = computed(
+  () =>
+    servers.value.find(
+      (server) => normalizeServerUrl(server.Url) === normalizeServerUrl(currentServerUrl.value)
+    ) || null
 );
 export const selectedLibrary = computed(() =>
   libraries.value.find((library) => library.Id === state.selectedLibraryId)
 );
 export const selectedMediaSource = computed(() => selectedItem.value?.MediaSources?.[0]);
-export const selectedStreams = computed(() => selectedMediaSource.value?.MediaStreams || selectedItem.value?.MediaStreams || []);
-export const currentItems = computed(() => (state.selectedLibraryId ? items.value : homeItems.value));
-export const currentParentName = computed(() => parentStack.value.at(-1)?.Name || selectedLibrary.value?.Name || '首页');
-export const continueWatching = computed(() =>
-  homeItems.value.filter((item) => item.UserData?.PlaybackPositionTicks > 0 && !item.UserData?.Played).slice(0, 12)
+export const selectedStreams = computed(
+  () => selectedMediaSource.value?.MediaStreams || selectedItem.value?.MediaStreams || []
 );
-export const favorites = computed(() => homeItems.value.filter((item) => item.UserData?.IsFavorite).slice(0, 12));
+export const currentItems = computed(() => (state.selectedLibraryId ? items.value : homeItems.value));
+export const currentParentName = computed(
+  () => parentStack.value.at(-1)?.Name || selectedLibrary.value?.Name || '首页'
+);
+export const continueWatching = computed(() =>
+  homeItems.value
+    .filter((item) => item.UserData?.PlaybackPositionTicks > 0 && !item.UserData?.Played)
+    .slice(0, 12)
+);
+export const favorites = computed(() =>
+  homeItems.value.filter((item) => item.UserData?.IsFavorite).slice(0, 12)
+);
 export const latest = computed(() => homeItems.value.filter((item) => !item.IsFolder).slice(0, 18));
 export const libraryCards = computed(() => libraries.value);
-export const totalLibraryItems = computed(() => libraries.value.reduce((sum, library) => sum + (library.ChildCount || 0), 0));
+export const totalLibraryItems = computed(() =>
+  libraries.value.reduce((sum, library) => sum + (library.ChildCount || 0), 0)
+);
 
 export async function initialize(force = false) {
   if (state.initialized && !force) {
@@ -90,6 +105,7 @@ export async function initialize(force = false) {
   ensureDefaultServer();
   api.setBaseUrl(currentServerUrl.value);
   await loadPublicInfo();
+
   if (!state.startupWizardCompleted) {
     await loadStartupWizard();
     state.initialized = true;
@@ -101,6 +117,7 @@ export async function initialize(force = false) {
     user.value = api.user;
     await enterHome();
   }
+
   state.initialized = true;
 }
 
@@ -174,6 +191,7 @@ export async function createWizardAdmin() {
       if (state.adminPassword.length < 4) {
         throw new Error('管理员密码至少需要 4 个字符');
       }
+
       if (state.adminPassword !== state.adminPasswordConfirm) {
         throw new Error('两次输入的密码不一致');
       }
@@ -184,6 +202,7 @@ export async function createWizardAdmin() {
       });
       state.adminCreated = true;
     }
+
     state.adminName = adminName;
     state.wizardStep = 3;
   }, '管理员已创建');
@@ -376,7 +395,7 @@ export async function scan() {
     await loadLibraries();
     await loadLatestByLibrary();
     await loadItems();
-    state.message = `扫描完成：${summary.ImportedItems} 个条目`;
+    state.message = `扫描完成，新增 ${summary.ImportedItems} 个条目`;
   });
 }
 
@@ -427,7 +446,7 @@ export function openItem(item: BaseItemDto) {
 
   if (item.IsFolder) {
     parentStack.value.push(item);
-    loadItems();
+    void loadItems();
     return;
   }
 
@@ -455,6 +474,7 @@ export function applyUserData(itemId: string, userData: BaseItemDto['UserData'])
       item.UserData = { ...item.UserData, ...userData };
     }
   }
+
   if (selectedItem.value?.Id === itemId) {
     selectedItem.value.UserData = { ...selectedItem.value.UserData, ...userData };
   }
@@ -462,7 +482,9 @@ export function applyUserData(itemId: string, userData: BaseItemDto['UserData'])
 
 export function itemSubtitle(item: BaseItemDto) {
   if (item.Type === 'Episode') {
-    const season = item.ParentIndexNumber ? `S${String(item.ParentIndexNumber).padStart(2, '0')}` : '';
+    const season = item.ParentIndexNumber
+      ? `S${String(item.ParentIndexNumber).padStart(2, '0')}`
+      : '';
     const episode = item.IndexNumber ? `E${String(item.IndexNumber).padStart(2, '0')}` : '';
     return [item.SeriesName, `${season}${episode}`].filter(Boolean).join(' ');
   }
@@ -471,7 +493,10 @@ export function itemSubtitle(item: BaseItemDto) {
     return `${item.Type} · ${item.ChildCount || 0}`;
   }
 
-  return [item.ProductionYear, item.MediaSources?.[0]?.Container || item.Container || item.MediaType || item.Type]
+  return [
+    item.ProductionYear,
+    item.MediaSources?.[0]?.Container || item.Container || item.MediaType || item.Type
+  ]
     .filter(Boolean)
     .join(' · ');
 }
@@ -523,7 +548,10 @@ export async function run(task: () => Promise<void>, success = '') {
 function upsertServer(server: ServerEntry) {
   const normalized = normalizeServerUrl(server.Url);
   const next = { ...server, Url: normalized };
-  const index = servers.value.findIndex((entry) => normalizeServerUrl(entry.Url) === normalized);
+  const index = servers.value.findIndex(
+    (entry) => normalizeServerUrl(entry.Url) === normalized
+  );
+
   if (index >= 0) {
     servers.value[index] = {
       ...servers.value[index],
@@ -532,6 +560,7 @@ function upsertServer(server: ServerEntry) {
   } else {
     servers.value.push(next);
   }
+
   persistServers();
 }
 
@@ -541,7 +570,13 @@ function ensureDefaultServer() {
     currentServerUrl.value = fallback;
     localStorage.setItem(CURRENT_SERVER_KEY, fallback);
   }
-  if (!servers.value.some((server) => normalizeServerUrl(server.Url) === normalizeServerUrl(currentServerUrl.value))) {
+
+  if (
+    !servers.value.some(
+      (server) =>
+        normalizeServerUrl(server.Url) === normalizeServerUrl(currentServerUrl.value)
+    )
+  ) {
     upsertServer({
       Id: normalizeServerUrl(currentServerUrl.value),
       Name: '当前服务器',

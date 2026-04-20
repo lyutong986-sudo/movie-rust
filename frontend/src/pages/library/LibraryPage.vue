@@ -2,8 +2,9 @@
 import { computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import MediaCard from '../../components/MediaCard.vue';
-import { api, backToParent, currentParentName, items, loadItems, parentStack, selectedLibrary, selectLibrary, state } from '../../store/app';
+import { backToParent, currentParentName, items, loadItems, parentStack, selectedLibrary, selectLibrary, state } from '../../store/app';
 import type { BaseItemDto } from '../../api/emby';
+import { itemRoute, playbackRoute } from '../../utils/navigation';
 
 const route = useRoute();
 const router = useRouter();
@@ -36,25 +37,27 @@ watch(
   }
 );
 
-const breadcrumbs = computed(() => [selectedLibrary.value?.Name, ...parentStack.value.map((item) => item.Name)].filter(Boolean));
+const breadcrumbs = computed(() =>
+  [selectedLibrary.value?.Name, ...parentStack.value.map((item) => item.Name)].filter(Boolean)
+);
 
 async function openMedia(item: BaseItemDto) {
-  if (item.Type === 'CollectionFolder') {
-    await router.push(`/library/${item.Id}`);
-    return;
-  }
+  if (item.IsFolder && item.Type !== 'Series') {
+    if (item.Type === 'CollectionFolder') {
+      await router.push(`/library/${item.Id}`);
+      return;
+    }
 
-  if (item.IsFolder) {
     parentStack.value.push(item);
     await loadItems();
     return;
   }
 
-  await router.push(`/item/${item.Id}`);
+  await router.push(itemRoute(item));
 }
 
-function playItem(item: BaseItemDto) {
-  window.open(api.streamUrl(item), '_blank', 'noopener');
+async function playItem(item: BaseItemDto) {
+  await router.push(playbackRoute(item));
 }
 
 function toggleSortOrder() {
@@ -65,7 +68,7 @@ function toggleSortOrder() {
 <template>
   <section class="home-sections">
     <nav class="crumbs">
-      <button v-if="parentStack.length" type="button" title="返回上一级" @click="backToParent">‹</button>
+      <button v-if="parentStack.length" type="button" title="返回上一层" @click="backToParent">←</button>
       <span v-for="crumb in breadcrumbs" :key="crumb">{{ crumb }}</span>
     </nav>
 

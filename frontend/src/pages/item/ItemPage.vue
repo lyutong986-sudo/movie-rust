@@ -3,7 +3,8 @@ import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import MediaCard from '../../components/MediaCard.vue';
 import type { BaseItemDto, MediaStreamDto } from '../../api/emby';
-import { api, fileSize } from '../../store/app';
+import { api, fileSize, streamLabel, streamText } from '../../store/app';
+import { genreRoute, itemRoute, playbackRoute } from '../../utils/navigation';
 
 const route = useRoute();
 const router = useRouter();
@@ -18,9 +19,7 @@ const currentSourceIndex = ref(0);
 const currentSource = computed(() => item.value?.MediaSources?.[currentSourceIndex.value]);
 const currentStreams = computed(() => currentSource.value?.MediaStreams || item.value?.MediaStreams || []);
 const itemImage = computed(() => (item.value ? api.itemImageUrl(item.value) || api.backdropUrl(item.value) : ''));
-const streamUrl = computed(() =>
-  item.value && !item.value.IsFolder && item.value.MediaSources?.length ? api.streamUrl(item.value) : ''
-);
+const playable = computed(() => Boolean(item.value && !item.value.IsFolder && item.value.MediaSources?.length));
 const metaChips = computed(() => {
   if (!item.value) {
     return [];
@@ -56,18 +55,44 @@ async function loadItem(itemId: string) {
       return;
     }
 
+    if (currentItem.Type === 'Series') {
+      await router.replace(`/series/${currentItem.Id}`);
+      return;
+    }
+
     item.value = currentItem;
     currentSourceIndex.value = 0;
 
     childItems.value = currentItem.IsFolder
-      ? (await api.items(currentItem.Id, '', false, { limit: 60 })).Items
+      ? (
+          await api.items(currentItem.Id, '', false, {
+            sortBy: currentItem.Type === 'Season' ? 'IndexNumber' : 'SortName',
+            sortOrder: 'Ascending',
+            limit: 120
+          })
+        ).Items
       : [];
 
-    relatedItems.value = currentItem.ParentId
-      ? (await api.items(currentItem.ParentId, '', false, { limit: 24 })).Items.filter(
-          (candidate) => candidate.Id !== currentItem.Id
-        )
-      : [];
+    if (currentItem.ParentId) {
+      relatedItems.value = (
+        await api.items(currentItem.ParentId, '', false, {
+          sortBy: currentItem.Type === 'Episode' ? 'IndexNumber' : 'SortName',
+          sortOrder: 'Ascending',
+          limit: 60
+        })
+      ).Items.filter((candidate) => candidate.Id !== currentItem.Id);
+    } else if (currentItem.Type !== 'Movie') {
+      relatedItems.value = [];
+    } else {
+      relatedItems.value = (
+        await api.items(undefined, '', true, {
+          includeTypes: ['Movie'],
+          sortBy: 'DateCreated',
+          sortOrder: 'Descending',
+          limit: 36
+        })
+      ).Items.filter((candidate) => candidate.Id !== currentItem.Id);
+    }
   } catch (loadError) {
     error.value = loadError instanceof Error ? loadError.message : String(loadError);
     item.value = null;
@@ -79,16 +104,11 @@ async function loadItem(itemId: string) {
 }
 
 async function openChild(target: BaseItemDto) {
-  if (target.Type === 'CollectionFolder') {
-    await router.push(`/library/${target.Id}`);
-    return;
-  }
-
-  await router.push(`/item/${target.Id}`);
+  await router.push(itemRoute(target));
 }
 
-function playItem(target: BaseItemDto) {
-  window.open(api.streamUrl(target), '_blank', 'noopener');
+async function playItem(target: BaseItemDto) {
+  await router.push(playbackRoute(target));
 }
 
 async function toggleFavorite() {
@@ -121,23 +141,12 @@ async function togglePlayed() {
   };
 }
 
-function streamLabel(type: string) {
-  if (type === 'Video') return '视频';
-  if (type === 'Audio') return '音频';
-  if (type === 'Subtitle') return '字幕';
-  return type;
-}
+async function openGenre(name: string) {
+  if (!item.value) {
+    return;
+  }
 
-function streamText(stream: MediaStreamDto) {
-  return [
-    stream.DisplayTitle,
-    stream.Codec,
-    stream.Language,
-    stream.Width && stream.Height ? `${stream.Width}x${stream.Height}` : '',
-    stream.IsExternal ? '外挂' : ''
-  ]
-    .filter(Boolean)
-    .join(' · ');
+  await router.push(genreRoute(name, item.value.Type));
 }
 
 function runtimeText(target: BaseItemDto) {
@@ -148,10 +157,12 @@ function runtimeText(target: BaseItemDto) {
   const totalMinutes = Math.round(target.RunTimeTicks / 10_000_000 / 60);
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
-  if (hours) {
-    return `${hours} 小时 ${minutes} 分`;
-  }
-  return `${minutes} 分钟`;
+
+  return hours ? `${hours} 小时 ${minutes} 分钟` : `${minutes} 分钟`;
+}
+
+function streamLine(stream: MediaStreamDto) {
+  return streamText(stream) || '默认轨道';
 }
 </script>
 
@@ -159,7 +170,7 @@ function runtimeText(target: BaseItemDto) {
   <section v-if="loading" class="empty">
     <p>媒体详情</p>
     <h2>正在加载</h2>
-    <p>正在读取项目元数据、播放源和子条目。</p>
+    <p>正在读取条目元数据、播放源和子项目。</p>
   </section>
 
   <section v-else-if="error" class="empty">
@@ -170,7 +181,7 @@ function runtimeText(target: BaseItemDto) {
 
   <section v-else-if="item" class="home-sections">
     <nav class="crumbs">
-      <button type="button" title="返回上一页" @click="router.back()">‹</button>
+      <button type="button" title="返回上一页" @click="router.back()">←</button>
       <span>{{ item.Type }}</span>
       <span>{{ item.Name }}</span>
     </nav>
@@ -194,15 +205,7 @@ function runtimeText(target: BaseItemDto) {
         <p v-if="item.Overview">{{ item.Overview }}</p>
 
         <div class="button-row">
-          <a
-            v-if="streamUrl"
-            class="play-link"
-            :href="streamUrl"
-            target="_blank"
-            rel="noreferrer"
-          >
-            播放
-          </a>
+          <button v-if="playable" type="button" @click="playItem(item)">播放</button>
           <button type="button" class="secondary" @click="toggleFavorite">
             {{ item.UserData.IsFavorite ? '取消收藏' : '加入收藏' }}
           </button>
@@ -214,8 +217,6 @@ function runtimeText(target: BaseItemDto) {
         <p v-if="item.Path" class="path">{{ item.Path }}</p>
       </div>
     </section>
-
-    <video v-if="streamUrl" controls :src="streamUrl"></video>
 
     <section v-if="item.MediaSources?.length" class="settings-page">
       <div v-if="item.MediaSources.length > 1" class="admin-tabs">
@@ -233,7 +234,7 @@ function runtimeText(target: BaseItemDto) {
       <div class="streams">
         <div v-for="stream in currentStreams" :key="`${stream.Type}-${stream.Index}`">
           <strong>{{ streamLabel(stream.Type) }}</strong>
-          <span>{{ streamText(stream) || '默认轨道' }}</span>
+          <span>{{ streamLine(stream) }}</span>
         </div>
         <div v-if="currentSource?.Size">
           <strong>文件大小</strong>
@@ -246,14 +247,22 @@ function runtimeText(target: BaseItemDto) {
       <div class="section-heading">
         <h3>类型</h3>
       </div>
-      <div class="meta">
-        <span v-for="genre in item.Genres" :key="genre">{{ genre }}</span>
+      <div class="meta meta-links">
+        <button
+          v-for="genre in item.Genres"
+          :key="genre"
+          type="button"
+          class="chip-button secondary"
+          @click="openGenre(genre)"
+        >
+          {{ genre }}
+        </button>
       </div>
     </section>
 
     <section v-if="childItems.length" class="media-row">
       <div class="section-heading">
-        <h3>内容</h3>
+        <h3>{{ item.Type === 'Season' ? '分集' : '内容' }}</h3>
         <span>{{ childItems.length }} 项</span>
       </div>
       <div class="poster-grid">
@@ -269,7 +278,7 @@ function runtimeText(target: BaseItemDto) {
 
     <section v-if="relatedItems.length" class="media-row">
       <div class="section-heading">
-        <h3>更多内容</h3>
+        <h3>{{ item.Type === 'Episode' ? '同季内容' : '更多内容' }}</h3>
         <span>{{ relatedItems.length }} 项</span>
       </div>
       <div class="rail poster-rail">

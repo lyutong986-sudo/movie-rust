@@ -4,7 +4,6 @@ import { useRouter } from 'vue-router';
 import { currentServerUrl, removeServer, servers, switchServer } from '../../store/app';
 
 const router = useRouter();
-
 const serverList = computed(() => servers.value);
 
 async function select(url: string) {
@@ -43,16 +42,22 @@ function remove(url: string) {
             >
               {{ server.Url === currentServerUrl ? '当前服务器' : '连接' }}
             </button>
-            <button v-if="serverList.length > 1" class="secondary" type="button" @click="remove(server.Url)">
+            <button
+              v-if="serverList.length > 1"
+              class="secondary"
+              type="button"
+              @click="remove(server.Url)"
+            >
               移除
             </button>
           </div>
         </article>
       </div>
+
       <div v-else class="empty">
         <p>服务器列表</p>
         <h2>还没有保存的服务器</h2>
-        <p>这一步对应 Jellyfin 的服务器选择页，适合管理多个地址。</p>
+        <p>这一页对应 Jellyfin 的服务器选择页，适合管理多个地址。</p>
       </div>
 
       <div class="button-row">

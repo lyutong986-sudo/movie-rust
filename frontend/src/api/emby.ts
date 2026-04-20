@@ -53,6 +53,11 @@ export interface LogFileDto {
   DateModified: string;
 }
 
+export interface PlaybackInfoResponse {
+  MediaSources: NonNullable<BaseItemDto['MediaSources']>;
+  PlaySessionId: string;
+}
+
 export interface BaseItemDto {
   Id: string;
   Name: string;
@@ -153,10 +158,20 @@ export interface StartupRemoteAccess {
 
 export interface ItemQueryOptions {
   includeTypes?: string[];
+  genres?: string[];
   sortBy?: string;
   sortOrder?: 'Ascending' | 'Descending';
   limit?: number;
   startIndex?: number;
+}
+
+export interface PlaybackReportPayload {
+  ItemId: string;
+  PlaySessionId: string;
+  MediaSourceId?: string;
+  PositionTicks?: number;
+  IsPaused?: boolean;
+  PlayedToCompletion?: boolean;
 }
 
 const TOKEN_KEY = 'movie-rust-token';
@@ -305,6 +320,9 @@ export class EmbyApi {
     if (options.includeTypes?.length) {
       params.set('IncludeItemTypes', options.includeTypes.join(','));
     }
+    if (options.genres?.length) {
+      params.set('Genres', options.genres.join(','));
+    }
     return this.request<QueryResult<BaseItemDto>>(`/Users/${userId}/Items?${params}`);
   }
 
@@ -322,6 +340,31 @@ export class EmbyApi {
       params.set('ParentId', parentId);
     }
     return this.request<BaseItemDto[]>(`/Users/${userId}/Items/Latest?${params}`);
+  }
+
+  async playbackInfo(itemId: string) {
+    return this.request<PlaybackInfoResponse>(`/Items/${itemId}/PlaybackInfo`);
+  }
+
+  async playbackStarted(payload: PlaybackReportPayload) {
+    return this.request<void>('/Sessions/Playing', {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async playbackProgress(payload: PlaybackReportPayload) {
+    return this.request<void>('/Sessions/Playing/Progress', {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async playbackStopped(payload: PlaybackReportPayload) {
+    return this.request<void>('/Sessions/Playing/Stopped', {
+      method: 'POST',
+      body: payload
+    });
   }
 
   async createLibrary(payload: { Name: string; Path: string; CollectionType: string }) {
@@ -390,11 +433,29 @@ export class EmbyApi {
   streamUrl(item: BaseItemDto) {
     const directUrl = item.MediaSources?.[0]?.DirectStreamUrl;
     if (directUrl) {
-      const joiner = directUrl.includes('?') ? '&' : '?';
-      return `${this.baseUrl}${directUrl}${joiner}api_key=${encodeURIComponent(this.token)}`;
+      return this.streamUrlForSource(item.MediaSources![0]);
     }
 
     return `${this.baseUrl}/Videos/${item.Id}/stream?static=true&api_key=${encodeURIComponent(this.token)}`;
+  }
+
+  streamUrlForSource(source: NonNullable<BaseItemDto['MediaSources']>[number]) {
+    const directUrl = source.DirectStreamUrl;
+    if (!directUrl) {
+      return '';
+    }
+
+    const joiner = directUrl.includes('?') ? '&' : '?';
+    return `${this.baseUrl}${directUrl}${joiner}api_key=${encodeURIComponent(this.token)}`;
+  }
+
+  subtitleUrl(deliveryUrl?: string) {
+    if (!deliveryUrl) {
+      return '';
+    }
+
+    const joiner = deliveryUrl.includes('?') ? '&' : '?';
+    return `${this.baseUrl}${deliveryUrl}${joiner}api_key=${encodeURIComponent(this.token)}`;
   }
 
   private requireUserId() {

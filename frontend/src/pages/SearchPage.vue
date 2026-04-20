@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import MediaCard from '../components/MediaCard.vue';
 import { api } from '../store/app';
 import type { BaseItemDto } from '../api/emby';
+import { itemRoute, playbackRoute } from '../utils/navigation';
 
 const route = useRoute();
 const router = useRouter();
@@ -101,16 +102,11 @@ watch(
 );
 
 async function openItem(item: BaseItemDto) {
-  if (item.Type === 'CollectionFolder') {
-    await router.push(`/library/${item.Id}`);
-    return;
-  }
-
-  await router.push(`/item/${item.Id}`);
+  await router.push(itemRoute(item));
 }
 
-function playItem(item: BaseItemDto) {
-  window.open(api.streamUrl(item), '_blank', 'noopener');
+async function playItem(item: BaseItemDto) {
+  await router.push(playbackRoute(item));
 }
 </script>
 
@@ -140,7 +136,7 @@ function playItem(item: BaseItemDto) {
       <div v-if="loading" class="empty">
         <p>{{ searchQuery }}</p>
         <h2>正在搜索</h2>
-        <p>正在按 Jellyfin 前端的分类逻辑整理搜索结果。</p>
+        <p>正在按 Jellyfin 前端的分栏方式整理结果。</p>
       </div>
       <div v-else-if="error" class="empty">
         <p>搜索失败</p>

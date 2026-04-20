@@ -453,6 +453,7 @@ pub struct ItemListOptions {
     pub library_id: Option<Uuid>,
     pub parent_id: Option<Uuid>,
     pub include_types: Vec<String>,
+    pub genres: Vec<String>,
     pub recursive: bool,
     pub search_term: Option<String>,
     pub sort_by: Option<String>,
@@ -493,6 +494,10 @@ pub async fn list_media_items(
             .push(" AND item_type = ANY(")
             .push_bind(options.include_types)
             .push(")");
+    }
+
+    if !options.genres.is_empty() {
+        builder.push(" AND genres && ").push_bind(options.genres);
     }
 
     if let Some(search_term) = options.search_term.filter(|value| !value.trim().is_empty()) {
@@ -1029,7 +1034,7 @@ pub async fn media_item_to_dto(
     };
 
     let is_folder = is_folder_item(item);
-    let media_sources = if item.media_type.eq_ignore_ascii_case("Video") && !is_folder {
+    let media_sources = if !is_folder {
         vec![media_source_for_item(item)]
     } else {
         Vec::new()
@@ -1112,7 +1117,11 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         size,
         e_tag: Some(item.date_modified.timestamp().to_string()),
         bitrate: None,
-        default_audio_stream_index: Some(1),
+        default_audio_stream_index: Some(if item.media_type.eq_ignore_ascii_case("Audio") {
+            0
+        } else {
+            1
+        }),
         default_subtitle_stream_index: None,
         run_time_ticks: item.runtime_ticks,
         media_streams,
@@ -1120,6 +1129,31 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
 }
 
 pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
+    if item.media_type.eq_ignore_ascii_case("Audio") {
+        return vec![MediaStreamDto {
+            index: 0,
+            stream_type: "Audio".to_string(),
+            codec: item.audio_codec.clone(),
+            language: None,
+            display_title: item
+                .audio_codec
+                .clone()
+                .or_else(|| Some("Default".to_string())),
+            is_default: true,
+            is_forced: false,
+            width: None,
+            height: None,
+            bit_rate: None,
+            channels: None,
+            sample_rate: None,
+            is_external: false,
+            delivery_method: None,
+            delivery_url: None,
+            supports_external_stream: false,
+            path: None,
+        }];
+    }
+
     let mut streams = vec![
         MediaStreamDto {
             index: 0,

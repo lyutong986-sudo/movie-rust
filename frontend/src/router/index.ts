@@ -13,7 +13,7 @@ export const router = createRouter({
       path: '/library/:id',
       name: 'library',
       component: () => import('../pages/library/LibraryPage.vue'),
-      meta: { section: 'home' }
+      meta: { title: '媒体库', section: 'home' }
     },
     {
       path: '/search',
@@ -26,6 +26,30 @@ export const router = createRouter({
       name: 'item',
       component: () => import('../pages/item/ItemPage.vue'),
       meta: { title: '详情', section: 'home' }
+    },
+    {
+      path: '/series/:id',
+      name: 'series',
+      component: () => import('../pages/series/SeriesPage.vue'),
+      meta: { title: '剧集', section: 'home' }
+    },
+    {
+      path: '/genre/:id',
+      name: 'genre',
+      component: () => import('../pages/genre/GenrePage.vue'),
+      meta: { title: '类型', section: 'home' }
+    },
+    {
+      path: '/playback/video',
+      name: 'playback-video',
+      component: () => import('../pages/playback/VideoPlaybackPage.vue'),
+      meta: { title: '视频播放', layout: 'fullpage' }
+    },
+    {
+      path: '/playback/music',
+      name: 'playback-music',
+      component: () => import('../pages/playback/MusicPlaybackPage.vue'),
+      meta: { title: '音乐播放', layout: 'fullpage' }
     },
     {
       path: '/settings',

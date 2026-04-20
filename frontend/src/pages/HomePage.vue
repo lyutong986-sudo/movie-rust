@@ -4,11 +4,14 @@ import { useRouter } from 'vue-router';
 import MediaCard from '../components/MediaCard.vue';
 import { api, backToHome, continueWatching, enterHome, favorites, homeItems, isAdmin, latest, latestByLibrary, libraries, state } from '../store/app';
 import type { BaseItemDto } from '../api/emby';
+import { itemRoute, playbackRoute } from '../utils/navigation';
 
 const router = useRouter();
 
 const heroItem = computed(() => continueWatching.value[0] || latest.value[0] || homeItems.value[0] || null);
-const heroImage = computed(() => (heroItem.value ? api.itemImageUrl(heroItem.value) || api.backdropUrl(heroItem.value) : ''));
+const heroImage = computed(() =>
+  heroItem.value ? api.backdropUrl(heroItem.value) || api.itemImageUrl(heroItem.value) : ''
+);
 const latestSections = computed(() =>
   libraries.value
     .map((library) => ({
@@ -37,16 +40,11 @@ function libraryIcon(collectionType?: string) {
 }
 
 async function openItem(item: BaseItemDto) {
-  if (item.Type === 'CollectionFolder') {
-    await router.push(`/library/${item.Id}`);
-    return;
-  }
-
-  await router.push(`/item/${item.Id}`);
+  await router.push(itemRoute(item));
 }
 
-function playItem(item: BaseItemDto) {
-  window.open(api.streamUrl(item), '_blank', 'noopener');
+async function playItem(item: BaseItemDto) {
+  await router.push(playbackRoute(item));
 }
 </script>
 
@@ -60,15 +58,13 @@ function playItem(item: BaseItemDto) {
         <h2>{{ heroItem.Name }}</h2>
         <p>{{ heroItem.Overview || '从这里继续浏览你的媒体库。' }}</p>
         <div class="button-row">
-          <a
+          <button
             v-if="heroItem.MediaSources?.length"
-            class="play-link"
-            :href="api.streamUrl(heroItem)"
-            target="_blank"
-            rel="noreferrer"
+            type="button"
+            @click="playItem(heroItem)"
           >
             立即播放
-          </a>
+          </button>
           <button class="secondary" type="button" @click="openItem(heroItem)">查看详情</button>
         </div>
       </div>
@@ -160,7 +156,7 @@ function playItem(item: BaseItemDto) {
   </section>
 
   <section v-else class="empty">
-    <p>Jellyfin 风格首页需要至少一个媒体库。</p>
+    <p>Jellyfin 风格首页至少需要一个媒体库。</p>
     <h2>还没有媒体内容</h2>
     <p>先创建媒体库并执行扫描，首页的继续观看、最近添加、详情页和播放链路才会完整出现。</p>
     <div class="button-row">

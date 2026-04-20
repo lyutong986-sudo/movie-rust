@@ -156,6 +156,7 @@ async fn list_items_for_user(
                     library_id: Some(library.id),
                     parent_id: None,
                     include_types: parse_include_types(query.include_item_types.as_deref()),
+                    genres: parse_list(query.genres.as_deref()),
                     recursive,
                     search_term: query.search_term,
                     sort_by: query.sort_by,
@@ -175,6 +176,7 @@ async fn list_items_for_user(
             library_id: None,
             parent_id: query.parent_id,
             include_types: parse_include_types(query.include_item_types.as_deref()),
+            genres: parse_list(query.genres.as_deref()),
             recursive,
             search_term: query.search_term,
             sort_by: query.sort_by,
@@ -469,6 +471,10 @@ async fn playback_info(
 }
 
 fn parse_include_types(value: Option<&str>) -> Vec<String> {
+    parse_list(value)
+}
+
+fn parse_list(value: Option<&str>) -> Vec<String> {
     value
         .unwrap_or_default()
         .split(',')

@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { onMounted, watch } from 'vue';
+import { computed, onMounted, watch } from 'vue';
 import { RouterView, useRoute, useRouter } from 'vue-router';
 import AppLayout from './layouts/AppLayout.vue';
 import { initialize, state, user } from './store/app';
 
 const route = useRoute();
 const router = useRouter();
+
+const isStandaloneRoute = computed(
+  () => route.meta.layout === 'server' || route.meta.layout === 'fullpage'
+);
 
 onMounted(initialize);
 
@@ -16,8 +20,6 @@ watch(
       return;
     }
 
-    const isServerRoute = Boolean(route.meta.layout === 'server');
-
     if (!state.startupWizardCompleted) {
       if (route.name !== 'wizard') {
         await router.replace('/wizard');
@@ -26,13 +28,13 @@ watch(
     }
 
     if (!user.value) {
-      if (!isServerRoute) {
+      if (route.meta.layout !== 'server') {
         await router.replace('/server/login');
       }
       return;
     }
 
-    if (isServerRoute) {
+    if (route.meta.layout === 'server') {
       await router.replace('/');
     }
   },
@@ -51,7 +53,7 @@ watch(
         </div>
       </div>
     </section>
-    <RouterView v-else-if="!state.startupWizardCompleted || !user || route.meta.layout === 'server'" />
+    <RouterView v-else-if="!state.startupWizardCompleted || !user || isStandaloneRoute" />
     <AppLayout v-else />
   </main>
 </template>

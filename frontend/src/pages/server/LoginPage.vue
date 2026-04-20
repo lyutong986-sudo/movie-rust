@@ -20,10 +20,16 @@ async function submitLogin(name = state.username, password = state.password) {
         <h1>{{ state.serverName }}</h1>
         <p>{{ currentServer?.Url || '当前服务器' }}</p>
       </div>
+
       <div v-if="publicUsers.length && !state.loginAsOther" class="user-picker">
         <h2>选择用户</h2>
         <div class="user-grid">
-          <button v-for="publicUser in publicUsers" :key="publicUser.Id" type="button" @click="state.username = publicUser.Name; state.loginAsOther = true">
+          <button
+            v-for="publicUser in publicUsers"
+            :key="publicUser.Id"
+            type="button"
+            @click="state.username = publicUser.Name; state.loginAsOther = true"
+          >
             <span>{{ publicUser.Name.slice(0, 1).toUpperCase() }}</span>
             {{ publicUser.Name }}
           </button>
@@ -34,6 +40,7 @@ async function submitLogin(name = state.username, password = state.password) {
           <button class="secondary" type="button" @click="router.push('/server/add')">添加服务器</button>
         </div>
       </div>
+
       <form v-else class="form-stack" @submit.prevent="submitLogin()">
         <h2>登录</h2>
         <label>
@@ -43,18 +50,29 @@ async function submitLogin(name = state.username, password = state.password) {
         <label>
           密码
           <div class="password-field">
-            <input v-model="state.password" :type="state.showLoginPassword ? 'text' : 'password'" autocomplete="current-password" />
-            <button type="button" :title="state.showLoginPassword ? '隐藏密码' : '显示密码'" @click="state.showLoginPassword = !state.showLoginPassword">
-              {{ state.showLoginPassword ? '◐' : '●' }}
+            <input
+              v-model="state.password"
+              :type="state.showLoginPassword ? 'text' : 'password'"
+              autocomplete="current-password"
+            />
+            <button
+              type="button"
+              :title="state.showLoginPassword ? '隐藏密码' : '显示密码'"
+              @click="state.showLoginPassword = !state.showLoginPassword"
+            >
+              {{ state.showLoginPassword ? '隐藏' : '显示' }}
             </button>
           </div>
         </label>
         <div class="button-row">
-          <button v-if="publicUsers.length" class="secondary" type="button" @click="state.loginAsOther = false">返回</button>
+          <button v-if="publicUsers.length" class="secondary" type="button" @click="state.loginAsOther = false">
+            返回
+          </button>
           <button class="secondary" type="button" @click="router.push('/server/select')">服务器</button>
           <button :disabled="state.busy" type="submit">登录</button>
         </div>
       </form>
+
       <p v-if="state.error" class="notice error">{{ state.error }}</p>
     </div>
   </section>

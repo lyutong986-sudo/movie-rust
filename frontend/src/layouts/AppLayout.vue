@@ -14,10 +14,6 @@ const currentTitle = computed(() => {
     return libraries.value.find((library) => library.Id === libraryRouteId.value)?.Name || '媒体库';
   }
 
-  if (route.name === 'item') {
-    return '详情';
-  }
-
   return String(route.meta.title || '首页');
 });
 const currentSubtitle = computed(() => {
@@ -131,7 +127,12 @@ async function handleLogout() {
         <button
           v-if="isAdmin"
           type="button"
-          :class="{ active: route.path.startsWith('/settings/server') || route.path.startsWith('/settings/users') || route.path.startsWith('/settings/network') }"
+          :class="{
+            active:
+              route.path.startsWith('/settings/server') ||
+              route.path.startsWith('/settings/users') ||
+              route.path.startsWith('/settings/network')
+          }"
           @click="goAdminConsole"
         >
           <span>控制台</span>

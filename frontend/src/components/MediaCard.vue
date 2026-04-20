@@ -21,6 +21,7 @@ const imageUrl = computed(() => {
 
   return api.itemImageUrl(props.item) || api.backdropUrl(props.item);
 });
+
 const title = computed(() =>
   props.item.Type === 'Episode' && props.item.SeriesName ? props.item.SeriesName : props.item.Name
 );
