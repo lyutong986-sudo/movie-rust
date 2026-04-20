@@ -1,13 +1,25 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { BaseItemDto } from '../../api/emby';
 import { api, fileSize, streamLabel, streamText } from '../../store/app';
 import { itemRoute } from '../../utils/navigation';
 
+type PlayerPanel = 'sources' | 'subtitles' | 'info' | null;
+
+interface SubtitleOption {
+  key: string;
+  label: string;
+  src: string;
+  srclang: string;
+  streamIndex: number;
+  isDefault: boolean;
+}
+
 const route = useRoute();
 const router = useRouter();
 
+const playerShellRef = ref<HTMLElement | null>(null);
 const videoRef = ref<HTMLVideoElement | null>(null);
 const loading = ref(false);
 const error = ref('');
@@ -16,30 +28,110 @@ const currentSourceIndex = ref(0);
 const playSessionId = ref('');
 const overlayVisible = ref(true);
 const paused = ref(true);
+const waiting = ref(false);
+const duration = ref(0);
+const currentTime = ref(0);
+const volume = ref(1);
+const muted = ref(false);
+const isFullscreen = ref(false);
+const panelMode = ref<PlayerPanel>(null);
+const selectedSubtitleKey = ref('off');
 
 let overlayTimer = 0;
 let hasStarted = false;
 let hasStopped = false;
 let lastProgressSecond = -10;
+let pendingSeekSeconds = 0;
+let rememberedVolume = 1;
 
-const itemId = computed(() => String(route.query.itemId || ''));
 const currentSource = computed(() => item.value?.MediaSources?.[currentSourceIndex.value]);
-const sourceUrl = computed(() =>
-  currentSource.value ? api.streamUrlForSource(currentSource.value) : item.value ? api.streamUrl(item.value) : ''
-);
+const sourceUrl = computed(() => {
+  if (currentSource.value) {
+    const directSourceUrl = api.streamUrlForSource(currentSource.value);
+    if (directSourceUrl) {
+      return directSourceUrl;
+    }
+  }
+
+  return item.value ? api.streamUrl(item.value) : '';
+});
 const posterImage = computed(() =>
   item.value ? api.backdropUrl(item.value) || api.itemImageUrl(item.value) : ''
 );
 const currentStreams = computed(() => currentSource.value?.MediaStreams || item.value?.MediaStreams || []);
-const subtitleTracks = computed(() =>
+const videoStream = computed(() => currentStreams.value.find((stream) => stream.Type === 'Video') || null);
+const audioStreams = computed(() => currentStreams.value.filter((stream) => stream.Type === 'Audio'));
+const subtitleStreams = computed(() => currentStreams.value.filter((stream) => stream.Type === 'Subtitle'));
+const subtitleOptions = computed<SubtitleOption[]>(() =>
   currentStreams.value
     .filter((stream) => stream.Type === 'Subtitle' && stream.DeliveryUrl)
     .map((stream) => ({
-      key: `${stream.Type}-${stream.Index}`,
+      key: String(stream.Index),
       label: stream.DisplayTitle || `字幕 ${stream.Index}`,
       src: api.subtitleUrl(stream.DeliveryUrl),
-      srclang: (stream.Language || 'und').toLowerCase()
+      srclang: (stream.Language || 'und').toLowerCase(),
+      streamIndex: stream.Index,
+      isDefault: Boolean(stream.IsDefault)
     }))
+);
+const progressValue = computed(() =>
+  duration.value > 0 ? Math.min(100, (currentTime.value / duration.value) * 100) : 0
+);
+const topMeta = computed(() => {
+  if (!item.value) {
+    return '';
+  }
+
+  if (item.value.Type === 'Episode') {
+    return [
+      item.value.SeriesName,
+      formatSeasonEpisode(item.value.ParentIndexNumber, item.value.IndexNumber)
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  }
+
+  return [item.value.ProductionYear, item.value.Type].filter(Boolean).join(' · ');
+});
+const detailMeta = computed(() => {
+  if (!item.value) {
+    return '';
+  }
+
+  const parts = [
+    currentSource.value?.Container?.toUpperCase(),
+    videoStream.value?.Width && videoStream.value?.Height
+      ? `${videoStream.value.Width}x${videoStream.value.Height}`
+      : '',
+    currentSource.value?.Size ? fileSize(currentSource.value.Size) : ''
+  ].filter(Boolean);
+
+  return parts.join(' · ');
+});
+const endTimeText = computed(() => {
+  if (!duration.value || currentTime.value >= duration.value) {
+    return '';
+  }
+
+  const remainingSeconds = Math.max(0, duration.value - currentTime.value);
+  const endTime = new Date(Date.now() + remainingSeconds * 1000);
+  return `预计 ${formatClock(endTime)} 结束`;
+});
+const selectedSubtitleLabel = computed(() => {
+  if (selectedSubtitleKey.value === 'off') {
+    return '关闭';
+  }
+
+  return (
+    subtitleOptions.value.find((track) => track.key === selectedSubtitleKey.value)?.label ||
+    '未选择'
+  );
+});
+const currentSourceLabel = computed(() =>
+  currentSource.value ? sourceLabel(currentSource.value, currentSourceIndex.value) : '未选择'
+);
+const supportsPictureInPicture = computed(
+  () => typeof document !== 'undefined' && 'pictureInPictureEnabled' in document && document.pictureInPictureEnabled
 );
 
 watch(
@@ -55,39 +147,100 @@ watch(
 watch(
   () => currentSourceIndex.value,
   async () => {
-    if (!videoRef.value || !sourceUrl.value) {
+    const player = videoRef.value;
+    if (!player || !sourceUrl.value) {
       return;
     }
 
-    const currentTime = videoRef.value.currentTime;
-    videoRef.value.load();
+    pendingSeekSeconds = player.currentTime;
+    currentTime.value = pendingSeekSeconds;
+    waiting.value = true;
+    panelMode.value = null;
+    player.load();
 
     try {
-      await videoRef.value.play();
-      videoRef.value.currentTime = currentTime;
+      await player.play();
     } catch {
-      // Ignore autoplay failures; native controls remain available.
+      paused.value = true;
     }
   }
 );
 
+watch(
+  subtitleOptions,
+  async (tracks) => {
+    if (!tracks.length) {
+      selectedSubtitleKey.value = 'off';
+      await nextTick();
+      applySubtitleSelection();
+      return;
+    }
+
+    if (tracks.some((track) => track.key === selectedSubtitleKey.value)) {
+      await nextTick();
+      applySubtitleSelection();
+      return;
+    }
+
+    const defaultTrack =
+      tracks.find((track) => track.streamIndex === currentSource.value?.DefaultSubtitleStreamIndex) ||
+      tracks.find((track) => track.isDefault) ||
+      null;
+
+    selectedSubtitleKey.value = defaultTrack?.key || 'off';
+    await nextTick();
+    applySubtitleSelection();
+  },
+  { immediate: true }
+);
+
+watch(
+  () => selectedSubtitleKey.value,
+  async () => {
+    await nextTick();
+    applySubtitleSelection();
+  }
+);
+
+watch([paused, waiting, panelMode], () => {
+  const keepVisible = paused.value || waiting.value || Boolean(panelMode.value);
+  overlayVisible.value = true;
+  window.clearTimeout(overlayTimer);
+
+  if (!keepVisible) {
+    overlayTimer = window.setTimeout(() => {
+      overlayVisible.value = false;
+    }, 5000);
+  }
+});
+
+onMounted(() => {
+  document.addEventListener('fullscreenchange', syncFullscreenState);
+  window.addEventListener('keydown', handleKeydown);
+});
+
 onBeforeUnmount(async () => {
   window.clearTimeout(overlayTimer);
+  document.removeEventListener('fullscreenchange', syncFullscreenState);
+  window.removeEventListener('keydown', handleKeydown);
   await stopPlayback();
 });
 
 async function loadPlayback(nextItemId: string) {
   loading.value = true;
   error.value = '';
-  hasStarted = false;
-  hasStopped = false;
-  lastProgressSecond = -10;
+  waiting.value = true;
+  panelMode.value = null;
+  overlayVisible.value = true;
 
   try {
-    const [loadedItem, playback] = await Promise.all([
-      api.item(nextItemId),
-      api.playbackInfo(nextItemId)
-    ]);
+    await stopPlayback();
+    hasStarted = false;
+    hasStopped = false;
+    lastProgressSecond = -10;
+    pendingSeekSeconds = 0;
+
+    const [loadedItem, playback] = await Promise.all([api.item(nextItemId), api.playbackInfo(nextItemId)]);
 
     item.value = {
       ...loadedItem,
@@ -96,7 +249,22 @@ async function loadPlayback(nextItemId: string) {
     };
     currentSourceIndex.value = 0;
     playSessionId.value = playback.PlaySessionId;
+    duration.value = 0;
+    currentTime.value = 0;
+    paused.value = true;
+    pendingSeekSeconds = ticksToSeconds(loadedItem.UserData?.PlaybackPositionTicks);
     touchOverlay();
+
+    await nextTick();
+    syncVolumeState();
+    if (videoRef.value) {
+      videoRef.value.load();
+      try {
+        await videoRef.value.play();
+      } catch {
+        paused.value = true;
+      }
+    }
   } catch (loadError) {
     error.value = loadError instanceof Error ? loadError.message : String(loadError);
     item.value = null;
@@ -107,6 +275,10 @@ async function loadPlayback(nextItemId: string) {
 
 function toTicks(seconds: number) {
   return Math.max(0, Math.round(seconds * 10_000_000));
+}
+
+function ticksToSeconds(ticks?: number) {
+  return ticks ? ticks / 10_000_000 : 0;
 }
 
 function playedToCompletion() {
@@ -139,18 +311,25 @@ async function stopPlayback(forceCompleted = false) {
   }
 
   hasStopped = true;
-  await api.playbackStopped({
-    ItemId: item.value.Id,
-    PlaySessionId: playSessionId.value,
-    MediaSourceId: currentSource.value?.Id,
-    PositionTicks: toTicks(videoRef.value.currentTime),
-    IsPaused: paused.value,
-    PlayedToCompletion: forceCompleted || playedToCompletion()
-  });
+  waiting.value = false;
+
+  try {
+    await api.playbackStopped({
+      ItemId: item.value.Id,
+      PlaySessionId: playSessionId.value,
+      MediaSourceId: currentSource.value?.Id,
+      PositionTicks: toTicks(videoRef.value.currentTime),
+      IsPaused: paused.value,
+      PlayedToCompletion: forceCompleted || playedToCompletion()
+    });
+  } catch {
+    // 忽略停止上报失败，避免阻塞页面离开。
+  }
 }
 
-async function handlePlay() {
+function handlePlay() {
   paused.value = false;
+  waiting.value = false;
   touchOverlay();
 
   if (!item.value || !playSessionId.value) {
@@ -159,26 +338,29 @@ async function handlePlay() {
 
   if (!hasStarted) {
     hasStarted = true;
-    await api.playbackStarted({
-      ItemId: item.value.Id,
-      PlaySessionId: playSessionId.value,
-      MediaSourceId: currentSource.value?.Id,
-      PositionTicks: toTicks(videoRef.value?.currentTime || 0)
-    });
+    void api
+      .playbackStarted({
+        ItemId: item.value.Id,
+        PlaySessionId: playSessionId.value,
+        MediaSourceId: currentSource.value?.Id,
+        PositionTicks: toTicks(videoRef.value?.currentTime || 0)
+      })
+      .catch(() => undefined);
   } else {
-    await reportProgress(false);
+    void reportProgress(false).catch(() => undefined);
   }
 }
 
-async function handlePause() {
+function handlePause() {
   paused.value = true;
   touchOverlay();
-  await reportProgress(true);
+  void reportProgress(true).catch(() => undefined);
 }
 
-async function handleEnded() {
+function handleEnded() {
   paused.value = true;
-  await stopPlayback(true);
+  currentTime.value = duration.value;
+  void stopPlayback(true);
 }
 
 function handleTimeUpdate() {
@@ -187,11 +369,71 @@ function handleTimeUpdate() {
     return;
   }
 
+  currentTime.value = player.currentTime;
+  duration.value = Number.isFinite(player.duration) ? player.duration : 0;
+
   const second = Math.floor(player.currentTime);
   if (second - lastProgressSecond >= 10) {
     lastProgressSecond = second;
-    void reportProgress(false);
+    void reportProgress(false).catch(() => undefined);
   }
+}
+
+function handleLoadedMetadata() {
+  const player = videoRef.value;
+  if (!player) {
+    return;
+  }
+
+  duration.value = Number.isFinite(player.duration) ? player.duration : 0;
+  syncVolumeState();
+
+  if (pendingSeekSeconds > 0) {
+    try {
+      player.currentTime = Math.min(
+        pendingSeekSeconds,
+        Number.isFinite(player.duration) && player.duration > 0 ? player.duration : pendingSeekSeconds
+      );
+      currentTime.value = player.currentTime;
+    } catch {
+      // 某些浏览器在媒体尚未准备好时不允许立即 seek。
+    } finally {
+      pendingSeekSeconds = 0;
+    }
+  }
+
+  applySubtitleSelection();
+}
+
+function handleDurationChange() {
+  const player = videoRef.value;
+  if (!player) {
+    return;
+  }
+
+  duration.value = Number.isFinite(player.duration) ? player.duration : 0;
+}
+
+function handleWaiting() {
+  waiting.value = true;
+  overlayVisible.value = true;
+}
+
+function handlePlaying() {
+  waiting.value = false;
+}
+
+function seek(event: Event) {
+  const player = videoRef.value;
+  if (!player || !duration.value) {
+    return;
+  }
+
+  const target = event.target as HTMLInputElement;
+  const ratio = Number(target.value) / 100;
+  player.currentTime = duration.value * ratio;
+  currentTime.value = player.currentTime;
+  touchOverlay();
 }
 
 function skip(seconds: number) {
@@ -200,7 +442,10 @@ function skip(seconds: number) {
     return;
   }
 
-  player.currentTime = Math.max(0, Math.min(player.duration || Infinity, player.currentTime + seconds));
+  const targetTime = Math.max(0, Math.min(player.duration || Infinity, player.currentTime + seconds));
+  player.currentTime = targetTime;
+  currentTime.value = targetTime;
+  touchOverlay();
 }
 
 async function closePlayer() {
@@ -215,21 +460,226 @@ function togglePlayback() {
   }
 
   if (player.paused) {
-    void player.play();
+    void player.play().catch(() => undefined);
   } else {
     player.pause();
   }
+}
+
+function handleVolumeInput(event: Event) {
+  const player = videoRef.value;
+  if (!player) {
+    return;
+  }
+
+  const target = event.target as HTMLInputElement;
+  const nextVolume = Math.max(0, Math.min(1, Number(target.value)));
+  player.volume = nextVolume;
+  player.muted = nextVolume === 0;
+  if (nextVolume > 0) {
+    rememberedVolume = nextVolume;
+  }
+  syncVolumeState();
+}
+
+function toggleMuted() {
+  const player = videoRef.value;
+  if (!player) {
+    return;
+  }
+
+  if (player.muted || player.volume === 0) {
+    player.muted = false;
+    player.volume = rememberedVolume > 0 ? rememberedVolume : 1;
+  } else {
+    rememberedVolume = player.volume || rememberedVolume;
+    player.muted = true;
+  }
+
+  syncVolumeState();
+  touchOverlay();
+}
+
+function adjustVolume(delta: number) {
+  const player = videoRef.value;
+  if (!player) {
+    return;
+  }
+
+  const nextVolume = Math.max(0, Math.min(1, player.volume + delta));
+  player.volume = nextVolume;
+  player.muted = nextVolume === 0;
+  if (nextVolume > 0) {
+    rememberedVolume = nextVolume;
+  }
+  syncVolumeState();
+}
+
+async function toggleFullscreen() {
+  const root = playerShellRef.value;
+  if (!root) {
+    return;
+  }
+
+  if (document.fullscreenElement) {
+    await document.exitFullscreen();
+  } else {
+    await root.requestFullscreen();
+  }
+}
+
+async function togglePictureInPicture() {
+  const player = videoRef.value;
+  if (!player || !supportsPictureInPicture.value) {
+    return;
+  }
+
+  const pictureInPictureDocument = document as Document & {
+    pictureInPictureElement?: Element | null;
+    exitPictureInPicture?: () => Promise<void>;
+  };
+  const pipVideo = player as HTMLVideoElement & {
+    requestPictureInPicture?: () => Promise<void>;
+  };
+
+  try {
+    if (pictureInPictureDocument.pictureInPictureElement && pictureInPictureDocument.exitPictureInPicture) {
+      await pictureInPictureDocument.exitPictureInPicture();
+    } else if (pipVideo.requestPictureInPicture) {
+      await pipVideo.requestPictureInPicture();
+    }
+  } catch {
+    // 画中画不作为关键能力，失败时保持播放器可用即可。
+  }
+}
+
+function togglePanel(mode: Exclude<PlayerPanel, null>) {
+  panelMode.value = panelMode.value === mode ? null : mode;
+  overlayVisible.value = true;
 }
 
 function touchOverlay() {
   overlayVisible.value = true;
   window.clearTimeout(overlayTimer);
 
-  if (!paused.value) {
+  if (!paused.value && !waiting.value && !panelMode.value) {
     overlayTimer = window.setTimeout(() => {
       overlayVisible.value = false;
-    }, 3500);
+    }, 5000);
   }
+}
+
+function syncVolumeState() {
+  const player = videoRef.value;
+  if (!player) {
+    return;
+  }
+
+  volume.value = player.muted ? 0 : player.volume;
+  muted.value = player.muted || player.volume === 0;
+}
+
+function syncFullscreenState() {
+  isFullscreen.value = Boolean(document.fullscreenElement);
+}
+
+function applySubtitleSelection() {
+  const player = videoRef.value;
+  if (!player) {
+    return;
+  }
+
+  Array.from(player.textTracks).forEach((track, index) => {
+    const target = subtitleOptions.value[index];
+    track.mode = target && target.key === selectedSubtitleKey.value ? 'showing' : 'disabled';
+  });
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  if (event.ctrlKey || event.metaKey || event.altKey) {
+    return;
+  }
+
+  const target = event.target as HTMLElement | null;
+  if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) {
+    return;
+  }
+
+  switch (event.key) {
+    case ' ':
+    case 'k':
+    case 'K':
+      event.preventDefault();
+      togglePlayback();
+      break;
+    case 'ArrowLeft':
+      event.preventDefault();
+      skip(-10);
+      break;
+    case 'ArrowRight':
+      event.preventDefault();
+      skip(10);
+      break;
+    case 'ArrowUp':
+      event.preventDefault();
+      adjustVolume(0.05);
+      break;
+    case 'ArrowDown':
+      event.preventDefault();
+      adjustVolume(-0.05);
+      break;
+    case 'f':
+    case 'F':
+      event.preventDefault();
+      void toggleFullscreen();
+      break;
+    case 'm':
+    case 'M':
+      event.preventDefault();
+      toggleMuted();
+      break;
+    case 'c':
+    case 'C':
+      event.preventDefault();
+      selectedSubtitleKey.value = selectedSubtitleKey.value === 'off' && subtitleOptions.value.length
+        ? subtitleOptions.value[0].key
+        : 'off';
+      break;
+    case 'Escape':
+      if (panelMode.value) {
+        panelMode.value = null;
+      }
+      break;
+    default:
+      touchOverlay();
+  }
+}
+
+function timeText(value: number) {
+  const totalSeconds = Math.max(0, Math.floor(value));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatSeasonEpisode(seasonNumber?: number, episodeNumber?: number) {
+  const season = seasonNumber ? `S${String(seasonNumber).padStart(2, '0')}` : '';
+  const episode = episodeNumber ? `E${String(episodeNumber).padStart(2, '0')}` : '';
+  return `${season}${episode}`;
+}
+
+function formatClock(value: Date) {
+  return `${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}`;
+}
+
+function sourceLabel(source: NonNullable<BaseItemDto['MediaSources']>[number], index: number) {
+  return source.Container ? `${source.Container.toUpperCase()} 源 ${index + 1}` : `播放源 ${index + 1}`;
 }
 </script>
 
@@ -248,26 +698,32 @@ function touchOverlay() {
 
   <section
     v-else
-    class="player-shell video-player-shell"
+    ref="playerShellRef"
+    class="jelly-video-player"
     @mousemove="touchOverlay"
     @touchstart.passive="touchOverlay"
   >
     <video
       ref="videoRef"
-      class="video-surface"
+      class="jelly-video-player__surface"
       :src="sourceUrl"
       :poster="posterImage"
-      controls
       autoplay
       playsinline
+      preload="metadata"
+      @click="togglePlayback"
       @play="handlePlay"
       @pause="handlePause"
       @ended="handleEnded"
       @timeupdate="handleTimeUpdate"
+      @loadedmetadata="handleLoadedMetadata"
+      @durationchange="handleDurationChange"
+      @waiting="handleWaiting"
+      @playing="handlePlaying"
     >
       <track
-        v-for="track in subtitleTracks"
-        :key="track.key"
+        v-for="track in subtitleOptions"
+        :key="`${currentSource?.Id}-${track.key}`"
         kind="subtitles"
         :label="track.label"
         :src="track.src"
@@ -275,52 +731,443 @@ function touchOverlay() {
       />
     </video>
 
-    <div class="player-overlay" :class="{ hidden: !overlayVisible }">
-      <div class="player-topbar">
-        <div>
-          <p>{{ item.SeriesName || item.SeasonName || item.Type }}</p>
-          <h2>{{ item.Name }}</h2>
+    <div class="jelly-video-player__overlay" :class="{ 'is-hidden': !overlayVisible }">
+      <div class="jelly-video-player__top">
+        <div class="jelly-video-player__nav">
+          <button class="jelly-video-player__ghost" type="button" @click="closePlayer">关闭</button>
         </div>
-        <div class="button-row">
-          <button class="secondary" type="button" @click="closePlayer">关闭</button>
+        <div class="jelly-video-player__heading">
+          <p>{{ topMeta || '在线播放' }}</p>
+          <h1>{{ item.Name }}</h1>
+          <span v-if="detailMeta">{{ detailMeta }}</span>
         </div>
       </div>
 
-      <div class="player-bottombar">
-        <div class="button-row">
-          <button class="secondary" type="button" @click="skip(-10)">-10s</button>
-          <button type="button" @click="togglePlayback">{{ paused ? '播放' : '暂停' }}</button>
-          <button class="secondary" type="button" @click="skip(10)">+10s</button>
+      <div class="jelly-video-player__center">
+        <button class="jelly-video-player__hero-button" type="button" @click="togglePlayback">
+          {{ paused ? '播放' : '暂停' }}
+        </button>
+        <p v-if="waiting" class="jelly-video-player__status">正在缓冲媒体流…</p>
+      </div>
+
+      <div class="jelly-video-player__bottom">
+        <div class="jelly-video-player__timeline">
+          <span>{{ timeText(currentTime) }}</span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="0.1"
+            :value="progressValue"
+            @input="seek"
+          />
+          <span>{{ timeText(duration) }}</span>
         </div>
 
-        <div class="player-panels">
-          <div class="player-panel">
-            <h3>播放源</h3>
-            <div class="admin-tabs">
+        <div class="jelly-video-player__controls">
+          <div class="jelly-video-player__title">
+            <strong>{{ item.SeriesName || item.Name }}</strong>
+            <span>{{ endTimeText || item.Overview || '继续播放当前媒体' }}</span>
+          </div>
+
+          <div class="jelly-video-player__transport">
+            <button type="button" @click="skip(-10)">后退 10 秒</button>
+            <button type="button" class="is-primary" @click="togglePlayback">
+              {{ paused ? '播放' : '暂停' }}
+            </button>
+            <button type="button" @click="skip(10)">快进 10 秒</button>
+          </div>
+
+          <div class="jelly-video-player__actions">
+            <label class="jelly-video-player__volume">
+              <span>{{ muted ? '静音' : '音量' }}</span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                :value="volume"
+                @input="handleVolumeInput"
+              />
+            </label>
+            <button type="button" @click="toggleMuted">{{ muted ? '取消静音' : '静音' }}</button>
+            <button type="button" :class="{ 'is-active': panelMode === 'subtitles' }" @click="togglePanel('subtitles')">
+              字幕
+            </button>
+            <button type="button" :class="{ 'is-active': panelMode === 'sources' }" @click="togglePanel('sources')">
+              播放源
+            </button>
+            <button type="button" :class="{ 'is-active': panelMode === 'info' }" @click="togglePanel('info')">
+              媒体信息
+            </button>
+            <button v-if="supportsPictureInPicture" type="button" @click="togglePictureInPicture">
+              画中画
+            </button>
+            <button type="button" @click="toggleFullscreen">
+              {{ isFullscreen ? '退出全屏' : '全屏' }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="panelMode" class="jelly-video-player__panel">
+          <template v-if="panelMode === 'subtitles'">
+            <div class="jelly-video-player__panel-header">
+              <h2>字幕</h2>
+              <span>{{ selectedSubtitleLabel }}</span>
+            </div>
+            <div class="jelly-video-player__option-list">
+              <button
+                type="button"
+                :class="{ 'is-active': selectedSubtitleKey === 'off' }"
+                @click="selectedSubtitleKey = 'off'"
+              >
+                关闭字幕
+              </button>
+              <button
+                v-for="track in subtitleOptions"
+                :key="track.key"
+                type="button"
+                :class="{ 'is-active': selectedSubtitleKey === track.key }"
+                @click="selectedSubtitleKey = track.key"
+              >
+                <strong>{{ track.label }}</strong>
+                <span>{{ track.srclang.toUpperCase() }}</span>
+              </button>
+            </div>
+          </template>
+
+          <template v-else-if="panelMode === 'sources'">
+            <div class="jelly-video-player__panel-header">
+              <h2>播放源</h2>
+              <span>{{ item.MediaSources?.length || 0 }} 个版本</span>
+            </div>
+            <div class="jelly-video-player__option-list">
               <button
                 v-for="(source, index) in item.MediaSources"
                 :key="source.Id"
                 type="button"
-                :class="{ active: currentSourceIndex === index }"
+                :class="{ 'is-active': currentSourceIndex === index }"
                 @click="currentSourceIndex = index"
               >
-                {{ source.Container || `版本 ${index + 1}` }}
+                <strong>{{ sourceLabel(source, index) }}</strong>
+                <span>{{ source.Size ? fileSize(source.Size) : '直连播放' }}</span>
               </button>
             </div>
-            <p v-if="currentSource?.Size" class="panel-note">大小：{{ fileSize(currentSource.Size) }}</p>
-          </div>
+          </template>
 
-          <div class="player-panel">
-            <h3>媒体流</h3>
+          <template v-else>
+            <div class="jelly-video-player__panel-header">
+              <h2>媒体信息</h2>
+              <span>{{ currentStreams.length }} 条流</span>
+            </div>
+            <div class="jelly-video-player__info-grid">
+              <div>
+                <strong>当前源</strong>
+                <span>{{ currentSourceLabel }}</span>
+              </div>
+              <div>
+                <strong>字幕状态</strong>
+                <span>{{ selectedSubtitleLabel }}</span>
+              </div>
+              <div>
+                <strong>音频轨道</strong>
+                <span>{{ audioStreams.length }} 条</span>
+              </div>
+              <div>
+                <strong>字幕轨道</strong>
+                <span>{{ subtitleStreams.length }} 条</span>
+              </div>
+            </div>
             <div class="streams compact">
               <div v-for="stream in currentStreams" :key="`${stream.Type}-${stream.Index}`">
                 <strong>{{ streamLabel(stream.Type) }}</strong>
                 <span>{{ streamText(stream) || '默认轨道' }}</span>
               </div>
             </div>
-          </div>
+          </template>
         </div>
       </div>
     </div>
   </section>
 </template>
+
+<style scoped>
+.jelly-video-player {
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+  background: #000;
+  overflow: hidden;
+}
+
+.jelly-video-player__surface {
+  width: 100%;
+  height: 100vh;
+  object-fit: contain;
+  background: #000;
+}
+
+.jelly-video-player__overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: opacity 180ms ease;
+}
+
+.jelly-video-player__overlay.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.jelly-video-player__top,
+.jelly-video-player__bottom {
+  width: min(1720px, 100%);
+  margin: 0 auto;
+  padding: 20px 24px;
+}
+
+.jelly-video-player__top {
+  display: grid;
+  gap: 20px;
+  background: linear-gradient(180deg, rgba(6, 8, 12, 0.86) 0%, rgba(6, 8, 12, 0) 100%);
+}
+
+.jelly-video-player__bottom {
+  display: grid;
+  gap: 16px;
+  background: linear-gradient(0deg, rgba(6, 8, 12, 0.92) 0%, rgba(6, 8, 12, 0) 100%);
+}
+
+.jelly-video-player__nav {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.jelly-video-player__heading {
+  display: grid;
+  gap: 8px;
+  max-width: min(960px, 100%);
+}
+
+.jelly-video-player__heading p,
+.jelly-video-player__heading span,
+.jelly-video-player__title span,
+.jelly-video-player__status {
+  color: #c8d2df;
+}
+
+.jelly-video-player__heading h1 {
+  font-size: clamp(2rem, 5vw, 4rem);
+  line-height: 1.05;
+}
+
+.jelly-video-player__center {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 12px;
+  padding: 0 24px;
+  pointer-events: none;
+}
+
+.jelly-video-player__hero-button,
+.jelly-video-player__top button,
+.jelly-video-player__transport button,
+.jelly-video-player__actions button,
+.jelly-video-player__option-list button {
+  pointer-events: auto;
+}
+
+.jelly-video-player__hero-button {
+  min-width: 120px;
+  padding: 14px 24px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  background: rgba(13, 18, 27, 0.8);
+  color: #f7f8fb;
+  backdrop-filter: blur(14px);
+}
+
+.jelly-video-player__ghost {
+  min-height: 42px;
+  padding: 0 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(13, 18, 27, 0.6);
+  color: #f7f8fb;
+}
+
+.jelly-video-player__timeline {
+  display: grid;
+  grid-template-columns: 62px 1fr 62px;
+  gap: 12px;
+  align-items: center;
+}
+
+.jelly-video-player__timeline span {
+  color: #d8e1ee;
+  font-size: 0.94rem;
+  text-align: center;
+}
+
+.jelly-video-player__timeline input,
+.jelly-video-player__volume input {
+  width: 100%;
+  accent-color: #00a4dc;
+}
+
+.jelly-video-player__controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 20px;
+  align-items: center;
+}
+
+.jelly-video-player__title {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.jelly-video-player__title strong,
+.jelly-video-player__title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jelly-video-player__transport,
+.jelly-video-player__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.jelly-video-player__transport {
+  justify-content: center;
+}
+
+.jelly-video-player__actions {
+  justify-content: flex-end;
+}
+
+.jelly-video-player__transport button,
+.jelly-video-player__actions button,
+.jelly-video-player__option-list button {
+  min-height: 42px;
+  padding: 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(13, 18, 27, 0.72);
+  color: #f7f8fb;
+}
+
+.jelly-video-player__transport button.is-primary,
+.jelly-video-player__actions button.is-active,
+.jelly-video-player__option-list button.is-active {
+  border-color: rgba(0, 164, 220, 0.62);
+  background: rgba(0, 164, 220, 0.2);
+}
+
+.jelly-video-player__volume {
+  display: grid;
+  grid-template-columns: auto minmax(108px, 160px);
+  gap: 10px;
+  align-items: center;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(13, 18, 27, 0.72);
+}
+
+.jelly-video-player__panel {
+  justify-self: end;
+  width: min(420px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(10, 12, 16, 0.88);
+  backdrop-filter: blur(18px);
+}
+
+.jelly-video-player__panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.jelly-video-player__panel-header span,
+.jelly-video-player__option-list span,
+.jelly-video-player__info-grid span {
+  color: #a8b2c1;
+}
+
+.jelly-video-player__option-list {
+  display: grid;
+  gap: 10px;
+}
+
+.jelly-video-player__option-list button {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  text-align: left;
+}
+
+.jelly-video-player__info-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.jelly-video-player__info-grid > div {
+  display: grid;
+  gap: 4px;
+}
+
+@media (max-width: 1080px) {
+  .jelly-video-player__controls {
+    grid-template-columns: 1fr;
+  }
+
+  .jelly-video-player__title,
+  .jelly-video-player__transport,
+  .jelly-video-player__actions {
+    justify-content: flex-start;
+  }
+
+  .jelly-video-player__panel {
+    justify-self: stretch;
+    width: 100%;
+  }
+}
+
+@media (max-width: 720px) {
+  .jelly-video-player__top,
+  .jelly-video-player__bottom {
+    padding: 16px;
+  }
+
+  .jelly-video-player__timeline {
+    grid-template-columns: 52px 1fr 52px;
+    gap: 8px;
+  }
+
+  .jelly-video-player__volume {
+    grid-template-columns: 1fr;
+    justify-items: start;
+    padding: 10px 12px;
+  }
+
+  .jelly-video-player__info-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
