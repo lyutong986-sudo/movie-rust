@@ -80,7 +80,7 @@ async fn serve_media_item(
             target = %target,
             "代理 STRM 远程播放流"
         );
-        return proxy_remote_stream(&target, request).await;
+        return proxy_remote_stream(&target, request, &item.media_type).await;
     }
 
     ServeFile::new(path)
@@ -90,7 +90,7 @@ async fn serve_media_item(
         .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))
 }
 
-async fn proxy_remote_stream(url: &str, request: Request<Body>) -> Result<Response, AppError> {
+async fn proxy_remote_stream(url: &str, request: Request<Body>, media_type: &str) -> Result<Response, AppError> {
     let method = request.method().clone();
     let client = Client::new();
     let mut remote_request = if method == Method::HEAD {
@@ -130,15 +130,42 @@ async fn proxy_remote_stream(url: &str, request: Request<Body>) -> Result<Respon
     );
 
     let mut response_builder = Response::builder().status(status);
+    let mut needs_content_type = false;
+    
     for (key, value) in headers.iter() {
         if is_hop_by_hop_header(key.as_str()) {
             continue;
         }
 
-        if let Ok(value) = value.to_str() {
-            response_builder = response_builder.header(key.as_str(), value);
+        let key_str = key.as_str();
+        let value_str = value.to_str().unwrap_or("");
+        
+        if key_str.eq_ignore_ascii_case("content-disposition") {
+            if value_str.contains("attachment") {
+                continue;
+            }
+        }
+        
+        if key_str.eq_ignore_ascii_case("content-type") {
+            let existing = value_str.to_lowercase();
+            if media_type.eq_ignore_ascii_case("Video") {
+                if existing.starts_with("audio/") || existing.starts_with("application/octet-stream") {
+                    needs_content_type = true;
+                    continue;
+                }
+            }
+            response_builder = response_builder.header(key_str, value_str);
+        } else {
+            response_builder = response_builder.header(key_str, value_str);
         }
     }
+
+    if media_type.eq_ignore_ascii_case("Video") && needs_content_type {
+        let mime_type = infer_video_mime_type(url);
+        response_builder = response_builder.header(header::CONTENT_TYPE, mime_type);
+    }
+
+    response_builder = response_builder.header("X-Content-Type-Options", "nosniff");
 
     let body = if method == Method::HEAD {
         Body::empty()
@@ -149,6 +176,28 @@ async fn proxy_remote_stream(url: &str, request: Request<Body>) -> Result<Respon
     response_builder
         .body(body)
         .map_err(|error| AppError::Internal(format!("构建 STRM 播放响应失败: {error}")))
+}
+
+fn infer_video_mime_type(url: &str) -> &'static str {
+    if let Some(pos) = url.rfind('.') {
+        let ext = &url[pos + 1..].to_lowercase();
+        match ext.as_str() {
+            "mp4" | "m4v" => "video/mp4",
+            "mkv" => "video/x-matroska",
+            "avi" => "video/x-msvideo",
+            "mov" => "video/quicktime",
+            "webm" => "video/webm",
+            "wmv" => "video/x-ms-wmv",
+            "flv" => "video/x-flv",
+            "ts" | "m2ts" => "video/mp2t",
+            "mpeg" | "mpg" => "video/mpeg",
+            "3gp" => "video/3gpp",
+            "ogv" | "ogm" => "video/ogg",
+            _ => "video/mp4",
+        }
+    } else {
+        "video/mp4"
+    }
 }
 
 async fn serve_subtitle(
