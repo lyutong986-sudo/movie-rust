@@ -4,8 +4,10 @@ FROM node:22-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 
+RUN apk add --no-cache git
+
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm install --no-audit --no-fund
 
 COPY frontend/index.html frontend/tsconfig.json frontend/vite.config.ts ./
 COPY frontend/src ./src
