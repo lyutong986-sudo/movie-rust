@@ -27,6 +27,45 @@ const currentSource = computed(() => item.value?.MediaSources?.[currentSourceInd
 const sourceUrl = computed(() =>
   currentSource.value ? api.streamUrlForSource(currentSource.value) : item.value ? api.streamUrl(item.value) : ''
 );
+const sourceType = computed(() => {
+  const url = sourceUrl.value;
+  if (!url) return '';
+  
+  const extMatch = url.match(/\.([a-zA-Z0-9]+)(?:[?#]|$)/);
+  if (!extMatch) return '';
+  
+  const ext = extMatch[1].toLowerCase();
+  switch (ext) {
+    case 'mkv':
+      return 'video/x-matroska';
+    case 'mp4':
+    case 'm4v':
+      return 'video/mp4';
+    case 'avi':
+      return 'video/x-msvideo';
+    case 'mov':
+      return 'video/quicktime';
+    case 'webm':
+      return 'video/webm';
+    case 'wmv':
+      return 'video/x-ms-wmv';
+    case 'flv':
+      return 'video/x-flv';
+    case 'ts':
+    case 'm2ts':
+      return 'video/mp2t';
+    case 'mpeg':
+    case 'mpg':
+      return 'video/mpeg';
+    case '3gp':
+      return 'video/3gpp';
+    case 'ogv':
+    case 'ogm':
+      return 'video/ogg';
+    default:
+      return '';
+  }
+});
 const posterImage = computed(() =>
   item.value ? api.backdropUrl(item.value) || api.itemImageUrl(item.value) : ''
 );
@@ -255,7 +294,6 @@ function touchOverlay() {
     <video
       ref="videoRef"
       class="video-surface"
-      :src="sourceUrl"
       :poster="posterImage"
       controls
       autoplay
@@ -265,6 +303,11 @@ function touchOverlay() {
       @ended="handleEnded"
       @timeupdate="handleTimeUpdate"
     >
+      <source
+        v-if="sourceUrl"
+        :src="sourceUrl"
+        :type="sourceType"
+      />
       <track
         v-for="track in subtitleTracks"
         :key="track.key"
