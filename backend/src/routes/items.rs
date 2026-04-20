@@ -25,6 +25,7 @@ pub fn router() -> Router<AppState> {
         .route("/Items", get(items))
         .route("/Users/{user_id}/Items", get(user_items))
         .route("/Users/{user_id}/Items/Latest", get(latest_items))
+        .route("/Users/{user_id}/Items/Resume", get(user_resume_items))
         .route(
             "/Items/{item_id}/PlaybackInfo",
             get(playback_info).post(playback_info),
@@ -508,4 +509,20 @@ fn parse_list(value: Option<&str>) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+async fn user_resume_items(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Query(mut query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    query.user_id = Some(user_id);
+    // 简化实现：暂时返回空列表，后续可添加恢复播放项的逻辑
+    // TODO: 查询用户未完成的媒体项（playback_position_ticks > 0）
+    Ok(Json(QueryResult {
+        items: Vec::new(),
+        total_record_count: 0,
+        start_index: Some(0),
+    }))
 }

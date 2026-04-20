@@ -12,6 +12,9 @@ pub struct AuthSession {
     pub is_admin: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct OptionalAuthSession(pub Option<AuthSession>);
+
 impl From<AuthSessionRow> for AuthSession {
     fn from(value: AuthSessionRow) -> Self {
         Self {
@@ -65,6 +68,42 @@ pub fn require_admin(session: &AuthSession) -> Result<(), AppError> {
         Ok(())
     } else {
         Err(AppError::Forbidden)
+    }
+}
+
+impl FromRequestParts<AppState> for OptionalAuthSession {
+    type Rejection = AppError;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        let headers = parts.headers.clone();
+        let query = parts.uri.query().map(ToOwned::to_owned);
+        let state = state.clone();
+
+        async move {
+            match extract_token(&headers, query.as_deref()) {
+                Some(token) => {
+                    if let Some(api_key) = &state.config.api_key {
+                        if token == *api_key {
+                            return Ok(OptionalAuthSession(Some(AuthSession {
+                                access_token: token,
+                                user_id: state.config.server_id,
+                                is_admin: true,
+                            })));
+                        }
+                    }
+                    
+                    match repository::get_session(&state.pool, &token).await {
+                        Ok(Some(session)) => Ok(OptionalAuthSession(Some(session.into()))),
+                        Ok(None) => Ok(OptionalAuthSession(None)),
+                        Err(e) => Err(e.into()),
+                    }
+                }
+                None => Ok(OptionalAuthSession(None)),
+            }
+        }
     }
 }
 
@@ -162,6 +201,8 @@ mod tests {
             Some("device-1")
         );
     }
+
+
 
     #[test]
     fn extracts_token_from_emby_query_aliases() {

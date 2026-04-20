@@ -1,5 +1,5 @@
 use crate::{
-    auth::AuthSession, error::AppError, models::ImageInfoDto, repository, state::AppState,
+    auth::{AuthSession, OptionalAuthSession}, error::AppError, models::ImageInfoDto, repository, state::AppState,
 };
 use axum::{
     body::Body,
@@ -35,7 +35,7 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn list_item_images(
-    _session: AuthSession,
+    _session: OptionalAuthSession,
     State(state): State<AppState>,
     Path(item_id): Path<Uuid>,
 ) -> Result<Json<Vec<ImageInfoDto>>, AppError> {
@@ -65,25 +65,25 @@ async fn list_item_images(
 }
 
 async fn get_item_image(
-    session: AuthSession,
+    session: OptionalAuthSession,
     State(state): State<AppState>,
     Path((item_id, image_type)): Path<(Uuid, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    serve_item_image(session, state, item_id, image_type, request).await
+    serve_item_image(session.0, state, item_id, image_type, request).await
 }
 
 async fn get_item_image_with_tail(
-    session: AuthSession,
+    session: OptionalAuthSession,
     State(state): State<AppState>,
     Path((item_id, image_type, _image_tail)): Path<(Uuid, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    serve_item_image(session, state, item_id, image_type, request).await
+    serve_item_image(session.0, state, item_id, image_type, request).await
 }
 
 async fn serve_item_image(
-    _session: AuthSession,
+    _session: Option<AuthSession>,
     state: AppState,
     item_id: Uuid,
     image_type: String,
