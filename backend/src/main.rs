@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod error;
+mod media_analyzer;
 mod models;
 mod naming;
 mod repository;

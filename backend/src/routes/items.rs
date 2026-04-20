@@ -1,6 +1,7 @@
 use crate::{
     auth::AuthSession,
     error::AppError,
+    media_analyzer,
     models::{
         BaseItemDto, ItemsQuery, PlaybackInfoResponse, QueryResult, UpdateUserItemDataRequest,
         UserItemDataDto, UserItemDataQuery,
@@ -456,12 +457,31 @@ async fn playback_info(
     State(state): State<AppState>,
     Path(item_id): Path<Uuid>,
 ) -> Result<Json<PlaybackInfoResponse>, AppError> {
-    let item = repository::get_media_item(&state.pool, item_id)
+    let mut item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
     if matches!(item.item_type.as_str(), "Series" | "Season" | "Folder") {
         return Err(AppError::BadRequest("目录条目没有播放源".to_string()));
     }
+
+    let needs_metadata = item.video_codec.is_none() || item.audio_codec.is_none() || item.runtime_ticks.is_none();
+    if needs_metadata {
+        let path = std::path::Path::new(&item.path);
+        if path.exists() {
+            match media_analyzer::analyze_media_file(path).await {
+                Ok(analysis) => {
+                    repository::update_media_item_metadata(&state.pool, item_id, &analysis).await?;
+                    item = repository::get_media_item(&state.pool, item_id)
+                        .await?
+                        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+                }
+                Err(e) => {
+                    tracing::warn!("无法分析媒体文件 {}: {}", path.display(), e);
+                }
+            }
+        }
+    }
+
     let play_session_id = Uuid::new_v4().simple().to_string();
 
     Ok(Json(PlaybackInfoResponse {

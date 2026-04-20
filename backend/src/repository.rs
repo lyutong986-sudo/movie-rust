@@ -1691,3 +1691,46 @@ fn empty_user_data_for_item(item_id: Uuid) -> UserItemDataDto {
     dto.item_id = Some(item_id.to_string());
     dto
 }
+
+pub async fn update_media_item_metadata(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    analysis: &crate::media_analyzer::MediaAnalysisResult,
+) -> Result<(), crate::error::AppError> {
+    let video_stream = analysis.streams.iter().find(|s| s.codec_type == "video");
+    let audio_stream = analysis.streams.iter().find(|s| s.codec_type == "audio");
+    let format = &analysis.format;
+
+    let video_codec = video_stream.and_then(|s| s.codec_name.clone());
+    let audio_codec = audio_stream.and_then(|s| s.codec_name.clone());
+    let width = video_stream.and_then(|s| s.width);
+    let height = video_stream.and_then(|s| s.height);
+    let runtime_ticks = format
+        .duration
+        .as_deref()
+        .and_then(|dur| dur.parse::<f64>().ok())
+        .map(|seconds| (seconds * 10_000_000.0).round() as i64);
+
+    sqlx::query(
+        r#"
+        UPDATE media_items
+        SET video_codec = COALESCE($1, video_codec),
+            audio_codec = COALESCE($2, audio_codec),
+            width = COALESCE($3, width),
+            height = COALESCE($4, height),
+            runtime_ticks = COALESCE($5, runtime_ticks),
+            date_modified = now()
+        WHERE id = $6
+        "#,
+    )
+    .bind(video_codec)
+    .bind(audio_codec)
+    .bind(width)
+    .bind(height)
+    .bind(runtime_ticks)
+    .bind(item_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
