@@ -11,7 +11,7 @@ import { computed, nextTick, shallowRef, watch } from 'vue';
 import { SubtitleDeliveryMethod } from '@jellyfin/sdk/lib/generated-client/models/subtitle-delivery-method';
 import { computedAsync, useFullscreen } from '@vueuse/core';
 import { MediaStreamType } from '@jellyfin/sdk/lib/generated-client';
-import { isNil, sealed } from '@jellyfin-vue/shared/validation';
+import { isNil, sealed } from '#/utils/shared/validation.ts';
 import { playbackManager } from './playback-manager.ts';
 import { mediaElementRef } from '#/store/index.ts';
 import { CommonStore } from '#/store/super/common-store.ts';

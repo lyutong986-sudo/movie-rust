@@ -38,9 +38,8 @@
 import Hls, { ErrorTypes, Events, type ErrorData } from 'hls.js';
 import HlsWorkerUrl from 'hls.js/dist/hls.worker.js?url';
 import { computed, nextTick, onScopeDispose, watch } from 'vue';
-import { useTranslation } from 'i18next-vue';
-import { isNil } from '@jellyfin-vue/shared/validation';
-import { PromiseQueue } from '@jellyfin-vue/shared/promises';
+import { isNil } from '#/utils/shared/validation.ts';
+import { PromiseQueue } from '#/utils/shared/promises.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
 import {
   mediaElementRef,
@@ -51,7 +50,16 @@ import { playerElement, videoContainerRef } from '#/store/player-element.ts';
 import { getImageInfo } from '#/utils/images.ts';
 import { subtitleSettings } from '#/store/settings/subtitle.ts';
 
-const { t } = useTranslation();
+// Simple translation function (replace with proper i18n if needed)
+const t = (key: string): string => {
+  const translations: Record<string, string> = {
+    'networkError': 'Network error encountered',
+    'mediaError': 'Media error encountered',
+    'cantPlayItem': 'Cannot play item'
+  };
+  return translations[key] || key;
+};
+
 const webAudioQueue = new PromiseQueue();
 const hls = Hls.isSupported()
   ? new Hls({

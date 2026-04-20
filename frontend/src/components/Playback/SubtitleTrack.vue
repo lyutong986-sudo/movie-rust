@@ -17,7 +17,7 @@
 
 <script setup lang="ts">
 import { computed, type StyleValue } from 'vue';
-import { isNil } from '@jellyfin-vue/shared/validation';
+import { isNil } from '#/utils/shared/validation.ts';
 import { subtitleSettings } from '#/store/settings/subtitle.ts';
 import { DEFAULT_TYPOGRAPHY } from '#/store/settings/theme.ts';
 import { playerElement } from '#/store/player-element.ts';

@@ -9,7 +9,7 @@ import {
   type CodecProfile,
   type ProfileCondition
 } from '@jellyfin/sdk/lib/generated-client';
-import { isFunc, isObj } from '@jellyfin-vue/shared/validation';
+import { isFunc, isObj } from '#/utils/shared/validation.ts';
 import {
   isApple,
   isChromiumBased,

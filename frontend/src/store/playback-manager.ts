@@ -18,7 +18,7 @@ import { getPlaystateApi } from '@jellyfin/sdk/lib/utils/api/playstate-api';
 import { getTvShowsApi } from '@jellyfin/sdk/lib/utils/api/tv-shows-api';
 import { computedAsync, watchThrottled } from '@vueuse/core';
 import { computed, watch, watchEffect } from 'vue';
-import { isNil, sealed } from '@jellyfin-vue/shared/validation';
+import { isNil, sealed } from '#/utils/shared/validation.ts';
 import i18next from 'i18next';
 import { useBaseItem } from '#/composables/apis.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';

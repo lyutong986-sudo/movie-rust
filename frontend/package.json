@@ -20,7 +20,9 @@
     "@vueuse/core": "^10.0.0",
     "@jellyfin/sdk": "0.13.0",
     "i18next": "^23.0.0",
-    "i18next-vue": "^1.0.0"
+    "sortablejs": "^1.15.7",
+    "assjs": "^0.1.5",
+    "libpgs": "^0.8.1"
   },
   "devDependencies": {}
 }
