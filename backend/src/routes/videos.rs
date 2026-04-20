@@ -2,7 +2,7 @@ use crate::{auth, error::AppError, repository, state::AppState};
 use axum::{
     body::Body,
     extract::{Path, Request, State},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::get,
     Router,
 };
@@ -65,6 +65,21 @@ async fn serve_media_item(
     let path = PathBuf::from(item.path);
     if !path.exists() {
         return Err(AppError::NotFound("媒体文件不存在".to_string()));
+    }
+
+    // 检查是否是 .strm 文件
+    if path.extension().and_then(|ext| ext.to_str()).map_or(false, |ext| ext.eq_ignore_ascii_case("strm")) {
+        // 读取 .strm 文件内容（第一行）
+        let content = tokio::fs::read_to_string(&path).await
+            .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let url = content.lines().next().map(str::trim).filter(|line| !line.is_empty());
+        if let Some(url) = url {
+            if url.starts_with("http://") || url.starts_with("https://") {
+                // 返回 302 重定向到真实 URL
+                return Ok(Redirect::to(url).into_response());
+            }
+        }
+        // 如果不是有效的 URL，回退到普通文件服务
     }
 
     ServeFile::new(path)
