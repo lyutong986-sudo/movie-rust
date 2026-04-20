@@ -10,6 +10,7 @@ mod routes;
 mod scanner;
 mod security;
 mod state;
+mod transcoder;
 
 use anyhow::Context;
 use sqlx::postgres::PgPoolOptions;
@@ -59,11 +60,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let bind_addr = config.bind_addr()?;
+    let config = Arc::new(config);
+    let transcoder = Transcoder::new(config.clone());
     let state = AppState {
         pool,
-        config: Arc::new(config),
+        config,
         metadata_manager: Some(Arc::new(metadata_manager)),
         websocket_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        transcoder,
     };
 
     let spa =

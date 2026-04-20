@@ -6,6 +6,7 @@ use crate::{
         BaseItemDto, ItemsQuery, PlaybackInfoResponse, QueryResult, UpdateUserItemDataRequest,
         UserItemDataDto, UserItemDataQuery,
     },
+    naming,
     repository::{self, ItemListOptions, UpdateUserDataInput},
     state::AppState,
 };
@@ -472,7 +473,7 @@ async fn playback_info(
     let needs_metadata = item.video_codec.is_none() || item.audio_codec.is_none() || item.runtime_ticks.is_none();
     if needs_metadata {
         let path = std::path::Path::new(&item.path);
-        if path.exists() {
+        if path.exists() && !naming::is_strm(path) {
             match media_analyzer::analyze_media_file(path).await {
                 Ok(analysis) => {
                     repository::update_media_item_metadata(&state.pool, item_id, &analysis).await?;
@@ -484,6 +485,8 @@ async fn playback_info(
                     tracing::warn!("无法分析媒体文件 {}: {}", path.display(), e);
                 }
             }
+        } else {
+            tracing::debug!("跳过媒体文件分析（文件不存在或为.strm文件）: {}", path.display());
         }
     }
 

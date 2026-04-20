@@ -3,6 +3,7 @@ use axum::{
     extract::FromRequestParts,
     http::{header::AUTHORIZATION, request::Parts, HeaderMap},
 };
+use chrono::Utc;
 use url::form_urlencoded;
 
 #[derive(Debug, Clone)]
@@ -45,7 +46,17 @@ pub async fn require_auth(
     headers: &HeaderMap,
     query: Option<&str>,
 ) -> Result<AuthSession, AppError> {
-    let token = extract_token(headers, query).ok_or(AppError::Unauthorized)?;
+    let token = extract_token(headers, query).ok_or_else(|| {
+        tracing::debug!(
+            "未找到认证令牌，headers: {:?}, query: {:?}",
+            headers
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.to_str().unwrap_or("[invalid]")))
+                .collect::<Vec<_>>(),
+            query
+        );
+        AppError::Unauthorized
+    })?;
     
     if let Some(api_key) = &state.config.api_key {
         if token == *api_key {
@@ -59,7 +70,19 @@ pub async fn require_auth(
     
     let session = repository::get_session(&state.pool, &token)
         .await?
-        .ok_or(AppError::Unauthorized)?;
+        .ok_or_else(|| {
+            tracing::debug!("令牌无效或会话不存在: {}", token);
+            AppError::Unauthorized
+        })?;
+    
+    // 检查会话是否已过期
+    if let Some(expires_at) = session.expires_at {
+        if expires_at < chrono::Utc::now() {
+            tracing::debug!("会话已过期: {}", token);
+            return Err(AppError::Unauthorized);
+        }
+    }
+    
     Ok(session.into())
 }
 

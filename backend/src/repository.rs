@@ -688,7 +688,8 @@ pub async fn get_session(
             s.device_name,
             s.client,
             s.application_version,
-            s.last_activity_at
+            s.last_activity_at,
+            s.expires_at
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
         WHERE s.access_token = $1 AND u.is_disabled = false
@@ -1340,6 +1341,58 @@ pub async fn set_user_favorite(
     .await?;
 
     Ok(user_item_data_to_dto_for_item(data, item_id))
+}
+
+pub async fn get_user_resume_items(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    limit: Option<i64>,
+    start_index: Option<i64>,
+) -> Result<(Vec<BaseItemDto>, i64), AppError> {
+    let limit = limit.unwrap_or(50).clamp(1, 100);
+    let start_index = start_index.unwrap_or(0).max(0);
+    
+    let total_count = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*) as count
+        FROM user_item_data uid
+        INNER JOIN media_items mi ON mi.id = uid.item_id
+        WHERE uid.user_id = $1
+          AND uid.playback_position_ticks > 0
+          AND (uid.is_played = false OR uid.playback_position_ticks < mi.runtime_ticks)
+        "#,
+        user_id
+    )
+    .fetch_one(pool)
+    .await?
+    .unwrap_or(0);
+    
+    let items = sqlx::query_as!(
+        DbMediaItem,
+        r#"
+        SELECT mi.*,
+               uid.playback_position_ticks as user_playback_position_ticks,
+               uid.is_favorite as user_is_favorite,
+               uid.is_played as user_is_played,
+               uid.play_count as user_play_count,
+               uid.last_played_date as user_last_played_date
+        FROM user_item_data uid
+        INNER JOIN media_items mi ON mi.id = uid.item_id
+        WHERE uid.user_id = $1
+          AND uid.playback_position_ticks > 0
+          AND (uid.is_played = false OR uid.playback_position_ticks < mi.runtime_ticks)
+        ORDER BY uid.last_played_date DESC NULLS LAST
+        LIMIT $2 OFFSET $3
+        "#,
+        user_id,
+        limit,
+        start_index
+    )
+    .fetch_all(pool)
+    .await?;
+    
+    let dtos = items.into_iter().map(|item| media_item_to_dto(item, Some(user_id))).collect();
+    Ok((dtos, total_count))
 }
 
 pub async fn set_user_played(

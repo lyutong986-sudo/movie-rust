@@ -17,6 +17,12 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("内部错误: {0}")]
     Internal(String),
+    #[error("FFmpeg错误: {0}")]
+    FfmpegError(String),
+    #[error("转码功能已禁用")]
+    TranscodingDisabled,
+    #[error("不支持的转码协议: {0}")]
+    InvalidTranscodingProtocol(String),
 }
 
 #[derive(Serialize)]
@@ -38,6 +44,9 @@ impl IntoResponse for AppError {
             AppError::Sqlx(_) => (StatusCode::INTERNAL_SERVER_ERROR, "DatabaseError"),
             AppError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "IOError"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "InternalServerError"),
+            AppError::FfmpegError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "FfmpegError"),
+            AppError::TranscodingDisabled => (StatusCode::BAD_REQUEST, "TranscodingDisabled"),
+            AppError::InvalidTranscodingProtocol(_) => (StatusCode::BAD_REQUEST, "InvalidTranscodingProtocol"),
         };
 
         if status.is_server_error() {

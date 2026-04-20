@@ -1,4 +1,4 @@
-use crate::{config::Config, metadata::provider::MetadataProviderManager};
+use crate::{config::Config, metadata::provider::MetadataProviderManager, transcoder::Transcoder};
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -8,4 +8,5 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub metadata_manager: Option<Arc<MetadataProviderManager>>,
     pub websocket_sessions: Arc<tokio::sync::RwLock<std::collections::HashMap<uuid::Uuid, crate::routes::websocket::WebSocketSession>>>,
+    pub transcoder: Transcoder,
 }

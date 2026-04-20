@@ -220,6 +220,7 @@ pub struct AuthSessionRow {
     pub client: Option<String>,
     pub application_version: Option<String>,
     pub last_activity_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize)]
