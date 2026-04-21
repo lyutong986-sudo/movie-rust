@@ -1,24 +1,23 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::{
     error::AppError,
     metadata::{
-        models::{ExternalPerson, ExternalPersonSearchResult},
-        provider::{MetadataProvider, MetadataProviderManager},
+        models::ExternalPersonSearchResult,
+        provider::{ExternalItemPerson, MetadataProviderManager},
     },
     repository,
 };
+use serde_json::to_value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// 人物数据服务
 pub struct PersonService {
     pool: PgPool,
     metadata_manager: Arc<MetadataProviderManager>,
 }
 
 impl PersonService {
-    /// 创建新的人物数据服务
     pub fn new(pool: PgPool, metadata_manager: Arc<MetadataProviderManager>) -> Self {
         Self {
             pool,
@@ -26,7 +25,6 @@ impl PersonService {
         }
     }
 
-    /// 从外部元数据源提取人物数据
     pub async fn fetch_person_from_external(
         &self,
         provider_name: &str,
@@ -35,37 +33,44 @@ impl PersonService {
         let provider = self
             .metadata_manager
             .get_provider(provider_name)
-            .ok_or_else(|| AppError::BadRequest(format!("Provider '{}' not found", provider_name)))?;
+            .ok_or_else(|| AppError::BadRequest(format!("Provider '{provider_name}' not found")))?;
 
-        // 从外部源获取人物详细信息
         let external_person = provider.get_person_details(external_id).await?;
-
-        // 将外部人物转换为数据库模型
         let db_person = external_person.to_db_person();
 
-        // 检查人物是否已存在（通过外部ID）
-        let existing_person = repository::get_person_by_external_id(
-            &self.pool,
-            provider_name,
-            external_id,
-        ).await?;
+        let existing_person =
+            repository::get_person_by_external_id(&self.pool, provider_name, external_id).await?;
 
         let person_id = if let Some(existing) = existing_person {
-            // 更新现有人物
             repository::update_person(&self.pool, existing.id, &db_person).await?;
             existing.id
         } else {
-            // 创建新人物
             repository::create_person(&self.pool, &db_person).await?
         };
 
-        // 获取人物作品并关联到项目
-        // TODO: 实现作品关联
+        let credits = provider.get_person_credits(external_id).await?;
+        let mut seen_links = HashSet::new();
+        for (index, credit) in credits.iter().enumerate() {
+            let items = repository::find_items_for_external_person_credit(&self.pool, credit).await?;
+            for item in items {
+                if !seen_links.insert(item.id) {
+                    continue;
+                }
+                repository::upsert_person_role(
+                    &self.pool,
+                    person_id,
+                    item.id,
+                    &credit.role_type,
+                    credit.role.as_deref(),
+                    index as i32,
+                )
+                .await?;
+            }
+        }
 
         Ok(person_id)
     }
 
-    /// 搜索外部人物
     pub async fn search_external_person(
         &self,
         provider_name: &str,
@@ -74,20 +79,54 @@ impl PersonService {
         let provider = self
             .metadata_manager
             .get_provider(provider_name)
-            .ok_or_else(|| AppError::BadRequest(format!("Provider '{}' not found", provider_name)))?;
+            .ok_or_else(|| AppError::BadRequest(format!("Provider '{provider_name}' not found")))?;
 
         provider.search_person(name).await
     }
 
-    /// 批量提取人物数据（用于电影/电视剧）
     pub async fn fetch_persons_for_item(
         &self,
         item_id: Uuid,
         provider_name: &str,
         external_item_id: &str,
+        media_type: &str,
     ) -> Result<(), AppError> {
-        // TODO: 根据外部项目ID获取人物列表并关联
+        let provider = self
+            .metadata_manager
+            .get_provider(provider_name)
+            .ok_or_else(|| AppError::BadRequest(format!("Provider '{provider_name}' not found")))?;
+
+        let people = provider.get_item_people(media_type, external_item_id).await?;
+        for person in people {
+            self.upsert_item_person(item_id, person).await?;
+        }
+
         Ok(())
     }
-}
 
+    async fn upsert_item_person(
+        &self,
+        item_id: Uuid,
+        person: ExternalItemPerson,
+    ) -> Result<(), AppError> {
+        let provider_ids = to_value(&person.provider_ids).unwrap_or_default();
+        let person_id = repository::upsert_person_reference(
+            &self.pool,
+            &person.name,
+            provider_ids,
+            person.image_url.as_deref(),
+            person.external_url.as_deref(),
+        )
+        .await?;
+
+        repository::upsert_person_role(
+            &self.pool,
+            person_id,
+            item_id,
+            &person.role_type,
+            person.role.as_deref(),
+            person.sort_order,
+        )
+        .await
+    }
+}

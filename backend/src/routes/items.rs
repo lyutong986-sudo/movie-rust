@@ -2,6 +2,7 @@ use crate::{
     auth::AuthSession,
     error::AppError,
     media_analyzer,
+    metadata::person_service::PersonService,
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, BaseItemDto, ContentSectionDto, GetSimilarItems, ItemCountsDto,
         ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult,
@@ -260,11 +261,17 @@ async fn list_items_for_user(
             .iter()
             .all(|item_type| item_type.eq_ignore_ascii_case("BoxSet"))
     {
-        return Ok(Json(QueryResult {
-            items: Vec::new(),
-            total_record_count: 0,
-            start_index: Some(query.start_index.unwrap_or(0).max(0)),
-        }));
+        return Ok(Json(
+            repository::get_boxsets_for_item_ids(
+                &state.pool,
+                user_id,
+                &requested_item_ids,
+                state.config.server_id,
+                query.start_index.unwrap_or(0).max(0) as i64,
+                query.limit.unwrap_or(100).clamp(1, 200) as i64,
+            )
+            .await?,
+        ));
     }
 
     let recursive = query.recursive.unwrap_or_else(|| {
@@ -565,10 +572,21 @@ async fn set_played_for_user(
 }
 
 async fn ensure_media_item_exists(state: &AppState, item_id: Uuid) -> Result<(), AppError> {
-    repository::get_media_item(&state.pool, item_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-    Ok(())
+    if repository::get_media_item(&state.pool, item_id).await?.is_some() {
+        return Ok(());
+    }
+    if repository::get_missing_episode_dto(
+        &state.pool,
+        item_id,
+        Uuid::nil(),
+        state.config.server_id,
+    )
+    .await?
+    .is_some()
+    {
+        return Ok(());
+    }
+    Err(AppError::NotFound("媒体条目不存在".to_string()))
 }
 
 fn ensure_user_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppError> {
@@ -604,6 +622,17 @@ async fn item_dto(
     user_id: Uuid,
     item_id: Uuid,
 ) -> Result<Json<BaseItemDto>, AppError> {
+    if let Some(item) = repository::get_missing_episode_dto(
+        &state.pool,
+        item_id,
+        user_id,
+        state.config.server_id,
+    )
+    .await?
+    {
+        return Ok(Json(item));
+    }
+
     if let Some(library) = repository::get_library(&state.pool, item_id).await? {
         return Ok(Json(
             repository::library_to_item_dto(&state.pool, &library, state.config.server_id).await?,
@@ -630,7 +659,7 @@ async fn refresh_item_metadata(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
-    if !item.item_type.eq_ignore_ascii_case("Series") {
+    if !item.item_type.eq_ignore_ascii_case("Series") && !item.item_type.eq_ignore_ascii_case("Movie") {
         return Ok(StatusCode::NO_CONTENT);
     }
 
@@ -646,8 +675,23 @@ async fn refresh_item_metadata(
         .get_provider("tmdb")
         .ok_or_else(|| AppError::BadRequest("未配置 TMDb 元数据提供者".to_string()))?;
 
-    let metadata = provider.get_series_details(&tmdb_id).await?;
-    repository::update_media_item_series_metadata(&state.pool, item.id, &metadata).await?;
+    if item.item_type.eq_ignore_ascii_case("Series") {
+        let metadata = provider.get_series_details(&tmdb_id).await?;
+        repository::update_media_item_series_metadata(&state.pool, item.id, &metadata).await?;
+        let catalog = provider.get_series_episode_catalog(&tmdb_id).await?;
+        repository::replace_series_episode_catalog(&state.pool, item.id, &catalog).await?;
+    }
+
+    let media_type = if item.item_type.eq_ignore_ascii_case("Series") {
+        "tv"
+    } else {
+        "movie"
+    };
+    let person_service = PersonService::new(state.pool.clone(), metadata_manager.clone());
+    person_service
+        .fetch_persons_for_item(item.id, "tmdb", &tmdb_id, media_type)
+        .await?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 

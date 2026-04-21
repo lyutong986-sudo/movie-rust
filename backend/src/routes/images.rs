@@ -6,15 +6,19 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    body::Body,
-    extract::{Path, Request, State},
-    http::{header, StatusCode},
+    body::{Body, Bytes},
+    extract::{Path, Query, Request, State},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
 use reqwest::Client;
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    path::{Path as StdPath, PathBuf},
+};
+use tokio::fs;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
@@ -56,11 +60,14 @@ pub fn router() -> Router<AppState> {
         .route("/Images/Remote", get(get_remote_image))
         .route(
             "/Users/{user_id}/Images/{image_type}",
-            get(user_image_placeholder).head(user_image_placeholder),
+            get(get_user_image)
+                .head(get_user_image)
+                .post(upload_user_image)
+                .delete(delete_user_image),
         )
         .route(
             "/Users/{user_id}/Images/{image_type}/{*image_tail}",
-            get(user_image_placeholder).head(user_image_placeholder),
+            get(get_user_image_with_tail).head(get_user_image_with_tail),
         )
 }
 
@@ -166,6 +173,24 @@ async fn get_genre_image_with_tail(
     serve_genre_image(state, name, image_type, request).await
 }
 
+async fn get_user_image(
+    _session: OptionalAuthSession,
+    State(state): State<AppState>,
+    Path((user_id, image_type)): Path<(String, String)>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    serve_user_image(state, user_id, image_type, request).await
+}
+
+async fn get_user_image_with_tail(
+    _session: OptionalAuthSession,
+    State(state): State<AppState>,
+    Path((user_id, image_type, _image_tail)): Path<(String, String, String)>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    serve_user_image(state, user_id, image_type, request).await
+}
+
 async fn serve_person_image(
     state: AppState,
     name: String,
@@ -175,7 +200,6 @@ async fn serve_person_image(
     let path = repository::get_person_image_path(&state.pool, &name, &image_type)
         .await?
         .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
-
     serve_image(&path, request).await
 }
 
@@ -188,7 +212,6 @@ async fn serve_genre_image(
     let path = repository::get_genre_image_path(&state.pool, &name, &image_type)
         .await?
         .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
-
     serve_image(&path, request).await
 }
 
@@ -201,6 +224,13 @@ async fn serve_item_image(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+
+    if let Some(path) =
+        repository::get_missing_episode_image_path(&state.pool, item_id, &image_type).await?
+    {
+        return serve_image(&path, request).await;
+    }
+
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
@@ -216,19 +246,117 @@ async fn serve_item_image(
     serve_image(&path, request).await
 }
 
+async fn serve_user_image(
+    state: AppState,
+    user_id: String,
+    image_type: String,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let user_id = emby_id_to_uuid(&user_id)
+        .map_err(|_| AppError::BadRequest("无效的用户ID格式".to_string()))?;
+    let path = repository::get_user_image_path(&state.pool, user_id, &image_type)
+        .await?
+        .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
+
+    serve_image(&path, request).await
+}
+
+async fn upload_user_image(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, image_type)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    let user_id = emby_id_to_uuid(&user_id)
+        .map_err(|_| AppError::BadRequest("无效的用户ID格式".to_string()))?;
+    if session.user_id != user_id && !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    if body.is_empty() {
+        return Err(AppError::BadRequest("图片内容不能为空".to_string()));
+    }
+
+    let image_type = normalized_user_image_type(&image_type);
+    let extension = image_extension_from_headers(&headers);
+    let dir = state.config.static_dir.join("user-images");
+    fs::create_dir_all(&dir).await.map_err(AppError::Io)?;
+
+    let filename = format!(
+        "{}-{}.{}",
+        user_id,
+        image_type.to_ascii_lowercase(),
+        extension
+    );
+    let path = dir.join(filename);
+    fs::write(&path, &body).await.map_err(AppError::Io)?;
+
+    repository::update_user_image_path(
+        &state.pool,
+        user_id,
+        &image_type,
+        Some(&path.to_string_lossy()),
+    )
+    .await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_user_image(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, image_type)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    let user_id = emby_id_to_uuid(&user_id)
+        .map_err(|_| AppError::BadRequest("无效的用户ID格式".to_string()))?;
+    if session.user_id != user_id && !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+
+    let image_type = normalized_user_image_type(&image_type);
+    if let Some(path) = repository::get_user_image_path(&state.pool, user_id, &image_type).await? {
+        let path_buf = PathBuf::from(&path);
+        if path_buf.exists() && path_buf.starts_with(state.config.static_dir.join("user-images")) {
+            let _ = fs::remove_file(&path_buf).await;
+        }
+    }
+
+    repository::update_user_image_path(&state.pool, user_id, &image_type, None).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn get_remote_image(
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let image_url = params
         .get("ImageUrl")
-        .ok_or_else(|| AppError::BadRequest("Missing ImageUrl parameter".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("缺少 ImageUrl 参数".to_string()))?;
 
     serve_remote_image(image_url, request).await
 }
 
-async fn user_image_placeholder() -> StatusCode {
-    StatusCode::NOT_FOUND
+fn normalized_user_image_type(image_type: &str) -> String {
+    match image_type.to_ascii_lowercase().as_str() {
+        "backdrop" => "Backdrop".to_string(),
+        "logo" => "Logo".to_string(),
+        _ => "Primary".to_string(),
+    }
+}
+
+fn image_extension_from_headers(headers: &HeaderMap) -> &'static str {
+    match headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "jpg",
+    }
 }
 
 async fn serve_image(path: &str, request: Request<Body>) -> Result<Response, AppError> {
@@ -244,7 +372,7 @@ async fn serve_local_path(path: PathBuf, request: Request<Body>) -> Result<Respo
         return Err(AppError::NotFound("文件不存在".to_string()));
     }
 
-    ServeFile::new(path)
+    ServeFile::new(StdPath::new(&path))
         .oneshot(request)
         .await
         .map(IntoResponse::into_response)
@@ -257,33 +385,31 @@ async fn serve_remote_image(url: &str, _request: Request<Body>) -> Result<Respon
         .get(url)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to fetch remote image: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("获取远程图片失败: {e}")))?;
 
     let status = response.status();
     if !status.is_success() {
-        return Err(AppError::NotFound(format!(
-            "Remote image not found: {status}"
-        )));
+        return Err(AppError::NotFound(format!("远程图片不存在: {status}")));
     }
 
     let content_type = response
         .headers()
         .get(header::CONTENT_TYPE)
-        .and_then(|v: &header::HeaderValue| v.to_str().ok())
+        .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
 
     let body_bytes = response
         .bytes()
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to read remote image body: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("读取远程图片失败: {e}")))?;
 
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CACHE_CONTROL, "public, max-age=86400")
         .body(Body::from(body_bytes))
-        .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("构建图片响应失败: {e}")))?;
 
     Ok(response)
 }

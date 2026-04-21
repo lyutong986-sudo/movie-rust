@@ -16,7 +16,9 @@ use crate::{
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct GetGenresQuery {
+    #[serde(default, alias = "StartIndex", alias = "startIndex")]
     start_index: Option<i32>,
+    #[serde(default, alias = "Limit")]
     limit: Option<i32>,
 }
 

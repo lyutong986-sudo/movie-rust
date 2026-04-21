@@ -1,5 +1,6 @@
 use crate::error::AppError;
 use async_trait::async_trait;
+use chrono::NaiveDate;
 use std::collections::HashMap;
 
 use super::models::{ExternalPerson, ExternalPersonSearchResult, ExternalSeriesMetadata};
@@ -20,6 +21,18 @@ pub trait MetadataProvider: Send + Sync {
     async fn get_person_credits(&self, provider_id: &str) -> Result<Vec<ExternalPersonCredit>, AppError>;
 
     async fn get_series_details(&self, provider_id: &str) -> Result<ExternalSeriesMetadata, AppError>;
+
+    /// 获取条目人物信息（电影/剧集）
+    async fn get_item_people(
+        &self,
+        media_type: &str,
+        provider_id: &str,
+    ) -> Result<Vec<ExternalItemPerson>, AppError>;
+
+    async fn get_series_episode_catalog(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<ExternalEpisodeCatalogItem>, AppError>;
 }
 
 /// 外部人物作品信息
@@ -41,6 +54,34 @@ pub struct ExternalPersonCredit {
     pub media_type: String,
     /// 发行年份
     pub year: Option<i32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalItemPerson {
+    pub external_id: String,
+    pub provider: String,
+    pub name: String,
+    pub role_type: String,
+    pub role: Option<String>,
+    pub sort_order: i32,
+    pub image_url: Option<String>,
+    pub external_url: Option<String>,
+    pub provider_ids: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalEpisodeCatalogItem {
+    pub provider: String,
+    pub external_series_id: String,
+    pub external_season_id: Option<String>,
+    pub external_episode_id: Option<String>,
+    pub season_number: i32,
+    pub episode_number: i32,
+    pub episode_number_end: Option<i32>,
+    pub name: String,
+    pub overview: Option<String>,
+    pub premiere_date: Option<NaiveDate>,
+    pub image_path: Option<String>,
 }
 
 /// 元数据提供者管理器

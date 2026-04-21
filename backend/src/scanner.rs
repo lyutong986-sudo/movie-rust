@@ -27,6 +27,7 @@ struct NfoMetadata {
     production_year: Option<i32>,
     official_rating: Option<String>,
     community_rating: Option<f64>,
+    critic_rating: Option<f64>,
     runtime_ticks: Option<i64>,
     premiere_date: Option<NaiveDate>,
     status: Option<String>,
@@ -92,7 +93,7 @@ pub async fn scan_all_libraries(
                     )
                     .await?;
                 } else {
-                    import_movie_file(pool, library, &file).await?;
+                    import_movie_file(pool, metadata_manager, library, &file).await?;
                 }
                 imported_items += 1;
             }
@@ -129,6 +130,7 @@ async fn collect_video_files(root: PathBuf) -> Result<Vec<PathBuf>, AppError> {
 
 async fn import_movie_file(
     pool: &sqlx::PgPool,
+    metadata_manager: Option<&MetadataProviderManager>,
     library: &DbLibrary,
     file: &Path,
 ) -> Result<(), AppError> {
@@ -173,13 +175,14 @@ async fn import_movie_file(
             production_year: nfo.production_year.or(parsed.production_year),
             official_rating: nfo.official_rating.as_deref(),
             community_rating: nfo.community_rating,
+            critic_rating: nfo.critic_rating,
             runtime_ticks: nfo.runtime_ticks,
             premiere_date: nfo.premiere_date.or(parsed.premiere_date),
             status: nfo.status.as_deref(),
             end_date: nfo.end_date,
             air_days: &nfo.air_days,
             air_time: nfo.air_time.as_deref(),
-            provider_ids,
+            provider_ids: provider_ids.clone(),
             genres: &nfo.genres,
             studios: &nfo.studios,
             tags: &nfo.tags,
@@ -202,6 +205,7 @@ async fn import_movie_file(
     )
     .await?;
     sync_nfo_people(pool, movie_id, &nfo.people).await?;
+    refresh_remote_people(pool, metadata_manager, movie_id, "movie", &provider_ids).await;
     analyze_imported_media(pool, movie_id, file).await?;
 
     Ok(())
@@ -287,10 +291,11 @@ async fn import_tv_file(
             container: None,
             original_title: series_nfo.original_title.as_deref(),
             overview: series_nfo.overview.as_deref(),
-            production_year: series_nfo.production_year.or(parsed.production_year),
-            official_rating: series_nfo.official_rating.as_deref(),
-            community_rating: series_nfo.community_rating,
-            runtime_ticks: None,
+              production_year: series_nfo.production_year.or(parsed.production_year),
+              official_rating: series_nfo.official_rating.as_deref(),
+              community_rating: series_nfo.community_rating,
+              critic_rating: series_nfo.critic_rating,
+              runtime_ticks: None,
             premiere_date: series_nfo.premiere_date,
             status: series_nfo.status.as_deref(),
             end_date: series_nfo.end_date,
@@ -319,6 +324,7 @@ async fn import_tv_file(
     )
     .await?;
     sync_nfo_people(pool, series_id, &series_nfo.people).await?;
+    refresh_remote_people(pool, metadata_manager, series_id, "tv", &series_provider_ids).await;
     refresh_series_remote_metadata(
         pool,
         metadata_manager,
@@ -327,6 +333,7 @@ async fn import_tv_file(
         &series_provider_ids,
     )
     .await;
+    refresh_series_episode_catalog(pool, metadata_manager, series_id, &series_provider_ids).await;
 
     let season_id = repository::upsert_media_item(
         pool,
@@ -341,12 +348,13 @@ async fn import_tv_file(
             original_title: season_nfo.original_title.as_deref(),
             overview: season_nfo.overview.as_deref(),
             production_year: season_nfo.production_year.or(series_nfo.production_year),
-            official_rating: season_nfo
-                .official_rating
-                .as_deref()
-                .or(series_nfo.official_rating.as_deref()),
-            community_rating: season_nfo.community_rating.or(series_nfo.community_rating),
-            runtime_ticks: None,
+              official_rating: season_nfo
+                  .official_rating
+                  .as_deref()
+                  .or(series_nfo.official_rating.as_deref()),
+              community_rating: season_nfo.community_rating.or(series_nfo.community_rating),
+              critic_rating: season_nfo.critic_rating.or(series_nfo.critic_rating),
+              runtime_ticks: None,
             premiere_date: season_nfo.premiere_date,
             status: season_nfo.status.as_deref().or(series_nfo.status.as_deref()),
             end_date: season_nfo.end_date.or(series_nfo.end_date),
@@ -441,12 +449,13 @@ async fn import_tv_file(
                 .production_year
                 .or(parsed.production_year)
                 .or(series_nfo.production_year),
-            official_rating: episode_nfo
-                .official_rating
-                .as_deref()
-                .or(series_nfo.official_rating.as_deref()),
-            community_rating: episode_nfo.community_rating.or(series_nfo.community_rating),
-            runtime_ticks: episode_nfo.runtime_ticks,
+              official_rating: episode_nfo
+                  .official_rating
+                  .as_deref()
+                  .or(series_nfo.official_rating.as_deref()),
+              community_rating: episode_nfo.community_rating.or(series_nfo.community_rating),
+              critic_rating: episode_nfo.critic_rating.or(series_nfo.critic_rating),
+              runtime_ticks: episode_nfo.runtime_ticks,
             premiere_date: episode_nfo.premiere_date.or(parsed.premiere_date),
             status: episode_nfo.status.as_deref().or(series_nfo.status.as_deref()),
             end_date: episode_nfo.end_date.or(series_nfo.end_date),
@@ -560,6 +569,117 @@ async fn refresh_series_remote_metadata(
     }
 }
 
+async fn refresh_series_episode_catalog(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<&MetadataProviderManager>,
+    series_id: uuid::Uuid,
+    provider_ids: &Value,
+) {
+    let Some(metadata_manager) = metadata_manager else {
+        return;
+    };
+    let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
+        return;
+    };
+    let Some(provider) = metadata_manager.get_provider("tmdb") else {
+        return;
+    };
+
+    match provider.get_series_episode_catalog(&tmdb_id).await {
+        Ok(items) => {
+            if let Err(error) = repository::replace_series_episode_catalog(pool, series_id, &items).await {
+                tracing::warn!(
+                    series_id = %series_id,
+                    tmdb_id = %tmdb_id,
+                    error = %error,
+                    "同步远程剧集目录失败"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                series_id = %series_id,
+                tmdb_id = %tmdb_id,
+                error = %error,
+                "获取远程剧集目录失败"
+            );
+        }
+    }
+}
+
+async fn refresh_remote_people(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<&MetadataProviderManager>,
+    media_item_id: uuid::Uuid,
+    media_type: &str,
+    provider_ids: &Value,
+) {
+    let Some(metadata_manager) = metadata_manager else {
+        return;
+    };
+    let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
+        return;
+    };
+    let Some(provider) = metadata_manager.get_provider("tmdb") else {
+        return;
+    };
+
+    match provider.get_item_people(media_type, &tmdb_id).await {
+        Ok(people) => {
+            for person in people {
+                let provider_ids = serde_json::to_value(&person.provider_ids).unwrap_or_default();
+                match repository::upsert_person_reference(
+                    pool,
+                    &person.name,
+                    provider_ids,
+                    person.image_url.as_deref(),
+                    person.external_url.as_deref(),
+                )
+                .await
+                {
+                    Ok(person_id) => {
+                        if let Err(error) = repository::upsert_person_role(
+                            pool,
+                            person_id,
+                            media_item_id,
+                            &person.role_type,
+                            person.role.as_deref(),
+                            person.sort_order,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                media_item_id = %media_item_id,
+                                tmdb_id = %tmdb_id,
+                                person = %person.name,
+                                error = %error,
+                                "同步远程人物角色失败"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            media_item_id = %media_item_id,
+                            tmdb_id = %tmdb_id,
+                            person = %person.name,
+                            error = %error,
+                            "同步远程人物失败"
+                        );
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                media_item_id = %media_item_id,
+                tmdb_id = %tmdb_id,
+                error = %error,
+                "获取远程人物信息失败"
+            );
+        }
+    }
+}
+
 async fn analyze_imported_media(
     pool: &sqlx::PgPool,
     item_id: uuid::Uuid,
@@ -634,6 +754,8 @@ fn read_nfo_file(path: &Path) -> Option<NfoMetadata> {
         production_year: first_tag(&xml, &["year"]).and_then(|value| value.parse().ok()),
         official_rating: first_tag(&xml, &["mpaa", "certification", "officialrating"]),
         community_rating: first_tag(&xml, &["rating", "communityrating", "userrating"])
+            .and_then(|value| parse_decimal(&value)),
+        critic_rating: first_tag(&xml, &["criticrating", "critic_rating"])
             .and_then(|value| parse_decimal(&value)),
         runtime_ticks: first_tag(&xml, &["runtime"]).and_then(|value| parse_runtime_ticks(&value)),
         premiere_date: first_tag(&xml, &["premiered", "aired", "releasedate"])

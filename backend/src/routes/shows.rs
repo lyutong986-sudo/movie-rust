@@ -10,6 +10,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -62,15 +63,21 @@ async fn get_upcoming(
 
 async fn get_missing(
     session: AuthSession,
+    State(state): State<AppState>,
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
-    Ok(Json(QueryResult {
-        items: Vec::new(),
-        total_record_count: 0,
-        start_index: Some(query.start_index.unwrap_or(0).max(0)),
-    }))
+    let result = repository::get_missing_episodes(
+        &state.pool,
+        user_id,
+        query.parent_id,
+        state.config.server_id,
+        query.start_index.unwrap_or(0).max(0),
+        query.limit.unwrap_or(100).clamp(1, 200),
+    )
+    .await?;
+    Ok(Json(result))
 }
 
 async fn get_seasons(
@@ -114,14 +121,47 @@ async fn get_seasons(
     )
     .await?;
 
-    let mut season_dtos = Vec::with_capacity(seasons.items.len());
-    for season in seasons.items {
+    let missing_season_numbers = if query.is_missing == Some(true) {
+        collect_missing_season_numbers(
+            &repository::get_missing_episodes(
+                &state.pool,
+                user_id,
+                Some(series_id),
+                state.config.server_id,
+                0,
+                10_000,
+            )
+            .await?,
+        )
+    } else {
+        BTreeSet::new()
+    };
+
+    let mut filtered_seasons = seasons.items;
+    if query.is_special_season == Some(false) {
+        filtered_seasons.retain(|season| season.index_number.unwrap_or(0) > 0);
+    } else if query.is_special_season == Some(true) {
+        filtered_seasons.retain(|season| season.index_number.unwrap_or(0) <= 0);
+    }
+    if query.is_missing == Some(true) {
+        filtered_seasons.retain(|season| {
+            season
+                .index_number
+                .is_some_and(|index| missing_season_numbers.contains(&index))
+        });
+    }
+
+    let mut season_dtos = Vec::with_capacity(filtered_seasons.len());
+    for season in filtered_seasons {
         season_dtos.push(season_to_dto(&state, user_id, &season).await?);
     }
 
+    let season_dtos = apply_adjacent_items(season_dtos, query.adjacent_to.as_deref());
+    let total_record_count = season_dtos.len() as i64;
+
     Ok(Json(QueryResult {
         items: season_dtos,
-        total_record_count: seasons.total_record_count,
+        total_record_count,
         start_index: Some(0),
     }))
 }
@@ -160,39 +200,165 @@ async fn get_episodes(
 
         parent_id = Some(season_id);
         recursive = false;
+    } else if let Some(season_number) = query.season {
+        let seasons = repository::list_media_items(
+            &state.pool,
+            ItemListOptions {
+                library_id: None,
+                parent_id: Some(series_id),
+                item_ids: vec![],
+                include_types: vec!["Season".to_string()],
+                genres: vec![],
+                recursive: false,
+                search_term: None,
+                sort_by: None,
+                sort_order: None,
+                filters: None,
+                fields: None,
+                start_index: 0,
+                limit: 200,
+            },
+        )
+        .await?;
+
+        if let Some(season) = seasons
+            .items
+            .into_iter()
+            .find(|season| season.index_number == Some(season_number))
+        {
+            parent_id = Some(season.id);
+            recursive = false;
+        }
     }
 
-    // 获取剧集
-    let episodes = repository::list_media_items(
-        &state.pool,
-        ItemListOptions {
-            library_id: None,
+    let mut episode_dtos = if query.is_missing == Some(true) {
+        let mut items = repository::get_missing_episodes(
+            &state.pool,
+            user_id,
             parent_id,
-            item_ids: vec![],
-            include_types: vec!["Episode".to_string()],
-            genres: vec![],
-            recursive,
-            search_term: None,
-            sort_by: Some("SortName".to_string()),
-            sort_order: Some("Ascending".to_string()),
-            filters: None,
-            fields: None,
-            start_index: query.start_index.unwrap_or(0),
-            limit: query.limit.unwrap_or(100),
-        },
-    )
-    .await?;
+            state.config.server_id,
+            0,
+            10_000,
+        )
+        .await?
+        .items;
 
-    let mut episode_dtos = Vec::with_capacity(episodes.items.len());
-    for episode in episodes.items {
-        episode_dtos.push(episode_to_dto(&state, user_id, &episode).await?);
-    }
+        if let Some(season_number) = query.season {
+            items.retain(|item| item.parent_index_number == Some(season_number));
+        }
+        items
+    } else {
+        let episodes = repository::list_media_items(
+            &state.pool,
+            ItemListOptions {
+                library_id: None,
+                parent_id,
+                item_ids: vec![],
+                include_types: vec!["Episode".to_string()],
+                genres: vec![],
+                recursive,
+                search_term: None,
+                sort_by: query.sort_by.clone().or_else(|| Some("SortName".to_string())),
+                sort_order: query
+                    .sort_order
+                    .clone()
+                    .or_else(|| Some("Ascending".to_string())),
+                filters: None,
+                fields: query.fields.clone(),
+                start_index: 0,
+                limit: 10_000,
+            },
+        )
+        .await?;
+
+        let mut items = Vec::with_capacity(episodes.items.len());
+        for episode in episodes.items {
+            items.push(episode_to_dto(&state, user_id, &episode).await?);
+        }
+        items
+    };
+
+    apply_episode_sort(
+        &mut episode_dtos,
+        query.sort_by.as_deref(),
+        query.sort_order.as_deref(),
+    );
+    episode_dtos = apply_start_item(episode_dtos, query.start_item_id.as_deref());
+    episode_dtos = apply_adjacent_items(episode_dtos, query.adjacent_to.as_deref());
+
+    let total_record_count = episode_dtos.len() as i64;
+    let start_index = query.start_index.unwrap_or(0).max(0) as usize;
+    let limit = query.limit.unwrap_or(100).clamp(1, 200) as usize;
+    let items = episode_dtos
+        .into_iter()
+        .skip(start_index)
+        .take(limit)
+        .collect::<Vec<_>>();
 
     Ok(Json(QueryResult {
-        items: episode_dtos,
-        total_record_count: episodes.total_record_count,
-        start_index: query.start_index,
+        items,
+        total_record_count,
+        start_index: Some(start_index as i64),
     }))
+}
+
+fn collect_missing_season_numbers(result: &QueryResult<BaseItemDto>) -> BTreeSet<i32> {
+    result
+        .items
+        .iter()
+        .filter_map(|item| item.parent_index_number)
+        .collect()
+}
+
+fn apply_start_item(mut items: Vec<BaseItemDto>, start_item_id: Option<&str>) -> Vec<BaseItemDto> {
+    let Some(start_item_id) = start_item_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return items;
+    };
+    if let Some(index) = items
+        .iter()
+        .position(|item| item.id.eq_ignore_ascii_case(start_item_id))
+    {
+        items.drain(0..index);
+    }
+    items
+}
+
+fn apply_adjacent_items(mut items: Vec<BaseItemDto>, adjacent_to: Option<&str>) -> Vec<BaseItemDto> {
+    let Some(adjacent_to) = adjacent_to.map(str::trim).filter(|value| !value.is_empty()) else {
+        return items;
+    };
+    if let Some(index) = items
+        .iter()
+        .position(|item| item.id.eq_ignore_ascii_case(adjacent_to))
+    {
+        let start = index.saturating_sub(3);
+        let end = (index + 4).min(items.len());
+        return items.drain(start..end).collect();
+    }
+    items
+}
+
+fn apply_episode_sort(items: &mut [BaseItemDto], sort_by: Option<&str>, sort_order: Option<&str>) {
+    match sort_by.unwrap_or("SortName") {
+        "PremiereDate" => items.sort_by(|a, b| a.premiere_date.cmp(&b.premiere_date)),
+        "IndexNumber" => items.sort_by(|a, b| {
+            a.parent_index_number
+                .cmp(&b.parent_index_number)
+                .then(a.index_number.cmp(&b.index_number))
+                .then(a.sort_name.cmp(&b.sort_name))
+        }),
+        "Random" => items.sort_by(|a, b| a.id.cmp(&b.id)),
+        _ => items.sort_by(|a, b| {
+            a.sort_name
+                .cmp(&b.sort_name)
+                .then(a.parent_index_number.cmp(&b.parent_index_number))
+                .then(a.index_number.cmp(&b.index_number))
+        }),
+    }
+
+    if sort_order.is_some_and(|value| value.eq_ignore_ascii_case("Descending")) {
+        items.reverse();
+    }
 }
 
 async fn get_episodes_by_season(

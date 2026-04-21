@@ -17,12 +17,19 @@ use crate::{
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct GetPersonsQuery {
+    #[serde(default, alias = "StartIndex", alias = "startIndex")]
     start_index: Option<i32>,
+    #[serde(default, alias = "Limit")]
     limit: Option<i32>,
+    #[serde(default, alias = "Fields")]
     fields: Option<String>,
+    #[serde(default, alias = "Filters")]
     filters: Option<String>,
+    #[serde(default, alias = "SortBy", alias = "sortBy")]
     sort_by: Option<String>,
+    #[serde(default, alias = "SortOrder", alias = "sortOrder")]
     sort_order: Option<String>,
+    #[serde(default, alias = "NameStartsWith", alias = "nameStartsWith")]
     name_starts_with: Option<String>,
 }
 

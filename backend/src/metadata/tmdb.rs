@@ -7,7 +7,9 @@ use std::collections::HashMap;
 
 use super::{
     models::{ExternalPerson, ExternalPersonSearchResult, ExternalSeriesMetadata},
-    provider::{ExternalPersonCredit, MetadataProvider},
+    provider::{
+        ExternalEpisodeCatalogItem, ExternalItemPerson, ExternalPersonCredit, MetadataProvider,
+    },
 };
 
 /// TMDB API配置
@@ -139,6 +141,61 @@ impl TmdbProvider {
 
         Ok(response.json().await?)
     }
+
+    async fn get_tv_season_details_internal(
+        &self,
+        tv_id: &str,
+        season_number: i32,
+    ) -> Result<TmdbSeasonDetails, AppError> {
+        let mut params = HashMap::new();
+        self.add_api_key(&mut params);
+
+        let url = self.build_url(&format!("/tv/{tv_id}/season/{season_number}"));
+        let response = self
+            .client
+            .get(&url)
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
+    }
+
+    async fn get_movie_credits_internal(
+        &self,
+        movie_id: &str,
+    ) -> Result<TmdbItemCredits, AppError> {
+        let mut params = HashMap::new();
+        self.add_api_key(&mut params);
+
+        let url = self.build_url(&format!("/movie/{movie_id}/credits"));
+        let response = self
+            .client
+            .get(&url)
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
+    }
+
+    async fn get_tv_credits_internal(&self, tv_id: &str) -> Result<TmdbItemCredits, AppError> {
+        let mut params = HashMap::new();
+        self.add_api_key(&mut params);
+
+        let url = self.build_url(&format!("/tv/{tv_id}/credits"));
+        let response = self
+            .client
+            .get(&url)
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
+    }
 }
 
 #[async_trait]
@@ -238,7 +295,7 @@ impl MetadataProvider for TmdbProvider {
 
             results.push(ExternalPersonCredit {
                 external_id: cast.id.to_string(),
-                title: cast.title.or(cast.name).unwrap_or_default(),
+                title: cast.title.unwrap_or(cast.name),
                 role_type: role_type.clone(),
                 role: cast.character,
                 is_featured,
@@ -272,7 +329,7 @@ impl MetadataProvider for TmdbProvider {
 
             results.push(ExternalPersonCredit {
                 external_id: crew.id.to_string(),
-                title: crew.title.or(crew.name).unwrap_or_default(),
+                title: crew.title.unwrap_or(crew.name),
                 role_type,
                 role: Some(crew.job),
                 is_featured: false,
@@ -333,6 +390,108 @@ impl MetadataProvider for TmdbProvider {
             homepage_url: details.homepage,
             metadata,
         })
+    }
+
+    async fn get_item_people(
+        &self,
+        media_type: &str,
+        provider_id: &str,
+    ) -> Result<Vec<ExternalItemPerson>, AppError> {
+        let credits = if media_type.eq_ignore_ascii_case("tv")
+            || media_type.eq_ignore_ascii_case("series")
+        {
+            self.get_tv_credits_internal(provider_id).await?
+        } else {
+            self.get_movie_credits_internal(provider_id).await?
+        };
+
+        let mut people = Vec::new();
+
+        for cast in credits.cast {
+            let mut provider_ids = HashMap::new();
+            provider_ids.insert("Tmdb".to_string(), cast.id.to_string());
+
+            people.push(ExternalItemPerson {
+                external_id: cast.id.to_string(),
+                provider: "tmdb".to_string(),
+                name: cast.name,
+                role_type: "Actor".to_string(),
+                role: cast.character,
+                sort_order: cast.order.unwrap_or(0),
+                image_url: cast
+                    .profile_path
+                    .map(|path| format!("{}/original{}", self.config.image_base_url, path)),
+                external_url: Some(format!("https://www.themoviedb.org/person/{}", cast.id)),
+                provider_ids,
+            });
+        }
+
+        for (index, crew) in credits.crew.into_iter().enumerate() {
+            let Some(role_type) = (match crew.job.as_str() {
+                "Director" => Some("Director"),
+                "Writer" | "Screenplay" | "Story" => Some("Writer"),
+                "Producer" | "Executive Producer" => Some("Producer"),
+                _ => None,
+            }) else {
+                continue;
+            };
+
+            let mut provider_ids = HashMap::new();
+            provider_ids.insert("Tmdb".to_string(), crew.id.to_string());
+
+            people.push(ExternalItemPerson {
+                external_id: crew.id.to_string(),
+                provider: "tmdb".to_string(),
+                name: crew.name,
+                role_type: role_type.to_string(),
+                role: Some(crew.job),
+                sort_order: 1000 + index as i32,
+                image_url: crew
+                    .profile_path
+                    .map(|path| format!("{}/original{}", self.config.image_base_url, path)),
+                external_url: Some(format!("https://www.themoviedb.org/person/{}", crew.id)),
+                provider_ids,
+            });
+        }
+
+        Ok(people)
+    }
+
+    async fn get_series_episode_catalog(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<ExternalEpisodeCatalogItem>, AppError> {
+        let details = self.get_tv_details_internal(provider_id).await?;
+        let mut items = Vec::new();
+
+        for season in details.seasons {
+            if season.season_number < 0 {
+                continue;
+            }
+
+            let season_details = self
+                .get_tv_season_details_internal(provider_id, season.season_number)
+                .await?;
+            for episode in season_details.episodes {
+                items.push(ExternalEpisodeCatalogItem {
+                    provider: "tmdb".to_string(),
+                    external_series_id: provider_id.to_string(),
+                    external_season_id: season.id.map(|value| value.to_string()),
+                    external_episode_id: Some(episode.id.to_string()),
+                    season_number: episode.season_number.unwrap_or(season.season_number),
+                    episode_number: episode.episode_number,
+                    episode_number_end: None,
+                    name: episode.name,
+                    overview: episode.overview.filter(|value| !value.trim().is_empty()),
+                    premiere_date: parse_tmdb_date(episode.air_date.as_deref()),
+                    image_path: episode
+                        .still_path
+                        .map(|path| format!("{}/original{}", self.config.image_base_url, path)),
+                });
+            }
+        }
+
+        Ok(items)
     }
 }
 
@@ -419,25 +578,50 @@ struct TmdbPersonCredits {
 #[derive(Debug, Deserialize)]
 struct TmdbCastCredit {
     id: i32,
+    name: String,
     title: Option<String>,
-    name: Option<String>,
     character: Option<String>,
     order: Option<i32>,
     media_type: String,
     release_date: Option<String>,
     first_air_date: Option<String>,
+    profile_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TmdbCrewCredit {
     id: i32,
+    name: String,
     title: Option<String>,
-    name: Option<String>,
     job: String,
     department: String,
     media_type: String,
     release_date: Option<String>,
     first_air_date: Option<String>,
+    profile_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbItemCredits {
+    cast: Vec<TmdbItemCastPerson>,
+    crew: Vec<TmdbItemCrewPerson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbItemCastPerson {
+    id: i32,
+    name: String,
+    character: Option<String>,
+    order: Option<i32>,
+    profile_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbItemCrewPerson {
+    id: i32,
+    name: String,
+    job: String,
+    profile_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -462,6 +646,8 @@ struct TmdbTvDetails {
     external_ids: Option<TmdbExternalIds>,
     next_episode_to_air: Option<TmdbEpisodeStub>,
     last_episode_to_air: Option<TmdbEpisodeStub>,
+    #[serde(default)]
+    seasons: Vec<TmdbSeasonStub>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -478,4 +664,29 @@ struct TmdbExternalIds {
 #[derive(Debug, Deserialize, Serialize)]
 struct TmdbEpisodeStub {
     air_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbSeasonStub {
+    id: Option<i32>,
+    season_number: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbSeasonDetails {
+    id: Option<i32>,
+    season_number: i32,
+    #[serde(default)]
+    episodes: Vec<TmdbSeasonEpisode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbSeasonEpisode {
+    id: i32,
+    name: String,
+    overview: Option<String>,
+    air_date: Option<String>,
+    episode_number: i32,
+    season_number: Option<i32>,
+    still_path: Option<String>,
 }

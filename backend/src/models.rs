@@ -14,6 +14,10 @@ pub struct DbUser {
     pub is_hidden: bool,
     pub is_disabled: bool,
     pub policy: Value,
+    pub primary_image_path: Option<String>,
+    pub backdrop_image_path: Option<String>,
+    pub logo_image_path: Option<String>,
+    pub date_modified: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -41,6 +45,7 @@ pub struct DbMediaItem {
     pub production_year: Option<i32>,
     pub official_rating: Option<String>,
     pub community_rating: Option<f64>,
+    pub critic_rating: Option<f64>,
     pub runtime_ticks: Option<i64>,
     pub premiere_date: Option<NaiveDate>,
     pub status: Option<String>,
@@ -141,6 +146,25 @@ pub struct DbMediaChapter {
 }
 
 #[derive(Debug, Clone, FromRow)]
+pub struct DbSeriesEpisodeCatalog {
+    pub id: Uuid,
+    pub series_id: Uuid,
+    pub provider: String,
+    pub external_series_id: String,
+    pub external_season_id: Option<String>,
+    pub external_episode_id: Option<String>,
+    pub season_number: i32,
+    pub episode_number: i32,
+    pub episode_number_end: Option<i32>,
+    pub name: String,
+    pub overview: Option<String>,
+    pub premiere_date: Option<NaiveDate>,
+    pub image_path: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct DbPerson {
     pub id: Uuid,
     pub name: String,
@@ -188,6 +212,7 @@ pub struct MediaItemRow {
     pub production_year: Option<i32>,
     pub official_rating: Option<String>,
     pub community_rating: Option<f64>,
+    pub critic_rating: Option<f64>,
     pub runtime_ticks: Option<i64>,
     pub premiere_date: Option<NaiveDate>,
     pub status: Option<String>,
@@ -232,10 +257,11 @@ impl From<MediaItemRow> for DbMediaItem {
             path: value.path,
             container: value.container,
             overview: value.overview,
-            production_year: value.production_year,
-            official_rating: value.official_rating,
-            community_rating: value.community_rating,
-            runtime_ticks: value.runtime_ticks,
+              production_year: value.production_year,
+              official_rating: value.official_rating,
+              community_rating: value.community_rating,
+              critic_rating: value.critic_rating,
+              runtime_ticks: value.runtime_ticks,
             premiere_date: value.premiere_date,
             status: value.status,
             end_date: value.end_date,
@@ -686,6 +712,8 @@ pub struct BaseItemDto {
     pub official_rating: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub community_rating: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub critic_rating: Option<f64>,
     pub taglines: Vec<String>,
     pub remote_trailers: Vec<Value>,
     pub people: Vec<PersonDto>,
@@ -710,6 +738,10 @@ pub struct BaseItemDto {
     pub air_time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_date: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_movie: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1118,33 +1150,42 @@ pub struct VideoStreamQuery {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsQuery {
-    #[serde(default)]
+    #[serde(default, alias = "UserId", alias = "userId")]
     pub user_id: Option<Uuid>,
-    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
+    #[serde(
+        default,
+        alias = "ParentId",
+        alias = "parentId",
+        deserialize_with = "deserialize_optional_uuid"
+    )]
     pub parent_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, alias = "IncludeItemTypes", alias = "includeItemTypes")]
     pub include_item_types: Option<String>,
     #[serde(default, alias = "GenreIds", alias = "genreIds")]
     pub genres: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "Recursive")]
     pub recursive: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "SearchTerm", alias = "searchTerm")]
     pub search_term: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "SortBy", alias = "sortBy")]
     pub sort_by: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "SortOrder", alias = "sortOrder")]
     pub sort_order: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "Filters")]
     pub filters: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "Fields")]
     pub fields: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "StartIndex", alias = "startIndex")]
     pub start_index: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "Limit")]
     pub limit: Option<i64>,
     #[serde(default, alias = "ListItemIds", alias = "listItemIds")]
     pub list_item_ids: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "GroupItemsIntoCollections",
+        alias = "groupItemsIntoCollections"
+    )]
     pub group_items_into_collections: Option<bool>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
@@ -1546,6 +1587,20 @@ pub struct SeasonsQuery {
     pub series_id: Option<Uuid>,
     #[serde(default)]
     pub fields: Option<String>,
+    #[serde(default)]
+    pub is_special_season: Option<bool>,
+    #[serde(default)]
+    pub is_missing: Option<bool>,
+    #[serde(default)]
+    pub adjacent_to: Option<String>,
+    #[serde(default)]
+    pub enable_images: Option<bool>,
+    #[serde(default)]
+    pub image_type_limit: Option<i64>,
+    #[serde(default)]
+    pub enable_image_types: Option<String>,
+    #[serde(default)]
+    pub enable_user_data: Option<bool>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
 }
@@ -1584,13 +1639,33 @@ pub struct EpisodesQuery {
     #[serde(default, alias = "userId")]
     pub user_id: Option<Uuid>,
     #[serde(default)]
+    pub season: Option<i32>,
+    #[serde(default)]
     pub season_id: Option<Uuid>,
+    #[serde(default)]
+    pub is_missing: Option<bool>,
+    #[serde(default)]
+    pub adjacent_to: Option<String>,
+    #[serde(default)]
+    pub start_item_id: Option<String>,
     #[serde(default)]
     pub fields: Option<String>,
     #[serde(default)]
     pub start_index: Option<i64>,
     #[serde(default)]
     pub limit: Option<i64>,
+    #[serde(default)]
+    pub enable_images: Option<bool>,
+    #[serde(default)]
+    pub image_type_limit: Option<i64>,
+    #[serde(default)]
+    pub enable_image_types: Option<String>,
+    #[serde(default)]
+    pub enable_user_data: Option<bool>,
+    #[serde(default)]
+    pub sort_by: Option<String>,
+    #[serde(default)]
+    pub sort_order: Option<String>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
 }
@@ -1654,19 +1729,19 @@ where
 pub struct GetSimilarItems {
     #[serde(skip)]
     pub id: Option<String>, // 从路径参数提取，不由查询字符串解析
-    #[serde(default)]
+    #[serde(default, alias = "UserId", alias = "userId")]
     pub user_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, alias = "Limit")]
     pub limit: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "Fields")]
     pub fields: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "EnableImages", alias = "enableImages")]
     pub enable_images: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "EnableUserData", alias = "enableUserData")]
     pub enable_user_data: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "ImageTypeLimit", alias = "imageTypeLimit")]
     pub image_type_limit: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "EnableImageTypes", alias = "enableImageTypes")]
     pub enable_image_types: Option<String>,
 }
 

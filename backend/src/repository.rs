@@ -2,9 +2,10 @@ use crate::{
     config::Config,
     error::AppError,
     metadata::models::ExternalSeriesMetadata,
+    metadata::provider::{ExternalEpisodeCatalogItem, ExternalPersonCredit},
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaChapter, DbMediaItem,
-        DbMediaStream, DbPerson, DbUser, DbUserItemData, ExternalUrlDto, GenreDto, ItemCountsDto,
+        DbMediaStream, DbPerson, DbSeriesEpisodeCatalog, DbUser, DbUserItemData, ExternalUrlDto, GenreDto, ItemCountsDto,
         LibraryOptionsDto, LogFileDto, MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto,
         NameIdDto, NameLongIdDto, PersonDto,
         QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
@@ -12,7 +13,7 @@ use crate::{
     },
     naming, security,
 };
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use regex::Regex;
 use serde_json::{json, Value};
 use sqlx::{FromRow, Postgres, QueryBuilder, Row};
@@ -144,8 +145,8 @@ pub async fn create_initial_admin(
 
     sqlx::query(
         r#"
-        INSERT INTO users (id, name, password_hash, is_admin)
-        VALUES ($1, $2, $3, true)
+        INSERT INTO users (id, name, password_hash, is_admin, date_modified)
+        VALUES ($1, $2, $3, true, now())
         "#,
     )
     .bind(id)
@@ -724,6 +725,49 @@ pub async fn upsert_person_from_nfo(
     Ok(result.get(0))
 }
 
+pub async fn upsert_person_reference(
+    pool: &sqlx::PgPool,
+    name: &str,
+    provider_ids: Value,
+    primary_image_path: Option<&str>,
+    external_url: Option<&str>,
+) -> Result<Uuid, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("人物名称不能为空".to_string()));
+    }
+
+    let sort_name = name.to_lowercase();
+    let result = sqlx::query(
+        r#"
+        INSERT INTO persons (
+            id, name, sort_name, provider_ids, primary_image_path, external_url, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, now(), now())
+        ON CONFLICT (name, sort_name)
+        DO UPDATE SET
+            provider_ids = CASE
+                WHEN persons.provider_ids = '{}'::jsonb THEN EXCLUDED.provider_ids
+                ELSE persons.provider_ids || EXCLUDED.provider_ids
+            END,
+            primary_image_path = COALESCE(persons.primary_image_path, EXCLUDED.primary_image_path),
+            external_url = COALESCE(persons.external_url, EXCLUDED.external_url),
+            updated_at = now()
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("person:{sort_name}").as_bytes()))
+    .bind(name)
+    .bind(sort_name)
+    .bind(provider_ids)
+    .bind(primary_image_path)
+    .bind(external_url)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result.get(0))
+}
+
 pub async fn upsert_person_role(
     pool: &sqlx::PgPool,
     person_id: Uuid,
@@ -795,7 +839,8 @@ pub async fn upsert_person_role(
 pub async fn get_user_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Option<DbUser>, AppError> {
     Ok(sqlx::query_as::<_, DbUser>(
         r#"
-        SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy
+        SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
+               primary_image_path, backdrop_image_path, logo_image_path, date_modified
         FROM users
         WHERE lower(name) = lower($1)
         "#,
@@ -808,7 +853,8 @@ pub async fn get_user_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Option<
 pub async fn get_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbUser>, AppError> {
     Ok(sqlx::query_as::<_, DbUser>(
         r#"
-        SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy
+        SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
+               primary_image_path, backdrop_image_path, logo_image_path, date_modified
         FROM users
         WHERE id = $1
         "#,
@@ -834,8 +880,8 @@ pub async fn create_user(pool: &sqlx::PgPool, name: &str) -> Result<DbUser, AppE
 
     sqlx::query(
         r#"
-        INSERT INTO users (id, name, password_hash, is_admin, is_hidden, is_disabled, policy)
-        VALUES ($1, $2, $3, false, false, false, $4)
+        INSERT INTO users (id, name, password_hash, is_admin, is_hidden, is_disabled, policy, date_modified)
+        VALUES ($1, $2, $3, false, false, false, $4, now())
         "#,
     )
     .bind(id)
@@ -901,7 +947,8 @@ pub async fn update_user_policy(pool: &sqlx::PgPool, user_id: Uuid, policy: &Use
         SET policy = $1,
             is_admin = $2,
             is_hidden = $3,
-            is_disabled = $4
+            is_disabled = $4,
+            date_modified = now()
         WHERE id = $5
         "#,
     )
@@ -920,7 +967,8 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
     let users = if public_only {
         sqlx::query_as::<_, DbUser>(
             r#"
-            SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy
+            SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
+                   primary_image_path, backdrop_image_path, logo_image_path, date_modified
             FROM users
             WHERE is_hidden = false AND is_disabled = false
             ORDER BY name
@@ -931,7 +979,8 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
     } else {
         sqlx::query_as::<_, DbUser>(
             r#"
-            SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy
+            SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
+                   primary_image_path, backdrop_image_path, logo_image_path, date_modified
             FROM users
             ORDER BY name
             "#,
@@ -941,6 +990,47 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
     };
 
     Ok(users)
+}
+
+pub async fn get_user_image_path(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    image_type: &str,
+) -> Result<Option<String>, AppError> {
+    let user = get_user_by_id(pool, user_id).await?;
+    let Some(user) = user else {
+        return Ok(None);
+    };
+
+    Ok(match image_type.to_ascii_lowercase().as_str() {
+        "backdrop" => user.backdrop_image_path,
+        "logo" => user.logo_image_path,
+        "thumb" => user.backdrop_image_path.or(user.primary_image_path),
+        _ => user.primary_image_path,
+    })
+}
+
+pub async fn update_user_image_path(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    image_type: &str,
+    path: Option<&str>,
+) -> Result<(), AppError> {
+    let column = match image_type.to_ascii_lowercase().as_str() {
+        "backdrop" => "backdrop_image_path",
+        "logo" => "logo_image_path",
+        _ => "primary_image_path",
+    };
+
+    let query = format!(
+        "UPDATE users SET {column} = $1, date_modified = now() WHERE id = $2"
+    );
+    sqlx::query(&query)
+        .bind(path)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn create_session(
@@ -1513,7 +1603,7 @@ pub async fn list_media_items(
         r#"
         SELECT
             id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
-            overview, production_year, official_rating, community_rating, runtime_ticks,
+            overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
             premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
@@ -1581,6 +1671,8 @@ pub async fn list_media_items(
     let sort_column = match options.sort_by.as_deref().unwrap_or("SortName") {
         "DateCreated" | "DateLastContentAdded" => "date_created",
         "IndexNumber" => "index_number",
+        "PremiereDate" => "premiere_date",
+        "DatePlayed" => "date_created",
         "ProductionYear" => "production_year",
         "Random" => "random()",
         _ => "sort_name",
@@ -1792,6 +1884,512 @@ pub async fn get_upcoming_episodes(
     })
 }
 
+#[derive(Debug, FromRow)]
+struct MissingEpisodeRow {
+    id: Uuid,
+    series_id: Uuid,
+    provider: String,
+    external_series_id: String,
+    external_season_id: Option<String>,
+    external_episode_id: Option<String>,
+    season_number: i32,
+    episode_number: i32,
+    episode_number_end: Option<i32>,
+    name: String,
+    overview: Option<String>,
+    premiere_date: Option<NaiveDate>,
+    image_path: Option<String>,
+    series_name: String,
+    series_sort_name: String,
+    series_overview: Option<String>,
+    series_production_year: Option<i32>,
+    series_provider_ids: Value,
+    series_image_primary_path: Option<String>,
+    series_backdrop_path: Option<String>,
+    series_logo_path: Option<String>,
+    series_thumb_path: Option<String>,
+    series_date_modified: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct MissingEpisodeDetailRow {
+    id: Uuid,
+    series_id: Uuid,
+    provider: String,
+    external_series_id: String,
+    external_season_id: Option<String>,
+    external_episode_id: Option<String>,
+    season_number: i32,
+    episode_number: i32,
+    episode_number_end: Option<i32>,
+    name: String,
+    overview: Option<String>,
+    premiere_date: Option<NaiveDate>,
+    image_path: Option<String>,
+    series_name: String,
+    series_sort_name: String,
+    series_overview: Option<String>,
+    series_production_year: Option<i32>,
+    series_provider_ids: Value,
+    series_image_primary_path: Option<String>,
+    series_backdrop_path: Option<String>,
+    series_logo_path: Option<String>,
+    series_thumb_path: Option<String>,
+    series_date_modified: DateTime<Utc>,
+}
+
+pub async fn replace_series_episode_catalog(
+    pool: &sqlx::PgPool,
+    series_id: Uuid,
+    items: &[ExternalEpisodeCatalogItem],
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM series_episode_catalog WHERE series_id = $1")
+        .bind(series_id)
+        .execute(&mut *tx)
+        .await?;
+
+    for item in items {
+        sqlx::query(
+            r#"
+            INSERT INTO series_episode_catalog (
+                id, series_id, provider, external_series_id, external_season_id, external_episode_id,
+                season_number, episode_number, episode_number_end, name, overview, premiere_date, image_path,
+                created_at, updated_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11, $12, $13,
+                now(), now()
+            )
+            "#,
+        )
+        .bind(Uuid::new_v5(
+            &series_id,
+            format!(
+                "catalog:{}:{}:{}",
+                item.provider, item.season_number, item.episode_number
+            )
+            .as_bytes(),
+        ))
+        .bind(series_id)
+        .bind(&item.provider)
+        .bind(&item.external_series_id)
+        .bind(&item.external_season_id)
+        .bind(&item.external_episode_id)
+        .bind(item.season_number)
+        .bind(item.episode_number)
+        .bind(item.episode_number_end)
+        .bind(&item.name)
+        .bind(&item.overview)
+        .bind(item.premiere_date)
+        .bind(&item.image_path)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn get_missing_episodes(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    parent_id: Option<Uuid>,
+    server_id: Uuid,
+    start_index: i64,
+    limit: i64,
+) -> Result<QueryResult<BaseItemDto>, AppError> {
+    let total_record_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM series_episode_catalog sec
+        INNER JOIN media_items series ON series.id = sec.series_id
+        WHERE (sec.premiere_date IS NULL OR sec.premiere_date <= CURRENT_DATE)
+          AND (
+              $1::uuid IS NULL
+              OR sec.series_id = $1
+              OR series.library_id = $1
+              OR EXISTS (
+                  SELECT 1
+                  FROM media_items season_scope
+                  WHERE season_scope.id = $1
+                    AND season_scope.item_type = 'Season'
+                    AND season_scope.parent_id = sec.series_id
+                    AND season_scope.index_number = sec.season_number
+              )
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM media_items season
+              INNER JOIN media_items episode
+                  ON episode.parent_id = season.id
+                 AND episode.item_type = 'Episode'
+                 AND episode.index_number = sec.episode_number
+              WHERE season.parent_id = sec.series_id
+                AND season.item_type = 'Season'
+                AND season.index_number = sec.season_number
+          )
+        "#,
+    )
+    .bind(parent_id)
+    .fetch_one(pool)
+    .await?;
+
+    let rows = sqlx::query_as::<_, MissingEpisodeRow>(
+        r#"
+        SELECT
+            sec.id,
+            sec.series_id,
+            sec.provider,
+            sec.external_series_id,
+            sec.external_season_id,
+            sec.external_episode_id,
+            sec.season_number,
+            sec.episode_number,
+            sec.episode_number_end,
+            sec.name,
+            sec.overview,
+            sec.premiere_date,
+            sec.image_path,
+            series.name AS series_name,
+            series.sort_name AS series_sort_name,
+            series.overview AS series_overview,
+            series.production_year AS series_production_year,
+            series.provider_ids AS series_provider_ids,
+            series.image_primary_path AS series_image_primary_path,
+            series.backdrop_path AS series_backdrop_path,
+            series.logo_path AS series_logo_path,
+            series.thumb_path AS series_thumb_path,
+            series.date_modified AS series_date_modified
+        FROM series_episode_catalog sec
+        INNER JOIN media_items series ON series.id = sec.series_id
+        WHERE (sec.premiere_date IS NULL OR sec.premiere_date <= CURRENT_DATE)
+          AND (
+              $1::uuid IS NULL
+              OR sec.series_id = $1
+              OR series.library_id = $1
+              OR EXISTS (
+                  SELECT 1
+                  FROM media_items season_scope
+                  WHERE season_scope.id = $1
+                    AND season_scope.item_type = 'Season'
+                    AND season_scope.parent_id = sec.series_id
+                    AND season_scope.index_number = sec.season_number
+              )
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM media_items season
+              INNER JOIN media_items episode
+                  ON episode.parent_id = season.id
+                 AND episode.item_type = 'Episode'
+                 AND episode.index_number = sec.episode_number
+              WHERE season.parent_id = sec.series_id
+                AND season.item_type = 'Season'
+                AND season.index_number = sec.season_number
+          )
+        ORDER BY
+            COALESCE(sec.premiere_date, DATE '1900-01-01'),
+            series.sort_name,
+            sec.season_number,
+            sec.episode_number
+        OFFSET $2 LIMIT $3
+        "#,
+    )
+    .bind(parent_id)
+    .bind(start_index.max(0))
+    .bind(limit.clamp(1, 200))
+    .fetch_all(pool)
+    .await?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(missing_episode_row_to_dto(pool, row, user_id, server_id).await?);
+    }
+
+    Ok(QueryResult {
+        items,
+        total_record_count,
+        start_index: Some(start_index.max(0)),
+    })
+}
+
+pub async fn get_missing_episode_dto(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    user_id: Uuid,
+    server_id: Uuid,
+) -> Result<Option<BaseItemDto>, AppError> {
+    let row = sqlx::query_as::<_, MissingEpisodeDetailRow>(
+        r#"
+        SELECT
+            sec.id,
+            sec.series_id,
+            sec.provider,
+            sec.external_series_id,
+            sec.external_season_id,
+            sec.external_episode_id,
+            sec.season_number,
+            sec.episode_number,
+            sec.episode_number_end,
+            sec.name,
+            sec.overview,
+            sec.premiere_date,
+            sec.image_path,
+            series.name AS series_name,
+            series.sort_name AS series_sort_name,
+            series.overview AS series_overview,
+            series.production_year AS series_production_year,
+            series.provider_ids AS series_provider_ids,
+            series.image_primary_path AS series_image_primary_path,
+            series.backdrop_path AS series_backdrop_path,
+            series.logo_path AS series_logo_path,
+            series.thumb_path AS series_thumb_path,
+            series.date_modified AS series_date_modified
+        FROM series_episode_catalog sec
+        INNER JOIN media_items series ON series.id = sec.series_id
+        WHERE sec.id = $1
+          AND (sec.premiere_date IS NULL OR sec.premiere_date <= CURRENT_DATE)
+          AND NOT EXISTS (
+              SELECT 1
+              FROM media_items season
+              INNER JOIN media_items episode
+                  ON episode.parent_id = season.id
+                 AND episode.item_type = 'Episode'
+                 AND episode.index_number = sec.episode_number
+              WHERE season.parent_id = sec.series_id
+                AND season.item_type = 'Season'
+                AND season.index_number = sec.season_number
+          )
+        LIMIT 1
+        "#,
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(row) => Ok(Some(missing_episode_row_to_dto(pool, row, user_id, server_id).await?)),
+        None => Ok(None),
+    }
+}
+
+pub async fn get_missing_episode_image_path(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    image_type: &str,
+) -> Result<Option<String>, AppError> {
+    let row = sqlx::query_as::<_, MissingEpisodeDetailRow>(
+        r#"
+        SELECT
+            sec.id,
+            sec.series_id,
+            sec.provider,
+            sec.external_series_id,
+            sec.external_season_id,
+            sec.external_episode_id,
+            sec.season_number,
+            sec.episode_number,
+            sec.episode_number_end,
+            sec.name,
+            sec.overview,
+            sec.premiere_date,
+            sec.image_path,
+            series.name AS series_name,
+            series.sort_name AS series_sort_name,
+            series.overview AS series_overview,
+            series.production_year AS series_production_year,
+            series.provider_ids AS series_provider_ids,
+            series.image_primary_path AS series_image_primary_path,
+            series.backdrop_path AS series_backdrop_path,
+            series.logo_path AS series_logo_path,
+            series.thumb_path AS series_thumb_path,
+            series.date_modified AS series_date_modified
+        FROM series_episode_catalog sec
+        INNER JOIN media_items series ON series.id = sec.series_id
+        WHERE sec.id = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    Ok(match image_type.to_ascii_lowercase().as_str() {
+        "backdrop" => row.series_backdrop_path,
+        "logo" => row.series_logo_path,
+        "thumb" => row.series_thumb_path.or(row.series_backdrop_path),
+        _ => row.image_path.or(row.series_image_primary_path),
+    })
+}
+
+pub async fn get_boxsets_for_item_ids(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    item_ids: &[Uuid],
+    server_id: Uuid,
+    start_index: i64,
+    limit: i64,
+) -> Result<QueryResult<BaseItemDto>, AppError> {
+    let mut results = Vec::new();
+
+    for item_id in item_ids {
+        let Some(item) = get_media_item(pool, *item_id).await? else {
+            continue;
+        };
+        let grouped_items = version_group_items_for_item(pool, &item).await?;
+        if grouped_items.len() <= 1 {
+            continue;
+        }
+
+        let providers = provider_ids_for_item(&item);
+        let boxset_id = uuid_to_emby_guid(&Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("boxset:{}", presentation_unique_key(&item, &providers)).as_bytes(),
+        ));
+        let primary_tag = item
+            .image_primary_path
+            .as_ref()
+            .map(|_| item.date_modified.timestamp().to_string());
+        let mut image_tags = BTreeMap::new();
+        if let Some(tag) = primary_tag.clone() {
+            image_tags.insert("Primary".to_string(), tag);
+        }
+
+        results.push(BaseItemDto {
+            name: item.name.clone(),
+            original_title: item.original_title.clone(),
+            server_id: uuid_to_emby_guid(&server_id),
+            id: boxset_id.clone(),
+            etag: Some(item.date_modified.timestamp().to_string()),
+            date_modified: Some(item.date_modified),
+            guid: None,
+            can_delete: false,
+            can_download: false,
+            can_edit_items: Some(false),
+            supports_resume: Some(false),
+            presentation_unique_key: Some(format!("{boxset_id}_")),
+            supports_sync: true,
+            item_type: "BoxSet".to_string(),
+            is_folder: true,
+            sort_name: Some(item.sort_name.clone()),
+            forced_sort_name: Some(item.sort_name.clone()),
+            primary_image_tag: primary_tag,
+            collection_type: Some("movies".to_string()),
+            media_type: Some(item.media_type.clone()),
+            container: None,
+            parent_id: None,
+            path: None,
+            location_type: Some("Virtual".to_string()),
+            run_time_ticks: item.runtime_ticks,
+            production_year: item.production_year,
+            overview: item.overview.clone(),
+            date_created: Some(item.date_created),
+            premiere_date: premiere_date_to_utc(item.premiere_date),
+            video_codec: None,
+            audio_codec: None,
+            average_frame_rate: None,
+            real_frame_rate: None,
+            genres: item.genres.clone(),
+            genre_items: name_long_id_items_from_names(&item.genres),
+            provider_ids: providers.clone(),
+            external_urls: external_urls_from_provider_map(&providers, "Movie"),
+            production_locations: item.production_locations.clone(),
+            size: None,
+            file_name: None,
+              bitrate: None,
+              official_rating: item.official_rating.clone(),
+              community_rating: item.community_rating,
+              critic_rating: None,
+              taglines: Vec::new(),
+            remote_trailers: remote_trailers_from_urls(&item.remote_trailers),
+            people: Vec::new(),
+            studios: name_long_id_items_from_names(&item.studios),
+            tag_items: name_long_id_items_from_names(&item.tags),
+            local_trailer_count: 0,
+            display_preferences_id: Some(boxset_id.clone()),
+            recursive_item_count: Some(grouped_items.len() as i64),
+            season_count: None,
+            series_count: None,
+            movie_count: Some(grouped_items.len() as i32),
+              status: None,
+              air_days: Vec::new(),
+              air_time: None,
+              end_date: None,
+              width: item.width,
+              height: item.height,
+              is_movie: Some(false),
+            is_series: Some(false),
+            is_live: Some(false),
+            is_news: Some(false),
+            is_kids: Some(false),
+            is_sports: Some(false),
+            is_premiere: Some(false),
+            is_new: Some(false),
+            is_repeat: Some(false),
+            disabled: Some(false),
+            series_name: None,
+            series_id: None,
+            season_name: None,
+            season_id: None,
+            index_number: None,
+            index_number_end: None,
+            parent_index_number: None,
+            image_tags,
+            backdrop_image_tags: item
+                .backdrop_path
+                .as_ref()
+                .map(|_| vec![item.date_modified.timestamp().to_string()])
+                .unwrap_or_default(),
+            parent_logo_item_id: None,
+            parent_logo_image_tag: None,
+            parent_backdrop_item_id: None,
+            parent_backdrop_image_tags: Vec::new(),
+            parent_thumb_item_id: None,
+            parent_thumb_image_tag: None,
+            series_primary_image_tag: None,
+            primary_image_item_id: None,
+            series_studio: None,
+            user_data: empty_user_data_for_item(*item_id),
+            media_sources: Vec::new(),
+            media_streams: Vec::new(),
+            part_count: grouped_items.len() as i32,
+            chapters: Vec::new(),
+            locked_fields: Vec::new(),
+            lock_data: false,
+            special_feature_count: None,
+            child_count: Some(grouped_items.len() as i64),
+            primary_image_aspect_ratio: None,
+            completion_percentage: None,
+            tags: item.tags.clone(),
+        });
+    }
+
+    let total_record_count = results.len() as i64;
+    let start = start_index.max(0) as usize;
+    let end = (start + limit.clamp(1, 200) as usize).min(results.len());
+    let items = if start >= total_record_count as usize {
+        Vec::new()
+    } else {
+        results
+            .into_iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .collect()
+    };
+
+    Ok(QueryResult {
+        items,
+        total_record_count,
+        start_index: Some(start_index.max(0)),
+    })
+}
+
 pub async fn get_media_item(
     pool: &sqlx::PgPool,
     id: Uuid,
@@ -1800,7 +2398,7 @@ pub async fn get_media_item(
         r#"
         SELECT
             id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
-            overview, production_year, official_rating, community_rating, runtime_ticks,
+            overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
             premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
@@ -1813,6 +2411,59 @@ pub async fn get_media_item(
     )
     .bind(id)
     .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn find_items_for_external_person_credit(
+    pool: &sqlx::PgPool,
+    credit: &ExternalPersonCredit,
+) -> Result<Vec<DbMediaItem>, AppError> {
+    let item_type = if credit.media_type.eq_ignore_ascii_case("tv") {
+        "Series"
+    } else {
+        "Movie"
+    };
+    let title_pattern = format!("%{}%", credit.title.trim());
+
+    Ok(sqlx::query_as::<_, DbMediaItem>(
+        r#"
+        SELECT
+            id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
+            overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
+            premiere_date, status, end_date, air_days, air_time, series_name, season_name,
+            index_number, index_number_end, parent_index_number, provider_ids, genres,
+            studios, tags, production_locations,
+            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            logo_path, thumb_path, remote_trailers,
+            date_created, date_modified
+        FROM media_items
+        WHERE item_type = $1
+          AND (
+              provider_ids->>'Tmdb' = $2 OR provider_ids->>'TMDb' = $2 OR provider_ids->>'tmdb' = $2
+              OR (
+                  name ILIKE $3
+                  AND ($4::integer IS NULL OR production_year = $4)
+              )
+              OR (
+                  original_title ILIKE $3
+                  AND ($4::integer IS NULL OR production_year = $4)
+              )
+          )
+        ORDER BY
+            CASE
+                WHEN provider_ids->>'Tmdb' = $2 OR provider_ids->>'TMDb' = $2 OR provider_ids->>'tmdb' = $2 THEN 0
+                WHEN production_year = $4 THEN 1
+                ELSE 2
+            END,
+            date_created ASC
+        LIMIT 20
+        "#,
+    )
+    .bind(item_type)
+    .bind(&credit.external_id)
+    .bind(&title_pattern)
+    .bind(credit.year)
+    .fetch_all(pool)
     .await?)
 }
 
@@ -2080,6 +2731,7 @@ pub struct UpsertMediaItem<'a> {
     pub production_year: Option<i32>,
     pub official_rating: Option<&'a str>,
     pub community_rating: Option<f64>,
+    pub critic_rating: Option<f64>,
     pub runtime_ticks: Option<i64>,
     pub premiere_date: Option<NaiveDate>,
     pub status: Option<&'a str>,
@@ -2132,7 +2784,7 @@ pub async fn upsert_media_item(
         INSERT INTO media_items
             (
                 id, library_id, parent_id, name, original_title, sort_name, item_type, media_type, path,
-                container, overview, production_year, official_rating, community_rating,
+                container, overview, production_year, official_rating, community_rating, critic_rating,
                 runtime_ticks, premiere_date, status, end_date, air_days, air_time,
                 provider_ids, genres, studios, tags, production_locations,
                 image_primary_path, backdrop_path, logo_path, thumb_path, remote_trailers,
@@ -2161,10 +2813,11 @@ pub async fn upsert_media_item(
             media_type = EXCLUDED.media_type,
             container = EXCLUDED.container,
             overview = EXCLUDED.overview,
-            production_year = EXCLUDED.production_year,
-            official_rating = EXCLUDED.official_rating,
-            community_rating = EXCLUDED.community_rating,
-            runtime_ticks = EXCLUDED.runtime_ticks,
+              production_year = EXCLUDED.production_year,
+              official_rating = EXCLUDED.official_rating,
+              community_rating = EXCLUDED.community_rating,
+              critic_rating = EXCLUDED.critic_rating,
+              runtime_ticks = EXCLUDED.runtime_ticks,
             premiere_date = EXCLUDED.premiere_date,
             status = EXCLUDED.status,
             end_date = EXCLUDED.end_date,
@@ -2203,10 +2856,11 @@ pub async fn upsert_media_item(
     .bind(path_text)
     .bind(input.container)
     .bind(input.overview)
-    .bind(input.production_year)
-    .bind(input.official_rating)
-    .bind(input.community_rating)
-    .bind(input.runtime_ticks)
+      .bind(input.production_year)
+      .bind(input.official_rating)
+      .bind(input.community_rating)
+      .bind(input.critic_rating)
+      .bind(input.runtime_ticks)
     .bind(input.premiere_date)
     .bind(input.status)
     .bind(input.end_date)
@@ -2348,10 +3002,11 @@ pub async fn library_to_item_dto(
         production_locations: Vec::new(),
         size: Some(0),
         file_name: None,
-        bitrate: None,
-        official_rating: None,
-        community_rating: None,
-        taglines: Vec::new(),
+          bitrate: None,
+          official_rating: None,
+          community_rating: None,
+          critic_rating: None,
+          taglines: Vec::new(),
         remote_trailers: Vec::new(),
         people: Vec::new(),
         studios: Vec::new(),
@@ -2362,11 +3017,13 @@ pub async fn library_to_item_dto(
         season_count: None,
         series_count: Some(series_count),
         movie_count: Some(movie_count),
-        status: None,
-        air_days: Vec::new(),
-        air_time: None,
-        end_date: None,
-        is_movie: Some(false),
+          status: None,
+          air_days: Vec::new(),
+          air_time: None,
+          end_date: None,
+          width: None,
+          height: None,
+          is_movie: Some(false),
         is_series: Some(false),
         is_live: Some(false),
         is_news: Some(false),
@@ -2455,10 +3112,11 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         production_locations: Vec::new(),
         size: Some(0),
         file_name: None,
-        bitrate: None,
-        official_rating: None,
-        community_rating: None,
-        taglines: Vec::new(),
+          bitrate: None,
+          official_rating: None,
+          community_rating: None,
+          critic_rating: None,
+          taglines: Vec::new(),
         remote_trailers: Vec::new(),
         people: Vec::new(),
         studios: Vec::new(),
@@ -2469,11 +3127,13 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         season_count: None,
         series_count: None,
         movie_count: None,
-        status: None,
-        air_days: Vec::new(),
-        air_time: None,
-        end_date: None,
-        is_movie: Some(false),
+          status: None,
+          air_days: Vec::new(),
+          air_time: None,
+          end_date: None,
+          width: None,
+          height: None,
+          is_movie: Some(false),
         is_series: Some(false),
         is_live: Some(false),
         is_news: Some(false),
@@ -2582,13 +3242,24 @@ pub async fn media_item_to_dto(
         .iter()
         .find(|stream| stream.stream_type == "Video")
         .and_then(|stream| stream.real_frame_rate);
-    let chapters = media_sources
-        .iter()
-        .find(|source| source.source_type == "Default")
-        .or_else(|| media_sources.first())
-        .map(|source| source.chapters.clone())
-        .unwrap_or_default();
-    let item_detail_media_sources = sanitize_media_sources_for_item_detail(media_sources);
+      let chapters = media_sources
+          .iter()
+          .find(|source| source.source_type == "Default")
+          .or_else(|| media_sources.first())
+          .map(|source| source.chapters.clone())
+          .unwrap_or_default();
+      let video_stream = media_streams
+          .iter()
+          .find(|stream| stream.stream_type.eq_ignore_ascii_case("Video"));
+      let width = item.width.or_else(|| video_stream.and_then(|stream| stream.width));
+      let height = item.height.or_else(|| video_stream.and_then(|stream| stream.height));
+      let primary_image_aspect_ratio = match (width, height) {
+          (Some(width), Some(height)) if width > 0 && height > 0 => {
+              Some(width as f64 / height as f64)
+          }
+          _ => None,
+      };
+      let item_detail_media_sources = sanitize_media_sources_for_item_detail(media_sources);
     let child_count = if is_folder {
         Some(count_item_children(pool, item.id).await?)
     } else {
@@ -2721,10 +3392,11 @@ pub async fn media_item_to_dto(
         production_locations: item.production_locations.clone(),
         size: Some(item_size(item, is_folder)),
         file_name: item_file_name(item),
-        bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
-        official_rating: item.official_rating.clone(),
-        community_rating: item.community_rating,
-        taglines: Vec::new(),
+          bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
+          official_rating: item.official_rating.clone(),
+          community_rating: item.community_rating,
+          critic_rating: item.critic_rating,
+          taglines: Vec::new(),
         remote_trailers: remote_trailers_from_urls(&item.remote_trailers),
         people,
         studios: name_long_id_items_from_names(&item.studios),
@@ -2735,11 +3407,13 @@ pub async fn media_item_to_dto(
         season_count,
         series_count: None,
         movie_count: None,
-        status: item.status.clone(),
-        air_days: item.air_days.clone(),
-        air_time: item.air_time.clone(),
-        end_date: premiere_date_to_utc(item.end_date),
-        is_movie: Some(item.item_type.eq_ignore_ascii_case("Movie")),
+          status: item.status.clone(),
+          air_days: item.air_days.clone(),
+          air_time: item.air_time.clone(),
+          end_date: premiere_date_to_utc(item.end_date),
+          width,
+          height,
+          is_movie: Some(item.item_type.eq_ignore_ascii_case("Movie")),
         is_series: Some(item.item_type.eq_ignore_ascii_case("Series")),
         is_live: Some(false),
         is_news: Some(false),
@@ -2773,13 +3447,13 @@ pub async fn media_item_to_dto(
         part_count: if is_folder { 0 } else { 1 },
         chapters,
         locked_fields: Vec::new(),
-        lock_data: false,
-        special_feature_count: Some(0),
-        child_count,
-        primary_image_aspect_ratio: None,
-        completion_percentage,
-        tags: item.tags.clone(),
-    })
+          lock_data: false,
+          special_feature_count: Some(0),
+          child_count,
+          primary_image_aspect_ratio,
+          completion_percentage,
+          tags: item.tags.clone(),
+      })
 }
 
 fn sanitize_media_sources_for_item_detail(media_sources: Vec<MediaSourceDto>) -> Vec<MediaSourceDto> {
@@ -2820,6 +3494,281 @@ async fn resolve_series_and_season_ids(
             Ok((series_id, season_id))
         }
         _ => Ok((None, None)),
+    }
+}
+
+async fn get_season_id_by_number(
+    pool: &sqlx::PgPool,
+    series_id: Uuid,
+    season_number: i32,
+) -> Result<Option<String>, AppError> {
+    let season_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM media_items
+        WHERE parent_id = $1
+          AND item_type = 'Season'
+          AND index_number = $2
+        LIMIT 1
+        "#,
+    )
+    .bind(series_id)
+    .bind(season_number)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(season_id.map(|value| uuid_to_emby_guid(&value)))
+}
+
+async fn missing_episode_row_to_dto<T>(
+    pool: &sqlx::PgPool,
+    row: T,
+    _user_id: Uuid,
+    server_id: Uuid,
+) -> Result<BaseItemDto, AppError>
+where
+    T: Into<MissingEpisodeDtoSource>,
+{
+    let row = row.into();
+    let virtual_id = row.id;
+    let providers = provider_ids_to_map(&row.series_provider_ids);
+    let mut item_provider_ids = providers.clone();
+    item_provider_ids.insert("Tmdb".to_string(), row.external_series_id.clone());
+    if let Some(value) = &row.external_episode_id {
+        item_provider_ids.insert("TmdbEpisode".to_string(), value.clone());
+    }
+    if let Some(value) = &row.external_season_id {
+        item_provider_ids.insert("TmdbSeason".to_string(), value.clone());
+    }
+    let mut image_tags = BTreeMap::new();
+    if row.image_path.is_some() {
+        image_tags.insert(
+            "Primary".to_string(),
+            row.series_date_modified.timestamp().to_string(),
+        );
+    }
+    let backdrop_image_tags = row
+        .series_backdrop_path
+        .as_ref()
+        .map(|_| vec![row.series_date_modified.timestamp().to_string()])
+        .unwrap_or_default();
+    let season_id = get_season_id_by_number(pool, row.series_id, row.season_number).await?;
+    let overview = row.overview.clone().or(row.series_overview.clone());
+    let people = get_item_people(pool, row.series_id).await?;
+    let parent_backdrop_item_id = Some(uuid_to_emby_guid(&row.series_id));
+    let parent_backdrop_image_tags = row
+        .series_backdrop_path
+        .as_ref()
+        .map(|_| vec![row.series_date_modified.timestamp().to_string()])
+        .unwrap_or_default();
+    let parent_thumb_item_id = Some(uuid_to_emby_guid(&row.series_id));
+    let parent_thumb_image_tag = row
+        .series_thumb_path
+        .as_ref()
+        .map(|_| row.series_date_modified.timestamp().to_string());
+    let parent_logo_item_id = Some(uuid_to_emby_guid(&row.series_id));
+    let parent_logo_image_tag = row
+        .series_logo_path
+        .as_ref()
+        .map(|_| row.series_date_modified.timestamp().to_string());
+
+    Ok(BaseItemDto {
+        name: row.name,
+        original_title: None,
+        server_id: uuid_to_emby_guid(&server_id),
+        id: uuid_to_emby_guid(&virtual_id),
+        guid: None,
+        etag: Some(row.series_date_modified.timestamp().to_string()),
+        date_modified: Some(row.series_date_modified),
+        can_delete: false,
+        can_download: false,
+        can_edit_items: Some(false),
+        supports_resume: Some(false),
+        presentation_unique_key: Some(format!("{}_missing", uuid_to_emby_guid(&virtual_id))),
+        supports_sync: true,
+        item_type: "Episode".to_string(),
+        is_folder: false,
+        sort_name: Some(format!(
+            "{:04}-{:04}-{}",
+            row.season_number, row.episode_number, row.series_sort_name
+        )),
+        forced_sort_name: None,
+        primary_image_tag: image_tags.get("Primary").cloned(),
+        collection_type: None,
+        media_type: Some("Video".to_string()),
+        container: None,
+        parent_id: season_id.clone(),
+        path: None,
+        location_type: Some("Virtual".to_string()),
+        run_time_ticks: None,
+        production_year: row
+            .premiere_date
+            .map(|date| date.year())
+            .or(row.series_production_year),
+        overview,
+        date_created: None,
+        premiere_date: premiere_date_to_utc(row.premiere_date),
+        video_codec: None,
+        audio_codec: None,
+        average_frame_rate: None,
+        real_frame_rate: None,
+        genres: Vec::new(),
+        genre_items: Vec::new(),
+        provider_ids: item_provider_ids.clone(),
+        external_urls: external_urls_from_provider_map(&item_provider_ids, "Series"),
+        production_locations: Vec::new(),
+        size: None,
+        file_name: None,
+          bitrate: None,
+          official_rating: None,
+          community_rating: None,
+          critic_rating: None,
+          taglines: Vec::new(),
+        remote_trailers: Vec::new(),
+        people,
+        studios: Vec::new(),
+        tag_items: Vec::new(),
+        local_trailer_count: 0,
+        display_preferences_id: Some(uuid_to_emby_guid(&virtual_id)),
+        recursive_item_count: None,
+        season_count: None,
+        series_count: None,
+        movie_count: None,
+          status: None,
+          air_days: Vec::new(),
+          air_time: None,
+          end_date: None,
+          width: None,
+          height: None,
+          is_movie: Some(false),
+        is_series: Some(false),
+        is_live: Some(false),
+        is_news: Some(false),
+        is_kids: Some(false),
+        is_sports: Some(false),
+        is_premiere: row.premiere_date.map(|date| date == Utc::now().date_naive()),
+        is_new: None,
+        is_repeat: Some(false),
+        disabled: Some(false),
+        series_name: Some(row.series_name),
+        series_id: Some(uuid_to_emby_guid(&row.series_id)),
+        season_name: Some(format!("Season {}", row.season_number)),
+        season_id,
+        index_number: Some(row.episode_number),
+        index_number_end: row.episode_number_end,
+        parent_index_number: Some(row.season_number),
+        image_tags,
+        backdrop_image_tags,
+        parent_logo_item_id,
+        parent_logo_image_tag,
+        parent_backdrop_item_id,
+        parent_backdrop_image_tags,
+        parent_thumb_item_id,
+        parent_thumb_image_tag,
+        series_primary_image_tag: row
+            .series_image_primary_path
+            .as_ref()
+            .map(|_| row.series_date_modified.timestamp().to_string()),
+        primary_image_item_id: Some(uuid_to_emby_guid(&row.series_id)),
+        series_studio: None,
+        user_data: empty_user_data_for_item(virtual_id),
+        media_sources: Vec::new(),
+        media_streams: Vec::new(),
+        part_count: 0,
+        chapters: Vec::new(),
+        locked_fields: Vec::new(),
+        lock_data: false,
+        special_feature_count: None,
+        child_count: None,
+        primary_image_aspect_ratio: None,
+        completion_percentage: None,
+        tags: Vec::new(),
+    })
+}
+
+struct MissingEpisodeDtoSource {
+    id: Uuid,
+    series_id: Uuid,
+    provider: String,
+    external_series_id: String,
+    external_season_id: Option<String>,
+    external_episode_id: Option<String>,
+    season_number: i32,
+    episode_number: i32,
+    episode_number_end: Option<i32>,
+    name: String,
+    overview: Option<String>,
+    premiere_date: Option<NaiveDate>,
+    image_path: Option<String>,
+    series_name: String,
+    series_sort_name: String,
+    series_overview: Option<String>,
+    series_production_year: Option<i32>,
+    series_provider_ids: Value,
+    series_image_primary_path: Option<String>,
+    series_backdrop_path: Option<String>,
+    series_logo_path: Option<String>,
+    series_thumb_path: Option<String>,
+    series_date_modified: DateTime<Utc>,
+}
+
+impl From<MissingEpisodeRow> for MissingEpisodeDtoSource {
+    fn from(value: MissingEpisodeRow) -> Self {
+        Self {
+            id: value.id,
+            series_id: value.series_id,
+            provider: value.provider,
+            external_series_id: value.external_series_id,
+            external_season_id: value.external_season_id,
+            external_episode_id: value.external_episode_id,
+            season_number: value.season_number,
+            episode_number: value.episode_number,
+            episode_number_end: value.episode_number_end,
+            name: value.name,
+            overview: value.overview,
+            premiere_date: value.premiere_date,
+            image_path: value.image_path,
+            series_name: value.series_name,
+            series_sort_name: value.series_sort_name,
+            series_overview: value.series_overview,
+            series_production_year: value.series_production_year,
+            series_provider_ids: value.series_provider_ids,
+            series_image_primary_path: value.series_image_primary_path,
+            series_backdrop_path: value.series_backdrop_path,
+            series_logo_path: value.series_logo_path,
+            series_thumb_path: value.series_thumb_path,
+            series_date_modified: value.series_date_modified,
+        }
+    }
+}
+
+impl From<MissingEpisodeDetailRow> for MissingEpisodeDtoSource {
+    fn from(value: MissingEpisodeDetailRow) -> Self {
+        Self {
+            id: value.id,
+            series_id: value.series_id,
+            provider: value.provider,
+            external_series_id: value.external_series_id,
+            external_season_id: value.external_season_id,
+            external_episode_id: value.external_episode_id,
+            season_number: value.season_number,
+            episode_number: value.episode_number,
+            episode_number_end: value.episode_number_end,
+            name: value.name,
+            overview: value.overview,
+            premiere_date: value.premiere_date,
+            image_path: value.image_path,
+            series_name: value.series_name,
+            series_sort_name: value.series_sort_name,
+            series_overview: value.series_overview,
+            series_production_year: value.series_production_year,
+            series_provider_ids: value.series_provider_ids,
+            series_image_primary_path: value.series_image_primary_path,
+            series_backdrop_path: value.series_backdrop_path,
+            series_logo_path: value.series_logo_path,
+            series_thumb_path: value.series_thumb_path,
+            series_date_modified: value.series_date_modified,
+        }
     }
 }
 
@@ -2901,8 +3850,32 @@ async fn media_sources_for_item(
     server_id: Uuid,
 ) -> Result<Vec<MediaSourceDto>, AppError> {
     let mut sources = vec![media_source_for_item_with_type(pool, item, "Default", server_id).await?];
-    if !item.item_type.eq_ignore_ascii_case("Movie") {
+    let grouped_sources = version_group_items_for_item(pool, item).await?;
+    if grouped_sources.len() <= 1 {
         return Ok(sources);
+    }
+    let mut hydrated_sources = Vec::new();
+    for source in &grouped_sources {
+        let source_type = if source.id == item.id {
+            "Default"
+        } else {
+            "Grouping"
+        };
+        hydrated_sources.push(
+            media_source_for_item_with_type(pool, source, source_type, server_id).await?,
+        );
+    }
+    sources = hydrated_sources;
+
+    Ok(sources)
+}
+
+async fn version_group_items_for_item(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+) -> Result<Vec<DbMediaItem>, AppError> {
+    if !matches!(item.item_type.as_str(), "Movie" | "Series") {
+        return Ok(vec![item.clone()]);
     }
 
     let providers = provider_ids_for_item(item);
@@ -2920,14 +3893,14 @@ async fn media_sources_for_item(
     let imdb_path_token = imdb.as_ref().map(|value| format!("%{{imdbid={value}}}%"));
 
     if tmdb.is_none() && imdb.is_none() {
-        return Ok(sources);
+        return Ok(vec![item.clone()]);
     }
 
-    let alternatives = sqlx::query_as::<_, DbMediaItem>(
+    let mut grouped_items = sqlx::query_as::<_, DbMediaItem>(
         r#"
         SELECT
             id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
-            overview, production_year, official_rating, community_rating, runtime_ticks,
+            overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
             premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
@@ -2935,25 +3908,23 @@ async fn media_sources_for_item(
             logo_path, thumb_path, remote_trailers,
             date_created, date_modified
         FROM media_items
-        WHERE id <> $1
-          AND item_type = $2
-          AND media_type = $3
+        WHERE item_type = $1
+          AND media_type = $2
           AND (
-              ($4::text IS NOT NULL AND (
-                  provider_ids->>'Tmdb' = $4 OR provider_ids->>'TMDb' = $4 OR provider_ids->>'tmdb' = $4
-                  OR path ILIKE $6
+              ($3::text IS NOT NULL AND (
+                  provider_ids->>'Tmdb' = $3 OR provider_ids->>'TMDb' = $3 OR provider_ids->>'tmdb' = $3
+                  OR path ILIKE $5
               ))
               OR
-              ($5::text IS NOT NULL AND (
-                  provider_ids->>'Imdb' = $5 OR provider_ids->>'IMDb' = $5 OR provider_ids->>'imdb' = $5
-                  OR path ILIKE $7
+              ($4::text IS NOT NULL AND (
+                  provider_ids->>'Imdb' = $4 OR provider_ids->>'IMDb' = $4 OR provider_ids->>'imdb' = $4
+                  OR path ILIKE $6
               ))
           )
         ORDER BY date_created ASC
         LIMIT 20
         "#,
     )
-    .bind(item.id)
     .bind(&item.item_type)
     .bind(&item.media_type)
     .bind(tmdb.as_deref())
@@ -2963,24 +3934,12 @@ async fn media_sources_for_item(
     .fetch_all(pool)
     .await?;
 
-    if !alternatives.is_empty() {
-        let mut grouped_sources = alternatives;
-        grouped_sources.push(item.clone());
-        grouped_sources.sort_by_key(|source| source.date_created);
-        let mut hydrated_sources = Vec::new();
-        for source in &grouped_sources {
-            let source_type = if source.id == item.id {
-                "Default"
-            } else {
-                "Grouping"
-            };
-            hydrated_sources.push(
-                media_source_for_item_with_type(pool, source, source_type, server_id).await?,
-            );
-        }
-        sources = hydrated_sources;
+    if !grouped_items.iter().any(|candidate| candidate.id == item.id) {
+        grouped_items.push(item.clone());
     }
-    Ok(sources)
+    grouped_items.sort_by_key(|candidate| candidate.date_created);
+    grouped_items.dedup_by_key(|candidate| candidate.id);
+    Ok(grouped_items)
 }
 
 pub async fn get_media_sources_for_item(
