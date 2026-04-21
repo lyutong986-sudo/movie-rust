@@ -4,8 +4,9 @@ use crate::{
     metadata::models::ExternalSeriesMetadata,
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaChapter, DbMediaItem,
-        DbMediaStream, DbPerson, DbUser, DbUserItemData, ExternalUrlDto, GenreDto, LibraryOptionsDto, LogFileDto,
-        MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto, NameIdDto, NameLongIdDto, PersonDto,
+        DbMediaStream, DbPerson, DbUser, DbUserItemData, ExternalUrlDto, GenreDto, ItemCountsDto,
+        LibraryOptionsDto, LogFileDto, MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto,
+        NameIdDto, NameLongIdDto, PersonDto,
         QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
         UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
     },
@@ -37,6 +38,38 @@ pub async fn user_count(pool: &sqlx::PgPool) -> Result<i64, AppError> {
     Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
         .await?)
+}
+
+pub async fn item_counts(pool: &sqlx::PgPool) -> Result<ItemCountsDto, AppError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT item_type, COUNT(*)::bigint FROM media_items GROUP BY item_type",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut counts = ItemCountsDto::default();
+    for (item_type, count) in rows {
+        let count = i64_to_i32_count(count);
+        match item_type.as_str() {
+            "Movie" => counts.movie_count = count,
+            "Series" => counts.series_count = count,
+            "Episode" => counts.episode_count = count,
+            "Trailer" => counts.trailer_count = count,
+            "BoxSet" => counts.box_set_count = count,
+            "Book" => counts.book_count = count,
+            "MusicVideo" => counts.music_video_count = count,
+            "Audio" | "AudioItem" | "Song" => counts.song_count = count,
+            "MusicAlbum" | "Album" => counts.album_count = count,
+            _ => {}
+        }
+        counts.item_count = counts.item_count.saturating_add(count);
+    }
+
+    Ok(counts)
+}
+
+fn i64_to_i32_count(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 pub async fn startup_wizard_completed(pool: &sqlx::PgPool) -> Result<bool, AppError> {
@@ -187,22 +220,23 @@ pub async fn get_genres(
 pub async fn get_items_by_genre(
     pool: &sqlx::PgPool,
     genre_name: &str,
-    _start_index: Option<i32>,
-    _limit: Option<i32>,
+    server_id: Uuid,
+    start_index: Option<i32>,
+    limit: Option<i32>,
 ) -> Result<Vec<BaseItemDto>, AppError> {
     let query = "
-        SELECT * FROM media_items 
+        SELECT * FROM media_items
         WHERE $1 = ANY(genres)
         ORDER BY sort_name
+        OFFSET $2 LIMIT $3
     ";
     
     let items = sqlx::query_as::<_, DbMediaItem>(query)
         .bind(genre_name)
+        .bind(start_index.unwrap_or(0).max(0) as i64)
+        .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
         .fetch_all(pool)
         .await?;
-    
-    // 获取server_id（这里使用虚拟值，实际应从配置获取）
-    let server_id = Uuid::new_v4();
     
     let mut item_dtos = Vec::new();
     for item in items {
@@ -280,15 +314,19 @@ pub async fn get_persons(
                 id: uuid_to_emby_guid(&person.id),
                 role: None,
                 person_type: None,
-                primary_image_tag: person.primary_image_path.as_ref().map(|_| "primary".to_string()),
+                primary_image_tag: person.primary_image_path.as_ref().map(|_| person.updated_at.timestamp().to_string()),
                 sort_name: person.sort_name,
                 overview: person.overview,
                 external_url: person.external_url,
                 premiere_date: person.premiere_date.map(|dt| dt.to_rfc3339()),
                 production_year: person.production_year,
-                image_tags: None, // 暂时为空
+                image_tags: person.primary_image_path.as_ref().map(|_| {
+                    let mut tags = std::collections::HashMap::new();
+                    tags.insert("Primary".to_string(), person.updated_at.timestamp().to_string());
+                    tags
+                }),
                 provider_ids,
-                favorite: Some(false),
+                favorite: None,
             }
         })
         .collect();
@@ -328,15 +366,19 @@ pub async fn get_person_by_uuid(
             id: uuid_to_emby_guid(&person.id),
             role: None,
             person_type: None,
-            primary_image_tag: person.primary_image_path.as_ref().map(|_| "primary".to_string()),
+            primary_image_tag: person.primary_image_path.as_ref().map(|_| person.updated_at.timestamp().to_string()),
             sort_name: person.sort_name,
             overview: person.overview,
             external_url: person.external_url,
             premiere_date: person.premiere_date.map(|dt| dt.to_rfc3339()),
             production_year: person.production_year,
-            image_tags: None, // 暂时为空
+            image_tags: person.primary_image_path.as_ref().map(|_| {
+                let mut tags = std::collections::HashMap::new();
+                tags.insert("Primary".to_string(), person.updated_at.timestamp().to_string());
+                tags
+            }),
             provider_ids,
-            favorite: Some(false),
+            favorite: None,
         };
         
         Ok(Some(person_dto))
@@ -378,15 +420,19 @@ pub async fn get_person_by_name(
             id: uuid_to_emby_guid(&person.id),
             role: None,
             person_type: None,
-            primary_image_tag: person.primary_image_path.as_ref().map(|_| "primary".to_string()),
+            primary_image_tag: person.primary_image_path.as_ref().map(|_| person.updated_at.timestamp().to_string()),
             sort_name: person.sort_name,
             overview: person.overview,
             external_url: person.external_url,
             premiere_date: person.premiere_date.map(|dt| dt.to_rfc3339()),
             production_year: person.production_year,
-            image_tags: None, // 暂时为空
+            image_tags: person.primary_image_path.as_ref().map(|_| {
+                let mut tags = std::collections::HashMap::new();
+                tags.insert("Primary".to_string(), person.updated_at.timestamp().to_string());
+                tags
+            }),
             provider_ids,
-            favorite: Some(false),
+            favorite: None,
         };
         
         Ok(person_dto)
@@ -395,32 +441,25 @@ pub async fn get_person_by_name(
     }
 }
 
-pub async fn get_items_by_person(
+pub async fn get_person_image_path(
     pool: &sqlx::PgPool,
     person_id_or_name: &str,
-    _start_index: Option<i32>,
-    _limit: Option<i32>,
-) -> Result<Vec<BaseItemDto>, AppError> {
-    // 尝试解析为UUID
-    if let Ok(uuid) = Uuid::parse_str(person_id_or_name) {
-        // 按UUID查找人物
-        let person = sqlx::query_as::<_, DbPerson>(
+    image_type: &str,
+) -> Result<Option<String>, AppError> {
+    let person = if let Ok(person_id) = emby_id_to_uuid(person_id_or_name) {
+        sqlx::query_as::<_, DbPerson>(
             r#"
             SELECT *
             FROM persons
             WHERE id = $1
+            LIMIT 1
             "#,
         )
-        .bind(uuid)
+        .bind(person_id)
         .fetch_optional(pool)
-        .await?;
-        
-        if person.is_none() {
-            return Ok(vec![]);
-        }
+        .await?
     } else {
-        // 按名称查找人物
-        let person = sqlx::query_as::<_, DbPerson>(
+        sqlx::query_as::<_, DbPerson>(
             r#"
             SELECT *
             FROM persons
@@ -430,16 +469,123 @@ pub async fn get_items_by_person(
         )
         .bind(person_id_or_name)
         .fetch_optional(pool)
-        .await?;
-        
-        if person.is_none() {
-            return Ok(vec![]);
+        .await?
+    };
+
+    let Some(person) = person else {
+        return Ok(None);
+    };
+
+    Ok(match image_type.to_ascii_lowercase().as_str() {
+        "backdrop" => person.backdrop_image_path,
+        "logo" => person.logo_image_path,
+        "thumb" => person.backdrop_image_path.or(person.primary_image_path),
+        _ => person.primary_image_path,
+    })
+}
+
+pub async fn get_genre_image_path(
+    pool: &sqlx::PgPool,
+    genre_name: &str,
+    image_type: &str,
+) -> Result<Option<String>, AppError> {
+    let image_column = match image_type.to_ascii_lowercase().as_str() {
+        "backdrop" => "backdrop_path",
+        "logo" => "logo_path",
+        "thumb" => "thumb_path",
+        _ => "image_primary_path",
+    };
+    let fallback_column = if image_column == "thumb_path" {
+        ", backdrop_path, image_primary_path"
+    } else {
+        ""
+    };
+    let query = format!(
+        r#"
+        SELECT {image_column}{fallback_column}
+        FROM media_items
+        WHERE $1 = ANY(genres)
+          AND ({image_column} IS NOT NULL{fallback_condition})
+        ORDER BY date_modified DESC
+        LIMIT 1
+        "#,
+        fallback_condition = if image_column == "thumb_path" {
+            " OR backdrop_path IS NOT NULL OR image_primary_path IS NOT NULL"
+        } else {
+            ""
+        },
+    );
+
+    let Some(row) = sqlx::query(&query)
+        .bind(genre_name)
+        .fetch_optional(pool)
+        .await? else {
+            return Ok(None);
+        };
+
+    if let Some(path) = row.try_get::<Option<String>, _>(image_column)? {
+        return Ok(Some(path));
+    }
+    if image_column == "thumb_path" {
+        if let Some(path) = row.try_get::<Option<String>, _>("backdrop_path")? {
+            return Ok(Some(path));
+        }
+        if let Some(path) = row.try_get::<Option<String>, _>("image_primary_path")? {
+            return Ok(Some(path));
         }
     }
-    
-    // 查询与人物相关的项目
-    // 注意：person_roles表还没有填充，暂时返回空列表
-    Ok(vec![])
+
+    Ok(None)
+}
+
+pub async fn get_items_by_person(
+    pool: &sqlx::PgPool,
+    person_id_or_name: &str,
+    server_id: Uuid,
+    start_index: Option<i32>,
+    limit: Option<i32>,
+) -> Result<Vec<BaseItemDto>, AppError> {
+    let person_id = if let Ok(uuid) = emby_id_to_uuid(person_id_or_name) {
+        uuid
+    } else {
+        let Some(id) = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id
+            FROM persons
+            WHERE name = $1
+            LIMIT 1
+            "#,
+        )
+        .bind(person_id_or_name)
+        .fetch_optional(pool)
+        .await? else {
+            return Ok(Vec::new());
+        };
+        id
+    };
+
+    let rows = sqlx::query_as::<_, DbMediaItem>(
+        r#"
+        SELECT DISTINCT mi.*
+        FROM person_roles pr
+        INNER JOIN media_items mi ON mi.id = pr.media_item_id
+        WHERE pr.person_id = $1
+        ORDER BY mi.sort_name
+        OFFSET $2 LIMIT $3
+        "#,
+    )
+    .bind(person_id)
+    .bind(start_index.unwrap_or(0).max(0) as i64)
+    .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
+    .fetch_all(pool)
+    .await?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for item in rows {
+        items.push(media_item_to_dto(pool, &item, None, server_id).await?);
+    }
+
+    Ok(items)
 }
 
 pub async fn get_person_by_external_id(
@@ -1474,6 +1620,178 @@ pub async fn list_media_items(
     })
 }
 
+pub async fn get_next_up_episodes(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    parent_id: Option<Uuid>,
+    server_id: Uuid,
+    start_index: i64,
+    limit: i64,
+) -> Result<QueryResult<BaseItemDto>, AppError> {
+    let total_record_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM media_items mi
+        LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
+        WHERE mi.item_type = 'Episode'
+          AND COALESCE(uid.is_played, false) = false
+          AND (
+              $2::uuid IS NULL
+              OR mi.parent_id = $2
+              OR mi.library_id = $2
+              OR EXISTS (
+                  SELECT 1
+                  FROM media_items season
+                  WHERE season.id = mi.parent_id
+                    AND (season.parent_id = $2 OR season.library_id = $2)
+              )
+          )
+        "#,
+    )
+    .bind(user_id)
+    .bind(parent_id)
+    .fetch_one(pool)
+    .await?;
+
+    let rows = sqlx::query_as::<_, DbMediaItem>(
+        r#"
+        SELECT
+            mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type,
+            mi.media_type, mi.path, mi.container, mi.overview, mi.production_year,
+            mi.official_rating, mi.community_rating, mi.runtime_ticks, mi.premiere_date,
+            mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
+            mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
+            mi.genres, mi.studios, mi.tags, mi.production_locations, mi.width, mi.height,
+            mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path,
+            mi.backdrop_path, mi.logo_path, mi.thumb_path, mi.remote_trailers,
+            mi.date_created, mi.date_modified
+        FROM media_items mi
+        LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
+        WHERE mi.item_type = 'Episode'
+          AND COALESCE(uid.is_played, false) = false
+          AND (
+              $2::uuid IS NULL
+              OR mi.parent_id = $2
+              OR mi.library_id = $2
+              OR EXISTS (
+                  SELECT 1
+                  FROM media_items season
+                  WHERE season.id = mi.parent_id
+                    AND (season.parent_id = $2 OR season.library_id = $2)
+              )
+          )
+        ORDER BY mi.series_name NULLS LAST,
+                 mi.parent_index_number NULLS LAST,
+                 mi.index_number NULLS LAST,
+                 mi.sort_name
+        OFFSET $3 LIMIT $4
+        "#,
+    )
+    .bind(user_id)
+    .bind(parent_id)
+    .bind(start_index.max(0))
+    .bind(limit.clamp(1, 200))
+    .fetch_all(pool)
+    .await?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(media_item_to_dto(pool, &row, Some(user_id), server_id).await?);
+    }
+
+    Ok(QueryResult {
+        items,
+        total_record_count,
+        start_index: Some(start_index.max(0)),
+    })
+}
+
+pub async fn get_upcoming_episodes(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    parent_id: Option<Uuid>,
+    server_id: Uuid,
+    start_index: i64,
+    limit: i64,
+) -> Result<QueryResult<BaseItemDto>, AppError> {
+    let today = Utc::now().date_naive();
+    let total_record_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM media_items mi
+        WHERE mi.item_type = 'Episode'
+          AND mi.premiere_date >= $1
+          AND (
+              $2::uuid IS NULL
+              OR mi.parent_id = $2
+              OR mi.library_id = $2
+              OR EXISTS (
+                  SELECT 1
+                  FROM media_items season
+                  WHERE season.id = mi.parent_id
+                    AND (season.parent_id = $2 OR season.library_id = $2)
+              )
+          )
+        "#,
+    )
+    .bind(today)
+    .bind(parent_id)
+    .fetch_one(pool)
+    .await?;
+
+    let rows = sqlx::query_as::<_, DbMediaItem>(
+        r#"
+        SELECT
+            mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type,
+            mi.media_type, mi.path, mi.container, mi.overview, mi.production_year,
+            mi.official_rating, mi.community_rating, mi.runtime_ticks, mi.premiere_date,
+            mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
+            mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
+            mi.genres, mi.studios, mi.tags, mi.production_locations, mi.width, mi.height,
+            mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path,
+            mi.backdrop_path, mi.logo_path, mi.thumb_path, mi.remote_trailers,
+            mi.date_created, mi.date_modified
+        FROM media_items mi
+        WHERE mi.item_type = 'Episode'
+          AND mi.premiere_date >= $1
+          AND (
+              $2::uuid IS NULL
+              OR mi.parent_id = $2
+              OR mi.library_id = $2
+              OR EXISTS (
+                  SELECT 1
+                  FROM media_items season
+                  WHERE season.id = mi.parent_id
+                    AND (season.parent_id = $2 OR season.library_id = $2)
+              )
+          )
+        ORDER BY mi.premiere_date,
+                 mi.series_name NULLS LAST,
+                 mi.parent_index_number NULLS LAST,
+                 mi.index_number NULLS LAST,
+                 mi.sort_name
+        OFFSET $3 LIMIT $4
+        "#,
+    )
+    .bind(today)
+    .bind(parent_id)
+    .bind(start_index.max(0))
+    .bind(limit.clamp(1, 200))
+    .fetch_all(pool)
+    .await?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(media_item_to_dto(pool, &row, Some(user_id), server_id).await?);
+    }
+
+    Ok(QueryResult {
+        items,
+        total_record_count,
+        start_index: Some(start_index.max(0)),
+    })
+}
+
 pub async fn get_media_item(
     pool: &sqlx::PgPool,
     id: Uuid,
@@ -2458,7 +2776,7 @@ pub async fn media_item_to_dto(
         lock_data: false,
         special_feature_count: Some(0),
         child_count,
-        primary_image_aspect_ratio: item.image_primary_path.as_ref().map(|_| 0.666_666_666_7),
+        primary_image_aspect_ratio: None,
         completion_percentage,
         tags: item.tags.clone(),
     })

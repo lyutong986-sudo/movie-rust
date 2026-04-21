@@ -30,10 +30,10 @@ pub fn router() -> Router<AppState> {
         .route("/videos/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
         .route("/Video/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
         .route("/video/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
-        .route("/Videos/{item_id}/{*stream_path}", get(stream_video))
-        .route("/videos/{item_id}/{*stream_path}", get(stream_video))
-        .route("/Video/{item_id}/{*stream_path}", get(stream_video))
-        .route("/video/{item_id}/{*stream_path}", get(stream_video))
+        .route("/Videos/{item_id}/{*stream_path}", get(stream_video).head(stream_video))
+        .route("/videos/{item_id}/{*stream_path}", get(stream_video).head(stream_video))
+        .route("/Video/{item_id}/{*stream_path}", get(stream_video).head(stream_video))
+        .route("/video/{item_id}/{*stream_path}", get(stream_video).head(stream_video))
         .route("/Videos/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
         .route("/videos/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
         .route("/Video/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
@@ -84,8 +84,8 @@ pub fn router() -> Router<AppState> {
         .route("/items/{item_id}/{_media_source_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start).head(subtitle_stream_with_start))
         .route("/Videos/{item_id}/{_media_source_id}/Attachments/{index}/Stream", get(attachment_stream).head(attachment_stream))
         .route("/videos/{item_id}/{_media_source_id}/Attachments/{index}/Stream", get(attachment_stream).head(attachment_stream))
-        .route("/Items/{item_id}/File", get(stream_file))
-        .route("/Items/{item_id}/Download", get(stream_file))
+        .route("/Items/{item_id}/File", get(stream_file).head(stream_file))
+        .route("/Items/{item_id}/Download", get(stream_file).head(stream_file))
 }
 
 async fn active_encodings(

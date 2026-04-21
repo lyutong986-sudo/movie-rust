@@ -1,7 +1,7 @@
 use crate::{
     auth::AuthSession,
     error::AppError,
-    models::{emby_id_to_uuid, BaseItemDto, EpisodesQuery, QueryResult, SeasonsQuery},
+    models::{emby_id_to_uuid, BaseItemDto, EpisodesQuery, ItemsQuery, QueryResult, SeasonsQuery},
     repository::{self, ItemListOptions},
     state::AppState,
 };
@@ -17,6 +17,60 @@ pub fn router() -> Router<AppState> {
         .route("/Shows/{series_id}/Seasons", get(get_seasons))
         .route("/Shows/{series_id}/Episodes", get(get_episodes))
         .route("/Seasons/{season_id}/Episodes", get(get_episodes_by_season))
+        .route("/Shows/NextUp", get(get_next_up))
+        .route("/Shows/Upcoming", get(get_upcoming))
+        .route("/Shows/Missing", get(get_missing))
+}
+
+async fn get_next_up(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    let result = repository::get_next_up_episodes(
+        &state.pool,
+        user_id,
+        query.parent_id,
+        state.config.server_id,
+        query.start_index.unwrap_or(0).max(0),
+        query.limit.unwrap_or(100).clamp(1, 200),
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+async fn get_upcoming(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    let result = repository::get_upcoming_episodes(
+        &state.pool,
+        user_id,
+        query.parent_id,
+        state.config.server_id,
+        query.start_index.unwrap_or(0).max(0),
+        query.limit.unwrap_or(100).clamp(1, 200),
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+async fn get_missing(
+    session: AuthSession,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    Ok(Json(QueryResult {
+        items: Vec::new(),
+        total_record_count: 0,
+        start_index: Some(query.start_index.unwrap_or(0).max(0)),
+    }))
 }
 
 async fn get_seasons(

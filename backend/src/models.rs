@@ -301,6 +301,54 @@ pub struct QueryResult<T> {
     pub start_index: Option<i64>,
 }
 
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct ItemCountsDto {
+    pub movie_count: i32,
+    pub series_count: i32,
+    pub episode_count: i32,
+    pub game_count: i32,
+    pub artist_count: i32,
+    pub program_count: i32,
+    pub game_system_count: i32,
+    pub trailer_count: i32,
+    pub song_count: i32,
+    pub album_count: i32,
+    pub music_video_count: i32,
+    pub box_set_count: i32,
+    pub book_count: i32,
+    pub item_count: i32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ContentSectionDto {
+    pub name: String,
+    pub id: String,
+    pub section_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_type: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub monitor: Vec<String>,
+    pub card_size_offset: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scroll_direction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_item: Option<BaseItemDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_info: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub premium_feature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub premium_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_interval: Option<i32>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct UserDto {
@@ -1590,8 +1638,12 @@ where
     match opt_str {
         Some(s) if s.trim().is_empty() => Ok(None), // 空字符串视为None
         Some(s) => {
+            let normalized = s.trim();
+            if normalized.eq_ignore_ascii_case("root") {
+                return Ok(Some(Uuid::nil()));
+            }
             // 尝试解析UUID
-            Uuid::parse_str(&s).map(Some).map_err(serde::de::Error::custom)
+            Uuid::parse_str(normalized).map(Some).map_err(serde::de::Error::custom)
         }
         None => Ok(None),
     }

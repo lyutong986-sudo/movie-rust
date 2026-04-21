@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
                 .post(add_virtual_folder)
                 .delete(remove_virtual_folder),
         )
+        .route("/Library/VirtualFolders/Query", get(virtual_folders))
         .route("/Library/VirtualFolders/Name", post(rename_virtual_folder))
         .route(
             "/Library/VirtualFolders/Paths",

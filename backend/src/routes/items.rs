@@ -3,8 +3,9 @@ use crate::{
     error::AppError,
     media_analyzer,
     models::{
-        emby_id_to_uuid, BaseItemDto, GetSimilarItems, ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult, UpdateUserItemDataRequest,
-        UserItemDataDto, UserItemDataQuery,
+        emby_id_to_uuid, uuid_to_emby_guid, BaseItemDto, ContentSectionDto, GetSimilarItems, ItemCountsDto,
+        ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult,
+        UpdateUserItemDataRequest, UserItemDataDto, UserItemDataQuery,
     },
     naming,
     repository::{self, ItemListOptions, UpdateUserDataInput},
@@ -25,8 +26,15 @@ pub fn router() -> Router<AppState> {
         .route("/Library/MediaFolders", get(media_folders))
         .route("/Items/Root", get(root_item))
         .route("/Users/{user_id}/Items/Root", get(root_item_for_user))
+        .route("/Items/Counts", get(item_counts))
         .route("/Items", get(items))
         .route("/Users/{user_id}/Items", get(user_items))
+        .route("/Users/{user_id}/HomeSections", get(home_sections))
+        .route("/Users/{user_id}/Suggestions", get(user_suggestions))
+        .route(
+            "/Users/{user_id}/Sections/{section_id}/Items",
+            get(user_section_items),
+        )
         .route("/Users/{user_id}/Items/Latest", get(latest_items))
         .route("/Users/{user_id}/Items/Resume", get(user_resume_items))
         .route(
@@ -69,6 +77,9 @@ pub fn router() -> Router<AppState> {
         .route("/Items/{item_id}/Refresh", post(refresh_item_metadata))
         .route("/Users/{user_id}/Items/{item_id}", get(user_item_by_id))
         .route("/Items/{item_id}/Similar", get(get_similar_items))
+        .route("/Movies/{item_id}/Similar", get(get_similar_items))
+        .route("/Shows/{item_id}/Similar", get(get_similar_items))
+        .route("/Trailers/{item_id}/Similar", get(get_similar_items))
 }
 
 async fn user_views(
@@ -117,6 +128,13 @@ async fn root_item_for_user(
     Json(repository::root_item_dto(state.config.server_id))
 }
 
+async fn item_counts(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<ItemCountsDto>, AppError> {
+    Ok(Json(repository::item_counts(&state.pool).await?))
+}
+
 async fn items(
     session: AuthSession,
     State(state): State<AppState>,
@@ -132,6 +150,72 @@ async fn user_items(
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     query.user_id = Some(user_id);
+    list_items_for_user(&state, user_id, query).await
+}
+
+async fn home_sections(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<Vec<ContentSectionDto>>, AppError> {
+    ensure_user_access(&session, user_id)?;
+    let libraries = repository::list_libraries(&state.pool).await?;
+    let mut sections = Vec::with_capacity(libraries.len());
+    for library in libraries {
+        let parent_item =
+            repository::library_to_item_dto(&state.pool, &library, state.config.server_id).await?;
+        sections.push(ContentSectionDto {
+            name: library.name.clone(),
+            id: uuid_to_emby_guid(&library.id),
+            section_type: "Library".to_string(),
+            subtitle: None,
+            collection_type: Some(library.collection_type),
+            view_type: Some("Library".to_string()),
+            monitor: Vec::new(),
+            card_size_offset: 0,
+            scroll_direction: Some("Horizontal".to_string()),
+            parent_item: Some(parent_item),
+            text_info: None,
+            premium_feature: None,
+            premium_message: None,
+            refresh_interval: None,
+        });
+    }
+
+    Ok(Json(sections))
+}
+
+async fn user_suggestions(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Query(mut query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    ensure_user_access(&session, user_id)?;
+    query.user_id = Some(user_id);
+    query.recursive = Some(true);
+    query.sort_by = query.sort_by.or_else(|| Some("DateCreated".to_string()));
+    query.sort_order = query.sort_order.or_else(|| Some("Descending".to_string()));
+    query.limit = query.limit.or(Some(20));
+    if query.include_item_types.is_none() {
+        query.include_item_types = Some("Movie,Series".to_string());
+    }
+    list_items_for_user(&state, user_id, query).await
+}
+
+async fn user_section_items(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, section_id)): Path<(Uuid, String)>,
+    Query(mut query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    ensure_user_access(&session, user_id)?;
+    if let Ok(parent_id) = emby_id_to_uuid(&section_id) {
+        query.parent_id = Some(parent_id);
+    }
+    query.user_id = Some(user_id);
+    query.recursive = Some(true);
+    query.limit = query.limit.or(Some(20));
     list_items_for_user(&state, user_id, query).await
 }
 
@@ -163,6 +247,10 @@ async fn list_items_for_user(
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
     let requested_include_types = parse_include_types(query.include_item_types.as_deref());
+
+    if is_top_level_items_request(&query, &requested_item_ids, &requested_include_types) {
+        return libraries_as_query_result(state).await;
+    }
 
     // Emby 客户端进入详情页时会用 ListItemIds + IncludeItemTypes=BoxSet 查询“该条目所在合集”。
     // 当前项目还没有真实 BoxSet 扫描/建模，这里返回空结果比误返回无关媒体更接近预期行为。
@@ -238,6 +326,32 @@ async fn list_items_for_user(
     .await?;
 
     media_items_to_dto_result(state, user_id, result).await
+}
+
+fn is_top_level_items_request(
+    query: &ItemsQuery,
+    requested_item_ids: &[Uuid],
+    requested_include_types: &[String],
+) -> bool {
+    let parent_is_root = query
+        .parent_id
+        .is_none_or(|parent_id| parent_id.is_nil());
+    parent_is_root
+        && !query.recursive.unwrap_or(false)
+        && requested_item_ids.is_empty()
+        && requested_include_types.is_empty()
+        && query
+            .search_term
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && query
+            .genres
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && query
+            .filters
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
 }
 
 async fn media_items_to_dto_result(
