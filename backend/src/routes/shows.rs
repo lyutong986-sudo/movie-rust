@@ -1,7 +1,7 @@
 use crate::{
     auth::AuthSession,
     error::AppError,
-    models::{uuid_to_emby_guid, optional_uuid_to_emby_guid, EpisodeDto, EpisodesQuery, QueryResult, SeasonDto, SeasonsQuery},
+    models::{emby_id_to_uuid, uuid_to_emby_guid, optional_uuid_to_emby_guid, EpisodeDto, EpisodesQuery, QueryResult, SeasonDto, SeasonsQuery},
     repository::{self, ItemListOptions},
     state::AppState,
 };
@@ -22,9 +22,11 @@ pub fn router() -> Router<AppState> {
 async fn get_seasons(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(series_id): Path<Uuid>,
+    Path(series_id_str): Path<String>,
     Query(query): Query<SeasonsQuery>,
 ) -> Result<Json<QueryResult<SeasonDto>>, AppError> {
+    let series_id = emby_id_to_uuid(&series_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的系列ID格式: {}", series_id_str)))?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
 
@@ -72,9 +74,11 @@ async fn get_seasons(
 async fn get_episodes(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(series_id): Path<Uuid>,
+    Path(series_id_str): Path<String>,
     Query(query): Query<EpisodesQuery>,
 ) -> Result<Json<QueryResult<EpisodeDto>>, AppError> {
+    let series_id = emby_id_to_uuid(&series_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的系列ID格式: {}", series_id_str)))?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
 
@@ -138,9 +142,11 @@ async fn get_episodes(
 async fn get_episodes_by_season(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(season_id): Path<Uuid>,
+    Path(season_id_str): Path<String>,
     Query(query): Query<EpisodesQuery>,
 ) -> Result<Json<QueryResult<EpisodeDto>>, AppError> {
+    let season_id = emby_id_to_uuid(&season_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的季节ID格式: {}", season_id_str)))?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
 

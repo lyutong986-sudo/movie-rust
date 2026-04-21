@@ -1375,6 +1375,27 @@ pub fn optional_uuid_to_emby_guid(uuid: Option<Uuid>) -> Option<String> {
     uuid.map(|u| uuid_to_emby_guid(&u))
 }
 
+/// 将Emby API中的ID字符串转换为UUID
+/// 支持格式:
+/// 1. 纯UUID (如: "12345678-1234-1234-1234-123456789012")
+/// 2. Emby GUID格式 (大写UUID)
+/// 3. mediasource_{GUID} 格式 (如: "mediasource_12345678-1234-1234-1234-123456789012")
+pub fn emby_id_to_uuid(id_str: &str) -> Result<Uuid, uuid::Error> {
+    // 检查是否是 mediasource_ 前缀
+    let id_to_parse = if id_str.starts_with("mediasource_") {
+        &id_str[12..] // 移除 "mediasource_" 前缀
+    } else {
+        id_str
+    };
+    
+    Uuid::parse_str(id_to_parse)
+}
+
+/// 尝试将Emby API中的ID字符串转换为UUID，如果失败返回None
+pub fn try_emby_id_to_uuid(id_str: &str) -> Option<Uuid> {
+    emby_id_to_uuid(id_str).ok()
+}
+
 fn deserialize_optional_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
 where
     D: serde::Deserializer<'de>,

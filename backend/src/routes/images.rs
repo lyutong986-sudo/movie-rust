@@ -1,5 +1,5 @@
 use crate::{
-    auth::{AuthSession, OptionalAuthSession}, error::AppError, models::ImageInfoDto, repository, state::AppState,
+    auth::{AuthSession, OptionalAuthSession}, error::AppError, models::{emby_id_to_uuid, ImageInfoDto}, repository, state::AppState,
 };
 use axum::{
     body::Body,
@@ -37,8 +37,10 @@ pub fn router() -> Router<AppState> {
 async fn list_item_images(
     _session: OptionalAuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id_str): Path<String>,
 ) -> Result<Json<Vec<ImageInfoDto>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
@@ -67,28 +69,30 @@ async fn list_item_images(
 async fn get_item_image(
     session: OptionalAuthSession,
     State(state): State<AppState>,
-    Path((item_id, image_type)): Path<(Uuid, String)>,
+    Path((item_id_str, image_type)): Path<(String, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    serve_item_image(session.0, state, item_id, image_type, request).await
+    serve_item_image(session.0, state, item_id_str, image_type, request).await
 }
 
 async fn get_item_image_with_tail(
     session: OptionalAuthSession,
     State(state): State<AppState>,
-    Path((item_id, image_type, _image_tail)): Path<(Uuid, String, String)>,
+    Path((item_id_str, image_type, _image_tail)): Path<(String, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    serve_item_image(session.0, state, item_id, image_type, request).await
+    serve_item_image(session.0, state, item_id_str, image_type, request).await
 }
 
 async fn serve_item_image(
     _session: Option<AuthSession>,
     state: AppState,
-    item_id: Uuid,
+    item_id_str: String,
     image_type: String,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;

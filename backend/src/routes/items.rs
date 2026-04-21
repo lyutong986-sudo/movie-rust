@@ -3,7 +3,7 @@ use crate::{
     error::AppError,
     media_analyzer,
     models::{
-        BaseItemDto, GetSimilarItems, ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult, UpdateUserItemDataRequest,
+        emby_id_to_uuid, BaseItemDto, GetSimilarItems, ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult, UpdateUserItemDataRequest,
         UserItemDataDto, UserItemDataQuery,
     },
     naming,
@@ -439,16 +439,20 @@ fn ensure_user_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppErr
 async fn item_by_id(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id_str): Path<String>,
 ) -> Result<Json<BaseItemDto>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     item_dto(&state, session.user_id, item_id).await
 }
 
 async fn user_item_by_id(
     _session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Path((user_id, item_id_str)): Path<(Uuid, String)>,
 ) -> Result<Json<BaseItemDto>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     item_dto(&state, user_id, item_id).await
 }
 
@@ -647,9 +651,11 @@ async fn user_resume_items(
 async fn get_similar_items(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id_str): Path<String>,
     Query(query): Query<GetSimilarItems>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     // 获取目标项目
     let target_item = repository::get_media_item(&state.pool, item_id)
         .await?
