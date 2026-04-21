@@ -54,18 +54,18 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/live_subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
         .route("/Video/{item_id}/live_subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
         .route("/video/{item_id}/live_subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
-        .route("/Videos/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
-        .route("/videos/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
-        .route("/Video/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
-        .route("/video/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
+        .route("/Videos/{item_id}/hls1/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
+        .route("/videos/{item_id}/hls1/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
+        .route("/Video/{item_id}/hls1/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
+        .route("/video/{item_id}/hls1/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
         .route("/Audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/Audio/{item_id}/main.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/audio/{item_id}/main.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/Audio/{item_id}/live.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/audio/{item_id}/live.m3u8", get(audio_master_playlist).head(audio_master_playlist))
-        .route("/Audio/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(audio_hls_segment).head(audio_hls_segment))
-        .route("/audio/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(audio_hls_segment).head(audio_hls_segment))
+        .route("/Audio/{item_id}/hls1/{_playlist_id}/{segment_file}", get(audio_hls_segment).head(audio_hls_segment))
+        .route("/audio/{item_id}/hls1/{_playlist_id}/{segment_file}", get(audio_hls_segment).head(audio_hls_segment))
         .route("/Videos/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
         .route("/videos/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
         .route("/Items/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
@@ -114,8 +114,7 @@ struct VideoPath {
 struct HlsSegmentPath {
     item_id: String,
     _playlist_id: String,
-    _segment_id: String,
-    _segment_container: String,
+    segment_file: String,
 }
 
 #[derive(Debug, Deserialize)]
