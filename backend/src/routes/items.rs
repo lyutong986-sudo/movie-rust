@@ -479,10 +479,12 @@ async fn item_dto(
 async fn playback_info(
     _session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id_str): Path<String>,
     Query(query_info): Query<PlaybackInfoDto>,
     request: Request,
 ) -> Result<Json<PlaybackInfoResponse>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     // 根据请求方法处理
     let info = if request.method() == http::Method::POST {
         // POST请求：尝试从请求体解析JSON

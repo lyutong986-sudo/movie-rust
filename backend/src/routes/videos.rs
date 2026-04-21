@@ -1,4 +1,4 @@
-use crate::{auth, error::AppError, models::VideoStreamQuery, naming, repository, state::AppState};
+use crate::{auth, error::AppError, models::{emby_id_to_uuid, VideoStreamQuery}, naming, repository, state::AppState};
 use axum::{
     body::Body,
     extract::{Path, Query, Request, State},
@@ -23,7 +23,7 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 struct VideoPath {
-    item_id: Uuid,
+    item_id: String,
     stream_path: String,
 }
 
@@ -33,10 +33,12 @@ async fn stream_video(
     Query(query): Query<VideoStreamQuery>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
+    let item_id = emby_id_to_uuid(&path.item_id)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", path.item_id)))?;
     let stream_path = path.stream_path.trim_start_matches('/');
     if let Some(subtitle_index) = parse_subtitle_stream_index(stream_path) {
         auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-        return serve_subtitle(&state, path.item_id, subtitle_index, request).await;
+        return serve_subtitle(&state, item_id, subtitle_index, request).await;
     }
 
     if !stream_path.starts_with("stream") {
@@ -46,7 +48,7 @@ async fn stream_video(
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     
     tracing::debug!(
-        item_id = %path.item_id,
+        item_id = %item_id,
         container = ?query.container,
         video_codec = ?query.video_codec,
         audio_codec = ?query.audio_codec,
@@ -54,14 +56,16 @@ async fn stream_video(
         "视频流请求参数"
     );
     
-    serve_media_item(&state, path.item_id, request, Some(query)).await
+    serve_media_item(&state, item_id, request, Some(query)).await
 }
 
 async fn stream_file(
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id_str): Path<String>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     serve_media_item(&state, item_id, request, None).await
 }
