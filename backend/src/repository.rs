@@ -1890,6 +1890,7 @@ pub async fn library_to_item_dto(
         production_locations: Vec::new(),
         size: Some(0),
         file_name: None,
+        bitrate: None,
         official_rating: None,
         community_rating: None,
         remote_trailers: Vec::new(),
@@ -1949,6 +1950,7 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         production_locations: Vec::new(),
         size: Some(0),
         file_name: None,
+        bitrate: None,
         official_rating: None,
         community_rating: None,
         remote_trailers: Vec::new(),
@@ -2018,6 +2020,7 @@ pub async fn media_item_to_dto(
     };
     let genre_items = genre_items_from_names(&item.genres);
     let people = get_item_people(pool, item.id).await?;
+    let provider_ids = provider_ids_for_item(item);
 
     Ok(BaseItemDto {
         name: item.name.clone(),
@@ -2036,7 +2039,7 @@ pub async fn media_item_to_dto(
         forced_sort_name: Some(item.sort_name.clone()),
         collection_type: None,
         media_type: (!is_folder).then(|| item.media_type.clone()),
-        container: item.container.clone(),
+        container: effective_container(item),
         parent_id: item.parent_id.map(|value| uuid_to_emby_guid(&value)),
         path: Some(item.path.clone()),
         run_time_ticks: item.runtime_ticks,
@@ -2046,11 +2049,12 @@ pub async fn media_item_to_dto(
         premiere_date: item.premiere_date,
         genres: item.genres.clone(),
         genre_items,
-        provider_ids: provider_ids_to_map(&item.provider_ids),
-        external_urls: external_urls_from_provider_ids(&item.provider_ids),
+        provider_ids: provider_ids.clone(),
+        external_urls: external_urls_from_provider_map(&provider_ids),
         production_locations: item.production_locations.clone(),
         size: Some(item_size(item, is_folder)),
         file_name: item_file_name(item),
+        bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
         official_rating: item.official_rating.clone(),
         community_rating: item.community_rating,
         remote_trailers: Vec::new(),
@@ -2082,35 +2086,18 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
     let strm_target = naming::is_strm(local_path)
         .then(|| naming::read_strm_target(local_path))
         .flatten();
-    let container = item
-        .container
-        .clone()
-        .or_else(|| {
-            local_path
-                .extension()
-                .map(|ext| ext.to_string_lossy().to_string())
-        })
-        .unwrap_or_else(|| "mp4".to_string());
+    let container = effective_container_from_target(item, strm_target.as_deref());
     let is_remote = strm_target.is_some();
-    let size = if is_remote {
-        Some(0)
-    } else {
-        std::fs::metadata(&item.path)
-            .ok()
-            .and_then(|metadata| i64::try_from(metadata.len()).ok())
-    };
+    let size = media_source_size(item, is_remote);
 
     MediaSourceDto {
+        chapters: Vec::new(),
         id: format!("mediasource_{}", uuid_to_emby_guid(&item.id)),
-        path: strm_target.unwrap_or_else(|| item.path.clone()),
+        path: strm_target.clone().unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
-        source_type: if is_remote {
-            "Default".to_string()
-        } else {
-            "Default".to_string()
-        },
+        source_type: "Default".to_string(),
         container: container.clone(),
-        name: item.name.clone(),
+        name: media_source_name(item, strm_target.as_deref()),
         is_remote,
         sort_name: None,
         encoder_path: None,
@@ -2512,6 +2499,38 @@ fn provider_ids_to_map(value: &Value) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
+fn provider_ids_for_item(item: &DbMediaItem) -> BTreeMap<String, String> {
+    let mut providers = provider_ids_to_map(&item.provider_ids);
+    for (key, value) in provider_ids_from_path_text(&item.path) {
+        providers.entry(key).or_insert(value);
+    }
+    providers
+}
+
+fn provider_ids_from_path_text(path: &str) -> BTreeMap<String, String> {
+    let mut providers = BTreeMap::new();
+    let lower = path.to_lowercase();
+    for (marker, provider_name) in [
+        ("{tmdbid=", "Tmdb"),
+        ("{imdbid=", "Imdb"),
+        ("{tvdbid=", "Tvdb"),
+        ("{traktid=", "Trakt"),
+    ] {
+        let Some(start) = lower.find(marker) else {
+            continue;
+        };
+        let value_start = start + marker.len();
+        let Some(relative_end) = path[value_start..].find('}') else {
+            continue;
+        };
+        let value = path[value_start..value_start + relative_end].trim();
+        if !value.is_empty() {
+            providers.insert(provider_name.to_string(), value.to_string());
+        }
+    }
+    providers
+}
+
 #[derive(Debug, FromRow)]
 struct ItemPersonRow {
     id: Uuid,
@@ -2525,8 +2544,7 @@ struct ItemPersonRow {
     primary_image_path: Option<String>,
 }
 
-fn external_urls_from_provider_ids(value: &Value) -> Vec<ExternalUrlDto> {
-    let providers = provider_ids_to_map(value);
+fn external_urls_from_provider_map(providers: &BTreeMap<String, String>) -> Vec<ExternalUrlDto> {
     let mut urls = Vec::new();
 
     if let Some(imdb) = providers.get("Imdb").or_else(|| providers.get("IMDb")) {
@@ -2634,6 +2652,12 @@ fn item_size(item: &DbMediaItem, is_folder: bool) -> i64 {
         return 0;
     }
 
+    if naming::is_strm(Path::new(&item.path)) {
+        if let Some(size) = estimated_media_size(item) {
+            return size;
+        }
+    }
+
     std::fs::metadata(&item.path)
         .ok()
         .and_then(|metadata| i64::try_from(metadata.len()).ok())
@@ -2644,6 +2668,75 @@ fn item_file_name(item: &DbMediaItem) -> Option<String> {
     Path::new(&item.path)
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
+}
+
+fn estimated_media_size(item: &DbMediaItem) -> Option<i64> {
+    let bitrate = item.bit_rate?;
+    let runtime_ticks = item.runtime_ticks?;
+    if bitrate <= 0 || runtime_ticks <= 0 {
+        return None;
+    }
+
+    let seconds = runtime_ticks as f64 / 10_000_000_f64;
+    Some(((bitrate as f64 * seconds) / 8_f64).round() as i64)
+}
+
+fn media_source_size(item: &DbMediaItem, is_remote: bool) -> Option<i64> {
+    if is_remote {
+        return estimated_media_size(item).or(Some(0));
+    }
+
+    std::fs::metadata(&item.path)
+        .ok()
+        .and_then(|metadata| i64::try_from(metadata.len()).ok())
+}
+
+fn effective_container(item: &DbMediaItem) -> Option<String> {
+    let local_path = Path::new(&item.path);
+    let strm_target = naming::is_strm(local_path)
+        .then(|| naming::read_strm_target(local_path))
+        .flatten();
+    Some(effective_container_from_target(item, strm_target.as_deref()))
+}
+
+fn effective_container_from_target(item: &DbMediaItem, strm_target: Option<&str>) -> String {
+    let local_path = Path::new(&item.path);
+    strm_target
+        .and_then(naming::extension_from_url)
+        .or_else(|| {
+            item.container
+                .clone()
+                .filter(|container| !container.eq_ignore_ascii_case("strm"))
+        })
+        .or_else(|| {
+            local_path
+                .extension()
+                .map(|ext| ext.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "mp4".to_string())
+}
+
+fn media_source_name(item: &DbMediaItem, strm_target: Option<&str>) -> String {
+    item_file_name(item)
+        .and_then(|file_name| {
+            Path::new(&file_name)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })
+        .and_then(|stem| {
+            stem.rsplit_once(" - ")
+                .map(|(_, quality)| quality.trim().to_string())
+                .filter(|quality| !quality.is_empty())
+        })
+        .or_else(|| strm_target.and_then(source_name_from_url))
+        .unwrap_or_else(|| item.name.clone())
+}
+
+fn source_name_from_url(value: &str) -> Option<String> {
+    let url = url::Url::parse(value).ok()?;
+    let file_name = Path::new(url.path()).file_stem()?.to_string_lossy();
+    let name = file_name.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn user_item_data_to_dto(data: DbUserItemData) -> UserItemDataDto {
@@ -2923,35 +3016,21 @@ pub async fn get_media_source_with_streams(
     let strm_target = naming::is_strm(local_path)
         .then(|| naming::read_strm_target(local_path))
         .flatten();
-    let container = strm_target
-        .as_deref()
-        .and_then(naming::extension_from_url)
-        .or_else(|| item.container.clone())
-        .or_else(|| {
-            local_path
-                .extension()
-                .map(|ext| ext.to_string_lossy().to_string())
-        })
-        .unwrap_or_else(|| "mp4".to_string());
+    let container = effective_container_from_target(item, strm_target.as_deref());
     let is_remote = strm_target.is_some();
-    let size = if is_remote {
-        None
-    } else {
-        std::fs::metadata(&item.path)
-            .ok()
-            .and_then(|metadata| i64::try_from(metadata.len()).ok())
-    };
+    let size = media_source_size(item, is_remote);
 
     let item_emby_id = uuid_to_emby_guid(&item.id);
     let media_source_id = format!("mediasource_{item_emby_id}");
 
     Ok(MediaSourceDto {
+        chapters: Vec::new(),
         id: media_source_id.clone(),
-        path: strm_target.unwrap_or_else(|| item.path.clone()),
+        path: strm_target.clone().unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),
         container: container.clone(),
-        name: item.name.clone(),
+        name: media_source_name(item, strm_target.as_deref()),
         sort_name: None,
         is_remote,
         encoder_path: None,

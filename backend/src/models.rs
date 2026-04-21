@@ -573,6 +573,8 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitrate: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub official_rating: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub community_rating: Option<f64>,
@@ -657,6 +659,7 @@ pub struct UserItemDataDto {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct MediaSourceDto {
+    pub chapters: Vec<Value>,
     pub id: String,
     pub path: String,
     pub protocol: String,
@@ -682,7 +685,6 @@ pub struct MediaSourceDto {
     pub supports_transcoding: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direct_stream_url: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub formats: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<i64>,
@@ -718,7 +720,6 @@ pub struct MediaSourceDto {
     pub video_3d_format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub required_http_headers: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub add_api_key_to_direct_stream_url: Option<bool>,
