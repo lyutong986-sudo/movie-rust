@@ -579,6 +579,10 @@ async fn playback_info(
     let play_session_id = Uuid::new_v4().simple().to_string();
 
     let mut media_source = repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id).await?;
+    if let Some(url) = media_source.direct_stream_url.as_mut() {
+        url.push_str("&PlaySessionId=");
+        url.push_str(&play_session_id);
+    }
     
     // 设备配置文件处理
     if let Some(device_profile) = &info.device_profile {

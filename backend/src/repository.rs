@@ -1839,7 +1839,7 @@ pub async fn media_item_to_dto(
     Ok(BaseItemDto {
         name: item.name.clone(),
         server_id: uuid_to_emby_guid(&server_id),
-        id: format!("mediasource_{}", uuid_to_emby_guid(&item.id)),
+        id: uuid_to_emby_guid(&item.id),
         item_type: item.item_type.clone(),
         is_folder,
         sort_name: Some(item.sort_name.clone()),
@@ -1896,7 +1896,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
     };
 
     MediaSourceDto {
-        id: format!("mediasource_{}", uuid_to_emby_guid(&item.id)),
+        id: uuid_to_emby_guid(&item.id),
         path: strm_target.unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),
@@ -1913,8 +1913,11 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         supports_direct_stream: true,
         supports_transcoding: true,
         direct_stream_url: Some(format!(
-            "/Videos/{}/stream.{}?Static=true&mediaSourceId={}",
-            item.id, container, item.id
+            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
+            uuid_to_emby_guid(&item.id),
+            container,
+            uuid_to_emby_guid(&item.id),
+            uuid_to_emby_guid(&item.id)
         )),
         formats: vec![container.clone()],
         size,
@@ -1945,7 +1948,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         video_3d_format: None,
         timestamp: None,
         required_http_headers: BTreeMap::new(),
-        add_api_key_to_direct_stream_url: Some(false),
+        add_api_key_to_direct_stream_url: Some(true),
         transcoding_url: None,
         transcoding_sub_protocol: None,
         transcoding_container: None,
@@ -2539,7 +2542,7 @@ pub async fn get_media_source_with_streams(
     };
 
     Ok(MediaSourceDto {
-        id: format!("mediasource_{}", uuid_to_emby_guid(&item.id)),
+        id: uuid_to_emby_guid(&item.id),
         path: strm_target.unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),
@@ -2556,8 +2559,11 @@ pub async fn get_media_source_with_streams(
         supports_direct_stream: true,
         supports_transcoding: true,
         direct_stream_url: Some(format!(
-            "/Videos/{}/stream.{}?Static=true&mediaSourceId={}",
-            item.id, container, item.id
+            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
+            uuid_to_emby_guid(&item.id),
+            container,
+            uuid_to_emby_guid(&item.id),
+            uuid_to_emby_guid(&item.id)
         )),
         formats: vec![container.clone()],
         size,
@@ -2588,7 +2594,7 @@ pub async fn get_media_source_with_streams(
         video_3d_format: None,
         timestamp: None,
         required_http_headers: BTreeMap::new(),
-        add_api_key_to_direct_stream_url: Some(false),
+        add_api_key_to_direct_stream_url: Some(true),
         transcoding_url: None,
         transcoding_sub_protocol: None,
         transcoding_container: None,

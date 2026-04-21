@@ -834,6 +834,8 @@ pub struct VideoStreamQuery {
     pub container: Option<String>,
     #[serde(default, rename = "Static")]
     pub static_param: Option<bool>,
+    #[serde(default, rename = "MediaSourceId", alias = "mediaSourceId")]
+    pub media_source_id: Option<String>,
     #[serde(default)]
     pub video_codec: Option<String>,
     #[serde(default)]
@@ -862,7 +864,7 @@ pub struct VideoStreamQuery {
     pub max_audio_bit_depth: Option<i32>,
     #[serde(default)]
     pub audio_sample_rate: Option<i32>,
-    #[serde(default)]
+    #[serde(default, rename = "PlaySessionId", alias = "playSessionId")]
     pub play_session_id: Option<String>,
     #[serde(default)]
     pub copy_timestamps: Option<bool>,

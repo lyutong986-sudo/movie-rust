@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{header, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{delete, get},
     Router,
 };
 use reqwest::Client;
@@ -16,9 +16,24 @@ use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/Videos/ActiveEncodings", delete(active_encodings))
+        .route("/videos/ActiveEncodings", delete(active_encodings))
+        .route("/Video/ActiveEncodings", delete(active_encodings))
+        .route("/video/ActiveEncodings", delete(active_encodings))
         .route("/Videos/{item_id}/{*stream_path}", get(stream_video))
+        .route("/videos/{item_id}/{*stream_path}", get(stream_video))
+        .route("/Video/{item_id}/{*stream_path}", get(stream_video))
+        .route("/video/{item_id}/{*stream_path}", get(stream_video))
         .route("/Items/{item_id}/File", get(stream_file))
         .route("/Items/{item_id}/Download", get(stream_file))
+}
+
+async fn active_encodings(
+    State(state): State<AppState>,
+    request: Request<Body>,
+) -> Result<StatusCode, AppError> {
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]
