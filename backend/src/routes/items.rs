@@ -578,37 +578,93 @@ async fn playback_info(
 
     let play_session_id = Uuid::new_v4().simple().to_string();
 
-    let mut media_source = repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id).await?;
-    if let Some(url) = media_source.direct_stream_url.as_mut() {
-        url.push_str("&PlaySessionId=");
-        url.push_str(&play_session_id);
+    let mut media_sources =
+        repository::get_media_sources_for_item(&state.pool, &item, state.config.server_id).await?;
+    if media_sources.is_empty() {
+        media_sources.push(
+            repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id)
+                .await?,
+        );
+    }
+
+    let selected_media_source_index = info
+        .media_source_id
+        .as_ref()
+        .and_then(|requested_id| {
+            media_sources.iter().position(|source| {
+                source.id.eq_ignore_ascii_case(requested_id)
+                    || source
+                        .item_id
+                        .as_ref()
+                        .is_some_and(|item_id| item_id.eq_ignore_ascii_case(requested_id))
+            })
+        })
+        .unwrap_or(0);
+
+    for media_source in &mut media_sources {
+        if let Some(url) = media_source.direct_stream_url.as_mut() {
+            url.push_str("&PlaySessionId=");
+            url.push_str(&play_session_id);
+        }
     }
     
     // 设备配置文件处理
     if let Some(device_profile) = &info.device_profile {
-        // 根据最大流比特率决定是否支持转码
-        if let Some(max_bitrate) = device_profile.max_streaming_bitrate {
-            // 如果媒体比特率大于最大流比特率，则可能需要转码
-            if let Some(media_bitrate) = media_source.bitrate {
-                if media_bitrate > max_bitrate as i32 {
-                    media_source.supports_transcoding = true;
+        for media_source in &mut media_sources {
+            // 根据最大流比特率决定是否支持转码
+            if let Some(max_bitrate) = device_profile.max_streaming_bitrate {
+                if let Some(media_bitrate) = media_source.bitrate {
+                    if media_bitrate > max_bitrate as i32 {
+                        media_source.supports_transcoding = true;
+                    }
                 }
             }
+
+            if !device_profile.direct_play_profiles.is_empty() {
+                media_source.supports_direct_play = true;
+            }
+
+            media_source.supports_direct_stream = true;
         }
-        
-        // 检查设备是否支持直接播放
-        if !device_profile.direct_play_profiles.is_empty() {
-            // 简化：如果存在直接播放配置文件，则支持直接播放
-            media_source.supports_direct_play = true;
+    }
+
+    if let Some(enable_direct_play) = info.enable_direct_play {
+        for media_source in &mut media_sources {
+            media_source.supports_direct_play = enable_direct_play;
         }
-        
-        // 检查是否支持直接流
-        media_source.supports_direct_stream = true;
+    }
+
+    if let Some(enable_direct_stream) = info.enable_direct_stream {
+        for media_source in &mut media_sources {
+            media_source.supports_direct_stream = enable_direct_stream;
+        }
+    }
+
+    if let Some(enable_transcoding) = info.enable_transcoding {
+        for media_source in &mut media_sources {
+            media_source.supports_transcoding = enable_transcoding;
+        }
     }
     
+    let response_media_source_id = info
+        .media_source_id
+        .clone()
+        .or_else(|| {
+            media_sources
+                .get(selected_media_source_index)
+                .map(|source| source.id.clone())
+        });
+    let direct_play_protocols = info
+        .device_profile
+        .as_ref()
+        .map(|profile| profile.direct_play_protocols.clone())
+        .filter(|protocols| !protocols.is_empty());
+
     Ok(Json(PlaybackInfoResponse {
-        media_sources: vec![media_source],
+        media_sources,
         play_session_id,
+        media_source_id: response_media_source_id,
+        direct_play_protocols,
         ..Default::default()
     }))
 }

@@ -247,8 +247,20 @@ async fn episode_to_dto(
         .ok();
 
     // 获取媒体源和媒体流
-    let media_sources = Some(vec![repository::media_source_for_item(episode)]);
-    let media_streams = Some(repository::media_streams_for_item(episode));
+    let media_sources = Some(vec![
+        repository::get_media_source_with_streams(&state.pool, episode, state.config.server_id)
+            .await?,
+    ]);
+    let media_streams = media_sources
+        .as_ref()
+        .map(|sources| {
+            sources
+                .first()
+                .map(|source| source.media_streams.clone())
+                .unwrap_or_default()
+        })
+        .filter(|streams| !streams.is_empty())
+        .or_else(|| Some(repository::media_streams_for_item(episode)));
 
     // 构建图片标签
     let mut image_tags = std::collections::BTreeMap::new();

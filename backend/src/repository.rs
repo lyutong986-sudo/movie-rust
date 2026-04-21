@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     error::AppError,
     models::{
-        uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaItem,
+        uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaChapter, DbMediaItem,
         DbMediaStream, DbPerson, DbUser, DbUserItemData, ExternalUrlDto, GenreDto, LibraryOptionsDto, LogFileDto,
         MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto, NameIdDto, PersonDto,
         QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
@@ -2047,7 +2047,18 @@ pub async fn media_item_to_dto(
     } else {
         Vec::new()
     };
-    let media_streams = Vec::new();
+    let media_streams = media_sources
+        .iter()
+        .find(|source| source.source_type == "Default")
+        .or_else(|| media_sources.first())
+        .map(|source| source.media_streams.clone())
+        .unwrap_or_default();
+    let chapters = media_sources
+        .iter()
+        .find(|source| source.source_type == "Default")
+        .or_else(|| media_sources.first())
+        .map(|source| source.chapters.clone())
+        .unwrap_or_default();
     let child_count = if is_folder {
         Some(count_item_children(pool, item.id).await?)
     } else {
@@ -2081,7 +2092,7 @@ pub async fn media_item_to_dto(
         production_year: item.production_year,
         overview: item.overview.clone(),
         date_created: Some(item.date_created),
-        premiere_date: item.premiere_date,
+        premiere_date: premiere_date_to_utc(item.premiere_date),
         genres: item.genres.clone(),
         genre_items,
         provider_ids: provider_ids.clone(),
@@ -2098,7 +2109,7 @@ pub async fn media_item_to_dto(
         studios: name_id_items_from_names(&item.studios),
         tag_items: name_id_items_from_names(&item.tags),
         local_trailer_count: 0,
-        display_preferences_id: Some(uuid_to_emby_guid(&item.id)),
+        display_preferences_id: Some(display_preferences_id(item, &provider_ids)),
         series_name: item.series_name.clone(),
         season_name: item.season_name.clone(),
         index_number: item.index_number,
@@ -2110,7 +2121,7 @@ pub async fn media_item_to_dto(
         media_sources,
         media_streams,
         part_count: if is_folder { 0 } else { 1 },
-        chapters: Vec::new(),
+        chapters,
         locked_fields: Vec::new(),
         lock_data: false,
         child_count,
@@ -2276,6 +2287,14 @@ async fn media_sources_for_item(
         sources = hydrated_sources;
     }
     Ok(sources)
+}
+
+pub async fn get_media_sources_for_item(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+    server_id: Uuid,
+) -> Result<Vec<MediaSourceDto>, AppError> {
+    media_sources_for_item(pool, item, server_id).await
 }
 
 pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
@@ -2602,6 +2621,22 @@ fn presentation_unique_key(item: &DbMediaItem, providers: &BTreeMap<String, Stri
         .or_else(|| providers.get("Imdb").map(|value| format!("movie:imdb:{value}")))
         .unwrap_or_else(|| format!("item:{}", item.id));
     format!("{}_", uuid_to_emby_guid(&Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes())))
+}
+
+fn display_preferences_id(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> String {
+    let source = providers
+        .get("Tmdb")
+        .map(|value| format!("movie:tmdb:{value}"))
+        .or_else(|| providers.get("Imdb").map(|value| format!("movie:imdb:{value}")))
+        .unwrap_or_else(|| format!("item:{}", item.id));
+    uuid_to_emby_guid(&Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes()))
+}
+
+fn premiere_date_to_utc(value: Option<NaiveDate>) -> Option<DateTime<Utc>> {
+    value.and_then(|date| {
+        date.and_hms_opt(0, 0, 0)
+            .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+    })
 }
 
 #[derive(Debug, FromRow)]
@@ -2977,6 +3012,26 @@ pub async fn get_media_streams(
     Ok(streams)
 }
 
+pub async fn get_media_chapters(
+    pool: &sqlx::PgPool,
+    media_item_id: Uuid,
+) -> Result<Vec<DbMediaChapter>, AppError> {
+    let chapters = sqlx::query_as::<_, DbMediaChapter>(
+        r#"
+        SELECT id, media_item_id, chapter_index, start_position_ticks, name, marker_type, image_path,
+               created_at, updated_at
+        FROM media_chapters
+        WHERE media_item_id = $1
+        ORDER BY chapter_index, start_position_ticks
+        "#,
+    )
+    .bind(media_item_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(chapters)
+}
+
 pub async fn get_media_source_with_streams(
     pool: &sqlx::PgPool,
     item: &DbMediaItem,
@@ -2984,6 +3039,7 @@ pub async fn get_media_source_with_streams(
 ) -> Result<MediaSourceDto, AppError> {
     // 获取媒体流
     let db_streams = get_media_streams(pool, item.id).await?;
+    let db_chapters = get_media_chapters(pool, item.id).await?;
     
     // 转换DbMediaStream为MediaStreamDto
     let mut media_streams = Vec::new();
@@ -3048,9 +3104,9 @@ pub async fn get_media_source_with_streams(
             channels: stream.channels,
             sample_rate: stream.sample_rate,
             is_external: stream.is_external,
-            delivery_method: None,
-            delivery_url: None,
-            supports_external_stream: false,
+            delivery_method,
+            delivery_url,
+            supports_external_stream: stream.is_external,
             path: None,
             aspect_ratio: stream.aspect_ratio.clone(),
             attachment_size: stream.attachment_size,
@@ -3089,6 +3145,10 @@ pub async fn get_media_source_with_streams(
     if media_streams.is_empty() {
         let mut dto = media_source_for_item(item);
         dto.server_id = Some(uuid_to_emby_guid(&server_id));
+        dto.chapters = db_chapters
+            .iter()
+            .map(chapter_to_value)
+            .collect();
         return Ok(dto);
     }
     
@@ -3104,7 +3164,7 @@ pub async fn get_media_source_with_streams(
     let media_source_id = format!("mediasource_{item_emby_id}");
 
     Ok(MediaSourceDto {
-        chapters: Vec::new(),
+        chapters: db_chapters.iter().map(chapter_to_value).collect(),
         id: media_source_id.clone(),
         path: strm_target.clone().unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
@@ -3133,17 +3193,17 @@ pub async fn get_media_source_with_streams(
         e_tag: Some(item.date_modified.timestamp().to_string()),
         bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
         default_audio_stream_index: media_streams.iter()
-            .position(|s| s.stream_type == "Audio" && s.is_default)
-            .map(|i| i as i32)
+            .find(|s| s.stream_type == "Audio" && s.is_default)
+            .map(|s| s.index)
             .or_else(|| media_streams.iter()
-                .position(|s| s.stream_type == "Audio")
-                .map(|i| i as i32)),
+                .find(|s| s.stream_type == "Audio")
+                .map(|s| s.index)),
         default_subtitle_stream_index: media_streams.iter()
-            .position(|s| s.stream_type == "Subtitle" && s.is_default)
-            .map(|i| i as i32)
+            .find(|s| s.stream_type == "Subtitle" && s.is_default)
+            .map(|s| s.index)
             .or_else(|| media_streams.iter()
-                .position(|s| s.stream_type == "Subtitle")
-                .map(|i| i as i32)),
+                .find(|s| s.stream_type == "Subtitle")
+                .map(|s| s.index)),
         run_time_ticks: item.runtime_ticks,
         container_start_time_ticks: None,
         is_infinite_stream: Some(false),
@@ -3176,6 +3236,10 @@ pub async fn save_media_streams(
 ) -> Result<(), crate::error::AppError> {
     // 先删除该媒体项的所有现有流
     sqlx::query("DELETE FROM media_streams WHERE media_item_id = $1")
+        .bind(media_item_id)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM media_chapters WHERE media_item_id = $1")
         .bind(media_item_id)
         .execute(pool)
         .await?;
@@ -3384,7 +3448,36 @@ pub async fn save_media_streams(
         .await?;
     }
 
+    for chapter in &analysis.chapters {
+        sqlx::query(
+            r#"
+            INSERT INTO media_chapters (
+                id, media_item_id, chapter_index, start_position_ticks, name, marker_type, image_path,
+                created_at, updated_at
+            ) VALUES (
+                gen_random_uuid(), $1, $2, $3, $4, $5, NULL, now(), now()
+            )
+            "#,
+        )
+        .bind(media_item_id)
+        .bind(chapter.chapter_index)
+        .bind(chapter.start_position_ticks)
+        .bind(chapter.name.clone())
+        .bind(chapter.marker_type.clone())
+        .execute(pool)
+        .await?;
+    }
+
     Ok(())
+}
+
+fn chapter_to_value(chapter: &DbMediaChapter) -> Value {
+    json!({
+        "StartPositionTicks": chapter.start_position_ticks,
+        "Name": chapter.name.clone().unwrap_or_else(|| format!("第 {:02} 章", chapter.chapter_index + 1)),
+        "MarkerType": chapter.marker_type.clone().unwrap_or_else(|| "Chapter".to_string()),
+        "ChapterIndex": chapter.chapter_index
+    })
 }
 
 pub async fn find_similar_items(

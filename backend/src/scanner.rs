@@ -1,5 +1,6 @@
 use crate::{
     error::AppError,
+    media_analyzer,
     models::{DbLibrary, ScanSummary},
     naming,
     repository::{self, UpsertMediaItem},
@@ -179,6 +180,7 @@ async fn import_movie_file(
     )
     .await?;
     sync_nfo_people(pool, movie_id, &nfo.people).await?;
+    analyze_imported_media(pool, movie_id, file).await?;
 
     Ok(())
 }
@@ -456,8 +458,57 @@ async fn import_tv_file(
         &episode_nfo.people
     };
     sync_nfo_people(pool, episode_id, episode_people).await?;
+    analyze_imported_media(pool, episode_id, file).await?;
 
     Ok(())
+}
+
+async fn analyze_imported_media(
+    pool: &sqlx::PgPool,
+    item_id: uuid::Uuid,
+    file: &Path,
+) -> Result<(), AppError> {
+    if !file.exists() {
+        return Ok(());
+    }
+
+    let analysis = if naming::is_strm(file) {
+        match std::fs::read_to_string(file) {
+            Ok(content) => {
+                let Some(target_url) = naming::strm_target_from_text(&content) else {
+                    tracing::debug!("扫描阶段跳过 .strm 分析，未找到有效 URL: {}", file.display());
+                    return Ok(());
+                };
+
+                match media_analyzer::analyze_remote_media(&target_url).await {
+                    Ok(analysis) => analysis,
+                    Err(error) => {
+                        tracing::warn!(
+                            "扫描阶段分析远程 .strm 失败 file={} url={} error={}",
+                            file.display(),
+                            target_url,
+                            error
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!("扫描阶段读取 .strm 文件失败 file={} error={}", file.display(), error);
+                return Ok(());
+            }
+        }
+    } else {
+        match media_analyzer::analyze_media_file(file).await {
+            Ok(analysis) => analysis,
+            Err(error) => {
+                tracing::warn!("扫描阶段分析媒体文件失败 file={} error={}", file.display(), error);
+                return Ok(());
+            }
+        }
+    };
+
+    repository::update_media_item_metadata(pool, item_id, &analysis).await
 }
 
 fn read_video_nfo(file: &Path) -> Option<NfoMetadata> {

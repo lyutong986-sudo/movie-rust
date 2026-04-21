@@ -124,6 +124,19 @@ pub struct DbMediaStream {
 }
 
 #[derive(Debug, Clone, FromRow)]
+pub struct DbMediaChapter {
+    pub id: Uuid,
+    pub media_item_id: Uuid,
+    pub chapter_index: i32,
+    pub start_position_ticks: i64,
+    pub name: Option<String>,
+    pub marker_type: Option<String>,
+    pub image_path: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct DbPerson {
     pub id: Uuid,
     pub name: String,
@@ -566,7 +579,7 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date_created: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub premiere_date: Option<NaiveDate>,
+    pub premiere_date: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub genres: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
