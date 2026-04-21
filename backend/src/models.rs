@@ -1039,6 +1039,8 @@ pub struct ItemsQuery {
     pub limit: Option<i64>,
     #[serde(default, alias = "ListItemIds", alias = "listItemIds")]
     pub list_item_ids: Option<String>,
+    #[serde(default)]
+    pub group_items_into_collections: Option<bool>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
 }

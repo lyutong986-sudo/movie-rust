@@ -11,6 +11,7 @@ use crate::{
     naming, security,
 };
 use chrono::{DateTime, NaiveDate, Utc};
+use regex::Regex;
 use serde_json::{json, Value};
 use sqlx::{FromRow, Postgres, QueryBuilder, Row};
 use std::{
@@ -2634,10 +2635,121 @@ fn provider_ids_to_map(value: &Value) -> BTreeMap<String, String> {
 
 fn provider_ids_for_item(item: &DbMediaItem) -> BTreeMap<String, String> {
     let mut providers = provider_ids_to_map(&item.provider_ids);
+    for (key, value) in provider_ids_from_local_nfo(item) {
+        providers.entry(key).or_insert(value);
+    }
     for (key, value) in provider_ids_from_path_text(&item.path) {
         providers.entry(key).or_insert(value);
     }
     providers
+}
+
+fn provider_ids_from_local_nfo(item: &DbMediaItem) -> BTreeMap<String, String> {
+    let mut providers = BTreeMap::new();
+    let media_path = Path::new(&item.path);
+
+    for candidate in nfo_candidates_for_item(item, media_path) {
+        let Ok(xml) = std::fs::read_to_string(&candidate) else {
+            continue;
+        };
+
+        for (key, value) in provider_ids_from_nfo_text(&xml) {
+            providers.entry(key).or_insert(value);
+        }
+
+        if !providers.is_empty() {
+            break;
+        }
+    }
+
+    providers
+}
+
+fn nfo_candidates_for_item(item: &DbMediaItem, media_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(parent) = media_path.parent() {
+        if let Some(stem) = media_path.file_stem().map(|value| value.to_string_lossy().to_string()) {
+            candidates.push(parent.join(format!("{stem}.nfo")));
+        }
+        candidates.push(parent.join("movie.nfo"));
+        candidates.push(parent.join("tvshow.nfo"));
+    }
+
+    if matches!(item.item_type.as_str(), "Season" | "Episode") {
+        if let Some(parent) = media_path.parent().and_then(Path::parent) {
+            candidates.push(parent.join("tvshow.nfo"));
+        }
+    }
+
+    candidates
+}
+
+fn provider_ids_from_nfo_text(xml: &str) -> BTreeMap<String, String> {
+    let mut providers = BTreeMap::new();
+
+    if let Some(value) = first_tag_value(xml, &["imdbid"]) {
+        providers.insert("Imdb".to_string(), value);
+    }
+    if let Some(value) = first_tag_value(xml, &["tmdbid"]) {
+        providers.insert("Tmdb".to_string(), value);
+    }
+    if let Some(value) = first_tag_value(xml, &["tvdbid"]) {
+        providers.insert("Tvdb".to_string(), value);
+    }
+    if let Some(value) = first_tag_value(xml, &["traktid"]) {
+        providers.insert("Trakt".to_string(), value);
+    }
+
+    if let Ok(regex) = Regex::new(r#"(?is)<uniqueid\b([^>]*)>(.*?)</uniqueid>"#) {
+        for captures in regex.captures_iter(xml) {
+            let attrs = captures.get(1).map(|value| value.as_str()).unwrap_or_default();
+            let raw_value = captures.get(2).map(|value| value.as_str()).unwrap_or_default();
+            let value = strip_xml_tags(raw_value).trim().to_string();
+            if value.is_empty() {
+                continue;
+            }
+
+            let provider = uniqueid_provider_name(attrs)
+                .unwrap_or_else(|| "Unknown".to_string());
+            providers.entry(provider).or_insert(value);
+        }
+    }
+
+    providers
+}
+
+fn first_tag_value(xml: &str, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        let pattern = format!(r"(?is)<{}\b[^>]*>(.*?)</{}>", regex::escape(name), regex::escape(name));
+        let regex = Regex::new(&pattern).ok()?;
+        let capture = regex.captures(xml)?;
+        let raw = capture.get(1)?.as_str();
+        let value = strip_xml_tags(raw).trim().to_string();
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+fn strip_xml_tags(value: &str) -> String {
+    if let Ok(regex) = Regex::new(r"(?is)<[^>]+>") {
+        regex.replace_all(value, "").to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn uniqueid_provider_name(attrs: &str) -> Option<String> {
+    let regex = Regex::new(r#"(?i)\b(?:type|provider)\s*=\s*["']([^"']+)["']"#).ok()?;
+    let raw = regex.captures(attrs)?.get(1)?.as_str().trim().to_ascii_lowercase();
+    let provider = match raw.as_str() {
+        "imdb" => "Imdb",
+        "tmdb" | "themoviedb" => "Tmdb",
+        "tvdb" | "thetvdb" => "Tvdb",
+        "trakt" => "Trakt",
+        other if !other.is_empty() => return Some(other.to_string()),
+        _ => return None,
+    };
+    Some(provider.to_string())
 }
 
 fn provider_ids_from_path_text(path: &str) -> BTreeMap<String, String> {
@@ -2676,6 +2788,20 @@ fn item_identity_scope(item: &DbMediaItem) -> &'static str {
 fn provider_value<'a>(providers: &'a BTreeMap<String, String>, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| providers.get(*key).map(String::as_str))
+}
+
+fn item_identity_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> Option<String> {
+    let scope = item_identity_scope(item);
+    provider_value(providers, &["Tmdb", "TMDb", "tmdb"])
+        .map(|value| format!("{scope}:tmdb:{value}"))
+        .or_else(|| {
+            provider_value(providers, &["Imdb", "IMDb", "imdb"])
+                .map(|value| format!("{scope}:imdb:{value}"))
+        })
+        .or_else(|| {
+            provider_value(providers, &["Tvdb", "TVDb", "tvdb"])
+                .map(|value| format!("{scope}:tvdb:{value}"))
+        })
 }
 
 fn presentation_unique_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> String {
@@ -3610,6 +3736,8 @@ pub async fn find_similar_items(
     user_id: Option<Uuid>,
     server_id: Uuid,
 ) -> Result<Vec<BaseItemDto>, AppError> {
+    let target_identity = item_identity_key(target_item, &provider_ids_for_item(target_item));
+
     // 简单的相似性算法：基于类型和标签查找相似项目
     // 1. 排除目标项目自身
     // 2. 匹配相同类型（电影、电视剧等）
@@ -3639,7 +3767,13 @@ pub async fn find_similar_items(
         
         let mut result = Vec::new();
         for item in similar_items {
+            if same_item_identity(target_identity.as_deref(), &item) {
+                continue;
+            }
             result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
+            if result.len() >= limit as usize {
+                break;
+            }
         }
         return Ok(result);
     }
@@ -3677,7 +3811,13 @@ pub async fn find_similar_items(
     
     let mut result = Vec::new();
     for item in similar_items {
+        if same_item_identity(target_identity.as_deref(), &item) {
+            continue;
+        }
         result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
+        if result.len() >= limit as usize {
+            break;
+        }
     }
     
     // 如果找到的项目不足限制数量，则用相同类型的其他项目补充
@@ -3709,9 +3849,23 @@ pub async fn find_similar_items(
         .await?;
 
         for item in additional_items {
+            if same_item_identity(target_identity.as_deref(), &item) {
+                continue;
+            }
             result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
+            if result.len() >= limit as usize {
+                break;
+            }
         }
     }
     
     Ok(result)
+}
+
+fn same_item_identity(target_identity: Option<&str>, candidate: &DbMediaItem) -> bool {
+    let Some(target_identity) = target_identity else {
+        return false;
+    };
+    let candidate_identity = item_identity_key(candidate, &provider_ids_for_item(candidate));
+    candidate_identity.as_deref() == Some(target_identity)
 }

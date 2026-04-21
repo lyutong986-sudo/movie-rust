@@ -152,6 +152,24 @@ async fn list_items_for_user(
     user_id: Uuid,
     query: ItemsQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
+    let requested_include_types = parse_include_types(query.include_item_types.as_deref());
+
+    // Emby 客户端进入详情页时会用 ListItemIds + IncludeItemTypes=BoxSet 查询“该条目所在合集”。
+    // 当前项目还没有真实 BoxSet 扫描/建模，这里返回空结果比误返回无关媒体更接近预期行为。
+    if !requested_item_ids.is_empty()
+        && !requested_include_types.is_empty()
+        && requested_include_types
+            .iter()
+            .all(|item_type| item_type.eq_ignore_ascii_case("BoxSet"))
+    {
+        return Ok(Json(QueryResult {
+            items: Vec::new(),
+            total_record_count: 0,
+            start_index: Some(query.start_index.unwrap_or(0).max(0)),
+        }));
+    }
+
     let recursive = query.recursive.unwrap_or_else(|| {
         query
             .search_term
@@ -172,7 +190,7 @@ async fn list_items_for_user(
                 ItemListOptions {
                     library_id: Some(library.id),
                     parent_id: None,
-                    item_ids: parse_emby_uuid_list(query.list_item_ids.as_deref()),
+                    item_ids: requested_item_ids.clone(),
                     include_types,
                     genres: parse_list(query.genres.as_deref()),
                     recursive,
@@ -195,8 +213,8 @@ async fn list_items_for_user(
         ItemListOptions {
             library_id: None,
             parent_id: query.parent_id,
-            item_ids: parse_emby_uuid_list(query.list_item_ids.as_deref()),
-            include_types: parse_include_types(query.include_item_types.as_deref()),
+            item_ids: requested_item_ids,
+            include_types: requested_include_types,
             genres: parse_list(query.genres.as_deref()),
             recursive,
             search_term: query.search_term,
