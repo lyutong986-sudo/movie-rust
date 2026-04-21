@@ -82,11 +82,22 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/{_media_source_id}/Attachments/{index}/Stream", get(attachment_stream).head(attachment_stream))
         .route("/Items/{item_id}/File", get(stream_file).head(stream_file))
         .route("/Items/{item_id}/Download", get(stream_file).head(stream_file))
-        // Catch-all routes must be last to avoid conflicts with specific routes
-        .route("/Videos/{item_id}/{*stream_path}", get(stream_video).head(stream_video))
-        .route("/videos/{item_id}/{*stream_path}", get(stream_video).head(stream_video))
-        .route("/Video/{item_id}/{*stream_path}", get(stream_video).head(stream_video))
-        .route("/video/{item_id}/{*stream_path}", get(stream_video).head(stream_video))
+        .route("/Videos/{item_id}/stream", get(stream_video).head(stream_video))
+        .route("/videos/{item_id}/stream", get(stream_video).head(stream_video))
+        .route("/Video/{item_id}/stream", get(stream_video).head(stream_video))
+        .route("/video/{item_id}/stream", get(stream_video).head(stream_video))
+        .route("/Videos/{item_id}/stream.{_container}", get(stream_video_with_container).head(stream_video_with_container))
+        .route("/videos/{item_id}/stream.{_container}", get(stream_video_with_container).head(stream_video_with_container))
+        .route("/Video/{item_id}/stream.{_container}", get(stream_video_with_container).head(stream_video_with_container))
+        .route("/video/{item_id}/stream.{_container}", get(stream_video_with_container).head(stream_video_with_container))
+        .route("/Videos/{item_id}/{_media_source_id}/stream", get(stream_video_for_media_source).head(stream_video_for_media_source))
+        .route("/videos/{item_id}/{_media_source_id}/stream", get(stream_video_for_media_source).head(stream_video_for_media_source))
+        .route("/Video/{item_id}/{_media_source_id}/stream", get(stream_video_for_media_source).head(stream_video_for_media_source))
+        .route("/video/{item_id}/{_media_source_id}/stream", get(stream_video_for_media_source).head(stream_video_for_media_source))
+        .route("/Videos/{item_id}/{_media_source_id}/stream.{_container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
+        .route("/videos/{item_id}/{_media_source_id}/stream.{_container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
+        .route("/Video/{item_id}/{_media_source_id}/stream.{_container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
+        .route("/video/{item_id}/{_media_source_id}/stream.{_container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
 }
 
 async fn active_encodings(
@@ -106,9 +117,27 @@ async fn active_encodings_delete(
 }
 
 #[derive(Debug, Deserialize)]
-struct VideoPath {
+struct VideoItemPath {
     item_id: String,
-    stream_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VideoItemContainerPath {
+    item_id: String,
+    container: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VideoMediaSourcePath {
+    item_id: String,
+    _media_source_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VideoMediaSourceContainerPath {
+    item_id: String,
+    _media_source_id: String,
+    container: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,44 +188,47 @@ struct AttachmentPath {
 
 async fn stream_video(
     State(state): State<AppState>,
-    Path(path): Path<VideoPath>,
+    Path(path): Path<VideoItemPath>,
     Query(query): Query<VideoStreamQuery>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    let requested_item_id = emby_id_to_uuid(&path.item_id)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
+    stream_video_request(&state, &path.item_id, None, None, query, request).await
+}
 
-    let (path_media_source_id, stream_path) =
-        split_media_source_prefix(path.stream_path.trim_start_matches('/'));
-    let effective_media_source_id = query
-        .media_source_id
-        .as_deref()
-        .or(path_media_source_id.as_deref());
-    let item_id = resolve_stream_item_id(requested_item_id, effective_media_source_id)?;
+async fn stream_video_with_container(
+    State(state): State<AppState>,
+    Path(path): Path<VideoItemContainerPath>,
+    Query(query): Query<VideoStreamQuery>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    stream_video_request(&state, &path.item_id, None, Some(path.container), query, request).await
+}
 
-    if let Some(subtitle_index) = parse_subtitle_stream_index(stream_path) {
-        auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-        return serve_subtitle(&state, item_id, subtitle_index, request).await;
-    }
+async fn stream_video_for_media_source(
+    State(state): State<AppState>,
+    Path(path): Path<VideoMediaSourcePath>,
+    Query(query): Query<VideoStreamQuery>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    stream_video_request(&state, &path.item_id, Some(path._media_source_id), None, query, request)
+        .await
+}
 
-    if !stream_path.starts_with("stream") {
-        return Err(AppError::NotFound("视频流路径不存在".to_string()));
-    }
-
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-
-    tracing::debug!(
-        requested_item_id = %requested_item_id,
-        resolved_item_id = %item_id,
-        media_source_id = ?effective_media_source_id,
-        container = ?query.container,
-        video_codec = ?query.video_codec,
-        audio_codec = ?query.audio_codec,
-        max_video_bitrate = ?query.max_video_bitrate,
-        "视频流请求参数"
-    );
-
-    serve_media_item(&state, item_id, request, Some(query)).await
+async fn stream_video_for_media_source_with_container(
+    State(state): State<AppState>,
+    Path(path): Path<VideoMediaSourceContainerPath>,
+    Query(query): Query<VideoStreamQuery>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    stream_video_request(
+        &state,
+        &path.item_id,
+        Some(path._media_source_id),
+        Some(path.container),
+        query,
+        request,
+    )
+    .await
 }
 
 async fn stream_file(
@@ -675,30 +707,41 @@ async fn serve_attachment(
         .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))
 }
 
-fn parse_subtitle_stream_index(stream_path: &str) -> Option<i32> {
-    let parts = stream_path.split('/').collect::<Vec<_>>();
-    if parts.len() < 4 {
-        return None;
+async fn stream_video_request(
+    state: &AppState,
+    item_id_str: &str,
+    path_media_source_id: Option<String>,
+    path_container: Option<String>,
+    mut query: VideoStreamQuery,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let requested_item_id = emby_id_to_uuid(item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
+
+    if query.container.is_none() {
+        query.container = path_container;
     }
 
-    if !parts.get(1)?.eq_ignore_ascii_case("Subtitles") {
-        return None;
-    }
+    let effective_media_source_id = query
+        .media_source_id
+        .as_deref()
+        .or(path_media_source_id.as_deref());
+    let item_id = resolve_stream_item_id(requested_item_id, effective_media_source_id)?;
 
-    parts.get(2)?.parse().ok()
-}
+    auth::require_auth(state, request.headers(), request.uri().query()).await?;
 
-fn split_media_source_prefix(stream_path: &str) -> (Option<String>, &str) {
-    let trimmed = stream_path.trim_start_matches('/');
-    let mut parts = trimmed.splitn(2, '/');
-    let first = parts.next().unwrap_or_default();
-    let rest = parts.next().unwrap_or_default();
+    tracing::debug!(
+        requested_item_id = %requested_item_id,
+        resolved_item_id = %item_id,
+        media_source_id = ?effective_media_source_id,
+        container = ?query.container,
+        video_codec = ?query.video_codec,
+        audio_codec = ?query.audio_codec,
+        max_video_bitrate = ?query.max_video_bitrate,
+        "视频流请求参数"
+    );
 
-    if first.to_ascii_lowercase().starts_with("mediasource_") && !rest.is_empty() {
-        (Some(first.to_string()), rest)
-    } else {
-        (None, trimmed)
-    }
+    serve_media_item(state, item_id, request, Some(query)).await
 }
 
 fn resolve_stream_item_id(default_item_id: Uuid, media_source_id: Option<&str>) -> Result<Uuid, AppError> {
