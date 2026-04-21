@@ -31,6 +31,7 @@ pub struct DbMediaItem {
     pub id: Uuid,
     pub parent_id: Option<Uuid>,
     pub name: String,
+    pub original_title: Option<String>,
     pub sort_name: String,
     pub item_type: String,
     pub media_type: String,
@@ -38,6 +39,8 @@ pub struct DbMediaItem {
     pub container: Option<String>,
     pub overview: Option<String>,
     pub production_year: Option<i32>,
+    pub official_rating: Option<String>,
+    pub community_rating: Option<f64>,
     pub runtime_ticks: Option<i64>,
     pub premiere_date: Option<NaiveDate>,
     pub series_name: Option<String>,
@@ -47,6 +50,9 @@ pub struct DbMediaItem {
     pub parent_index_number: Option<i32>,
     pub provider_ids: Value,
     pub genres: Vec<String>,
+    pub studios: Vec<String>,
+    pub tags: Vec<String>,
+    pub production_locations: Vec<String>,
     pub width: Option<i32>,
     pub height: Option<i32>,
     pub bit_rate: Option<i64>,
@@ -152,6 +158,7 @@ pub struct MediaItemRow {
     pub id: Uuid,
     pub parent_id: Option<Uuid>,
     pub name: String,
+    pub original_title: Option<String>,
     pub sort_name: String,
     pub item_type: String,
     pub media_type: String,
@@ -159,6 +166,8 @@ pub struct MediaItemRow {
     pub container: Option<String>,
     pub overview: Option<String>,
     pub production_year: Option<i32>,
+    pub official_rating: Option<String>,
+    pub community_rating: Option<f64>,
     pub runtime_ticks: Option<i64>,
     pub premiere_date: Option<NaiveDate>,
     pub series_name: Option<String>,
@@ -168,6 +177,9 @@ pub struct MediaItemRow {
     pub parent_index_number: Option<i32>,
     pub provider_ids: Value,
     pub genres: Vec<String>,
+    pub studios: Vec<String>,
+    pub tags: Vec<String>,
+    pub production_locations: Vec<String>,
     pub width: Option<i32>,
     pub height: Option<i32>,
     pub bit_rate: Option<i64>,
@@ -186,6 +198,7 @@ impl From<MediaItemRow> for DbMediaItem {
             id: value.id,
             parent_id: value.parent_id,
             name: value.name,
+            original_title: value.original_title,
             sort_name: value.sort_name,
             item_type: value.item_type,
             media_type: value.media_type,
@@ -193,6 +206,8 @@ impl From<MediaItemRow> for DbMediaItem {
             container: value.container,
             overview: value.overview,
             production_year: value.production_year,
+            official_rating: value.official_rating,
+            community_rating: value.community_rating,
             runtime_ticks: value.runtime_ticks,
             premiere_date: value.premiere_date,
             series_name: value.series_name,
@@ -202,6 +217,9 @@ impl From<MediaItemRow> for DbMediaItem {
             parent_index_number: value.parent_index_number,
             provider_ids: value.provider_ids,
             genres: value.genres,
+            studios: value.studios,
+            tags: value.tags,
+            production_locations: value.production_locations,
             width: value.width,
             height: value.height,
             bit_rate: value.bit_rate,
@@ -542,6 +560,8 @@ pub struct BaseItemDto {
     pub premiere_date: Option<NaiveDate>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub genres: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub genre_items: Vec<NameIdDto>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_ids: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -558,6 +578,14 @@ pub struct BaseItemDto {
     pub community_rating: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub remote_trailers: Vec<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub people: Vec<PersonDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub studios: Vec<NameIdDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tag_items: Vec<NameIdDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_preferences_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -594,6 +622,13 @@ pub struct BaseItemDto {
 pub struct ExternalUrlDto {
     pub name: String,
     pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct NameIdDto {
+    pub name: String,
+    pub id: String,
 }
 
 #[derive(Debug, Serialize)]
