@@ -3,7 +3,7 @@ use crate::{
     error::AppError,
     models::{
         uuid_to_emby_guid, optional_uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaItem, DbMediaStream,
-        DbPerson, DbPersonRole, DbUser, DbUserItemData, GenreDto, LibraryOptionsDto, LogFileDto,
+        DbPerson, DbPersonRole, DbUser, DbUserItemData, ExternalUrlDto, GenreDto, LibraryOptionsDto, LogFileDto,
         MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto, PersonDto, QueryResult,
         SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest, UserConfigurationDto,
         UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
@@ -1721,11 +1721,19 @@ pub async fn library_to_item_dto(
 
     Ok(BaseItemDto {
         name: library.name.clone(),
+        original_title: None,
         server_id: uuid_to_emby_guid(&server_id),
         id: uuid_to_emby_guid(&library.id),
+        etag: Some(library.created_at.timestamp().to_string()),
+        date_modified: Some(library.created_at),
+        can_delete: true,
+        can_download: false,
+        presentation_unique_key: Some(format!("{}_", uuid_to_emby_guid(&library.id))),
+        supports_sync: true,
         item_type: "CollectionFolder".to_string(),
         is_folder: true,
         sort_name: Some(library.name.to_lowercase()),
+        forced_sort_name: Some(library.name.to_lowercase()),
         collection_type: Some(library.collection_type.clone()),
         media_type: None,
         container: None,
@@ -1741,6 +1749,13 @@ pub async fn library_to_item_dto(
         premiere_date: None,
         genres: Vec::new(),
         provider_ids: BTreeMap::new(),
+        external_urls: Vec::new(),
+        production_locations: Vec::new(),
+        size: Some(0),
+        file_name: None,
+        official_rating: None,
+        community_rating: None,
+        remote_trailers: Vec::new(),
         series_name: None,
         season_name: None,
         index_number: None,
@@ -1751,6 +1766,10 @@ pub async fn library_to_item_dto(
         user_data: empty_user_data(),
         media_sources: Vec::new(),
         media_streams: Vec::new(),
+        part_count: 0,
+        chapters: Vec::new(),
+        locked_fields: Vec::new(),
+        lock_data: false,
         child_count: Some(child_count),
         primary_image_aspect_ratio: None,
     })
@@ -1759,11 +1778,19 @@ pub async fn library_to_item_dto(
 pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
     BaseItemDto {
         name: "Root".to_string(),
+        original_title: None,
         server_id: uuid_to_emby_guid(&server_id),
         id: uuid_to_emby_guid(&Uuid::nil()),
+        etag: None,
+        date_modified: Some(Utc::now()),
+        can_delete: false,
+        can_download: false,
+        presentation_unique_key: Some("root_".to_string()),
+        supports_sync: true,
         item_type: "Folder".to_string(),
         is_folder: true,
         sort_name: Some("root".to_string()),
+        forced_sort_name: Some("root".to_string()),
         collection_type: None,
         media_type: None,
         container: None,
@@ -1776,6 +1803,13 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         premiere_date: None,
         genres: Vec::new(),
         provider_ids: BTreeMap::new(),
+        external_urls: Vec::new(),
+        production_locations: Vec::new(),
+        size: Some(0),
+        file_name: None,
+        official_rating: None,
+        community_rating: None,
+        remote_trailers: Vec::new(),
         series_name: None,
         season_name: None,
         index_number: None,
@@ -1786,6 +1820,10 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         user_data: empty_user_data(),
         media_sources: Vec::new(),
         media_streams: Vec::new(),
+        part_count: 0,
+        chapters: Vec::new(),
+        locked_fields: Vec::new(),
+        lock_data: false,
         child_count: None,
         primary_image_aspect_ratio: None,
     }
@@ -1826,10 +1864,7 @@ pub async fn media_item_to_dto(
     } else {
         Vec::new()
     };
-    let media_streams = media_sources
-        .first()
-        .map(|source| source.media_streams.clone())
-        .unwrap_or_default();
+    let media_streams = Vec::new();
     let child_count = if is_folder {
         Some(count_item_children(pool, item.id).await?)
     } else {
@@ -1838,11 +1873,19 @@ pub async fn media_item_to_dto(
 
     Ok(BaseItemDto {
         name: item.name.clone(),
+        original_title: None,
         server_id: uuid_to_emby_guid(&server_id),
         id: uuid_to_emby_guid(&item.id),
+        etag: Some(item_etag(item)),
+        date_modified: Some(item.date_modified),
+        can_delete: true,
+        can_download: true,
+        presentation_unique_key: Some(format!("{}_", uuid_to_emby_guid(&item.id))),
+        supports_sync: true,
         item_type: item.item_type.clone(),
         is_folder,
         sort_name: Some(item.sort_name.clone()),
+        forced_sort_name: Some(item.sort_name.clone()),
         collection_type: None,
         media_type: (!is_folder).then(|| item.media_type.clone()),
         container: item.container.clone(),
@@ -1855,6 +1898,13 @@ pub async fn media_item_to_dto(
         premiere_date: item.premiere_date,
         genres: item.genres.clone(),
         provider_ids: provider_ids_to_map(&item.provider_ids),
+        external_urls: external_urls_from_provider_ids(&item.provider_ids),
+        production_locations: Vec::new(),
+        size: Some(item_size(item, is_folder)),
+        file_name: item_file_name(item),
+        official_rating: None,
+        community_rating: None,
+        remote_trailers: Vec::new(),
         series_name: item.series_name.clone(),
         season_name: item.season_name.clone(),
         index_number: item.index_number,
@@ -1865,6 +1915,10 @@ pub async fn media_item_to_dto(
         user_data,
         media_sources,
         media_streams,
+        part_count: if is_folder { 0 } else { 1 },
+        chapters: Vec::new(),
+        locked_fields: Vec::new(),
+        lock_data: false,
         child_count,
         primary_image_aspect_ratio: item.image_primary_path.as_ref().map(|_| 0.666_666_666_7),
     })
@@ -1875,20 +1929,18 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
     let strm_target = naming::is_strm(local_path)
         .then(|| naming::read_strm_target(local_path))
         .flatten();
-    let container = strm_target
-        .as_deref()
-        .and_then(naming::extension_from_url)
-        .or_else(|| item.container.clone())
+    let container = item
+        .container
+        .clone()
         .or_else(|| {
             local_path
                 .extension()
                 .map(|ext| ext.to_string_lossy().to_string())
         })
         .unwrap_or_else(|| "mp4".to_string());
-    let media_streams = media_streams_for_item(item);
     let is_remote = strm_target.is_some();
     let size = if is_remote {
-        None
+        Some(0)
     } else {
         std::fs::metadata(&item.path)
             .ok()
@@ -1896,10 +1948,14 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
     };
 
     MediaSourceDto {
-        id: uuid_to_emby_guid(&item.id),
+        id: format!("mediasource_{}", uuid_to_emby_guid(&item.id)),
         path: strm_target.unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
-        source_type: "Default".to_string(),
+        source_type: if is_remote {
+            "Default".to_string()
+        } else {
+            "Default".to_string()
+        },
         container: container.clone(),
         name: item.name.clone(),
         is_remote,
@@ -1912,29 +1968,13 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         supports_direct_play: true,
         supports_direct_stream: true,
         supports_transcoding: true,
-        direct_stream_url: Some(format!(
-            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
-            uuid_to_emby_guid(&item.id),
-            container,
-            uuid_to_emby_guid(&item.id),
-            uuid_to_emby_guid(&item.id)
-        )),
-        formats: vec![container.clone()],
+        direct_stream_url: None,
+        formats: Vec::new(),
         size,
         e_tag: Some(item.date_modified.timestamp().to_string()),
         bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
-        default_audio_stream_index: media_streams.iter()
-            .position(|s| s.stream_type == "Audio" && s.is_default)
-            .map(|i| i as i32)
-            .or_else(|| media_streams.iter()
-                .position(|s| s.stream_type == "Audio")
-                .map(|i| i as i32)),
-        default_subtitle_stream_index: media_streams.iter()
-            .position(|s| s.stream_type == "Subtitle" && s.is_default)
-            .map(|i| i as i32)
-            .or_else(|| media_streams.iter()
-                .position(|s| s.stream_type == "Subtitle")
-                .map(|i| i as i32)),
+        default_audio_stream_index: None,
+        default_subtitle_stream_index: None,
         run_time_ticks: item.runtime_ticks,
         container_start_time_ticks: None,
         is_infinite_stream: Some(false),
@@ -1948,7 +1988,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         video_3d_format: None,
         timestamp: None,
         required_http_headers: BTreeMap::new(),
-        add_api_key_to_direct_stream_url: Some(true),
+        add_api_key_to_direct_stream_url: Some(false),
         transcoding_url: None,
         transcoding_sub_protocol: None,
         transcoding_container: None,
@@ -1956,7 +1996,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         read_at_native_framerate: Some(false),
         item_id: Some(uuid_to_emby_guid(&item.id)),
         server_id: None,
-        media_streams,
+        media_streams: Vec::new(),
     }
 }
 
@@ -2243,6 +2283,52 @@ fn provider_ids_to_map(value: &Value) -> BTreeMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn external_urls_from_provider_ids(value: &Value) -> Vec<ExternalUrlDto> {
+    let providers = provider_ids_to_map(value);
+    let mut urls = Vec::new();
+
+    if let Some(imdb) = providers.get("Imdb").or_else(|| providers.get("IMDb")) {
+        urls.push(ExternalUrlDto {
+            name: "IMDb".to_string(),
+            url: format!("https://www.imdb.com/title/{imdb}"),
+        });
+    }
+
+    if let Some(tmdb) = providers.get("Tmdb").or_else(|| providers.get("TMDb")) {
+        urls.push(ExternalUrlDto {
+            name: "TheMovieDb".to_string(),
+            url: format!("https://www.themoviedb.org/movie/{tmdb}"),
+        });
+        urls.push(ExternalUrlDto {
+            name: "Trakt".to_string(),
+            url: format!("https://trakt.tv/search/tmdb/{tmdb}?id_type=movie"),
+        });
+    }
+
+    urls
+}
+
+fn item_etag(item: &DbMediaItem) -> String {
+    item.date_modified.timestamp().to_string()
+}
+
+fn item_size(item: &DbMediaItem, is_folder: bool) -> i64 {
+    if is_folder {
+        return 0;
+    }
+
+    std::fs::metadata(&item.path)
+        .ok()
+        .and_then(|metadata| i64::try_from(metadata.len()).ok())
+        .unwrap_or(0)
+}
+
+fn item_file_name(item: &DbMediaItem) -> Option<String> {
+    Path::new(&item.path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
 }
 
 fn user_item_data_to_dto(data: DbUserItemData) -> UserItemDataDto {
@@ -2541,8 +2627,11 @@ pub async fn get_media_source_with_streams(
             .and_then(|metadata| i64::try_from(metadata.len()).ok())
     };
 
+    let item_emby_id = uuid_to_emby_guid(&item.id);
+    let media_source_id = format!("mediasource_{item_emby_id}");
+
     Ok(MediaSourceDto {
-        id: uuid_to_emby_guid(&item.id),
+        id: media_source_id.clone(),
         path: strm_target.unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),
@@ -2560,10 +2649,10 @@ pub async fn get_media_source_with_streams(
         supports_transcoding: true,
         direct_stream_url: Some(format!(
             "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
-            uuid_to_emby_guid(&item.id),
+            item_emby_id,
             container,
-            uuid_to_emby_guid(&item.id),
-            uuid_to_emby_guid(&item.id)
+            media_source_id,
+            media_source_id
         )),
         formats: vec![container.clone()],
         size,
@@ -2594,13 +2683,13 @@ pub async fn get_media_source_with_streams(
         video_3d_format: None,
         timestamp: None,
         required_http_headers: BTreeMap::new(),
-        add_api_key_to_direct_stream_url: Some(true),
+        add_api_key_to_direct_stream_url: Some(false),
         transcoding_url: None,
         transcoding_sub_protocol: None,
         transcoding_container: None,
         analyze_duration_ms: None,
         read_at_native_framerate: Some(false),
-        item_id: Some(uuid_to_emby_guid(&item.id)),
+        item_id: Some(item_emby_id),
         server_id: Some(uuid_to_emby_guid(&server_id)),
         media_streams,
     })

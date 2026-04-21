@@ -500,13 +500,26 @@ pub struct StartupRemoteAccessRequest {
 #[serde(rename_all = "PascalCase")]
 pub struct BaseItemDto {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_title: Option<String>,
     pub server_id: String,
     pub id: String,
+    #[serde(rename = "Etag", skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_modified: Option<DateTime<Utc>>,
+    pub can_delete: bool,
+    pub can_download: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation_unique_key: Option<String>,
+    pub supports_sync: bool,
     #[serde(rename = "Type")]
     pub item_type: String,
     pub is_folder: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forced_sort_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collection_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -531,6 +544,20 @@ pub struct BaseItemDto {
     pub genres: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_ids: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub external_urls: Vec<ExternalUrlDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub production_locations: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub official_rating: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub community_rating: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remote_trailers: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -550,10 +577,23 @@ pub struct BaseItemDto {
     pub media_sources: Vec<MediaSourceDto>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub media_streams: Vec<MediaStreamDto>,
+    pub part_count: i32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub chapters: Vec<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub locked_fields: Vec<String>,
+    pub lock_data: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_image_aspect_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ExternalUrlDto {
+    pub name: String,
+    pub url: String,
 }
 
 #[derive(Debug, Serialize)]
