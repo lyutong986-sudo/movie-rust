@@ -42,6 +42,14 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
         .route("/Video/{item_id}/subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
         .route("/video/{item_id}/subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
+        .route("/Videos/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
+        .route("/videos/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
+        .route("/Video/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
+        .route("/video/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
+        .route("/Audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
+        .route("/audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
+        .route("/Audio/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(audio_hls_segment).head(audio_hls_segment))
+        .route("/audio/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(audio_hls_segment).head(audio_hls_segment))
         .route("/Items/{item_id}/File", get(stream_file))
         .route("/Items/{item_id}/Download", get(stream_file))
 }
@@ -58,6 +66,14 @@ async fn active_encodings(
 struct VideoPath {
     item_id: String,
     stream_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HlsSegmentPath {
+    item_id: String,
+    _playlist_id: String,
+    _segment_id: String,
+    _segment_container: String,
 }
 
 async fn stream_video(
@@ -131,6 +147,15 @@ async fn main_playlist(
     hls_playlist_response(&state, &item_id_str, query, request, false).await
 }
 
+async fn audio_master_playlist(
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Query(query): Query<VideoStreamQuery>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    hls_audio_playlist_response(&state, &item_id_str, query, request).await
+}
+
 async fn subtitles_playlist(
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
@@ -144,19 +169,27 @@ async fn subtitles_playlist(
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-    let _ = query;
+    let subtitle_index = query.subtitle_stream_index.unwrap_or(0);
 
-    let subtitle_path = repository::subtitle_path_for_stream_index(&item, 0);
+    let subtitle_path = repository::subtitle_path_for_stream_index(&item, subtitle_index);
     let codec = subtitle_path
         .as_deref()
         .and_then(StdPath::extension)
         .and_then(|value| value.to_str())
         .unwrap_or("vtt");
+    let passthrough = auth_passthrough_query(request.uri().query());
+    let subtitle_url = append_query_pairs(
+        &format!(
+            "/Videos/{}/Subtitles/{}/Stream.{}",
+            crate::models::uuid_to_emby_guid(&item.id),
+            subtitle_index,
+            codec
+        ),
+        &passthrough,
+    );
 
     let playlist = format!(
-        "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n/Videos/{}/Subtitles/0/Stream.{}\n#EXT-X-ENDLIST\n",
-        crate::models::uuid_to_emby_guid(&item.id),
-        codec
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{subtitle_url}\n#EXT-X-ENDLIST\n"
     );
     playlist_response(request.method(), playlist)
 }
@@ -261,10 +294,34 @@ async fn serve_media_item(
         .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))
 }
 
+async fn video_hls_segment(
+    State(state): State<AppState>,
+    Path(path): Path<HlsSegmentPath>,
+    Query(query): Query<VideoStreamQuery>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let item_id = emby_id_to_uuid(&path.item_id)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    serve_media_item(&state, item_id, request, Some(query)).await
+}
+
+async fn audio_hls_segment(
+    State(state): State<AppState>,
+    Path(path): Path<HlsSegmentPath>,
+    Query(query): Query<VideoStreamQuery>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let item_id = emby_id_to_uuid(&path.item_id)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    serve_media_item(&state, item_id, request, Some(query)).await
+}
+
 async fn hls_playlist_response(
     state: &AppState,
     item_id_str: &str,
-    _query: VideoStreamQuery,
+    query: VideoStreamQuery,
     request: Request<Body>,
     is_master: bool,
 ) -> Result<Response, AppError> {
@@ -278,21 +335,12 @@ async fn hls_playlist_response(
     let media_source =
         repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id).await?;
 
-    let direct_stream_path = media_source
-        .direct_stream_url
-        .clone()
-        .unwrap_or_else(|| {
-            format!(
-                "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
-                crate::models::uuid_to_emby_guid(&item.id),
-                media_source.container,
-                media_source.id,
-                media_source.id
-            )
-        });
-
     let passthrough = auth_passthrough_query(request.uri().query());
-    let direct_stream_url = append_query_pairs(&direct_stream_path, &passthrough);
+    let item_emby_id = crate::models::uuid_to_emby_guid(&item.id);
+    let media_source_id = query
+        .media_source_id
+        .clone()
+        .unwrap_or_else(|| media_source.id.clone());
 
     let playlist = if is_master {
         let bandwidth = media_source.bitrate.unwrap_or(8_000_000).max(1);
@@ -303,16 +351,68 @@ async fn hls_playlist_response(
             .and_then(|stream| Some((stream.width?, stream.height?)))
             .map(|(w, h)| format!("{w}x{h}"))
             .unwrap_or_else(|| "1920x1080".to_string());
+        let main_url = append_query_pairs(
+            &format!("/Videos/{item_emby_id}/main.m3u8"),
+            &extend_query_pairs(
+                passthrough.clone(),
+                vec![
+                    ("MediaSourceId".to_string(), media_source_id.clone()),
+                    ("mediaSourceId".to_string(), media_source_id.clone()),
+                ],
+            ),
+        );
 
         format!(
-            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={resolution}\n{direct_stream_url}\n"
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={resolution}\n{main_url}\n"
         )
     } else {
+        let segment_url = append_query_pairs(
+            &format!("/Videos/{item_emby_id}/hls1/main/0.ts"),
+            &extend_query_pairs(
+                passthrough,
+                video_query_pairs(&query, &media_source_id),
+            ),
+        );
         format!(
-            "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{direct_stream_url}\n#EXT-X-ENDLIST\n"
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{segment_url}\n#EXT-X-ENDLIST\n"
         )
     };
 
+    playlist_response(request.method(), playlist)
+}
+
+async fn hls_audio_playlist_response(
+    state: &AppState,
+    item_id_str: &str,
+    query: VideoStreamQuery,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let requested_item_id = emby_id_to_uuid(item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
+    auth::require_auth(state, request.headers(), request.uri().query()).await?;
+
+    let item = repository::get_media_item(&state.pool, requested_item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let media_source =
+        repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id).await?;
+    let passthrough = auth_passthrough_query(request.uri().query());
+    let item_emby_id = crate::models::uuid_to_emby_guid(&item.id);
+    let media_source_id = query
+        .media_source_id
+        .clone()
+        .unwrap_or_else(|| media_source.id.clone());
+    let segment_url = append_query_pairs(
+        &format!("/Audio/{item_emby_id}/hls1/main/0.ts"),
+        &extend_query_pairs(
+            passthrough,
+            video_query_pairs(&query, &media_source_id),
+        ),
+    );
+
+    let playlist = format!(
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{segment_url}\n#EXT-X-ENDLIST\n"
+    );
     playlist_response(request.method(), playlist)
 }
 
@@ -504,4 +604,61 @@ fn append_query_pairs(base: &str, pairs: &[(String, String)]) -> String {
     let encoded = serializer.finish();
 
     format!("{base}{separator}{encoded}")
+}
+
+fn extend_query_pairs(
+    mut base: Vec<(String, String)>,
+    extra: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    base.extend(extra);
+    base
+}
+
+fn video_query_pairs(
+    query: &VideoStreamQuery,
+    media_source_id: &str,
+) -> Vec<(String, String)> {
+    let mut pairs = vec![
+        ("MediaSourceId".to_string(), media_source_id.to_string()),
+        ("mediaSourceId".to_string(), media_source_id.to_string()),
+    ];
+
+    if let Some(value) = &query.container {
+        pairs.push(("Container".to_string(), value.clone()));
+    }
+    if let Some(value) = &query.audio_codec {
+        pairs.push(("AudioCodec".to_string(), value.clone()));
+    }
+    if let Some(value) = &query.video_codec {
+        pairs.push(("VideoCodec".to_string(), value.clone()));
+    }
+    if let Some(value) = query.audio_stream_index {
+        pairs.push(("AudioStreamIndex".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.subtitle_stream_index {
+        pairs.push(("SubtitleStreamIndex".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.start_time_ticks {
+        pairs.push(("StartTimeTicks".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.max_video_bitrate {
+        pairs.push(("VideoBitRate".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.max_audio_channels {
+        pairs.push(("MaxAudioChannels".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.max_width {
+        pairs.push(("MaxWidth".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.max_height {
+        pairs.push(("MaxHeight".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.play_session_id.clone() {
+        pairs.push(("PlaySessionId".to_string(), value));
+    }
+    if let Some(value) = query.static_param {
+        pairs.push(("Static".to_string(), value.to_string()));
+    }
+
+    pairs
 }
