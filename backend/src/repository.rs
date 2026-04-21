@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     error::AppError,
     models::{
-        uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaChapter, DbMediaItem,
+        emby_id_to_uuid, uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaChapter, DbMediaItem,
         DbMediaStream, DbPerson, DbUser, DbUserItemData, ExternalUrlDto, GenreDto, LibraryOptionsDto, LogFileDto,
         MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto, NameIdDto, PersonDto,
         QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
@@ -1189,6 +1189,36 @@ pub async fn count_item_children(pool: &sqlx::PgPool, parent_id: Uuid) -> Result
     )
 }
 
+pub async fn count_recursive_children(pool: &sqlx::PgPool, parent_id: Uuid) -> Result<i64, AppError> {
+    Ok(
+        sqlx::query_scalar(
+            r#"
+            WITH RECURSIVE descendants AS (
+                SELECT id FROM media_items WHERE parent_id = $1
+                UNION ALL
+                SELECT m.id
+                FROM media_items m
+                INNER JOIN descendants d ON m.parent_id = d.id
+            )
+            SELECT COUNT(*) FROM descendants
+            "#,
+        )
+        .bind(parent_id)
+        .fetch_one(pool)
+        .await?,
+    )
+}
+
+pub async fn count_series_seasons(pool: &sqlx::PgPool, series_id: Uuid) -> Result<i32, AppError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM media_items WHERE parent_id = $1 AND item_type = 'Season'",
+    )
+    .bind(series_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(i32::try_from(count).unwrap_or(i32::MAX))
+}
+
 pub fn library_options(library: &DbLibrary) -> LibraryOptionsDto {
     let mut options = serde_json::from_value::<LibraryOptionsDto>(library.library_options.clone())
         .unwrap_or_default();
@@ -1929,10 +1959,13 @@ pub async fn library_to_item_dto(
         original_title: None,
         server_id: uuid_to_emby_guid(&server_id),
         id: uuid_to_emby_guid(&library.id),
+        guid: Some(uuid_to_emby_guid(&library.id)),
         etag: Some(library.created_at.timestamp().to_string()),
         date_modified: Some(library.created_at),
         can_delete: true,
         can_download: false,
+        can_edit_items: Some(true),
+        supports_resume: Some(false),
         presentation_unique_key: Some(format!("{}_", uuid_to_emby_guid(&library.id))),
         supports_sync: true,
         item_type: "CollectionFolder".to_string(),
@@ -1953,6 +1986,10 @@ pub async fn library_to_item_dto(
         overview: None,
         date_created: Some(library.created_at),
         premiere_date: None,
+        video_codec: None,
+        audio_codec: None,
+        average_frame_rate: None,
+        real_frame_rate: None,
         genres: Vec::new(),
         genre_items: Vec::new(),
         provider_ids: BTreeMap::new(),
@@ -1970,6 +2007,10 @@ pub async fn library_to_item_dto(
         tag_items: Vec::new(),
         local_trailer_count: 0,
         display_preferences_id: Some(uuid_to_emby_guid(&library.id)),
+        recursive_item_count: Some(child_count),
+        season_count: None,
+        series_count: None,
+        status: None,
         series_name: None,
         series_id: None,
         season_name: None,
@@ -1979,6 +2020,13 @@ pub async fn library_to_item_dto(
         parent_index_number: None,
         image_tags: BTreeMap::new(),
         backdrop_image_tags: Vec::new(),
+        parent_logo_item_id: None,
+        parent_logo_image_tag: None,
+        parent_backdrop_item_id: None,
+        parent_backdrop_image_tags: Vec::new(),
+        parent_thumb_item_id: None,
+        parent_thumb_image_tag: None,
+        series_primary_image_tag: None,
         user_data: empty_user_data(),
         media_sources: Vec::new(),
         media_streams: Vec::new(),
@@ -1997,10 +2045,13 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         original_title: None,
         server_id: uuid_to_emby_guid(&server_id),
         id: uuid_to_emby_guid(&Uuid::nil()),
+        guid: Some(uuid_to_emby_guid(&Uuid::nil())),
         etag: None,
         date_modified: Some(Utc::now()),
         can_delete: false,
         can_download: false,
+        can_edit_items: Some(false),
+        supports_resume: Some(false),
         presentation_unique_key: Some("root_".to_string()),
         supports_sync: true,
         item_type: "Folder".to_string(),
@@ -2018,6 +2069,10 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         overview: None,
         date_created: Some(Utc::now()),
         premiere_date: None,
+        video_codec: None,
+        audio_codec: None,
+        average_frame_rate: None,
+        real_frame_rate: None,
         genres: Vec::new(),
         genre_items: Vec::new(),
         provider_ids: BTreeMap::new(),
@@ -2035,6 +2090,10 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         tag_items: Vec::new(),
         local_trailer_count: 0,
         display_preferences_id: Some("root".to_string()),
+        recursive_item_count: None,
+        season_count: None,
+        series_count: None,
+        status: None,
         series_name: None,
         series_id: None,
         season_name: None,
@@ -2044,6 +2103,13 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         parent_index_number: None,
         image_tags: BTreeMap::new(),
         backdrop_image_tags: Vec::new(),
+        parent_logo_item_id: None,
+        parent_logo_image_tag: None,
+        parent_backdrop_item_id: None,
+        parent_backdrop_image_tags: Vec::new(),
+        parent_thumb_item_id: None,
+        parent_thumb_image_tag: None,
+        series_primary_image_tag: None,
         user_data: empty_user_data(),
         media_sources: Vec::new(),
         media_streams: Vec::new(),
@@ -2109,14 +2175,33 @@ pub async fn media_item_to_dto(
         .or_else(|| media_sources.first())
         .map(|source| source.media_streams.clone())
         .unwrap_or_default();
+    let average_frame_rate = media_streams
+        .iter()
+        .find(|stream| stream.stream_type == "Video")
+        .and_then(|stream| stream.average_frame_rate);
+    let real_frame_rate = media_streams
+        .iter()
+        .find(|stream| stream.stream_type == "Video")
+        .and_then(|stream| stream.real_frame_rate);
     let chapters = media_sources
         .iter()
         .find(|source| source.source_type == "Default")
         .or_else(|| media_sources.first())
         .map(|source| source.chapters.clone())
         .unwrap_or_default();
+    let item_detail_media_sources = sanitize_media_sources_for_item_detail(media_sources);
     let child_count = if is_folder {
         Some(count_item_children(pool, item.id).await?)
+    } else {
+        None
+    };
+    let recursive_item_count = if is_folder {
+        Some(count_recursive_children(pool, item.id).await?)
+    } else {
+        None
+    };
+    let season_count = if item.item_type.eq_ignore_ascii_case("Series") {
+        Some(count_series_seasons(pool, item.id).await?)
     } else {
         None
     };
@@ -2128,16 +2213,64 @@ pub async fn media_item_to_dto(
         .image_primary_path
         .as_ref()
         .map(|_| item.date_modified.timestamp().to_string());
+    let parent_item = match item.parent_id {
+        Some(parent_id) => get_media_item(pool, parent_id).await?,
+        None => None,
+    };
+    let parent_logo_item_id = parent_item
+        .as_ref()
+        .filter(|parent| parent.logo_path.is_some())
+        .map(|parent| uuid_to_emby_guid(&parent.id));
+    let parent_logo_image_tag = parent_item
+        .as_ref()
+        .and_then(|parent| parent.logo_path.as_ref().map(|_| parent.date_modified.timestamp().to_string()));
+    let parent_backdrop_item_id = parent_item
+        .as_ref()
+        .filter(|parent| parent.backdrop_path.is_some())
+        .map(|parent| uuid_to_emby_guid(&parent.id));
+    let parent_backdrop_image_tags = parent_item
+        .as_ref()
+        .and_then(|parent| parent.backdrop_path.as_ref().map(|_| vec![parent.date_modified.timestamp().to_string()]))
+        .unwrap_or_default();
+    let parent_thumb_item_id = parent_item
+        .as_ref()
+        .filter(|parent| parent.thumb_path.is_some())
+        .map(|parent| uuid_to_emby_guid(&parent.id));
+    let parent_thumb_image_tag = parent_item
+        .as_ref()
+        .and_then(|parent| parent.thumb_path.as_ref().map(|_| parent.date_modified.timestamp().to_string()));
+    let series_primary_image_tag = if item.item_type.eq_ignore_ascii_case("Episode") {
+        if let Some(series_id_value) = &series_id {
+            if let Ok(series_uuid) = emby_id_to_uuid(series_id_value) {
+                get_media_item(pool, series_uuid)
+                    .await?
+                    .and_then(|series_item| {
+                        series_item
+                            .image_primary_path
+                            .map(|_| series_item.date_modified.timestamp().to_string())
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     Ok(BaseItemDto {
         name: item.name.clone(),
         original_title: item.original_title.clone(),
         server_id: uuid_to_emby_guid(&server_id),
         id: uuid_to_emby_guid(&item.id),
+        guid: Some(uuid_to_emby_guid(&item.id)),
         etag: Some(item_etag(item)),
         date_modified: Some(item.date_modified),
         can_delete: true,
         can_download: true,
+        can_edit_items: Some(true),
+        supports_resume: Some(!is_folder),
         presentation_unique_key: Some(presentation_unique_key(item, &provider_ids)),
         supports_sync: true,
         item_type: item.item_type.clone(),
@@ -2155,6 +2288,10 @@ pub async fn media_item_to_dto(
         overview: item.overview.clone(),
         date_created: Some(item.date_created),
         premiere_date: premiere_date_to_utc(item.premiere_date),
+        video_codec: item.video_codec.clone(),
+        audio_codec: item.audio_codec.clone(),
+        average_frame_rate,
+        real_frame_rate,
         genres: item.genres.clone(),
         genre_items,
         provider_ids: provider_ids.clone(),
@@ -2172,6 +2309,10 @@ pub async fn media_item_to_dto(
         tag_items: name_id_items_from_names(&item.tags),
         local_trailer_count: 0,
         display_preferences_id: Some(display_preferences_id(item, &provider_ids)),
+        recursive_item_count,
+        season_count,
+        series_count: None,
+        status: None,
         series_name: item.series_name.clone(),
         series_id,
         season_name: item.season_name.clone(),
@@ -2181,8 +2322,15 @@ pub async fn media_item_to_dto(
         parent_index_number: item.parent_index_number,
         image_tags,
         backdrop_image_tags,
+        parent_logo_item_id,
+        parent_logo_image_tag,
+        parent_backdrop_item_id,
+        parent_backdrop_image_tags,
+        parent_thumb_item_id,
+        parent_thumb_image_tag,
+        series_primary_image_tag,
         user_data,
-        media_sources,
+        media_sources: item_detail_media_sources,
         media_streams,
         part_count: if is_folder { 0 } else { 1 },
         chapters,
@@ -2191,6 +2339,21 @@ pub async fn media_item_to_dto(
         child_count,
         primary_image_aspect_ratio: item.image_primary_path.as_ref().map(|_| 0.666_666_666_7),
     })
+}
+
+fn sanitize_media_sources_for_item_detail(media_sources: Vec<MediaSourceDto>) -> Vec<MediaSourceDto> {
+    media_sources
+        .into_iter()
+        .map(|mut source| {
+            source.direct_stream_url = None;
+            source.transcoding_url = None;
+            source.transcoding_sub_protocol = None;
+            source.transcoding_container = None;
+            source.required_http_headers = BTreeMap::new();
+            source.add_api_key_to_direct_stream_url = Some(false);
+            source
+        })
+        .collect()
 }
 
 async fn resolve_series_and_season_ids(
@@ -2265,9 +2428,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         supports_probing: Some(true),
         video_3d_format: None,
         timestamp: None,
-        required_http_headers: BTreeMap::from([
-            ("Accept-Ranges".to_string(), "bytes".to_string()),
-        ]),
+        required_http_headers: BTreeMap::new(),
         add_api_key_to_direct_stream_url: Some(false),
         transcoding_url: None,
         transcoding_sub_protocol: None,

@@ -552,12 +552,18 @@ pub struct BaseItemDto {
     pub original_title: Option<String>,
     pub server_id: String,
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guid: Option<String>,
     #[serde(rename = "Etag", skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date_modified: Option<DateTime<Utc>>,
     pub can_delete: bool,
     pub can_download: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_edit_items: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_resume: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presentation_unique_key: Option<String>,
     pub supports_sync: bool,
@@ -590,6 +596,14 @@ pub struct BaseItemDto {
     pub date_created: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub premiere_date: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_frame_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub real_frame_rate: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub genres: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -619,6 +633,14 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_preferences_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub recursive_item_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub season_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub series_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_id: Option<String>,
@@ -636,6 +658,20 @@ pub struct BaseItemDto {
     pub image_tags: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub backdrop_image_tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_logo_item_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_logo_image_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_backdrop_item_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub parent_backdrop_image_tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_thumb_item_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_thumb_image_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_primary_image_tag: Option<String>,
     pub user_data: UserItemDataDto,
     pub media_sources: Vec<MediaSourceDto>,
     pub media_streams: Vec<MediaStreamDto>,
