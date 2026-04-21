@@ -2009,6 +2009,7 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             title: None,
             video_range: None,
             channel_layout: None,
+            subtitle_location_type: None,
         }];
     }
 
@@ -2060,6 +2061,7 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             title: None,
             video_range: None,
             channel_layout: None,
+            subtitle_location_type: None,
         },
         MediaStreamDto {
             index: 1,
@@ -2111,6 +2113,7 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             title: None,
             video_range: None,
             channel_layout: None,
+            subtitle_location_type: None,
         },
     ];
 
@@ -2183,6 +2186,7 @@ fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
                 title: None,
                 video_range: None,
                 channel_layout: None,
+                subtitle_location_type: Some("External".to_string()),
             }
         })
         .collect()
@@ -2406,7 +2410,11 @@ pub async fn get_media_source_with_streams(
     
     // 转换DbMediaStream为MediaStreamDto
     let mut media_streams = Vec::new();
+    let mut total_bitrate: i32 = 0;
     for stream in db_streams.iter() {
+        if let Some(br) = stream.bit_rate {
+            total_bitrate += br;
+        }
         let stream_type = match stream.stream_type.as_str() {
             "video" => "Video".to_string(),
             "audio" => "Audio".to_string(),
@@ -2429,6 +2437,24 @@ pub async fn get_media_source_with_streams(
             }
         } else {
             None
+        };
+
+        // 根据流类型设置交付方法和字幕位置类型
+        let (delivery_method, delivery_url, subtitle_location_type) = if stream_type == "Subtitle" {
+            if stream.is_external {
+                let delivery_url = Some(format!(
+                    "/Videos/{}/{}/Subtitles/{}/Stream.{}",
+                    item.id,
+                    item.id,
+                    stream.index,
+                    stream.codec.as_deref().unwrap_or("sub")
+                ));
+                (Some("External".to_string()), delivery_url, Some("External".to_string()))
+            } else {
+                (Some("Embed".to_string()), None, Some("InternalStream".to_string()))
+            }
+        } else {
+            (None, None, None)
         };
         
         media_streams.push(MediaStreamDto {
@@ -2478,6 +2504,7 @@ pub async fn get_media_source_with_streams(
             title: stream.title.clone(),
             video_range: stream.color_range.clone(),
             channel_layout: stream.channel_layout.clone(),
+            subtitle_location_type,
         });
     }
     
@@ -2702,50 +2729,18 @@ pub async fn save_media_streams(
             .and_then(|v| v.as_str())
             .map(String::from);
         
-        let attachment_size = stream.tags.as_ref()
-            .and_then(|tags| tags.get("attachment_size"))
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32);
-        let extended_video_sub_type = stream.tags.as_ref()
-            .and_then(|tags| tags.get("extended_video_sub_type"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let extended_video_sub_type_description = stream.tags.as_ref()
-            .and_then(|tags| tags.get("extended_video_sub_type_description"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let extended_video_type = stream.tags.as_ref()
-            .and_then(|tags| tags.get("extended_video_type"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let is_anamorphic = stream.tags.as_ref()
-            .and_then(|tags| tags.get("is_anamorphic"))
-            .and_then(|v| v.as_bool());
-        let is_avc = stream.tags.as_ref()
-            .and_then(|tags| tags.get("is_avc"))
-            .and_then(|v| v.as_bool());
-        let is_external_url = stream.tags.as_ref()
-            .and_then(|tags| tags.get("is_external_url"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let is_text_subtitle_stream = stream.tags.as_ref()
-            .and_then(|tags| tags.get("is_text_subtitle_stream"))
-            .and_then(|v| v.as_bool());
-        let level = stream.tags.as_ref()
-            .and_then(|tags| tags.get("level"))
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32);
-        let pixel_format = stream.tags.as_ref()
-            .and_then(|tags| tags.get("pixel_format"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let ref_frames = stream.tags.as_ref()
-            .and_then(|tags| tags.get("ref_frames"))
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32);
-        let stream_start_time_ticks = stream.tags.as_ref()
-            .and_then(|tags| tags.get("stream_start_time_ticks"))
-            .and_then(|v| v.as_i64());
+        let attachment_size = stream.attachment_size;
+        let extended_video_sub_type = stream.extended_video_sub_type.clone();
+        let extended_video_sub_type_description = stream.extended_video_sub_type_description.clone();
+        let extended_video_type = stream.extended_video_type.clone();
+        let is_anamorphic = stream.is_anamorphic;
+        let is_avc = stream.is_avc;
+        let is_external_url = stream.is_external_url.clone();
+        let is_text_subtitle_stream = stream.is_text_subtitle_stream;
+        let level = stream.level;
+        let pixel_format = stream.pixel_format.clone();
+        let ref_frames = stream.ref_frames;
+        let stream_start_time_ticks = stream.stream_start_time_ticks;
 
         sqlx::query(
             r#"

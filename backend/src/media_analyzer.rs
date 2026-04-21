@@ -30,6 +30,18 @@ pub struct MediaStreamInfo {
     pub channel_layout: Option<String>,
     pub sample_rate: Option<String>,
     pub language: Option<String>,
+    pub level: Option<i32>,
+    pub pixel_format: Option<String>,
+    pub ref_frames: Option<i32>,
+    pub stream_start_time_ticks: Option<i64>,
+    pub attachment_size: Option<i32>,
+    pub extended_video_sub_type: Option<String>,
+    pub extended_video_sub_type_description: Option<String>,
+    pub extended_video_type: Option<String>,
+    pub is_anamorphic: Option<bool>,
+    pub is_avc: Option<bool>,
+    pub is_external_url: Option<String>,
+    pub is_text_subtitle_stream: Option<bool>,
     pub tags: Option<serde_json::Value>,
 }
 
@@ -110,6 +122,43 @@ pub async fn analyze_media_file(path: &Path) -> Result<MediaAnalysisResult, Medi
                 .map(String::from);
             let tags = stream.get("tags").cloned();
 
+            let level = stream.get("level").and_then(|v| v.as_i64()).map(|v| v as i32);
+            let pixel_format = stream.get("pix_fmt").and_then(|v| v.as_str()).map(String::from);
+            let ref_frames = stream.get("refs").and_then(|v| v.as_i64()).map(|v| v as i32);
+            let stream_start_time_ticks = stream.get("start_time")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|seconds| (seconds * 10_000_000.0) as i64);
+            let attachment_size = stream.get("tags")
+                .and_then(|tags| tags.get("attachment_size"))
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32);
+            let extended_video_sub_type = stream.get("tags")
+                .and_then(|tags| tags.get("extended_video_sub_type"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let extended_video_sub_type_description = stream.get("tags")
+                .and_then(|tags| tags.get("extended_video_sub_type_description"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let extended_video_type = stream.get("tags")
+                .and_then(|tags| tags.get("extended_video_type"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let is_anamorphic = stream.get("tags")
+                .and_then(|tags| tags.get("is_anamorphic"))
+                .and_then(|v| v.as_bool());
+            let is_avc = stream.get("tags")
+                .and_then(|tags| tags.get("is_avc"))
+                .and_then(|v| v.as_bool());
+            let is_external_url = stream.get("tags")
+                .and_then(|tags| tags.get("is_external_url"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let is_text_subtitle_stream = stream.get("tags")
+                .and_then(|tags| tags.get("is_text_subtitle_stream"))
+                .and_then(|v| v.as_bool());
+
             Some(MediaStreamInfo {
                 index,
                 codec_type,
@@ -122,6 +171,18 @@ pub async fn analyze_media_file(path: &Path) -> Result<MediaAnalysisResult, Medi
                 channel_layout,
                 sample_rate,
                 language,
+                level,
+                pixel_format,
+                ref_frames,
+                stream_start_time_ticks,
+                attachment_size,
+                extended_video_sub_type,
+                extended_video_sub_type_description,
+                extended_video_type,
+                is_anamorphic,
+                is_avc,
+                is_external_url,
+                is_text_subtitle_stream,
                 tags,
             })
         })
@@ -210,6 +271,43 @@ pub async fn analyze_remote_media(url: &str) -> Result<MediaAnalysisResult, Medi
                 .map(String::from);
             let tags = stream.get("tags").cloned();
 
+            let level = stream.get("level").and_then(|v| v.as_i64()).map(|v| v as i32);
+            let pixel_format = stream.get("pix_fmt").and_then(|v| v.as_str()).map(String::from);
+            let ref_frames = stream.get("refs").and_then(|v| v.as_i64()).map(|v| v as i32);
+            let stream_start_time_ticks = stream.get("start_time")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|seconds| (seconds * 10_000_000.0) as i64);
+            let attachment_size = stream.get("tags")
+                .and_then(|tags| tags.get("attachment_size"))
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32);
+            let extended_video_sub_type = stream.get("tags")
+                .and_then(|tags| tags.get("extended_video_sub_type"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let extended_video_sub_type_description = stream.get("tags")
+                .and_then(|tags| tags.get("extended_video_sub_type_description"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let extended_video_type = stream.get("tags")
+                .and_then(|tags| tags.get("extended_video_type"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let is_anamorphic = stream.get("tags")
+                .and_then(|tags| tags.get("is_anamorphic"))
+                .and_then(|v| v.as_bool());
+            let is_avc = stream.get("tags")
+                .and_then(|tags| tags.get("is_avc"))
+                .and_then(|v| v.as_bool());
+            let is_external_url = stream.get("tags")
+                .and_then(|tags| tags.get("is_external_url"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let is_text_subtitle_stream = stream.get("tags")
+                .and_then(|tags| tags.get("is_text_subtitle_stream"))
+                .and_then(|v| v.as_bool());
+
             Some(MediaStreamInfo {
                 index,
                 codec_type,
@@ -222,6 +320,18 @@ pub async fn analyze_remote_media(url: &str) -> Result<MediaAnalysisResult, Medi
                 channel_layout,
                 sample_rate,
                 language,
+                level,
+                pixel_format,
+                ref_frames,
+                stream_start_time_ticks,
+                attachment_size,
+                extended_video_sub_type,
+                extended_video_sub_type_description,
+                extended_video_type,
+                is_anamorphic,
+                is_avc,
+                is_external_url,
+                is_text_subtitle_stream,
                 tags,
             })
         })

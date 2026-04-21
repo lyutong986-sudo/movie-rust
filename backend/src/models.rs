@@ -754,6 +754,8 @@ pub struct MediaStreamDto {
     pub video_range: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_layout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitle_location_type: Option<String>,
 }
 
 #[derive(Debug, Serialize, Default)]
