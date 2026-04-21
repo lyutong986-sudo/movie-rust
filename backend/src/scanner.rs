@@ -38,6 +38,9 @@ struct NfoMetadata {
     people: Vec<NfoPerson>,
     primary_image: Option<PathBuf>,
     backdrop_image: Option<PathBuf>,
+    logo_image: Option<PathBuf>,
+    thumb_image: Option<PathBuf>,
+    remote_trailers: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -124,6 +127,15 @@ async fn import_movie_file(
         .backdrop_image
         .clone()
         .or_else(|| file.parent().and_then(naming::find_backdrop_image));
+    let logo = nfo
+        .logo_image
+        .clone()
+        .or_else(|| find_item_image(file, &["logo", "clearlogo"]));
+    let thumb = nfo
+        .thumb_image
+        .clone()
+        .or_else(|| find_item_image(file, &["thumb", "landscape"]))
+        .or_else(|| backdrop.clone());
     let name = nfo.title.as_deref().unwrap_or(&parsed.title);
     let provider_ids = merge_provider_ids(nfo.provider_ids.clone(), provider_ids_from_path(file));
 
@@ -151,6 +163,9 @@ async fn import_movie_file(
             production_locations: &nfo.production_locations,
             image_primary_path: poster.as_deref(),
             backdrop_path: backdrop.as_deref(),
+            logo_path: logo.as_deref(),
+            thumb_path: thumb.as_deref(),
+            remote_trailers: &nfo.remote_trailers,
             series_name: None,
             season_name: None,
             index_number: None,
@@ -219,6 +234,15 @@ async fn import_tv_file(
         .backdrop_image
         .clone()
         .or_else(|| naming::find_backdrop_image(&series_path));
+    let series_logo = series_nfo
+        .logo_image
+        .clone()
+        .or_else(|| find_folder_art(&series_path, &["logo", "clearlogo"]));
+    let series_thumb = series_nfo
+        .thumb_image
+        .clone()
+        .or_else(|| find_folder_art(&series_path, &["thumb", "landscape"]))
+        .or_else(|| series_backdrop.clone());
     let season_poster = season_nfo
         .primary_image
         .clone()
@@ -249,6 +273,9 @@ async fn import_tv_file(
             production_locations: &series_nfo.production_locations,
             image_primary_path: series_poster.as_deref(),
             backdrop_path: series_backdrop.as_deref(),
+            logo_path: series_logo.as_deref(),
+            thumb_path: series_thumb.as_deref(),
+            remote_trailers: &series_nfo.remote_trailers,
             series_name: Some(&series_name),
             season_name: None,
             index_number: None,
@@ -310,6 +337,9 @@ async fn import_tv_file(
             },
             image_primary_path: season_poster.as_deref(),
             backdrop_path: series_backdrop.as_deref(),
+            logo_path: series_logo.as_deref(),
+            thumb_path: series_thumb.as_deref(),
+            remote_trailers: &season_nfo.remote_trailers,
             series_name: Some(&series_name),
             season_name: Some(&season_name),
             index_number: Some(season_number),
@@ -336,6 +366,13 @@ async fn import_tv_file(
         .backdrop_image
         .clone()
         .or_else(|| series_backdrop.clone());
+    let episode_logo = episode_nfo.logo_image.clone().or_else(|| series_logo.clone());
+    let episode_thumb = episode_nfo
+        .thumb_image
+        .clone()
+        .or_else(|| find_item_image(file, &["thumb", "landscape"]))
+        .or_else(|| series_thumb.clone())
+        .or_else(|| backdrop.clone());
     let episode_name = episode_nfo.title.as_deref().unwrap_or(&parsed.title);
     let episode_number = episode_nfo
         .episode_number
@@ -392,6 +429,13 @@ async fn import_tv_file(
             },
             image_primary_path: poster.as_deref(),
             backdrop_path: backdrop.as_deref(),
+            logo_path: episode_logo.as_deref(),
+            thumb_path: episode_thumb.as_deref(),
+            remote_trailers: if episode_nfo.remote_trailers.is_empty() {
+                &series_nfo.remote_trailers
+            } else {
+                &episode_nfo.remote_trailers
+            },
             series_name: Some(&series_name),
             season_name: Some(&season_name),
             index_number: episode_number,
@@ -469,12 +513,21 @@ fn read_nfo_file(path: &Path) -> Option<NfoMetadata> {
         people: nfo_people(&xml, parent),
         primary_image: None,
         backdrop_image: None,
+        logo_image: None,
+        thumb_image: None,
+        remote_trailers: remote_trailer_urls(&xml),
     };
 
     for image in nfo_images(&xml, parent) {
         match image.kind.as_deref() {
             Some("fanart") | Some("backdrop") | Some("background") => {
                 metadata.backdrop_image.get_or_insert(image.path);
+            }
+            Some("logo") | Some("clearlogo") => {
+                metadata.logo_image.get_or_insert(image.path);
+            }
+            Some("thumb") | Some("landscape") => {
+                metadata.thumb_image.get_or_insert(image.path);
             }
             _ => {
                 metadata.primary_image.get_or_insert(image.path);
@@ -690,6 +743,52 @@ fn nfo_images(xml: &str, base_dir: &Path) -> Vec<NfoImage> {
             })
         })
         .collect()
+}
+
+fn remote_trailer_urls(xml: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for tag in ["trailer", "youtube_trailer", "remote_trailer"] {
+        for value in repeated_tags(xml, tag) {
+            let value = value.trim();
+            if value.starts_with("http://") || value.starts_with("https://") {
+                urls.push(value.to_string());
+            }
+        }
+    }
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+fn find_item_image(file: &Path, names: &[&str]) -> Option<PathBuf> {
+    let parent = file.parent()?;
+    let stem = file.file_stem()?.to_string_lossy();
+    for name in names {
+        for extension in naming::IMAGE_EXTENSIONS {
+            for candidate in [
+                parent.join(format!("{stem}-{name}.{extension}")),
+                parent.join(format!("{stem}.{name}.{extension}")),
+                parent.join(format!("{name}.{extension}")),
+            ] {
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_folder_art(folder: &Path, names: &[&str]) -> Option<PathBuf> {
+    for name in names {
+        for extension in naming::IMAGE_EXTENSIONS {
+            let candidate = folder.join(format!("{name}.{extension}"));
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn image_aspect(attrs: &str) -> Option<String> {

@@ -62,6 +62,22 @@ async fn list_item_images(
             path,
         });
     }
+    if let Some(path) = item.logo_path {
+        images.push(ImageInfoDto {
+            image_type: "Logo".to_string(),
+            image_index: None,
+            image_tag: item.date_modified.timestamp().to_string(),
+            path,
+        });
+    }
+    if let Some(path) = item.thumb_path {
+        images.push(ImageInfoDto {
+            image_type: "Thumb".to_string(),
+            image_index: None,
+            image_tag: item.date_modified.timestamp().to_string(),
+            path,
+        });
+    }
 
     Ok(Json(images))
 }
@@ -97,10 +113,11 @@ async fn serve_item_image(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
-    let path = if image_type.eq_ignore_ascii_case("Backdrop") {
-        item.backdrop_path
-    } else {
-        item.image_primary_path
+    let path = match image_type.to_ascii_lowercase().as_str() {
+        "backdrop" => item.backdrop_path,
+        "logo" => item.logo_path,
+        "thumb" => item.thumb_path.or(item.backdrop_path),
+        _ => item.image_primary_path,
     }
     .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
 

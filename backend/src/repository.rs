@@ -1280,6 +1280,7 @@ pub async fn list_media_items(
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            logo_path, thumb_path, remote_trailers,
             date_created, date_modified, COUNT(*) OVER() AS total_count
         FROM media_items
         WHERE 1 = 1
@@ -1390,6 +1391,7 @@ pub async fn get_media_item(
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            logo_path, thumb_path, remote_trailers,
             date_created, date_modified
         FROM media_items
         WHERE id = $1
@@ -1673,6 +1675,9 @@ pub struct UpsertMediaItem<'a> {
     pub production_locations: &'a [String],
     pub image_primary_path: Option<&'a Path>,
     pub backdrop_path: Option<&'a Path>,
+    pub logo_path: Option<&'a Path>,
+    pub thumb_path: Option<&'a Path>,
+    pub remote_trailers: &'a [String],
     pub series_name: Option<&'a str>,
     pub season_name: Option<&'a str>,
     pub index_number: Option<i32>,
@@ -1695,6 +1700,12 @@ pub async fn upsert_media_item(
     let backdrop_text = input
         .backdrop_path
         .map(|value| value.to_string_lossy().to_string());
+    let logo_text = input
+        .logo_path
+        .map(|value| value.to_string_lossy().to_string());
+    let thumb_text = input
+        .thumb_path
+        .map(|value| value.to_string_lossy().to_string());
     let id = Uuid::new_v5(&input.library_id, path_text.as_bytes());
     let sort_name = sort_name_for_item(&input);
 
@@ -1705,7 +1716,8 @@ pub async fn upsert_media_item(
                 id, library_id, parent_id, name, original_title, sort_name, item_type, media_type, path,
                 container, overview, production_year, official_rating, community_rating,
                 runtime_ticks, premiere_date, provider_ids, genres, studios, tags, production_locations,
-                image_primary_path, backdrop_path, series_name, season_name, index_number,
+                image_primary_path, backdrop_path, logo_path, thumb_path, remote_trailers,
+                series_name, season_name, index_number,
                 index_number_end, parent_index_number, width, height, video_codec, audio_codec,
                 date_modified
             )
@@ -1716,6 +1728,7 @@ pub async fn upsert_media_item(
                 $15, $16, $17, $18, $19, $20, $21,
                 $22, $23, $24, $25, $26,
                 $27, $28, $29, $30, $31, $32,
+                $33, $34, $35,
                 now()
             )
         ON CONFLICT (library_id, path)
@@ -1740,6 +1753,9 @@ pub async fn upsert_media_item(
             production_locations = EXCLUDED.production_locations,
             image_primary_path = EXCLUDED.image_primary_path,
             backdrop_path = EXCLUDED.backdrop_path,
+            logo_path = EXCLUDED.logo_path,
+            thumb_path = EXCLUDED.thumb_path,
+            remote_trailers = EXCLUDED.remote_trailers,
             series_name = EXCLUDED.series_name,
             season_name = EXCLUDED.season_name,
             index_number = EXCLUDED.index_number,
@@ -1775,6 +1791,9 @@ pub async fn upsert_media_item(
     .bind(input.production_locations)
     .bind(image_text)
     .bind(backdrop_text)
+    .bind(logo_text)
+    .bind(thumb_text)
+    .bind(input.remote_trailers)
     .bind(input.series_name)
     .bind(input.season_name)
     .bind(input.index_number)
@@ -1990,6 +2009,18 @@ pub async fn media_item_to_dto(
             item.date_modified.timestamp().to_string(),
         );
     }
+    if item.logo_path.is_some() {
+        image_tags.insert(
+            "Logo".to_string(),
+            item.date_modified.timestamp().to_string(),
+        );
+    }
+    if item.thumb_path.is_some() {
+        image_tags.insert(
+            "Thumb".to_string(),
+            item.date_modified.timestamp().to_string(),
+        );
+    }
 
     let backdrop_image_tags = if item.backdrop_path.is_some() {
         vec![item.date_modified.timestamp().to_string()]
@@ -2057,7 +2088,7 @@ pub async fn media_item_to_dto(
         bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
         official_rating: item.official_rating.clone(),
         community_rating: item.community_rating,
-        remote_trailers: Vec::new(),
+        remote_trailers: remote_trailers_from_urls(&item.remote_trailers),
         people,
         studios: name_id_items_from_names(&item.studios),
         tag_items: name_id_items_from_names(&item.tags),
@@ -2180,6 +2211,7 @@ async fn media_sources_for_item(
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            logo_path, thumb_path, remote_trailers,
             date_created, date_modified
         FROM media_items
         WHERE id <> $1
@@ -2737,6 +2769,13 @@ fn source_name_from_url(value: &str) -> Option<String> {
     let file_name = Path::new(url.path()).file_stem()?.to_string_lossy();
     let name = file_name.trim();
     (!name.is_empty()).then(|| name.to_string())
+}
+
+fn remote_trailers_from_urls(urls: &[String]) -> Vec<Value> {
+    urls.iter()
+        .filter(|url| !url.trim().is_empty())
+        .map(|url| json!({ "Url": url }))
+        .collect()
 }
 
 fn user_item_data_to_dto(data: DbUserItemData) -> UserItemDataDto {
