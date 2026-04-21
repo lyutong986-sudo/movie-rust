@@ -581,22 +581,28 @@ pub async fn upsert_person_role(
     role: Option<&str>,
     sort_order: i32,
 ) -> Result<(), AppError> {
+    let role_key = role
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("<none>");
+    let id = Uuid::new_v5(
+        &media_item_id,
+        format!("person-role:{person_id}:{role_type}:{role_key}:{sort_order}").as_bytes(),
+    );
+
     sqlx::query(
         r#"
         INSERT INTO person_roles (
             id, person_id, media_item_id, role_type, role, sort_order, created_at, updated_at
         )
         VALUES ($1, $2, $3, $4, $5, $6, now(), now())
-        ON CONFLICT (person_id, media_item_id, role_type, role)
+        ON CONFLICT (id)
         DO UPDATE SET
             sort_order = EXCLUDED.sort_order,
             updated_at = now()
         "#,
     )
-    .bind(Uuid::new_v5(
-        &media_item_id,
-        format!("person-role:{person_id}:{role_type}:{}", role.unwrap_or_default()).as_bytes(),
-    ))
+    .bind(id)
     .bind(person_id)
     .bind(media_item_id)
     .bind(role_type)
