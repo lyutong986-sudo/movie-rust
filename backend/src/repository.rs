@@ -2380,6 +2380,9 @@ pub async fn get_media_streams(
                color_transfer, color_primaries, rotation, hdr10_plus_present_flag,
                dv_version_major, dv_version_minor, dv_profile, dv_level,
                dv_bl_signal_compatibility_id, comment, time_base, codec_time_base,
+               attachment_size, extended_video_sub_type, extended_video_sub_type_description,
+               extended_video_type, is_anamorphic, is_avc, is_external_url,
+               is_text_subtitle_stream, level, pixel_format, ref_frames, stream_start_time_ticks,
                created_at, updated_at
         FROM media_streams
         WHERE media_item_id = $1
@@ -2447,30 +2450,30 @@ pub async fn get_media_source_with_streams(
             supports_external_stream: false,
             path: None,
             aspect_ratio: stream.aspect_ratio.clone(),
-            attachment_size: None,
+            attachment_size: stream.attachment_size,
             average_frame_rate: stream.average_frame_rate,
             bit_depth: stream.bit_depth,
             color_primaries: stream.color_primaries.clone(),
             color_space: stream.color_space.clone(),
             color_transfer: stream.color_transfer.clone(),
             display_language: stream.language.clone(),
-            extended_video_sub_type: None,
-            extended_video_sub_type_description: None,
-            extended_video_type: None,
-            is_anamorphic: None,
-            is_avc: None,
-            is_external_url: None,
+            extended_video_sub_type: stream.extended_video_sub_type.clone(),
+            extended_video_sub_type_description: stream.extended_video_sub_type_description.clone(),
+            extended_video_type: stream.extended_video_type.clone(),
+            is_anamorphic: stream.is_anamorphic,
+            is_avc: stream.is_avc,
+            is_external_url: stream.is_external_url.clone(),
             is_hearing_impaired: Some(stream.is_hearing_impaired),
             is_interlaced: Some(stream.is_interlaced),
-            is_text_subtitle_stream: None,
-            level: None,
-            pixel_format: None,
+            is_text_subtitle_stream: stream.is_text_subtitle_stream,
+            level: stream.level,
+            pixel_format: stream.pixel_format.clone(),
             profile: stream.profile.clone(),
             protocol: Some("File".to_string()),
             real_frame_rate: stream.real_frame_rate,
-            ref_frames: None,
+            ref_frames: stream.ref_frames,
             rotation: stream.rotation,
-            stream_start_time_ticks: None,
+            stream_start_time_ticks: stream.stream_start_time_ticks,
             time_base: stream.time_base.clone(),
             title: stream.title.clone(),
             video_range: stream.color_range.clone(),
@@ -2698,6 +2701,51 @@ pub async fn save_media_streams(
             .and_then(|tags| tags.get("codec_time_base"))
             .and_then(|v| v.as_str())
             .map(String::from);
+        
+        let attachment_size = stream.tags.as_ref()
+            .and_then(|tags| tags.get("attachment_size"))
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+        let extended_video_sub_type = stream.tags.as_ref()
+            .and_then(|tags| tags.get("extended_video_sub_type"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let extended_video_sub_type_description = stream.tags.as_ref()
+            .and_then(|tags| tags.get("extended_video_sub_type_description"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let extended_video_type = stream.tags.as_ref()
+            .and_then(|tags| tags.get("extended_video_type"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let is_anamorphic = stream.tags.as_ref()
+            .and_then(|tags| tags.get("is_anamorphic"))
+            .and_then(|v| v.as_bool());
+        let is_avc = stream.tags.as_ref()
+            .and_then(|tags| tags.get("is_avc"))
+            .and_then(|v| v.as_bool());
+        let is_external_url = stream.tags.as_ref()
+            .and_then(|tags| tags.get("is_external_url"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let is_text_subtitle_stream = stream.tags.as_ref()
+            .and_then(|tags| tags.get("is_text_subtitle_stream"))
+            .and_then(|v| v.as_bool());
+        let level = stream.tags.as_ref()
+            .and_then(|tags| tags.get("level"))
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+        let pixel_format = stream.tags.as_ref()
+            .and_then(|tags| tags.get("pixel_format"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let ref_frames = stream.tags.as_ref()
+            .and_then(|tags| tags.get("ref_frames"))
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+        let stream_start_time_ticks = stream.tags.as_ref()
+            .and_then(|tags| tags.get("stream_start_time_ticks"))
+            .and_then(|v| v.as_i64());
 
         sqlx::query(
             r#"
@@ -2709,11 +2757,15 @@ pub async fn save_media_streams(
                 color_transfer, color_primaries, rotation, hdr10_plus_present_flag,
                 dv_version_major, dv_version_minor, dv_profile, dv_level,
                 dv_bl_signal_compatibility_id, comment, time_base, codec_time_base,
+                attachment_size, extended_video_sub_type, extended_video_sub_type_description,
+                extended_video_type, is_anamorphic, is_avc, is_external_url,
+                is_text_subtitle_stream, level, pixel_format, ref_frames, stream_start_time_ticks,
                 created_at, updated_at
             ) VALUES (
                 gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, false, false, $10,
                 $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-                $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, now(), now()
+                $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38,
+                $39, $40, $41, $42, $43, $44, $45, $46, $47, now(), now()
             )
             "#,
         )
@@ -2752,6 +2804,18 @@ pub async fn save_media_streams(
         .bind(comment)
         .bind(time_base)
         .bind(codec_time_base)
+        .bind(attachment_size)
+        .bind(extended_video_sub_type)
+        .bind(extended_video_sub_type_description)
+        .bind(extended_video_type)
+        .bind(is_anamorphic)
+        .bind(is_avc)
+        .bind(is_external_url)
+        .bind(is_text_subtitle_stream)
+        .bind(level)
+        .bind(pixel_format)
+        .bind(ref_frames)
+        .bind(stream_start_time_ticks)
         .execute(pool)
         .await?;
     }
