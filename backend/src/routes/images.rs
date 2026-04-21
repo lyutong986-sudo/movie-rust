@@ -14,6 +14,7 @@ use axum::{
     Json, Router,
 };
 use reqwest::Client;
+use serde::Serialize;
 use std::{
     collections::HashMap,
     path::{Path as StdPath, PathBuf},
@@ -25,6 +26,7 @@ use tower_http::services::ServeFile;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/Items/{item_id}/Images", get(list_item_images))
+        .route("/Items/{item_id}/ThumbnailSet", get(get_item_thumbnail_set))
         .route(
             "/Items/{item_id}/Images/{image_type}",
             get(get_item_image).head(get_item_image),
@@ -125,16 +127,20 @@ async fn get_item_image(
     Path((item_id_str, image_type)): Path<(String, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    serve_item_image(session.0, state, item_id_str, image_type, request).await
+    serve_item_image(session.0, state, item_id_str, image_type, None, request).await
 }
 
 async fn get_item_image_with_tail(
     session: OptionalAuthSession,
     State(state): State<AppState>,
-    Path((item_id_str, image_type, _image_tail)): Path<(String, String, String)>,
+    Path((item_id_str, image_type, image_tail)): Path<(String, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    serve_item_image(session.0, state, item_id_str, image_type, request).await
+    let image_index = image_tail
+        .split('/')
+        .next()
+        .and_then(|value| value.parse::<i32>().ok());
+    serve_item_image(session.0, state, item_id_str, image_type, image_index, request).await
 }
 
 async fn get_person_image(
@@ -220,10 +226,24 @@ async fn serve_item_image(
     state: AppState,
     item_id_str: String,
     image_type: String,
+    image_index: Option<i32>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+
+    if image_type.eq_ignore_ascii_case("Chapter") {
+        let chapter_index = image_index.unwrap_or(0);
+        let chapters = repository::get_media_chapters(&state.pool, item_id).await?;
+        let chapter = chapters
+            .into_iter()
+            .find(|chapter| chapter.chapter_index == chapter_index)
+            .ok_or_else(|| AppError::NotFound("章节图片不存在".to_string()))?;
+        let path = chapter
+            .image_path
+            .ok_or_else(|| AppError::NotFound("章节图片不存在".to_string()))?;
+        return serve_image(&path, request).await;
+    }
 
     if let Some(path) =
         repository::get_missing_episode_image_path(&state.pool, item_id, &image_type).await?
@@ -244,6 +264,41 @@ async fn serve_item_image(
     .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
 
     serve_image(&path, request).await
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct ThumbnailSetResponse {
+    thumbnails: Vec<ThumbnailSetItem>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct ThumbnailSetItem {
+    position_ticks: i64,
+    image_tag: String,
+}
+
+async fn get_item_thumbnail_set(
+    _session: OptionalAuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<ThumbnailSetResponse>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    let chapters = repository::get_media_chapters(&state.pool, item_id).await?;
+    let thumbnails = chapters
+        .into_iter()
+        .filter_map(|chapter| {
+            chapter.image_path.as_ref()?;
+            Some(ThumbnailSetItem {
+                position_ticks: chapter.start_position_ticks,
+                image_tag: chapter.updated_at.timestamp().to_string(),
+            })
+        })
+        .collect();
+
+    Ok(Json(ThumbnailSetResponse { thumbnails }))
 }
 
 async fn serve_user_image(
