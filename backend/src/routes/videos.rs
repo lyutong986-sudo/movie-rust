@@ -339,12 +339,22 @@ async fn serve_media_item(
     if let Some(ref q) = query {
         let has_transcoding_params = q.video_codec.is_some()
             || q.audio_codec.is_some()
-            || q.max_video_bitrate.is_some()
+            || effective_max_video_bitrate(q).is_some()
             || q.max_audio_channels.is_some()
             || q.max_width.is_some()
             || q.max_height.is_some()
-            || q.max_framerate.is_some();
+            || q.max_framerate.is_some()
+            || q.transcoding_protocol.is_some()
+            || q.segment_container.is_some()
+            || q.segment_length.is_some()
+            || q.min_segments.is_some()
+            || q.break_on_non_key_frames.is_some()
+            || q.video_stream_index.is_some();
         if has_transcoding_params {
+            let mut transcoding_query = q.clone();
+            if transcoding_query.max_video_bitrate.is_none() {
+                transcoding_query.max_video_bitrate = q.max_streaming_bitrate.or(q.video_bitrate);
+            }
             let user_id = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap();
             let device_id = "default-device".to_string();
 
@@ -357,7 +367,7 @@ async fn serve_media_item(
 
                 match state
                     .transcoder
-                    .start_transcoding(item_id, user_id, &device_id, q.clone(), &path)
+                    .start_transcoding(item_id, user_id, &device_id, transcoding_query, &path)
                     .await
                 {
                     Ok(session) => {
@@ -800,7 +810,25 @@ fn auth_passthrough_query(query: Option<&str>) -> Vec<(String, String)> {
         .filter_map(|(key, value)| {
             let key_ref = key.as_ref();
             match key_ref {
-                "api_key" | "apiKey" | "ApiKey" | "X-Emby-Token" | "X-MediaBrowser-Token" | "PlaySessionId" | "Static" => {
+                "api_key"
+                | "apiKey"
+                | "ApiKey"
+                | "X-Emby-Token"
+                | "X-MediaBrowser-Token"
+                | "PlaySessionId"
+                | "playSessionId"
+                | "Static"
+                | "static"
+                | "DeviceId"
+                | "deviceId"
+                | "MediaSourceId"
+                | "mediaSourceId"
+                | "StartTimeTicks"
+                | "startTimeTicks"
+                | "SubtitleStreamIndex"
+                | "subtitleStreamIndex"
+                | "AudioStreamIndex"
+                | "audioStreamIndex" => {
                     Some((key.into_owned(), value.into_owned()))
                 }
                 _ => None,
@@ -836,6 +864,7 @@ fn video_query_pairs(
     query: &VideoStreamQuery,
     media_source_id: &str,
 ) -> Vec<(String, String)> {
+    let effective_max_bitrate = effective_max_video_bitrate(query);
     let mut pairs = vec![
         ("MediaSourceId".to_string(), media_source_id.to_string()),
         ("mediaSourceId".to_string(), media_source_id.to_string()),
@@ -859,11 +888,21 @@ fn video_query_pairs(
     if let Some(value) = query.start_time_ticks {
         pairs.push(("StartTimeTicks".to_string(), value.to_string()));
     }
-    if let Some(value) = query.max_video_bitrate {
+    if let Some(value) = effective_max_bitrate {
         pairs.push(("VideoBitRate".to_string(), value.to_string()));
+        pairs.push(("MaxStreamingBitrate".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.video_bitrate {
+        pairs.push(("VideoBitrate".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.audio_bitrate {
+        pairs.push(("AudioBitrate".to_string(), value.to_string()));
     }
     if let Some(value) = query.max_audio_channels {
         pairs.push(("MaxAudioChannels".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.max_framerate {
+        pairs.push(("MaxFramerate".to_string(), value.to_string()));
     }
     if let Some(value) = query.max_width {
         pairs.push(("MaxWidth".to_string(), value.to_string()));
@@ -871,12 +910,76 @@ fn video_query_pairs(
     if let Some(value) = query.max_height {
         pairs.push(("MaxHeight".to_string(), value.to_string()));
     }
+    if let Some(value) = query.max_ref_frames {
+        pairs.push(("MaxRefFrames".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.max_video_bit_depth {
+        pairs.push(("MaxVideoBitDepth".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.max_audio_bit_depth {
+        pairs.push(("MaxAudioBitDepth".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.audio_sample_rate {
+        pairs.push(("AudioSampleRate".to_string(), value.to_string()));
+    }
     if let Some(value) = query.play_session_id.clone() {
         pairs.push(("PlaySessionId".to_string(), value));
     }
     if let Some(value) = query.static_param {
         pairs.push(("Static".to_string(), value.to_string()));
     }
+    if let Some(value) = &query.subtitle_method {
+        pairs.push(("SubtitleMethod".to_string(), value.clone()));
+    }
+    if let Some(value) = query.require_avc {
+        pairs.push(("RequireAvc".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.de_interlace {
+        pairs.push(("DeInterlace".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.require_non_anamorphic {
+        pairs.push(("RequireNonAnamorphic".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.transcoding_max_audio_channels {
+        pairs.push(("TranscodingMaxAudioChannels".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.cpu_core_limit {
+        pairs.push(("CPUCoreLimit".to_string(), value.to_string()));
+    }
+    if let Some(value) = &query.live_stream_id {
+        pairs.push(("LiveStreamId".to_string(), value.clone()));
+    }
+    if let Some(value) = query.enable_mpegts_m2_ts_mode {
+        pairs.push(("EnableMpegtsM2TsMode".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.video_stream_index {
+        pairs.push(("VideoStreamIndex".to_string(), value.to_string()));
+    }
+    if let Some(value) = &query.transcoding_protocol {
+        pairs.push(("TranscodingProtocol".to_string(), value.clone()));
+    }
+    if let Some(value) = &query.segment_container {
+        pairs.push(("SegmentContainer".to_string(), value.clone()));
+    }
+    if let Some(value) = query.segment_length {
+        pairs.push(("SegmentLength".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.min_segments {
+        pairs.push(("MinSegments".to_string(), value.to_string()));
+    }
+    if let Some(value) = query.break_on_non_key_frames {
+        pairs.push(("BreakOnNonKeyFrames".to_string(), value.to_string()));
+    }
+    if let Some(value) = &query.manifest_subtitles {
+        pairs.push(("ManifestSubtitles".to_string(), value.clone()));
+    }
 
     pairs
+}
+
+fn effective_max_video_bitrate(query: &VideoStreamQuery) -> Option<i64> {
+    query
+        .max_video_bitrate
+        .or(query.max_streaming_bitrate)
+        .or(query.video_bitrate)
 }

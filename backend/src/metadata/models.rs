@@ -26,6 +26,29 @@ pub struct ExternalSeriesMetadata {
     pub metadata: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalMovieMetadata {
+    pub external_id: String,
+    pub provider: String,
+    pub name: Option<String>,
+    pub original_title: Option<String>,
+    pub overview: Option<String>,
+    pub premiere_date: Option<NaiveDate>,
+    pub production_year: Option<i32>,
+    pub community_rating: Option<f64>,
+    pub critic_rating: Option<f64>,
+    pub official_rating: Option<String>,
+    pub runtime_ticks: Option<i64>,
+    pub genres: Vec<String>,
+    pub studios: Vec<String>,
+    pub production_locations: Vec<String>,
+    pub provider_ids: HashMap<String, String>,
+    pub poster_image_url: Option<String>,
+    pub backdrop_image_url: Option<String>,
+    pub remote_trailers: Vec<String>,
+    pub metadata: Value,
+}
+
 /// 外部人物搜索结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalPersonSearchResult {

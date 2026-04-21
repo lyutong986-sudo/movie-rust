@@ -664,7 +664,11 @@ async fn refresh_item_metadata(
     }
 
     let Some(tmdb_id) = tmdb_id_from_provider_ids(&item.provider_ids) else {
-        tracing::debug!(item_id = %item.id, "跳过远程元数据刷新：Series 缺少 TMDb provider id");
+        tracing::debug!(
+            item_id = %item.id,
+            item_type = %item.item_type,
+            "跳过远程元数据刷新：条目缺少 TMDb provider id"
+        );
         return Ok(StatusCode::NO_CONTENT);
     };
     let metadata_manager = state
@@ -680,6 +684,9 @@ async fn refresh_item_metadata(
         repository::update_media_item_series_metadata(&state.pool, item.id, &metadata).await?;
         let catalog = provider.get_series_episode_catalog(&tmdb_id).await?;
         repository::replace_series_episode_catalog(&state.pool, item.id, &catalog).await?;
+    } else if item.item_type.eq_ignore_ascii_case("Movie") {
+        let metadata = provider.get_movie_details(&tmdb_id).await?;
+        repository::update_media_item_movie_metadata(&state.pool, item.id, &metadata).await?;
     }
 
     let media_type = if item.item_type.eq_ignore_ascii_case("Series") {

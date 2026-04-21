@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     error::AppError,
-    metadata::models::ExternalSeriesMetadata,
+    metadata::models::{ExternalMovieMetadata, ExternalSeriesMetadata},
     metadata::provider::{ExternalEpisodeCatalogItem, ExternalPersonCredit},
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaChapter, DbMediaItem,
@@ -4934,6 +4934,77 @@ pub async fn update_media_item_series_metadata(
     .bind(&metadata.studios)
     .bind(&metadata.production_locations)
     .bind(provider_ids)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn update_media_item_movie_metadata(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    metadata: &ExternalMovieMetadata,
+) -> Result<(), AppError> {
+    let provider_ids = serde_json::to_value(&metadata.provider_ids).unwrap_or_else(|_| json!({}));
+
+    sqlx::query(
+        r#"
+        UPDATE media_items
+        SET name = COALESCE($2, name),
+            original_title = COALESCE($3, original_title),
+            overview = COALESCE($4, overview),
+            premiere_date = COALESCE($5, premiere_date),
+            production_year = COALESCE($6, production_year),
+            community_rating = COALESCE($7, community_rating),
+            critic_rating = COALESCE($8, critic_rating),
+            official_rating = COALESCE($9, official_rating),
+            runtime_ticks = COALESCE($10, runtime_ticks),
+            genres = CASE
+                WHEN cardinality($11::text[]) > 0 THEN $11
+                ELSE genres
+            END,
+            studios = CASE
+                WHEN cardinality($12::text[]) > 0 THEN $12
+                ELSE studios
+            END,
+            production_locations = CASE
+                WHEN cardinality($13::text[]) > 0 THEN $13
+                ELSE production_locations
+            END,
+            provider_ids = provider_ids || $14::jsonb,
+            image_primary_path = CASE
+                WHEN image_primary_path IS NULL OR image_primary_path = '' THEN COALESCE($15, image_primary_path)
+                ELSE image_primary_path
+            END,
+            backdrop_path = CASE
+                WHEN backdrop_path IS NULL OR backdrop_path = '' THEN COALESCE($16, backdrop_path)
+                ELSE backdrop_path
+            END,
+            remote_trailers = CASE
+                WHEN cardinality($17::text[]) > 0 THEN $17
+                ELSE remote_trailers
+            END,
+            date_modified = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(item_id)
+    .bind(metadata.name.as_deref())
+    .bind(metadata.original_title.as_deref())
+    .bind(metadata.overview.as_deref())
+    .bind(metadata.premiere_date)
+    .bind(metadata.production_year)
+    .bind(metadata.community_rating)
+    .bind(metadata.critic_rating)
+    .bind(metadata.official_rating.as_deref())
+    .bind(metadata.runtime_ticks)
+    .bind(&metadata.genres)
+    .bind(&metadata.studios)
+    .bind(&metadata.production_locations)
+    .bind(provider_ids)
+    .bind(metadata.poster_image_url.as_deref())
+    .bind(metadata.backdrop_image_url.as_deref())
+    .bind(&metadata.remote_trailers)
     .execute(pool)
     .await?;
 

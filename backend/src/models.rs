@@ -1065,81 +1065,88 @@ pub struct PlaybackInfoResponse {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct VideoStreamQuery {
-    #[serde(default)]
+    #[serde(default, alias = "container")]
     pub container: Option<String>,
-    #[serde(default, rename = "Static")]
+    #[serde(default, rename = "Static", alias = "static")]
     pub static_param: Option<bool>,
     #[serde(default, rename = "MediaSourceId", alias = "mediaSourceId")]
     pub media_source_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "videoCodec")]
     pub video_codec: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "audioCodec")]
     pub audio_codec: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "audioStreamIndex")]
     pub audio_stream_index: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "subtitleStreamIndex")]
     pub subtitle_stream_index: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "VideoBitRate", alias = "videoBitrate", alias = "videoBitRate")]
     pub video_bitrate: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "AudioBitRate", alias = "audioBitrate", alias = "audioBitRate")]
     pub audio_bitrate: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "maxAudioChannels")]
     pub max_audio_channels: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "maxFramerate")]
     pub max_framerate: Option<f64>,
-    #[serde(default)]
+    #[serde(default, alias = "maxWidth")]
     pub max_width: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "maxHeight")]
     pub max_height: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "maxRefFrames")]
     pub max_ref_frames: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "maxVideoBitDepth")]
     pub max_video_bit_depth: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "maxAudioBitDepth")]
     pub max_audio_bit_depth: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "audioSampleRate")]
     pub audio_sample_rate: Option<i32>,
     #[serde(default, rename = "PlaySessionId", alias = "playSessionId")]
     pub play_session_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "copyTimestamps")]
     pub copy_timestamps: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "startTimeTicks")]
     pub start_time_ticks: Option<i64>,
     #[serde(default)]
     pub width: Option<i32>,
     #[serde(default)]
     pub height: Option<i32>,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "MaxVideoBitRate",
+        alias = "maxVideoBitrate",
+        alias = "maxVideoBitRate"
+    )]
     pub max_video_bitrate: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "MaxStreamingBitrate", alias = "maxStreamingBitrate")]
+    pub max_streaming_bitrate: Option<i64>,
+    #[serde(default, alias = "subtitleMethod")]
     pub subtitle_method: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "requireAvc")]
     pub require_avc: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "deInterlace")]
     pub de_interlace: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "requireNonAnamorphic")]
     pub require_non_anamorphic: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "transcodingMaxAudioChannels")]
     pub transcoding_max_audio_channels: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "cpuCoreLimit")]
     pub cpu_core_limit: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "liveStreamId")]
     pub live_stream_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "enableMpegtsM2TsMode")]
     pub enable_mpegts_m2_ts_mode: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "videoStreamIndex")]
     pub video_stream_index: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "transcodingProtocol")]
     pub transcoding_protocol: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "segmentContainer")]
     pub segment_container: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "segmentLength")]
     pub segment_length: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "minSegments")]
     pub min_segments: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "breakOnNonKeyFrames")]
     pub break_on_non_key_frames: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "manifestSubtitles")]
     pub manifest_subtitles: Option<String>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
@@ -1750,43 +1757,43 @@ pub struct GetSimilarItems {
 pub struct PlaybackInfoDto {
     #[serde(default)]
     pub id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "userId")]
     pub user_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, alias = "maxStreamingBitrate")]
     pub max_streaming_bitrate: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "startTimeTicks")]
     pub start_time_ticks: Option<i64>,
-    #[serde(default)]
+    #[serde(default, alias = "audioStreamIndex")]
     pub audio_stream_index: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "subtitleStreamIndex")]
     pub subtitle_stream_index: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "maxAudioChannels")]
     pub max_audio_channels: Option<i32>,
-    #[serde(default)]
+    #[serde(default, alias = "mediaSourceId")]
     pub media_source_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "liveStreamId")]
     pub live_stream_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "deviceProfile")]
     pub device_profile: Option<DeviceProfile>,
-    #[serde(default)]
+    #[serde(default, alias = "enableDirectPlay")]
     pub enable_direct_play: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "enableDirectStream")]
     pub enable_direct_stream: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "enableTranscoding")]
     pub enable_transcoding: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "allowInterlacedVideoStreamCopy")]
     pub allow_interlaced_video_stream_copy: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "allowVideoStreamCopy")]
     pub allow_video_stream_copy: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "allowAudioStreamCopy")]
     pub allow_audio_stream_copy: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "isPlayback")]
     pub is_playback: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "autoOpenLiveStream")]
     pub auto_open_live_stream: Option<bool>,
-    #[serde(default)]
+    #[serde(default, alias = "currentPlaySessionId")]
     pub current_play_session_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "alwaysBurnInSubtitleWhenTranscoding")]
     pub always_burn_in_subtitle_when_transcoding: Option<bool>,
 }
 

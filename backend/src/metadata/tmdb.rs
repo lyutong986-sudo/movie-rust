@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::{
-    models::{ExternalPerson, ExternalPersonSearchResult, ExternalSeriesMetadata},
+    models::{
+        ExternalMovieMetadata, ExternalPerson, ExternalPersonSearchResult, ExternalSeriesMetadata,
+    },
     provider::{
         ExternalEpisodeCatalogItem, ExternalItemPerson, ExternalPersonCredit, MetadataProvider,
     },
@@ -123,6 +125,27 @@ impl TmdbProvider {
 
         let credits: TmdbPersonCredits = response.json().await?;
         Ok(credits)
+    }
+
+
+    async fn get_movie_details_internal(&self, movie_id: &str) -> Result<TmdbMovieDetails, AppError> {
+        let mut params = HashMap::new();
+        self.add_api_key(&mut params);
+        params.insert(
+            "append_to_response".to_string(),
+            "external_ids,release_dates,videos".to_string(),
+        );
+
+        let url = self.build_url(&format!("/movie/{movie_id}"));
+        let response = self
+            .client
+            .get(&url)
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
     }
 
     async fn get_tv_details_internal(&self, tv_id: &str) -> Result<TmdbTvDetails, AppError> {
@@ -392,6 +415,64 @@ impl MetadataProvider for TmdbProvider {
         })
     }
 
+    async fn get_movie_details(&self, provider_id: &str) -> Result<ExternalMovieMetadata, AppError> {
+        let details = self.get_movie_details_internal(provider_id).await?;
+        let premiere_date = parse_tmdb_date(details.release_date.as_deref());
+        let runtime_ticks = details.runtime.map(|minutes| i64::from(minutes) * 60 * 10_000_000);
+        let official_rating = tmdb_movie_certification(&details.release_dates);
+
+        let mut provider_ids = HashMap::new();
+        provider_ids.insert("Tmdb".to_string(), details.id.to_string());
+        if let Some(external_ids) = &details.external_ids {
+            if let Some(value) = external_ids.imdb_id.as_ref().filter(|value| !value.trim().is_empty()) {
+                provider_ids.insert("Imdb".to_string(), value.clone());
+            }
+        }
+
+        let remote_trailers = details
+            .videos
+            .as_ref()
+            .map(tmdb_trailer_urls)
+            .unwrap_or_default();
+        let metadata = serde_json::to_value(&details).unwrap_or_default();
+
+        Ok(ExternalMovieMetadata {
+            external_id: details.id.to_string(),
+            provider: "tmdb".to_string(),
+            name: details.title,
+            original_title: details.original_title,
+            overview: details.overview,
+            premiere_date,
+            production_year: premiere_date.map(|date| date.year()),
+            community_rating: details.vote_average,
+            critic_rating: None,
+            official_rating,
+            runtime_ticks,
+            genres: details.genres.into_iter().map(|genre| genre.name).collect(),
+            studios: details
+                .production_companies
+                .into_iter()
+                .map(|company| company.name)
+                .filter(|name| !name.trim().is_empty())
+                .collect(),
+            production_locations: details
+                .production_countries
+                .into_iter()
+                .map(|country| country.name)
+                .filter(|name| !name.trim().is_empty())
+                .collect(),
+            provider_ids,
+            poster_image_url: details
+                .poster_path
+                .map(|path| format!("{}/original{}", self.config.image_base_url, path)),
+            backdrop_image_url: details
+                .backdrop_path
+                .map(|path| format!("{}/original{}", self.config.image_base_url, path)),
+            remote_trailers,
+            metadata,
+        })
+    }
+
     async fn get_item_people(
         &self,
         media_type: &str,
@@ -526,6 +607,33 @@ fn weekday_name(value: chrono::Weekday) -> String {
     .to_string()
 }
 
+fn tmdb_movie_certification(release_dates: &Option<TmdbMovieReleaseDates>) -> Option<String> {
+    let release_dates = release_dates.as_ref()?;
+    release_dates
+        .results
+        .iter()
+        .find(|entry| entry.iso_3166_1.eq_ignore_ascii_case("US"))
+        .or_else(|| release_dates.results.first())
+        .and_then(|entry| {
+            entry.release_dates
+                .iter()
+                .find_map(|date| {
+                    let certification = date.certification.trim();
+                    (!certification.is_empty()).then(|| certification.to_string())
+                })
+        })
+}
+
+fn tmdb_trailer_urls(videos: &TmdbVideoCollection) -> Vec<String> {
+    videos
+        .results
+        .iter()
+        .filter(|video| video.site.eq_ignore_ascii_case("YouTube"))
+        .filter(|video| video.kind.eq_ignore_ascii_case("Trailer"))
+        .map(|video| format!("https://www.youtube.com/watch?v={}", video.key))
+        .collect()
+}
+
 // TMDB API响应结构
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -651,6 +759,28 @@ struct TmdbTvDetails {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+struct TmdbMovieDetails {
+    id: i32,
+    title: Option<String>,
+    original_title: Option<String>,
+    overview: Option<String>,
+    release_date: Option<String>,
+    runtime: Option<i32>,
+    vote_average: Option<f64>,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
+    #[serde(default)]
+    genres: Vec<TmdbNamedItem>,
+    #[serde(default)]
+    production_companies: Vec<TmdbNamedItem>,
+    #[serde(default)]
+    production_countries: Vec<TmdbNamedItem>,
+    external_ids: Option<TmdbMovieExternalIds>,
+    release_dates: Option<TmdbMovieReleaseDates>,
+    videos: Option<TmdbVideoCollection>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct TmdbNamedItem {
     name: String,
 }
@@ -659,6 +789,43 @@ struct TmdbNamedItem {
 struct TmdbExternalIds {
     imdb_id: Option<String>,
     tvdb_id: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbMovieExternalIds {
+    imdb_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbMovieReleaseDates {
+    #[serde(default)]
+    results: Vec<TmdbMovieReleaseDateCountry>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbMovieReleaseDateCountry {
+    iso_3166_1: String,
+    #[serde(default)]
+    release_dates: Vec<TmdbMovieReleaseDate>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbMovieReleaseDate {
+    certification: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbVideoCollection {
+    #[serde(default)]
+    results: Vec<TmdbVideoResult>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbVideoResult {
+    key: String,
+    site: String,
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

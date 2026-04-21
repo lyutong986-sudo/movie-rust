@@ -206,6 +206,7 @@ async fn import_movie_file(
     .await?;
     sync_nfo_people(pool, movie_id, &nfo.people).await?;
     refresh_remote_people(pool, metadata_manager, movie_id, "movie", &provider_ids).await;
+    refresh_movie_remote_metadata(pool, metadata_manager, movie_id, &provider_ids).await;
     analyze_imported_media(pool, movie_id, file).await?;
 
     Ok(())
@@ -564,6 +565,46 @@ async fn refresh_series_remote_metadata(
                 tmdb_id = %tmdb_id,
                 error = %error,
                 "刷新远程剧集元数据失败"
+            );
+        }
+    }
+}
+
+async fn refresh_movie_remote_metadata(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<&MetadataProviderManager>,
+    movie_id: uuid::Uuid,
+    provider_ids: &Value,
+) {
+    let Some(metadata_manager) = metadata_manager else {
+        return;
+    };
+    let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
+        return;
+    };
+    let Some(provider) = metadata_manager.get_provider("tmdb") else {
+        return;
+    };
+
+    match provider.get_movie_details(&tmdb_id).await {
+        Ok(metadata) => {
+            if let Err(error) =
+                repository::update_media_item_movie_metadata(pool, movie_id, &metadata).await
+            {
+                tracing::warn!(
+                    movie_id = %movie_id,
+                    tmdb_id = %tmdb_id,
+                    error = %error,
+                    "刷新远程电影元数据落库失败"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                movie_id = %movie_id,
+                tmdb_id = %tmdb_id,
+                error = %error,
+                "刷新远程电影元数据失败"
             );
         }
     }
