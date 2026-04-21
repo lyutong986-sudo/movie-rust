@@ -50,12 +50,20 @@ pub fn router() -> Router<AppState> {
             post(legacy_mark_favorite).delete(legacy_unmark_favorite),
         )
         .route(
+            "/Users/{user_id}/FavoriteItems/{item_id}/Delete",
+            post(legacy_unmark_favorite),
+        )
+        .route(
             "/UserPlayedItems/{item_id}",
             post(mark_played).delete(mark_unplayed),
         )
         .route(
             "/Users/{user_id}/PlayedItems/{item_id}",
             post(legacy_mark_played).delete(legacy_mark_unplayed),
+        )
+        .route(
+            "/Users/{user_id}/PlayedItems/{item_id}/Delete",
+            post(legacy_mark_unplayed),
         )
         .route("/Items/{item_id}", get(item_by_id))
         .route("/Users/{user_id}/Items/{item_id}", get(user_item_by_id))
@@ -596,7 +604,11 @@ async fn playback_info(
         }
     }
 
-    let play_session_id = Uuid::new_v4().simple().to_string();
+    let play_session_id = info
+        .current_play_session_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
 
     let mut media_sources =
         repository::get_media_sources_for_item(&state.pool, &item, state.config.server_id).await?;
@@ -628,6 +640,20 @@ async fn playback_info(
             info.subtitle_stream_index,
         );
     }
+
+    let effective_max_bitrate = info
+        .max_streaming_bitrate
+        .or_else(|| info.device_profile.as_ref().and_then(|profile| profile.max_streaming_bitrate));
+
+    let force_transcoding = media_sources
+        .get(selected_media_source_index)
+        .is_some_and(|source| {
+            should_force_transcoding(
+                &info,
+                source,
+                effective_max_bitrate,
+            )
+        });
 
     for media_source in &mut media_sources {
         if let Some(url) = media_source.direct_stream_url.as_mut() {
@@ -673,6 +699,47 @@ async fn playback_info(
             media_source.supports_transcoding = enable_transcoding;
         }
     }
+
+    if force_transcoding {
+        let item_emby_id = crate::models::uuid_to_emby_guid(&item.id);
+        let selected_media_source_id = media_sources
+            .get(selected_media_source_index)
+            .map(|source| source.id.clone())
+            .unwrap_or_else(|| format!("mediasource_{item_emby_id}"));
+
+        let transcoding_container = preferred_transcoding_container(&info);
+        let transcoding_sub_protocol = preferred_transcoding_sub_protocol(&info, &transcoding_container);
+        let transcoding_url = build_transcoding_url(
+            &item_emby_id,
+            &selected_media_source_id,
+            &play_session_id,
+            info.audio_stream_index,
+            info.subtitle_stream_index,
+            info.start_time_ticks,
+            effective_max_bitrate,
+            &transcoding_container,
+        );
+
+        if let Some(selected_source) = media_sources.get_mut(selected_media_source_index) {
+            selected_source.supports_direct_play = false;
+            selected_source.supports_direct_stream = false;
+            selected_source.transcoding_url = Some(transcoding_url.clone());
+            selected_source.transcoding_container = Some(transcoding_container.clone());
+            selected_source.transcoding_sub_protocol = Some(transcoding_sub_protocol.clone());
+        }
+
+        return Ok(Json(PlaybackInfoResponse {
+            media_sources,
+            play_session_id,
+            media_source_id: Some(selected_media_source_id),
+            direct_play_protocols: Some(vec!["File".to_string(), "Http".to_string()]),
+            transcoding_url: Some(transcoding_url),
+            transcoding_sub_protocol: Some(transcoding_sub_protocol),
+            transcoding_container: Some(transcoding_container),
+            transcoding_bitrate: effective_max_bitrate,
+            ..Default::default()
+        }));
+    }
     
     let response_media_source_id = info
         .media_source_id
@@ -695,6 +762,83 @@ async fn playback_info(
         direct_play_protocols,
         ..Default::default()
     }))
+}
+
+fn should_force_transcoding(
+    info: &PlaybackInfoDto,
+    media_source: &crate::models::MediaSourceDto,
+    effective_max_bitrate: Option<i64>,
+) -> bool {
+    if matches!(info.enable_direct_play, Some(false)) || matches!(info.enable_direct_stream, Some(false)) {
+        return true;
+    }
+
+    if matches!(info.enable_transcoding, Some(true))
+        && matches!(info.enable_direct_play, Some(false) | None)
+        && matches!(info.enable_direct_stream, Some(false) | None)
+    {
+        return true;
+    }
+
+    if let (Some(max_bitrate), Some(media_bitrate)) =
+        (effective_max_bitrate, media_source.bitrate.map(i64::from))
+    {
+        if media_bitrate > max_bitrate && matches!(info.enable_transcoding, Some(true) | None) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn preferred_transcoding_container(info: &PlaybackInfoDto) -> String {
+    if info
+        .device_profile
+        .as_ref()
+        .is_some_and(|profile| profile.direct_play_protocols.iter().any(|value| value.eq_ignore_ascii_case("hls")))
+    {
+        "ts".to_string()
+    } else {
+        "ts".to_string()
+    }
+}
+
+fn preferred_transcoding_sub_protocol(_info: &PlaybackInfoDto, _container: &str) -> String {
+    "hls".to_string()
+}
+
+fn build_transcoding_url(
+    item_emby_id: &str,
+    media_source_id: &str,
+    play_session_id: &str,
+    audio_stream_index: Option<i32>,
+    subtitle_stream_index: Option<i32>,
+    start_time_ticks: Option<i64>,
+    max_streaming_bitrate: Option<i64>,
+    transcoding_container: &str,
+) -> String {
+    let mut params = vec![
+        format!("MediaSourceId={media_source_id}"),
+        format!("mediaSourceId={media_source_id}"),
+        format!("PlaySessionId={play_session_id}"),
+        format!("Container={transcoding_container}"),
+    ];
+
+    if let Some(value) = audio_stream_index {
+        params.push(format!("AudioStreamIndex={value}"));
+    }
+    if let Some(value) = subtitle_stream_index {
+        params.push(format!("SubtitleStreamIndex={value}"));
+    }
+    if let Some(value) = start_time_ticks {
+        params.push(format!("StartTimeTicks={value}"));
+    }
+    if let Some(value) = max_streaming_bitrate {
+        params.push(format!("VideoBitRate={value}"));
+        params.push(format!("MaxStreamingBitrate={value}"));
+    }
+
+    format!("/Videos/{item_emby_id}/master.m3u8?{}", params.join("&"))
 }
 
 fn parse_include_types(value: Option<&str>) -> Vec<String> {

@@ -302,6 +302,14 @@ pub struct UserDto {
     pub configuration: UserConfigurationDto,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct CreateUserByNameRequest {
+    pub name: String,
+    #[serde(default)]
+    pub copy_from_user_id: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct UserPolicyDto {
@@ -1212,6 +1220,25 @@ pub struct VirtualFolderInfoDto {
     pub library_options: LibraryOptionsDto,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibrarySubFolderDto {
+    pub name: String,
+    pub id: String,
+    pub path: String,
+    pub is_user_access_configurable: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibraryMediaFolderDto {
+    pub name: String,
+    pub id: String,
+    pub guid: String,
+    pub sub_folders: Vec<LibrarySubFolderDto>,
+    pub is_user_access_configurable: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct AddVirtualFolderDto {
@@ -1546,6 +1573,8 @@ pub struct GetSimilarItems {
 #[serde(rename_all = "PascalCase")]
 pub struct PlaybackInfoDto {
     #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
     pub user_id: Option<Uuid>,
     #[serde(default)]
     pub max_streaming_bitrate: Option<i64>,
@@ -1570,11 +1599,17 @@ pub struct PlaybackInfoDto {
     #[serde(default)]
     pub enable_transcoding: Option<bool>,
     #[serde(default)]
+    pub allow_interlaced_video_stream_copy: Option<bool>,
+    #[serde(default)]
     pub allow_video_stream_copy: Option<bool>,
     #[serde(default)]
     pub allow_audio_stream_copy: Option<bool>,
     #[serde(default)]
+    pub is_playback: Option<bool>,
+    #[serde(default)]
     pub auto_open_live_stream: Option<bool>,
+    #[serde(default)]
+    pub current_play_session_id: Option<String>,
     #[serde(default)]
     pub always_burn_in_subtitle_when_transcoding: Option<bool>,
 }

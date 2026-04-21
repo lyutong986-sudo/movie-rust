@@ -15,7 +15,7 @@ use axum::{
 };
 use reqwest::Client;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 use uuid::Uuid;
@@ -30,6 +30,18 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/{*stream_path}", get(stream_video))
         .route("/Video/{item_id}/{*stream_path}", get(stream_video))
         .route("/video/{item_id}/{*stream_path}", get(stream_video))
+        .route("/Videos/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
+        .route("/videos/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
+        .route("/Video/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
+        .route("/video/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
+        .route("/Videos/{item_id}/main.m3u8", get(main_playlist).head(main_playlist))
+        .route("/videos/{item_id}/main.m3u8", get(main_playlist).head(main_playlist))
+        .route("/Video/{item_id}/main.m3u8", get(main_playlist).head(main_playlist))
+        .route("/video/{item_id}/main.m3u8", get(main_playlist).head(main_playlist))
+        .route("/Videos/{item_id}/subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
+        .route("/videos/{item_id}/subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
+        .route("/Video/{item_id}/subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
+        .route("/video/{item_id}/subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
         .route("/Items/{item_id}/File", get(stream_file))
         .route("/Items/{item_id}/Download", get(stream_file))
 }
@@ -99,6 +111,54 @@ async fn stream_file(
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     serve_media_item(&state, item_id, request, None).await
+}
+
+async fn master_playlist(
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Query(query): Query<VideoStreamQuery>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    hls_playlist_response(&state, &item_id_str, query, request, true).await
+}
+
+async fn main_playlist(
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Query(query): Query<VideoStreamQuery>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    hls_playlist_response(&state, &item_id_str, query, request, false).await
+}
+
+async fn subtitles_playlist(
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Query(query): Query<VideoStreamQuery>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+
+    let item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let _ = query;
+
+    let subtitle_path = repository::subtitle_path_for_stream_index(&item, 0);
+    let codec = subtitle_path
+        .as_deref()
+        .and_then(StdPath::extension)
+        .and_then(|value| value.to_str())
+        .unwrap_or("vtt");
+
+    let playlist = format!(
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n/Videos/{}/Subtitles/0/Stream.{}\n#EXT-X-ENDLIST\n",
+        crate::models::uuid_to_emby_guid(&item.id),
+        codec
+    );
+    playlist_response(request.method(), playlist)
 }
 
 async fn serve_media_item(
@@ -199,6 +259,61 @@ async fn serve_media_item(
         .await
         .map(IntoResponse::into_response)
         .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))
+}
+
+async fn hls_playlist_response(
+    state: &AppState,
+    item_id_str: &str,
+    _query: VideoStreamQuery,
+    request: Request<Body>,
+    is_master: bool,
+) -> Result<Response, AppError> {
+    let requested_item_id = emby_id_to_uuid(item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
+    auth::require_auth(state, request.headers(), request.uri().query()).await?;
+
+    let item = repository::get_media_item(&state.pool, requested_item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let media_source =
+        repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id).await?;
+
+    let direct_stream_path = media_source
+        .direct_stream_url
+        .clone()
+        .unwrap_or_else(|| {
+            format!(
+                "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
+                crate::models::uuid_to_emby_guid(&item.id),
+                media_source.container,
+                media_source.id,
+                media_source.id
+            )
+        });
+
+    let passthrough = auth_passthrough_query(request.uri().query());
+    let direct_stream_url = append_query_pairs(&direct_stream_path, &passthrough);
+
+    let playlist = if is_master {
+        let bandwidth = media_source.bitrate.unwrap_or(8_000_000).max(1);
+        let resolution = media_source
+            .media_streams
+            .iter()
+            .find(|stream| stream.stream_type == "Video")
+            .and_then(|stream| Some((stream.width?, stream.height?)))
+            .map(|(w, h)| format!("{w}x{h}"))
+            .unwrap_or_else(|| "1920x1080".to_string());
+
+        format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={resolution}\n{direct_stream_url}\n"
+        )
+    } else {
+        format!(
+            "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{direct_stream_url}\n#EXT-X-ENDLIST\n"
+        )
+    };
+
+    playlist_response(request.method(), playlist)
 }
 
 async fn proxy_remote_stream(url: &str, request: Request<Body>) -> Result<Response, AppError> {
@@ -341,4 +456,52 @@ fn is_hop_by_hop_header(name: &str) -> bool {
             | "transfer-encoding"
             | "upgrade"
     )
+}
+
+fn playlist_response(method: &Method, playlist: String) -> Result<Response, AppError> {
+    let body = if *method == Method::HEAD {
+        Body::empty()
+    } else {
+        Body::from(playlist)
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(body)
+        .map_err(|error| AppError::Internal(format!("构建 HLS 播放列表响应失败: {error}")))
+}
+
+fn auth_passthrough_query(query: Option<&str>) -> Vec<(String, String)> {
+    let Some(query) = query else {
+        return Vec::new();
+    };
+
+    url::form_urlencoded::parse(query.as_bytes())
+        .filter_map(|(key, value)| {
+            let key_ref = key.as_ref();
+            match key_ref {
+                "api_key" | "apiKey" | "ApiKey" | "X-Emby-Token" | "X-MediaBrowser-Token" | "PlaySessionId" | "Static" => {
+                    Some((key.into_owned(), value.into_owned()))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn append_query_pairs(base: &str, pairs: &[(String, String)]) -> String {
+    if pairs.is_empty() {
+        return base.to_string();
+    }
+
+    let separator = if base.contains('?') { '&' } else { '?' };
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in pairs {
+        serializer.append_pair(key, value);
+    }
+    let encoded = serializer.finish();
+
+    format!("{base}{separator}{encoded}")
 }

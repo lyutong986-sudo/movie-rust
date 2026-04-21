@@ -1,7 +1,7 @@
 use crate::{
     auth::{self, AuthSession},
     error::AppError,
-    models::{uuid_to_emby_guid, AuthenticateByNameRequest, AuthenticationResult, UpdateUserPasswordRequest, UserDto, UserPolicyDto},
+    models::{uuid_to_emby_guid, AuthenticateByNameRequest, AuthenticationResult, CreateUserByNameRequest, UpdateUserPasswordRequest, UserDto, UserPolicyDto},
     repository, security,
     state::AppState,
 };
@@ -21,6 +21,8 @@ pub fn router() -> Router<AppState> {
         .route("/users/public", get(public_users))
         .route("/Users", get(users))
         .route("/users", get(users))
+        .route("/Users/New", post(create_user))
+        .route("/users/new", post(create_user))
         .route("/Users/AuthenticateByName", post(authenticate_by_name))
         .route("/Users/authenticatebyname", post(authenticate_by_name))
         .route("/users/authenticatebyname", post(authenticate_by_name))
@@ -34,6 +36,8 @@ pub fn router() -> Router<AppState> {
         .route("/users/me", get(me))
         .route("/Users/{user_id}", get(user_by_id))
         .route("/users/{user_id}", get(user_by_id))
+        .route("/Users/{user_id}/Delete", post(delete_user))
+        .route("/users/{user_id}/delete", post(delete_user))
         .route("/Users/{user_id}/Policy", post(update_user_policy))
         .route("/Users/{user_id}/policy", post(update_user_policy))
         .route("/users/{user_id}/policy", post(update_user_policy))
@@ -81,6 +85,29 @@ async fn me(
         .await?
         .ok_or_else(|| AppError::Unauthorized)?;
     Ok(Json(repository::user_to_dto(&user, state.config.server_id)))
+}
+
+async fn create_user(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<CreateUserByNameRequest>,
+) -> Result<Json<UserDto>, AppError> {
+    auth::require_admin(&session)?;
+    let user = repository::create_user(&state.pool, &payload.name).await?;
+    Ok(Json(repository::user_to_dto(&user, state.config.server_id)))
+}
+
+async fn delete_user(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    if session.user_id == user_id {
+        return Err(AppError::BadRequest("不能删除当前登录用户".to_string()));
+    }
+    repository::delete_user(&state.pool, user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn authenticate_by_name(

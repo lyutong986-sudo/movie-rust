@@ -671,6 +671,46 @@ pub async fn get_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbUs
     .await?)
 }
 
+pub async fn create_user(pool: &sqlx::PgPool, name: &str) -> Result<DbUser, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("用户名不能为空".to_string()));
+    }
+
+    if get_user_by_name(pool, name).await?.is_some() {
+        return Err(AppError::BadRequest("用户已存在".to_string()));
+    }
+
+    let id = Uuid::new_v4();
+    let password_hash = security::hash_password("")?;
+    let policy = serde_json::to_value(UserPolicyDto::default())?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO users (id, name, password_hash, is_admin, is_hidden, is_disabled, policy)
+        VALUES ($1, $2, $3, false, false, false, $4)
+        "#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(password_hash)
+    .bind(policy)
+    .execute(pool)
+    .await?;
+
+    get_user_by_id(pool, id)
+        .await?
+        .ok_or_else(|| AppError::Internal("创建用户后无法读取用户".to_string()))
+}
+
+pub async fn delete_user(pool: &sqlx::PgPool, user_id: Uuid) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn change_user_password(
     pool: &sqlx::PgPool,
     user_id: Uuid,

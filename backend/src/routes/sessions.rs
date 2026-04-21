@@ -26,10 +26,15 @@ pub fn router() -> Router<AppState> {
             "/PlayingItems/{item_id}",
             post(legacy_started).delete(legacy_stopped),
         )
+        .route("/PlayingItems/{item_id}/Delete", post(legacy_stopped))
         .route("/PlayingItems/{item_id}/Progress", post(legacy_progress))
         .route(
             "/Users/{user_id}/PlayingItems/{item_id}",
             post(legacy_user_started).delete(legacy_user_stopped),
+        )
+        .route(
+            "/Users/{user_id}/PlayingItems/{item_id}/Delete",
+            post(legacy_user_stopped),
         )
         .route(
             "/Users/{user_id}/PlayingItems/{item_id}/Progress",

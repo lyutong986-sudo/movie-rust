@@ -2,8 +2,9 @@ use crate::{
     auth::{self, AuthSession},
     error::AppError,
     models::{
-        AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, MediaPathDto, ScanSummary,
-        UpdateLibraryOptionsDto, UpdateMediaPathRequestDto, VirtualFolderInfoDto,
+        AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, LibraryMediaFolderDto,
+        LibrarySubFolderDto, MediaPathDto, ScanSummary, UpdateLibraryOptionsDto,
+        UpdateMediaPathRequestDto, VirtualFolderInfoDto,
         VirtualFolderQuery,
     },
     repository, scanner,
@@ -43,6 +44,9 @@ pub fn router() -> Router<AppState> {
             "/Library/VirtualFolders/LibraryOptions",
             post(update_library_options),
         )
+        .route("/Library/Refresh", post(refresh_libraries))
+        .route("/Library/PhysicalPaths", get(physical_paths))
+        .route("/Library/SelectableMediaFolders", get(selectable_media_folders))
         .route("/api/admin/scan", post(scan_libraries))
 }
 
@@ -243,6 +247,67 @@ async fn scan_libraries(
 ) -> Result<Json<ScanSummary>, AppError> {
     auth::require_admin(&session)?;
     Ok(Json(scanner::scan_all_libraries(&state.pool).await?))
+}
+
+async fn refresh_libraries(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    let _ = scanner::scan_all_libraries(&state.pool).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn physical_paths(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<String>>, AppError> {
+    auth::require_admin(&session)?;
+    let libraries = repository::list_libraries(&state.pool).await?;
+    let mut paths: Vec<String> = libraries
+        .iter()
+        .flat_map(|library| {
+            let mut values = vec![library.path.clone()];
+            values.extend(
+                repository::library_to_virtual_folder_dto(library)
+                    .locations
+                    .into_iter(),
+            );
+            values
+        })
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(Json(paths))
+}
+
+async fn selectable_media_folders(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<LibraryMediaFolderDto>>, AppError> {
+    auth::require_admin(&session)?;
+    let libraries = repository::list_libraries(&state.pool).await?;
+    let items = libraries
+        .iter()
+        .map(|library| LibraryMediaFolderDto {
+            name: library.name.clone(),
+            id: library.id.to_string(),
+            guid: library.id.to_string(),
+            sub_folders: repository::library_to_virtual_folder_dto(library)
+                .locations
+                .into_iter()
+                .enumerate()
+                .map(|(index, path)| LibrarySubFolderDto {
+                    name: format!("{}-{}", library.name, index + 1),
+                    id: format!("{}:{index}", library.id),
+                    path,
+                    is_user_access_configurable: true,
+                })
+                .collect(),
+            is_user_access_configurable: true,
+        })
+        .collect();
+    Ok(Json(items))
 }
 
 fn split_query_paths(value: Option<&str>) -> Vec<String> {
