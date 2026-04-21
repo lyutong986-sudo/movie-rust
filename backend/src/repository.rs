@@ -581,13 +581,40 @@ pub async fn upsert_person_role(
     role: Option<&str>,
     sort_order: i32,
 ) -> Result<(), AppError> {
-    let role_key = role
+    let normalized_role = role
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("<none>");
+        .filter(|value| !value.is_empty());
+    let role_key = normalized_role.unwrap_or("<none>");
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE person_roles
+        SET
+            role = $6,
+            sort_order = $5,
+            updated_at = now()
+        WHERE person_id = $1
+          AND media_item_id = $2
+          AND role_type = $3
+          AND COALESCE(NULLIF(btrim(role), ''), '<none>') = $4
+        "#,
+    )
+    .bind(person_id)
+    .bind(media_item_id)
+    .bind(role_type)
+    .bind(role_key)
+    .bind(sort_order)
+    .bind(normalized_role)
+    .execute(pool)
+    .await?;
+
+    if updated.rows_affected() > 0 {
+        return Ok(());
+    }
+
     let id = Uuid::new_v5(
         &media_item_id,
-        format!("person-role:{person_id}:{role_type}:{role_key}:{sort_order}").as_bytes(),
+        format!("person-role:{person_id}:{role_type}:{role_key}").as_bytes(),
     );
 
     sqlx::query(
@@ -606,7 +633,7 @@ pub async fn upsert_person_role(
     .bind(person_id)
     .bind(media_item_id)
     .bind(role_type)
-    .bind(role)
+    .bind(normalized_role)
     .bind(sort_order)
     .execute(pool)
     .await?;
