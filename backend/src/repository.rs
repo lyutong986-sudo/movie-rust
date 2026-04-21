@@ -1,10 +1,11 @@
 use crate::{
     config::Config,
     error::AppError,
+    metadata::models::ExternalSeriesMetadata,
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaChapter, DbMediaItem,
         DbMediaStream, DbPerson, DbUser, DbUserItemData, ExternalUrlDto, GenreDto, LibraryOptionsDto, LogFileDto,
-        MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto, NameIdDto, PersonDto,
+        MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto, NameIdDto, NameLongIdDto, PersonDto,
         QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
         UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
     },
@@ -1189,6 +1190,21 @@ pub async fn count_item_children(pool: &sqlx::PgPool, parent_id: Uuid) -> Result
     )
 }
 
+pub async fn count_library_items_by_type(
+    pool: &sqlx::PgPool,
+    library_id: Uuid,
+    item_type: &str,
+) -> Result<i32, AppError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM media_items WHERE library_id = $1 AND item_type = $2",
+    )
+    .bind(library_id)
+    .bind(item_type)
+    .fetch_one(pool)
+    .await?;
+    Ok(i32::try_from(count).unwrap_or(i32::MAX))
+}
+
 pub async fn count_recursive_children(pool: &sqlx::PgPool, parent_id: Uuid) -> Result<i64, AppError> {
     Ok(
         sqlx::query_scalar(
@@ -1352,7 +1368,7 @@ pub async fn list_media_items(
         SELECT
             id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
             overview, production_year, official_rating, community_rating, runtime_ticks,
-            premiere_date, series_name, season_name,
+            premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
@@ -1467,7 +1483,7 @@ pub async fn get_media_item(
         SELECT
             id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
             overview, production_year, official_rating, community_rating, runtime_ticks,
-            premiere_date, series_name, season_name,
+            premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
@@ -1748,6 +1764,10 @@ pub struct UpsertMediaItem<'a> {
     pub community_rating: Option<f64>,
     pub runtime_ticks: Option<i64>,
     pub premiere_date: Option<NaiveDate>,
+    pub status: Option<&'a str>,
+    pub end_date: Option<NaiveDate>,
+    pub air_days: &'a [String],
+    pub air_time: Option<&'a str>,
     pub provider_ids: Value,
     pub genres: &'a [String],
     pub studios: &'a [String],
@@ -1795,7 +1815,8 @@ pub async fn upsert_media_item(
             (
                 id, library_id, parent_id, name, original_title, sort_name, item_type, media_type, path,
                 container, overview, production_year, official_rating, community_rating,
-                runtime_ticks, premiere_date, provider_ids, genres, studios, tags, production_locations,
+                runtime_ticks, premiere_date, status, end_date, air_days, air_time,
+                provider_ids, genres, studios, tags, production_locations,
                 image_primary_path, backdrop_path, logo_path, thumb_path, remote_trailers,
                 series_name, season_name, index_number,
                 index_number_end, parent_index_number, width, height, video_codec, audio_codec,
@@ -1805,10 +1826,11 @@ pub async fn upsert_media_item(
             (
                 $1, $2, $3, $4, $5, $6, $7, $8,
                 $9, $10, $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20, $21,
-                $22, $23, $24, $25, $26,
-                $27, $28, $29, $30, $31, $32,
-                $33, $34, $35,
+                $15, $16, $17, $18, $19, $20,
+                $21, $22, $23, $24, $25,
+                $26, $27, $28, $29, $30,
+                $31, $32, $33, $34, $35, $36,
+                $37, $38, $39,
                 now()
             )
         ON CONFLICT (library_id, path)
@@ -1826,6 +1848,10 @@ pub async fn upsert_media_item(
             community_rating = EXCLUDED.community_rating,
             runtime_ticks = EXCLUDED.runtime_ticks,
             premiere_date = EXCLUDED.premiere_date,
+            status = EXCLUDED.status,
+            end_date = EXCLUDED.end_date,
+            air_days = EXCLUDED.air_days,
+            air_time = EXCLUDED.air_time,
             provider_ids = EXCLUDED.provider_ids,
             genres = EXCLUDED.genres,
             studios = EXCLUDED.studios,
@@ -1864,6 +1890,10 @@ pub async fn upsert_media_item(
     .bind(input.community_rating)
     .bind(input.runtime_ticks)
     .bind(input.premiere_date)
+    .bind(input.status)
+    .bind(input.end_date)
+    .bind(input.air_days)
+    .bind(input.air_time)
     .bind(&input.provider_ids)
     .bind(input.genres)
     .bind(input.studios)
@@ -1952,6 +1982,8 @@ pub async fn library_to_item_dto(
     server_id: Uuid,
 ) -> Result<BaseItemDto, AppError> {
     let child_count = count_library_children(pool, library.id).await?;
+    let movie_count = count_library_items_by_type(pool, library.id, "Movie").await?;
+    let series_count = count_library_items_by_type(pool, library.id, "Series").await?;
     let locations = library_paths(library);
 
     Ok(BaseItemDto {
@@ -1981,6 +2013,7 @@ pub async fn library_to_item_dto(
             .first()
             .cloned()
             .or_else(|| Some(library.path.clone())),
+        location_type: Some("FileSystem".to_string()),
         run_time_ticks: None,
         production_year: None,
         overview: None,
@@ -2009,8 +2042,22 @@ pub async fn library_to_item_dto(
         display_preferences_id: Some(uuid_to_emby_guid(&library.id)),
         recursive_item_count: Some(child_count),
         season_count: None,
-        series_count: None,
+        series_count: Some(series_count),
+        movie_count: Some(movie_count),
         status: None,
+        air_days: Vec::new(),
+        air_time: None,
+        end_date: None,
+        is_movie: Some(false),
+        is_series: Some(false),
+        is_live: Some(false),
+        is_news: Some(false),
+        is_kids: Some(false),
+        is_sports: Some(false),
+        is_premiere: Some(false),
+        is_new: Some(false),
+        is_repeat: Some(false),
+        disabled: Some(false),
         series_name: None,
         series_id: None,
         season_name: None,
@@ -2027,15 +2074,24 @@ pub async fn library_to_item_dto(
         parent_thumb_item_id: None,
         parent_thumb_image_tag: None,
         series_primary_image_tag: None,
-        user_data: empty_user_data(),
+        primary_image_item_id: None,
+        series_studio: None,
+        user_data: {
+            let mut value = empty_user_data();
+            value.server_id = Some(uuid_to_emby_guid(&server_id));
+            value
+        },
         media_sources: Vec::new(),
         media_streams: Vec::new(),
         part_count: 0,
         chapters: Vec::new(),
         locked_fields: Vec::new(),
         lock_data: false,
+        special_feature_count: Some(0),
         child_count: Some(child_count),
         primary_image_aspect_ratio: None,
+        completion_percentage: None,
+        tags: Vec::new(),
     })
 }
 
@@ -2064,6 +2120,7 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         container: None,
         parent_id: None,
         path: None,
+        location_type: Some("Virtual".to_string()),
         run_time_ticks: None,
         production_year: None,
         overview: None,
@@ -2093,7 +2150,21 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         recursive_item_count: None,
         season_count: None,
         series_count: None,
+        movie_count: None,
         status: None,
+        air_days: Vec::new(),
+        air_time: None,
+        end_date: None,
+        is_movie: Some(false),
+        is_series: Some(false),
+        is_live: Some(false),
+        is_news: Some(false),
+        is_kids: Some(false),
+        is_sports: Some(false),
+        is_premiere: Some(false),
+        is_new: Some(false),
+        is_repeat: Some(false),
+        disabled: Some(false),
         series_name: None,
         series_id: None,
         season_name: None,
@@ -2110,15 +2181,24 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         parent_thumb_item_id: None,
         parent_thumb_image_tag: None,
         series_primary_image_tag: None,
-        user_data: empty_user_data(),
+        primary_image_item_id: None,
+        series_studio: None,
+        user_data: {
+            let mut value = empty_user_data();
+            value.server_id = Some(uuid_to_emby_guid(&server_id));
+            value
+        },
         media_sources: Vec::new(),
         media_streams: Vec::new(),
         part_count: 0,
         chapters: Vec::new(),
         locked_fields: Vec::new(),
         lock_data: false,
+        special_feature_count: Some(0),
         child_count: None,
         primary_image_aspect_ratio: None,
+        completion_percentage: None,
+        tags: Vec::new(),
     }
 }
 
@@ -2154,7 +2234,7 @@ pub async fn media_item_to_dto(
         Vec::new()
     };
 
-    let user_data = if let Some(user_id) = user_id {
+    let mut user_data = if let Some(user_id) = user_id {
         get_user_item_data(pool, user_id, item.id)
             .await?
             .map(|data| user_item_data_to_dto_for_item(data, item.id))
@@ -2162,6 +2242,7 @@ pub async fn media_item_to_dto(
     } else {
         empty_user_data_for_item(item.id)
     };
+    user_data.server_id = Some(uuid_to_emby_guid(&server_id));
 
     let is_folder = is_folder_item(item);
     let media_sources = if !is_folder {
@@ -2217,46 +2298,64 @@ pub async fn media_item_to_dto(
         Some(parent_id) => get_media_item(pool, parent_id).await?,
         None => None,
     };
-    let parent_logo_item_id = parent_item
-        .as_ref()
-        .filter(|parent| parent.logo_path.is_some())
-        .map(|parent| uuid_to_emby_guid(&parent.id));
-    let parent_logo_image_tag = parent_item
-        .as_ref()
-        .and_then(|parent| parent.logo_path.as_ref().map(|_| parent.date_modified.timestamp().to_string()));
-    let parent_backdrop_item_id = parent_item
-        .as_ref()
-        .filter(|parent| parent.backdrop_path.is_some())
-        .map(|parent| uuid_to_emby_guid(&parent.id));
-    let parent_backdrop_image_tags = parent_item
-        .as_ref()
-        .and_then(|parent| parent.backdrop_path.as_ref().map(|_| vec![parent.date_modified.timestamp().to_string()]))
-        .unwrap_or_default();
-    let parent_thumb_item_id = parent_item
-        .as_ref()
-        .filter(|parent| parent.thumb_path.is_some())
-        .map(|parent| uuid_to_emby_guid(&parent.id));
-    let parent_thumb_image_tag = parent_item
-        .as_ref()
-        .and_then(|parent| parent.thumb_path.as_ref().map(|_| parent.date_modified.timestamp().to_string()));
-    let series_primary_image_tag = if item.item_type.eq_ignore_ascii_case("Episode") {
-        if let Some(series_id_value) = &series_id {
-            if let Ok(series_uuid) = emby_id_to_uuid(series_id_value) {
-                get_media_item(pool, series_uuid)
-                    .await?
-                    .and_then(|series_item| {
-                        series_item
-                            .image_primary_path
-                            .map(|_| series_item.date_modified.timestamp().to_string())
-                    })
-            } else {
-                None
-            }
+    let series_item = if let Some(series_id_value) = &series_id {
+        if let Ok(series_uuid) = emby_id_to_uuid(series_id_value) {
+            get_media_item(pool, series_uuid).await?
         } else {
             None
         }
     } else {
         None
+    };
+    let inherited_logo_source = parent_item
+        .as_ref()
+        .filter(|parent| parent.logo_path.is_some())
+        .or_else(|| series_item.as_ref().filter(|series| series.logo_path.is_some()));
+    let inherited_backdrop_source = parent_item
+        .as_ref()
+        .filter(|parent| parent.backdrop_path.is_some())
+        .or_else(|| series_item.as_ref().filter(|series| series.backdrop_path.is_some()));
+    let inherited_thumb_source = parent_item
+        .as_ref()
+        .filter(|parent| parent.thumb_path.is_some())
+        .or_else(|| series_item.as_ref().filter(|series| series.thumb_path.is_some()));
+    let parent_logo_item_id = inherited_logo_source.map(|parent| uuid_to_emby_guid(&parent.id));
+    let parent_logo_image_tag = inherited_logo_source
+        .and_then(|parent| parent.logo_path.as_ref().map(|_| parent.date_modified.timestamp().to_string()));
+    let parent_backdrop_item_id = inherited_backdrop_source.map(|parent| uuid_to_emby_guid(&parent.id));
+    let parent_backdrop_image_tags = inherited_backdrop_source
+        .and_then(|parent| parent.backdrop_path.as_ref().map(|_| vec![parent.date_modified.timestamp().to_string()]))
+        .unwrap_or_default();
+    let parent_thumb_item_id = inherited_thumb_source.map(|parent| uuid_to_emby_guid(&parent.id));
+    let parent_thumb_image_tag = inherited_thumb_source
+        .and_then(|parent| parent.thumb_path.as_ref().map(|_| parent.date_modified.timestamp().to_string()));
+    let series_primary_image_tag = series_item
+        .as_ref()
+        .and_then(|series_item| {
+            series_item
+                .image_primary_path
+                .as_ref()
+                .map(|_| series_item.date_modified.timestamp().to_string())
+        });
+    let resolved_series_name = item
+        .series_name
+        .clone()
+        .or_else(|| series_item.as_ref().map(|series| series.name.clone()));
+    let resolved_season_name = item.season_name.clone().or_else(|| {
+        parent_item
+            .as_ref()
+            .filter(|parent| parent.item_type.eq_ignore_ascii_case("Season"))
+            .map(|parent| parent.name.clone())
+    });
+    let completion_percentage = if is_folder {
+        user_data.played_percentage
+    } else {
+        match (item.runtime_ticks, user_data.playback_position_ticks) {
+            (Some(runtime_ticks), position) if runtime_ticks > 0 && position > 0 => {
+                Some((position as f64 / runtime_ticks as f64) * 100.0)
+            }
+            _ => user_data.played_percentage,
+        }
     };
 
     Ok(BaseItemDto {
@@ -2277,12 +2376,17 @@ pub async fn media_item_to_dto(
         is_folder,
         sort_name: Some(item.sort_name.clone()),
         forced_sort_name: Some(item.sort_name.clone()),
-        primary_image_tag,
+        primary_image_tag: primary_image_tag.clone(),
         collection_type: None,
         media_type: (!is_folder).then(|| item.media_type.clone()),
         container: effective_container(item),
         parent_id: item.parent_id.map(|value| uuid_to_emby_guid(&value)),
         path: Some(item.path.clone()),
+        location_type: Some(if item.path.starts_with("http://") || item.path.starts_with("https://") {
+            "Remote".to_string()
+        } else {
+            "FileSystem".to_string()
+        }),
         run_time_ticks: item.runtime_ticks,
         production_year: item.production_year,
         overview: item.overview.clone(),
@@ -2305,17 +2409,31 @@ pub async fn media_item_to_dto(
         taglines: Vec::new(),
         remote_trailers: remote_trailers_from_urls(&item.remote_trailers),
         people,
-        studios: name_id_items_from_names(&item.studios),
-        tag_items: name_id_items_from_names(&item.tags),
+        studios: name_long_id_items_from_names(&item.studios),
+        tag_items: name_long_id_items_from_names(&item.tags),
         local_trailer_count: 0,
         display_preferences_id: Some(display_preferences_id(item, &provider_ids)),
         recursive_item_count,
         season_count,
         series_count: None,
-        status: None,
-        series_name: item.series_name.clone(),
+        movie_count: None,
+        status: item.status.clone(),
+        air_days: item.air_days.clone(),
+        air_time: item.air_time.clone(),
+        end_date: premiere_date_to_utc(item.end_date),
+        is_movie: Some(item.item_type.eq_ignore_ascii_case("Movie")),
+        is_series: Some(item.item_type.eq_ignore_ascii_case("Series")),
+        is_live: Some(false),
+        is_news: Some(false),
+        is_kids: Some(false),
+        is_sports: Some(false),
+        is_premiere: Some(false),
+        is_new: Some(false),
+        is_repeat: Some(false),
+        disabled: Some(false),
+        series_name: resolved_series_name,
         series_id,
-        season_name: item.season_name.clone(),
+        season_name: resolved_season_name,
         season_id,
         index_number: item.index_number,
         index_number_end: item.index_number_end,
@@ -2329,6 +2447,8 @@ pub async fn media_item_to_dto(
         parent_thumb_item_id,
         parent_thumb_image_tag,
         series_primary_image_tag,
+        primary_image_item_id: primary_image_tag.as_ref().map(|_| uuid_to_emby_guid(&item.id)),
+        series_studio: item.studios.first().cloned(),
         user_data,
         media_sources: item_detail_media_sources,
         media_streams,
@@ -2336,8 +2456,11 @@ pub async fn media_item_to_dto(
         chapters,
         locked_fields: Vec::new(),
         lock_data: false,
+        special_feature_count: Some(0),
         child_count,
         primary_image_aspect_ratio: item.image_primary_path.as_ref().map(|_| 0.666_666_666_7),
+        completion_percentage,
+        tags: item.tags.clone(),
     })
 }
 
@@ -2487,7 +2610,7 @@ async fn media_sources_for_item(
         SELECT
             id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
             overview, production_year, official_rating, community_rating, runtime_ticks,
-            premiere_date, series_name, season_name,
+            premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
@@ -3070,6 +3193,10 @@ struct ItemPersonRow {
     role_type: String,
     role: Option<String>,
     primary_image_path: Option<String>,
+    premiere_date: Option<DateTime<Utc>>,
+    production_year: Option<i32>,
+    favorite_count: i32,
+    updated_at: DateTime<Utc>,
 }
 
 fn external_urls_from_provider_map(
@@ -3118,8 +3245,8 @@ fn external_urls_from_provider_map(
     urls
 }
 
-fn genre_items_from_names(names: &[String]) -> Vec<NameIdDto> {
-    name_id_items_from_names(names)
+fn genre_items_from_names(names: &[String]) -> Vec<NameLongIdDto> {
+    name_long_id_items_from_names(names)
 }
 
 fn name_id_items_from_names(names: &[String]) -> Vec<NameIdDto> {
@@ -3131,6 +3258,27 @@ fn name_id_items_from_names(names: &[String]) -> Vec<NameIdDto> {
             id: name.clone(),
         })
         .collect()
+}
+
+fn name_long_id_items_from_names(names: &[String]) -> Vec<NameLongIdDto> {
+    names
+        .iter()
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| NameLongIdDto {
+            name: name.clone(),
+            id: stable_long_id_from_name(name),
+        })
+        .collect()
+}
+
+fn stable_long_id_from_name(name: &str) -> i64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    let value = hasher.finish() & 0x7FFF_FFFF_FFFF_FFFF;
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 async fn get_item_people(pool: &sqlx::PgPool, item_id: Uuid) -> Result<Vec<PersonDto>, AppError> {
@@ -3145,7 +3293,11 @@ async fn get_item_people(pool: &sqlx::PgPool, item_id: Uuid) -> Result<Vec<Perso
             p.provider_ids,
             pr.role_type,
             pr.role,
-            p.primary_image_path
+            p.primary_image_path,
+            p.premiere_date,
+            p.production_year,
+            p.favorite_count,
+            p.updated_at
         FROM person_roles pr
         INNER JOIN persons p ON p.id = pr.person_id
         WHERE pr.media_item_id = $1
@@ -3170,10 +3322,27 @@ async fn get_item_people(pool: &sqlx::PgPool, item_id: Uuid) -> Result<Vec<Perso
         .map(|row| {
             let image_tags = row.primary_image_path.as_ref().map(|_| {
                 let mut tags = std::collections::HashMap::new();
-                tags.insert("Primary".to_string(), "primary".to_string());
+                tags.insert("Primary".to_string(), row.updated_at.timestamp().to_string());
                 tags
             });
-            let provider_ids = serde_json::from_value(row.provider_ids).ok();
+            let provider_ids: Option<std::collections::HashMap<String, String>> =
+                serde_json::from_value(row.provider_ids).ok();
+            let external_url = row.external_url.or_else(|| {
+                provider_ids.as_ref().and_then(|providers| {
+                    providers
+                        .get("Imdb")
+                        .or_else(|| providers.get("IMDb"))
+                        .or_else(|| providers.get("imdb"))
+                        .map(|imdb| format!("https://www.imdb.com/name/{imdb}"))
+                        .or_else(|| {
+                            providers
+                                .get("Tmdb")
+                                .or_else(|| providers.get("TMDb"))
+                                .or_else(|| providers.get("tmdb"))
+                                .map(|tmdb| format!("https://www.themoviedb.org/person/{tmdb}"))
+                        })
+                })
+            });
 
             PersonDto {
                 name: row.name,
@@ -3183,15 +3352,15 @@ async fn get_item_people(pool: &sqlx::PgPool, item_id: Uuid) -> Result<Vec<Perso
                 primary_image_tag: row
                     .primary_image_path
                     .as_ref()
-                    .map(|_| "primary".to_string()),
+                    .map(|_| row.updated_at.timestamp().to_string()),
                 sort_name: row.sort_name,
                 overview: row.overview,
-                external_url: row.external_url,
-                premiere_date: None,
-                production_year: None,
+                external_url,
+                premiere_date: row.premiere_date.map(|value| value.to_rfc3339()),
+                production_year: row.production_year,
                 image_tags,
                 provider_ids,
-                favorite: Some(false),
+                favorite: Some(row.favorite_count > 0),
             }
         })
         .collect())
@@ -3313,6 +3482,7 @@ fn user_item_data_to_dto(data: DbUserItemData) -> UserItemDataDto {
         last_played_date: data.last_played_date,
         key: None,
         item_id: None,
+        server_id: None,
     }
 }
 
@@ -3360,20 +3530,23 @@ fn empty_user_data() -> UserItemDataDto {
         last_played_date: None,
         key: None,
         item_id: None,
+        server_id: None,
     }
 }
 
 fn user_item_data_to_dto_for_item(data: DbUserItemData, item_id: Uuid) -> UserItemDataDto {
     let mut dto = user_item_data_to_dto(data);
-    dto.key = Some(item_id.to_string());
-    dto.item_id = Some(item_id.to_string());
+    let emby_id = uuid_to_emby_guid(&item_id);
+    dto.key = Some(emby_id.clone());
+    dto.item_id = Some(emby_id);
     dto
 }
 
 fn empty_user_data_for_item(item_id: Uuid) -> UserItemDataDto {
     let mut dto = empty_user_data();
-    dto.key = Some(item_id.to_string());
-    dto.item_id = Some(item_id.to_string());
+    let emby_id = uuid_to_emby_guid(&item_id);
+    dto.key = Some(emby_id.clone());
+    dto.item_id = Some(emby_id);
     dto
 }
 
@@ -3425,6 +3598,67 @@ pub async fn update_media_item_metadata(
 
     // 保存媒体流信息到media_streams表
     save_media_streams(pool, item_id, analysis).await?;
+
+    Ok(())
+}
+
+pub async fn update_media_item_series_metadata(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    metadata: &ExternalSeriesMetadata,
+) -> Result<(), AppError> {
+    let provider_ids = serde_json::to_value(&metadata.provider_ids).unwrap_or_else(|_| json!({}));
+
+    sqlx::query(
+        r#"
+        UPDATE media_items
+        SET name = COALESCE($2, name),
+            original_title = COALESCE($3, original_title),
+            overview = COALESCE($4, overview),
+            premiere_date = COALESCE($5, premiere_date),
+            status = COALESCE($6, status),
+            end_date = COALESCE($7, end_date),
+            air_days = CASE
+                WHEN cardinality($8::text[]) > 0 THEN $8
+                ELSE air_days
+            END,
+            air_time = COALESCE($9, air_time),
+            production_year = COALESCE($10, production_year),
+            community_rating = COALESCE($11, community_rating),
+            genres = CASE
+                WHEN cardinality($12::text[]) > 0 THEN $12
+                ELSE genres
+            END,
+            studios = CASE
+                WHEN cardinality($13::text[]) > 0 THEN $13
+                ELSE studios
+            END,
+            production_locations = CASE
+                WHEN cardinality($14::text[]) > 0 THEN $14
+                ELSE production_locations
+            END,
+            provider_ids = provider_ids || $15::jsonb,
+            date_modified = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(item_id)
+    .bind(metadata.name.as_deref())
+    .bind(metadata.original_title.as_deref())
+    .bind(metadata.overview.as_deref())
+    .bind(metadata.premiere_date)
+    .bind(metadata.status.as_deref())
+    .bind(metadata.end_date)
+    .bind(&metadata.air_days)
+    .bind(metadata.air_time.as_deref())
+    .bind(metadata.production_year)
+    .bind(metadata.community_rating)
+    .bind(&metadata.genres)
+    .bind(&metadata.studios)
+    .bind(&metadata.production_locations)
+    .bind(provider_ids)
+    .execute(pool)
+    .await?;
 
     Ok(())
 }

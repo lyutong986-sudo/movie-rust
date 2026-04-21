@@ -246,7 +246,9 @@ async fn scan_libraries(
     State(state): State<AppState>,
 ) -> Result<Json<ScanSummary>, AppError> {
     auth::require_admin(&session)?;
-    Ok(Json(scanner::scan_all_libraries(&state.pool).await?))
+    Ok(Json(
+        scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref()).await?,
+    ))
 }
 
 async fn refresh_libraries(
@@ -254,7 +256,7 @@ async fn refresh_libraries(
     State(state): State<AppState>,
 ) -> Result<StatusCode, AppError> {
     auth::require_admin(&session)?;
-    let _ = scanner::scan_all_libraries(&state.pool).await?;
+    let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref()).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

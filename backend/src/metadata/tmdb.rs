@@ -1,11 +1,12 @@
 use crate::error::AppError;
 use async_trait::async_trait;
+use chrono::Datelike;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::{
-    models::{ExternalPerson, ExternalPersonSearchResult},
+    models::{ExternalPerson, ExternalPersonSearchResult, ExternalSeriesMetadata},
     provider::{ExternalPersonCredit, MetadataProvider},
 };
 
@@ -120,6 +121,23 @@ impl TmdbProvider {
 
         let credits: TmdbPersonCredits = response.json().await?;
         Ok(credits)
+    }
+
+    async fn get_tv_details_internal(&self, tv_id: &str) -> Result<TmdbTvDetails, AppError> {
+        let mut params = HashMap::new();
+        self.add_api_key(&mut params);
+        params.insert("append_to_response".to_string(), "external_ids".to_string());
+
+        let url = self.build_url(&format!("/tv/{}", tv_id));
+        let response = self
+            .client
+            .get(&url)
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
     }
 }
 
@@ -266,6 +284,87 @@ impl MetadataProvider for TmdbProvider {
 
         Ok(results)
     }
+
+    async fn get_series_details(&self, provider_id: &str) -> Result<ExternalSeriesMetadata, AppError> {
+        let details = self.get_tv_details_internal(provider_id).await?;
+        let first_air_date = parse_tmdb_date(details.first_air_date.as_deref());
+        let last_air_date = parse_tmdb_date(details.last_air_date.as_deref());
+        let next_air_date = details
+            .next_episode_to_air
+            .as_ref()
+            .and_then(|episode| parse_tmdb_date(episode.air_date.as_deref()));
+        let inferred_air_day = next_air_date.or(last_air_date).map(|date| weekday_name(date.weekday()));
+
+        let mut provider_ids = HashMap::new();
+        provider_ids.insert("Tmdb".to_string(), details.id.to_string());
+        if let Some(external_ids) = &details.external_ids {
+            if let Some(value) = external_ids.imdb_id.as_ref().filter(|value| !value.trim().is_empty()) {
+                provider_ids.insert("Imdb".to_string(), value.clone());
+            }
+            if let Some(value) = external_ids.tvdb_id {
+                provider_ids.insert("Tvdb".to_string(), value.to_string());
+            }
+        }
+
+        let metadata = serde_json::to_value(&details).unwrap_or_default();
+        Ok(ExternalSeriesMetadata {
+            external_id: details.id.to_string(),
+            provider: "tmdb".to_string(),
+            name: details.name,
+            original_title: details.original_name,
+            overview: details.overview,
+            premiere_date: first_air_date,
+            status: details.status.and_then(|value| normalize_tmdb_series_status(&value)),
+            end_date: last_air_date,
+            air_days: inferred_air_day.into_iter().collect(),
+            air_time: None,
+            production_year: first_air_date.map(|date| date.year()),
+            community_rating: details.vote_average,
+            genres: details.genres.into_iter().map(|genre| genre.name).collect(),
+            studios: details
+                .networks
+                .into_iter()
+                .map(|network| network.name)
+                .chain(details.production_companies.into_iter().map(|company| company.name))
+                .filter(|name| !name.trim().is_empty())
+                .collect(),
+            production_locations: details.origin_country,
+            provider_ids,
+            homepage_url: details.homepage,
+            metadata,
+        })
+    }
+}
+
+fn parse_tmdb_date(value: Option<&str>) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(value?, "%Y-%m-%d").ok()
+}
+
+fn normalize_tmdb_series_status(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let status = match value.to_ascii_lowercase().as_str() {
+        "ended" | "canceled" | "cancelled" => "Ended",
+        "returning series" | "in production" | "planned" | "pilot" => "Continuing",
+        _ => value,
+    };
+    Some(status.to_string())
+}
+
+fn weekday_name(value: chrono::Weekday) -> String {
+    match value {
+        chrono::Weekday::Mon => "Monday",
+        chrono::Weekday::Tue => "Tuesday",
+        chrono::Weekday::Wed => "Wednesday",
+        chrono::Weekday::Thu => "Thursday",
+        chrono::Weekday::Fri => "Friday",
+        chrono::Weekday::Sat => "Saturday",
+        chrono::Weekday::Sun => "Sunday",
+    }
+    .to_string()
 }
 
 // TMDB API响应结构
@@ -339,4 +438,44 @@ struct TmdbCrewCredit {
     media_type: String,
     release_date: Option<String>,
     first_air_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbTvDetails {
+    id: i32,
+    name: Option<String>,
+    original_name: Option<String>,
+    overview: Option<String>,
+    first_air_date: Option<String>,
+    last_air_date: Option<String>,
+    status: Option<String>,
+    homepage: Option<String>,
+    vote_average: Option<f64>,
+    #[serde(default)]
+    genres: Vec<TmdbNamedItem>,
+    #[serde(default)]
+    networks: Vec<TmdbNamedItem>,
+    #[serde(default)]
+    production_companies: Vec<TmdbNamedItem>,
+    #[serde(default)]
+    origin_country: Vec<String>,
+    external_ids: Option<TmdbExternalIds>,
+    next_episode_to_air: Option<TmdbEpisodeStub>,
+    last_episode_to_air: Option<TmdbEpisodeStub>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbNamedItem {
+    name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbExternalIds {
+    imdb_id: Option<String>,
+    tvdb_id: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbEpisodeStub {
+    air_date: Option<String>,
 }

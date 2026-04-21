@@ -1,10 +1,8 @@
 use crate::error::AppError;
 use async_trait::async_trait;
-use serde_json::Value;
 use std::collections::HashMap;
-use uuid::Uuid;
 
-use super::models::{ExternalPerson, ExternalPersonSearchResult};
+use super::models::{ExternalPerson, ExternalPersonSearchResult, ExternalSeriesMetadata};
 
 /// 元数据提供者接口
 #[async_trait]
@@ -20,6 +18,8 @@ pub trait MetadataProvider: Send + Sync {
 
     /// 获取人物参演作品
     async fn get_person_credits(&self, provider_id: &str) -> Result<Vec<ExternalPersonCredit>, AppError>;
+
+    async fn get_series_details(&self, provider_id: &str) -> Result<ExternalSeriesMetadata, AppError>;
 }
 
 /// 外部人物作品信息

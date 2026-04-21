@@ -4,6 +4,28 @@ use serde_json::Value;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalSeriesMetadata {
+    pub external_id: String,
+    pub provider: String,
+    pub name: Option<String>,
+    pub original_title: Option<String>,
+    pub overview: Option<String>,
+    pub premiere_date: Option<NaiveDate>,
+    pub status: Option<String>,
+    pub end_date: Option<NaiveDate>,
+    pub air_days: Vec<String>,
+    pub air_time: Option<String>,
+    pub production_year: Option<i32>,
+    pub community_rating: Option<f64>,
+    pub genres: Vec<String>,
+    pub studios: Vec<String>,
+    pub production_locations: Vec<String>,
+    pub provider_ids: HashMap<String, String>,
+    pub homepage_url: Option<String>,
+    pub metadata: Value,
+}
+
 /// 外部人物搜索结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalPersonSearchResult {

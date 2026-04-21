@@ -1,6 +1,7 @@
 use crate::{
     error::AppError,
     media_analyzer,
+    metadata::provider::MetadataProviderManager,
     models::{DbLibrary, ScanSummary},
     naming,
     repository::{self, UpsertMediaItem},
@@ -9,6 +10,7 @@ use chrono::NaiveDate;
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::{
+    collections::HashSet,
     ffi::OsStr,
     path::{Path, PathBuf},
     sync::OnceLock,
@@ -27,6 +29,10 @@ struct NfoMetadata {
     community_rating: Option<f64>,
     runtime_ticks: Option<i64>,
     premiere_date: Option<NaiveDate>,
+    status: Option<String>,
+    end_date: Option<NaiveDate>,
+    air_days: Vec<String>,
+    air_time: Option<String>,
     series_name: Option<String>,
     season_number: Option<i32>,
     episode_number: Option<i32>,
@@ -54,10 +60,14 @@ struct NfoPerson {
     primary_image: Option<PathBuf>,
 }
 
-pub async fn scan_all_libraries(pool: &sqlx::PgPool) -> Result<ScanSummary, AppError> {
+pub async fn scan_all_libraries(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<&MetadataProviderManager>,
+) -> Result<ScanSummary, AppError> {
     let libraries = repository::list_libraries(pool).await?;
     let mut scanned_files = 0_i64;
     let mut imported_items = 0_i64;
+    let mut refreshed_series = HashSet::new();
 
     for library in &libraries {
         for library_path in repository::library_paths(library) {
@@ -72,7 +82,15 @@ pub async fn scan_all_libraries(pool: &sqlx::PgPool) -> Result<ScanSummary, AppE
 
             for file in files {
                 if library.collection_type.eq_ignore_ascii_case("tvshows") {
-                    import_tv_file(pool, library, &path, &file).await?;
+                    import_tv_file(
+                        pool,
+                        metadata_manager,
+                        &mut refreshed_series,
+                        library,
+                        &path,
+                        &file,
+                    )
+                    .await?;
                 } else {
                     import_movie_file(pool, library, &file).await?;
                 }
@@ -157,6 +175,10 @@ async fn import_movie_file(
             community_rating: nfo.community_rating,
             runtime_ticks: nfo.runtime_ticks,
             premiere_date: nfo.premiere_date.or(parsed.premiere_date),
+            status: nfo.status.as_deref(),
+            end_date: nfo.end_date,
+            air_days: &nfo.air_days,
+            air_time: nfo.air_time.as_deref(),
             provider_ids,
             genres: &nfo.genres,
             studios: &nfo.studios,
@@ -187,6 +209,8 @@ async fn import_movie_file(
 
 async fn import_tv_file(
     pool: &sqlx::PgPool,
+    metadata_manager: Option<&MetadataProviderManager>,
+    refreshed_series: &mut HashSet<uuid::Uuid>,
     library: &DbLibrary,
     library_root: &Path,
     file: &Path,
@@ -268,6 +292,10 @@ async fn import_tv_file(
             community_rating: series_nfo.community_rating,
             runtime_ticks: None,
             premiere_date: series_nfo.premiere_date,
+            status: series_nfo.status.as_deref(),
+            end_date: series_nfo.end_date,
+            air_days: &series_nfo.air_days,
+            air_time: series_nfo.air_time.as_deref(),
             provider_ids: series_provider_ids.clone(),
             genres: &series_nfo.genres,
             studios: &series_nfo.studios,
@@ -291,6 +319,14 @@ async fn import_tv_file(
     )
     .await?;
     sync_nfo_people(pool, series_id, &series_nfo.people).await?;
+    refresh_series_remote_metadata(
+        pool,
+        metadata_manager,
+        refreshed_series,
+        series_id,
+        &series_provider_ids,
+    )
+    .await;
 
     let season_id = repository::upsert_media_item(
         pool,
@@ -312,6 +348,14 @@ async fn import_tv_file(
             community_rating: season_nfo.community_rating.or(series_nfo.community_rating),
             runtime_ticks: None,
             premiere_date: season_nfo.premiere_date,
+            status: season_nfo.status.as_deref().or(series_nfo.status.as_deref()),
+            end_date: season_nfo.end_date.or(series_nfo.end_date),
+            air_days: if season_nfo.air_days.is_empty() {
+                &series_nfo.air_days
+            } else {
+                &season_nfo.air_days
+            },
+            air_time: season_nfo.air_time.as_deref().or(series_nfo.air_time.as_deref()),
             provider_ids: if has_provider_ids(&season_nfo.provider_ids) {
                 season_nfo.provider_ids.clone()
             } else {
@@ -404,6 +448,14 @@ async fn import_tv_file(
             community_rating: episode_nfo.community_rating.or(series_nfo.community_rating),
             runtime_ticks: episode_nfo.runtime_ticks,
             premiere_date: episode_nfo.premiere_date.or(parsed.premiere_date),
+            status: episode_nfo.status.as_deref().or(series_nfo.status.as_deref()),
+            end_date: episode_nfo.end_date.or(series_nfo.end_date),
+            air_days: if episode_nfo.air_days.is_empty() {
+                &series_nfo.air_days
+            } else {
+                &episode_nfo.air_days
+            },
+            air_time: episode_nfo.air_time.as_deref().or(series_nfo.air_time.as_deref()),
             provider_ids: if has_provider_ids(&episode_provider_ids) {
                 episode_provider_ids
             } else {
@@ -461,6 +513,51 @@ async fn import_tv_file(
     analyze_imported_media(pool, episode_id, file).await?;
 
     Ok(())
+}
+
+async fn refresh_series_remote_metadata(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<&MetadataProviderManager>,
+    refreshed_series: &mut HashSet<uuid::Uuid>,
+    series_id: uuid::Uuid,
+    provider_ids: &Value,
+) {
+    if !refreshed_series.insert(series_id) {
+        return;
+    }
+
+    let Some(metadata_manager) = metadata_manager else {
+        return;
+    };
+    let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
+        return;
+    };
+    let Some(provider) = metadata_manager.get_provider("tmdb") else {
+        return;
+    };
+
+    match provider.get_series_details(&tmdb_id).await {
+        Ok(metadata) => {
+            if let Err(error) =
+                repository::update_media_item_series_metadata(pool, series_id, &metadata).await
+            {
+                tracing::warn!(
+                    series_id = %series_id,
+                    tmdb_id = %tmdb_id,
+                    error = %error,
+                    "刷新远程剧集元数据落库失败"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                series_id = %series_id,
+                tmdb_id = %tmdb_id,
+                error = %error,
+                "刷新远程剧集元数据失败"
+            );
+        }
+    }
 }
 
 async fn analyze_imported_media(
@@ -541,6 +638,12 @@ fn read_nfo_file(path: &Path) -> Option<NfoMetadata> {
         runtime_ticks: first_tag(&xml, &["runtime"]).and_then(|value| parse_runtime_ticks(&value)),
         premiere_date: first_tag(&xml, &["premiered", "aired", "releasedate"])
             .and_then(|value| parse_date(&value)),
+        status: parse_series_status(&xml),
+        end_date: first_tag(&xml, &["enddate", "end_date", "ended", "lastaired", "last_air_date"])
+            .and_then(|value| parse_date(&value)),
+        air_days: parse_air_days(&xml),
+        air_time: first_tag(&xml, &["airtime", "airs_time", "air_time"])
+            .filter(|value| !value.trim().is_empty()),
         series_name: first_tag(&xml, &["showtitle"]),
         season_number: first_tag(&xml, &["season"]).and_then(|value| value.parse().ok()),
         episode_number: first_tag(&xml, &["episode"]).and_then(|value| value.parse().ok()),
@@ -627,8 +730,90 @@ fn provider_ids_from_nfo(xml: &str) -> Value {
     Value::Object(ids)
 }
 
+fn parse_series_status(xml: &str) -> Option<String> {
+    first_tag(xml, &["status", "seriesstatus"])
+        .and_then(|value| normalize_series_status(&value))
+        .or_else(|| {
+            let ended = first_tag(xml, &["ended", "isended"]).map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "true" | "1" | "yes" | "ended" | "completed"
+                )
+            });
+            ended.and_then(|value| value.then(|| "Ended".to_string()))
+        })
+}
+
+fn normalize_series_status(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let normalized = match value.to_ascii_lowercase().as_str() {
+        "ended" | "completed" | "complete" | "canceled" | "cancelled" => "Ended",
+        "continuing" | "returning series" | "returning" | "in production" | "running" => {
+            "Continuing"
+        }
+        _ => value,
+    };
+    Some(normalized.to_string())
+}
+
+fn parse_air_days(xml: &str) -> Vec<String> {
+    let mut days = Vec::new();
+    for tag in [
+        "airday",
+        "airdays",
+        "air_day",
+        "air_days",
+        "airsdayofweek",
+        "airs_dayofweek",
+    ] {
+        for value in repeated_tags(xml, tag) {
+            for part in value.split([',', '/', '|', ';']) {
+                if let Some(day) = normalize_air_day(part) {
+                    if !days.iter().any(|existing| existing == &day) {
+                        days.push(day);
+                    }
+                }
+            }
+        }
+    }
+    days
+}
+
+fn normalize_air_day(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let day = match value.to_ascii_lowercase().as_str() {
+        "0" | "sun" | "sunday" | "周日" | "星期日" | "星期天" => "Sunday",
+        "1" | "mon" | "monday" | "周一" | "星期一" => "Monday",
+        "2" | "tue" | "tues" | "tuesday" | "周二" | "星期二" => "Tuesday",
+        "3" | "wed" | "wednesday" | "周三" | "星期三" => "Wednesday",
+        "4" | "thu" | "thur" | "thurs" | "thursday" | "周四" | "星期四" => "Thursday",
+        "5" | "fri" | "friday" | "周五" | "星期五" => "Friday",
+        "6" | "sat" | "saturday" | "周六" | "星期六" => "Saturday",
+        _ => return None,
+    };
+    Some(day.to_string())
+}
+
 fn has_provider_ids(value: &Value) -> bool {
     value.as_object().is_some_and(|object| !object.is_empty())
+}
+
+fn tmdb_id_from_provider_ids(value: &Value) -> Option<String> {
+    let object = value.as_object()?;
+    ["Tmdb", "TMDb", "tmdb"].iter().find_map(|key| {
+        object
+            .get(*key)
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .or_else(|| object.get(*key).and_then(|value| value.as_i64().map(|id| id.to_string())))
+    })
 }
 
 fn provider_ids_from_path(path: &Path) -> Value {

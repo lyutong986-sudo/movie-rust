@@ -43,6 +43,10 @@ pub struct DbMediaItem {
     pub community_rating: Option<f64>,
     pub runtime_ticks: Option<i64>,
     pub premiere_date: Option<NaiveDate>,
+    pub status: Option<String>,
+    pub end_date: Option<NaiveDate>,
+    pub air_days: Vec<String>,
+    pub air_time: Option<String>,
     pub series_name: Option<String>,
     pub season_name: Option<String>,
     pub index_number: Option<i32>,
@@ -186,6 +190,10 @@ pub struct MediaItemRow {
     pub community_rating: Option<f64>,
     pub runtime_ticks: Option<i64>,
     pub premiere_date: Option<NaiveDate>,
+    pub status: Option<String>,
+    pub end_date: Option<NaiveDate>,
+    pub air_days: Vec<String>,
+    pub air_time: Option<String>,
     pub series_name: Option<String>,
     pub season_name: Option<String>,
     pub index_number: Option<i32>,
@@ -229,6 +237,10 @@ impl From<MediaItemRow> for DbMediaItem {
             community_rating: value.community_rating,
             runtime_ticks: value.runtime_ticks,
             premiere_date: value.premiere_date,
+            status: value.status,
+            end_date: value.end_date,
+            air_days: value.air_days,
+            air_time: value.air_time,
             series_name: value.series_name,
             season_name: value.season_name,
             index_number: value.index_number,
@@ -587,6 +599,8 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub location_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub run_time_ticks: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub production_year: Option<i32>,
@@ -607,7 +621,7 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub genres: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub genre_items: Vec<NameIdDto>,
+    pub genre_items: Vec<NameLongIdDto>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_ids: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -627,8 +641,8 @@ pub struct BaseItemDto {
     pub taglines: Vec<String>,
     pub remote_trailers: Vec<Value>,
     pub people: Vec<PersonDto>,
-    pub studios: Vec<NameIdDto>,
-    pub tag_items: Vec<NameIdDto>,
+    pub studios: Vec<NameLongIdDto>,
+    pub tag_items: Vec<NameLongIdDto>,
     pub local_trailer_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_preferences_id: Option<String>,
@@ -639,7 +653,35 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub movie_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub air_days: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub air_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_movie: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_series: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_live: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_news: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_kids: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_sports: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_premiere: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_new: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_repeat: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -672,6 +714,10 @@ pub struct BaseItemDto {
     pub parent_thumb_image_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_primary_image_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_image_item_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_studio: Option<String>,
     pub user_data: UserItemDataDto,
     pub media_sources: Vec<MediaSourceDto>,
     pub media_streams: Vec<MediaStreamDto>,
@@ -680,9 +726,15 @@ pub struct BaseItemDto {
     pub locked_fields: Vec<String>,
     pub lock_data: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub special_feature_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub child_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_image_aspect_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_percentage: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -697,6 +749,13 @@ pub struct ExternalUrlDto {
 pub struct NameIdDto {
     pub name: String,
     pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct NameLongIdDto {
+    pub name: String,
+    pub id: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -720,6 +779,8 @@ pub struct UserItemDataDto {
     pub key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -919,66 +980,6 @@ pub struct PlaybackInfoResponse {
     pub play_session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub media_source_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub live_stream_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub direct_play_protocols: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_sub_protocol: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_container: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_offset: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_size: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_framerate: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_bitrate: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_audio_codec: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_video_codec: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_video_bit_depth: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_audio_bit_depth: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_audio_channels: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_audio_sample_rate: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_max_audio_channels: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_is_avc: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_is_interlaced: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_is_anamorphic: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_cabac: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_ref_frames: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_level: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_video_range_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_color_primaries: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_color_transfer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_color_space: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_matrix_coefficients: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_chroma_subsampling: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcoding_bit_depth: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
