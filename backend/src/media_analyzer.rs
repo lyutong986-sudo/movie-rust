@@ -30,6 +30,19 @@ pub struct MediaStreamInfo {
     pub channel_layout: Option<String>,
     pub sample_rate: Option<String>,
     pub language: Option<String>,
+    pub title: Option<String>,
+    pub profile: Option<String>,
+    pub average_frame_rate: Option<f32>,
+    pub real_frame_rate: Option<f32>,
+    pub aspect_ratio: Option<String>,
+    pub is_default: bool,
+    pub is_forced: bool,
+    pub is_hearing_impaired: bool,
+    pub is_interlaced: bool,
+    pub color_range: Option<String>,
+    pub color_space: Option<String>,
+    pub color_transfer: Option<String>,
+    pub color_primaries: Option<String>,
     pub level: Option<i32>,
     pub pixel_format: Option<String>,
     pub ref_frames: Option<i32>,
@@ -154,15 +167,52 @@ fn parse_probe_result(probe_result: &serde_json::Value) -> Result<MediaAnalysisR
                 .and_then(|tags| tags.get("language"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            let title = stream.get("tags")
+                .and_then(|tags| tags.get("title"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let tags = stream.get("tags").cloned();
+            let disposition = stream.get("disposition");
 
             let level = stream.get("level").and_then(|v| v.as_i64()).map(|v| v as i32);
+            let profile = stream.get("profile").and_then(|v| v.as_str()).map(String::from);
             let pixel_format = stream.get("pix_fmt").and_then(|v| v.as_str()).map(String::from);
             let ref_frames = stream.get("refs").and_then(|v| v.as_i64()).map(|v| v as i32);
+            let average_frame_rate = parse_ffprobe_rational(
+                stream.get("avg_frame_rate").and_then(|v| v.as_str())
+            );
+            let real_frame_rate = parse_ffprobe_rational(
+                stream.get("r_frame_rate").and_then(|v| v.as_str())
+            );
+            let aspect_ratio = stream.get("display_aspect_ratio").and_then(|v| v.as_str()).map(String::from);
+            let is_default = disposition
+                .and_then(|value| value.get("default"))
+                .and_then(|v| v.as_i64())
+                .map(|v| v != 0)
+                .unwrap_or(false);
+            let is_forced = disposition
+                .and_then(|value| value.get("forced"))
+                .and_then(|v| v.as_i64())
+                .map(|v| v != 0)
+                .unwrap_or(false);
+            let is_hearing_impaired = disposition
+                .and_then(|value| value.get("hearing_impaired"))
+                .and_then(|v| v.as_i64())
+                .map(|v| v != 0)
+                .unwrap_or(false);
+            let is_interlaced = stream
+                .get("field_order")
+                .and_then(|v| v.as_str())
+                .map(|value| value != "progressive" && value != "unknown")
+                .unwrap_or(false);
             let stream_start_time_ticks = stream.get("start_time")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<f64>().ok())
                 .map(|seconds| (seconds * 10_000_000.0) as i64);
+            let color_range = stream.get("color_range").and_then(|v| v.as_str()).map(String::from);
+            let color_space = stream.get("color_space").and_then(|v| v.as_str()).map(String::from);
+            let color_transfer = stream.get("color_transfer").and_then(|v| v.as_str()).map(String::from);
+            let color_primaries = stream.get("color_primaries").and_then(|v| v.as_str()).map(String::from);
             let attachment_size = stream.get("tags")
                 .and_then(|tags| tags.get("attachment_size"))
                 .and_then(|v| v.as_i64())
@@ -205,6 +255,19 @@ fn parse_probe_result(probe_result: &serde_json::Value) -> Result<MediaAnalysisR
                 channel_layout,
                 sample_rate,
                 language,
+                title,
+                profile,
+                average_frame_rate,
+                real_frame_rate,
+                aspect_ratio,
+                is_default,
+                is_forced,
+                is_hearing_impaired,
+                is_interlaced,
+                color_range,
+                color_space,
+                color_transfer,
+                color_primaries,
                 level,
                 pixel_format,
                 ref_frames,
@@ -273,6 +336,22 @@ fn parse_probe_result(probe_result: &serde_json::Value) -> Result<MediaAnalysisR
         chapters: chapter_infos,
         format: format_info,
     })
+}
+
+fn parse_ffprobe_rational(value: Option<&str>) -> Option<f32> {
+    let value = value?;
+    if value.trim().is_empty() || value == "0/0" {
+        return None;
+    }
+    if let Some((num, den)) = value.split_once('/') {
+        let num = num.parse::<f32>().ok()?;
+        let den = den.parse::<f32>().ok()?;
+        if den == 0.0 {
+            return None;
+        }
+        return Some(num / den);
+    }
+    value.parse::<f32>().ok()
 }
 
 #[cfg(test)]

@@ -2096,7 +2096,7 @@ pub async fn media_item_to_dto(
         genres: item.genres.clone(),
         genre_items,
         provider_ids: provider_ids.clone(),
-        external_urls: external_urls_from_provider_map(&provider_ids),
+        external_urls: external_urls_from_provider_map(&provider_ids, &item.item_type),
         production_locations: item.production_locations.clone(),
         size: Some(item_size(item, is_folder)),
         file_name: item_file_name(item),
@@ -2614,20 +2614,36 @@ fn provider_ids_from_path_text(path: &str) -> BTreeMap<String, String> {
     providers
 }
 
+fn item_identity_scope(item: &DbMediaItem) -> &'static str {
+    match item.item_type.as_str() {
+        "Series" | "Season" | "Episode" => "series",
+        "Movie" | "Trailer" | "Video" => "movie",
+        "Audio" | "AudioBook" | "MusicAlbum" | "MusicArtist" => "audio",
+        _ => "item",
+    }
+}
+
+fn provider_value<'a>(providers: &'a BTreeMap<String, String>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| providers.get(*key).map(String::as_str))
+}
+
 fn presentation_unique_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> String {
-    let source = providers
-        .get("Tmdb")
-        .map(|value| format!("movie:tmdb:{value}"))
-        .or_else(|| providers.get("Imdb").map(|value| format!("movie:imdb:{value}")))
+    let scope = item_identity_scope(item);
+    let source = provider_value(providers, &["Tmdb", "TMDb", "tmdb"])
+        .map(|value| format!("{scope}:tmdb:{value}"))
+        .or_else(|| provider_value(providers, &["Imdb", "IMDb", "imdb"]).map(|value| format!("{scope}:imdb:{value}")))
+        .or_else(|| provider_value(providers, &["Tvdb", "TVDb", "tvdb"]).map(|value| format!("{scope}:tvdb:{value}")))
         .unwrap_or_else(|| format!("item:{}", item.id));
     format!("{}_", uuid_to_emby_guid(&Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes())))
 }
 
 fn display_preferences_id(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> String {
-    let source = providers
-        .get("Tmdb")
-        .map(|value| format!("movie:tmdb:{value}"))
-        .or_else(|| providers.get("Imdb").map(|value| format!("movie:imdb:{value}")))
+    let scope = item_identity_scope(item);
+    let source = provider_value(providers, &["Tmdb", "TMDb", "tmdb"])
+        .map(|value| format!("{scope}:tmdb:{value}"))
+        .or_else(|| provider_value(providers, &["Imdb", "IMDb", "imdb"]).map(|value| format!("{scope}:imdb:{value}")))
+        .or_else(|| provider_value(providers, &["Tvdb", "TVDb", "tvdb"]).map(|value| format!("{scope}:tvdb:{value}")))
         .unwrap_or_else(|| format!("item:{}", item.id));
     uuid_to_emby_guid(&Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes()))
 }
@@ -2652,24 +2668,46 @@ struct ItemPersonRow {
     primary_image_path: Option<String>,
 }
 
-fn external_urls_from_provider_map(providers: &BTreeMap<String, String>) -> Vec<ExternalUrlDto> {
+fn external_urls_from_provider_map(
+    providers: &BTreeMap<String, String>,
+    item_type: &str,
+) -> Vec<ExternalUrlDto> {
     let mut urls = Vec::new();
+    let is_series_family = matches!(item_type, "Series" | "Season" | "Episode");
 
-    if let Some(imdb) = providers.get("Imdb").or_else(|| providers.get("IMDb")) {
+    if let Some(imdb) = provider_value(providers, &["Imdb", "IMDb", "imdb"]) {
         urls.push(ExternalUrlDto {
             name: "IMDb".to_string(),
             url: format!("https://www.imdb.com/title/{imdb}"),
         });
     }
 
-    if let Some(tmdb) = providers.get("Tmdb").or_else(|| providers.get("TMDb")) {
+    if let Some(tmdb) = provider_value(providers, &["Tmdb", "TMDb", "tmdb"]) {
+        let tmdb_path = if is_series_family { "tv" } else { "movie" };
         urls.push(ExternalUrlDto {
             name: "TheMovieDb".to_string(),
-            url: format!("https://www.themoviedb.org/movie/{tmdb}"),
+            url: format!("https://www.themoviedb.org/{tmdb_path}/{tmdb}"),
         });
         urls.push(ExternalUrlDto {
             name: "Trakt".to_string(),
-            url: format!("https://trakt.tv/search/tmdb/{tmdb}?id_type=movie"),
+            url: format!(
+                "https://trakt.tv/search/tmdb/{tmdb}?id_type={}",
+                if is_series_family { "show" } else { "movie" }
+            ),
+        });
+    }
+
+    if let Some(tvdb) = provider_value(providers, &["Tvdb", "TVDb", "tvdb"]) {
+        urls.push(ExternalUrlDto {
+            name: "TheTVDB".to_string(),
+            url: format!("https://thetvdb.com/dereferrer/series/{tvdb}"),
+        });
+    }
+
+    if let Some(trakt) = provider_value(providers, &["Trakt", "trakt"]) {
+        urls.push(ExternalUrlDto {
+            name: "Trakt".to_string(),
+            url: format!("https://trakt.tv/search/trakt/{trakt}"),
         });
     }
 
@@ -3055,22 +3093,8 @@ pub async fn get_media_source_with_streams(
             _ => stream.stream_type.clone(),
         };
         
-        // 生成显示标题
-        let display_title = if stream_type == "Subtitle" {
-            if let Some(lang) = &stream.language {
-                Some(format!("{} - {}", lang, stream.codec.as_deref().unwrap_or("Unknown")))
-            } else {
-                Some("Unknown".to_string())
-            }
-        } else if stream_type == "Audio" {
-            if let Some(lang) = &stream.language {
-                Some(format!("{} - {} ({})", lang, stream.codec.as_deref().unwrap_or("Unknown"), stream.channels.unwrap_or(2)))
-            } else {
-                Some(stream.codec.clone().unwrap_or_else(|| "Unknown".to_string()))
-            }
-        } else {
-            None
-        };
+        let display_language = display_language(stream.language.as_deref());
+        let display_title = display_title_for_stream(stream, &stream_type, display_language.as_deref());
 
         // 根据流类型设置交付方法和字幕位置类型
         let (delivery_method, delivery_url, subtitle_location_type) = if stream_type == "Subtitle" {
@@ -3115,7 +3139,7 @@ pub async fn get_media_source_with_streams(
             color_primaries: stream.color_primaries.clone(),
             color_space: stream.color_space.clone(),
             color_transfer: stream.color_transfer.clone(),
-            display_language: stream.language.clone(),
+            display_language,
             extended_video_sub_type: stream.extended_video_sub_type.clone(),
             extended_video_sub_type_description: stream.extended_video_sub_type_description.clone(),
             extended_video_type: stream.extended_video_type.clone(),
@@ -3258,70 +3282,30 @@ pub async fn save_media_streams(
         let sample_rate = stream.sample_rate.as_deref().and_then(|sr| sr.parse::<i32>().ok());
 
         // 检查是否为默认轨道（从tags中获取）
-        let is_default = stream.tags.as_ref()
-            .and_then(|tags| tags.get("default"))
-            .and_then(|v| v.as_str())
-            .map(|s| s == "yes" || s == "1")
-            .unwrap_or(false);
-
-        let is_forced = stream.tags.as_ref()
-            .and_then(|tags| tags.get("forced"))
-            .and_then(|v| v.as_str())
-            .map(|s| s == "yes" || s == "1")
-            .unwrap_or(false);
+        let is_default = stream.is_default;
+        let is_forced = stream.is_forced;
 
         // 提取codec_tag和title
         let codec_tag = stream.tags.as_ref()
             .and_then(|tags| tags.get("codec_tag_string"))
             .and_then(|v| v.as_str())
             .map(String::from);
-        let title = stream.tags.as_ref()
-            .and_then(|tags| tags.get("title"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let title = stream.title.clone();
 
         // 提取其他字段
-        let profile = stream.tags.as_ref()
-            .and_then(|tags| tags.get("profile"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let profile = stream.profile.clone();
         let bit_depth = stream.tags.as_ref()
-            .and_then(|tags| tags.get("bits_per_raw_sample"))
+            .and_then(|tags| tags.get("bits_per_raw_sample").or_else(|| tags.get("bits_per_sample")))
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<i32>().ok());
-        let aspect_ratio = stream.tags.as_ref()
-            .and_then(|tags| tags.get("display_aspect_ratio"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let average_frame_rate = stream.tags.as_ref()
-            .and_then(|tags| tags.get("avg_frame_rate"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<f32>().ok());
-        let real_frame_rate = stream.tags.as_ref()
-            .and_then(|tags| tags.get("r_frame_rate"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<f32>().ok());
-        let is_interlaced = stream.tags.as_ref()
-            .and_then(|tags| tags.get("field_order"))
-            .and_then(|v| v.as_str())
-            .map(|s| s != "progressive" && s != "unknown")
-            .unwrap_or(false);
-        let color_range = stream.tags.as_ref()
-            .and_then(|tags| tags.get("color_range"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let color_space = stream.tags.as_ref()
-            .and_then(|tags| tags.get("color_space"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let color_transfer = stream.tags.as_ref()
-            .and_then(|tags| tags.get("color_transfer"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let color_primaries = stream.tags.as_ref()
-            .and_then(|tags| tags.get("color_primaries"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let aspect_ratio = stream.aspect_ratio.clone();
+        let average_frame_rate = stream.average_frame_rate;
+        let real_frame_rate = stream.real_frame_rate;
+        let is_interlaced = stream.is_interlaced;
+        let color_range = stream.color_range.clone();
+        let color_space = stream.color_space.clone();
+        let color_transfer = stream.color_transfer.clone();
+        let color_primaries = stream.color_primaries.clone();
         let rotation = stream.tags.as_ref()
             .and_then(|tags| tags.get("rotation"))
             .and_then(|v| v.as_str())
@@ -3390,10 +3374,10 @@ pub async fn save_media_streams(
                 is_text_subtitle_stream, level, pixel_format, ref_frames, stream_start_time_ticks,
                 created_at, updated_at
             ) VALUES (
-                gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, false, false, $10,
-                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-                $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38,
-                $39, $40, $41, $42, $43, $44, $45, $46, $47, now(), now()
+                gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, false, $10, $11,
+                $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
+                $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39,
+                $40, $41, $42, $43, $44, $45, $46, $47, $48, now(), now()
             )
             "#,
         )
@@ -3406,6 +3390,7 @@ pub async fn save_media_streams(
         .bind(title)
         .bind(is_default)
         .bind(is_forced)
+        .bind(stream.is_hearing_impaired)
         .bind(profile)
         .bind(stream.width)
         .bind(stream.height)
@@ -3469,6 +3454,88 @@ pub async fn save_media_streams(
     }
 
     Ok(())
+}
+
+fn display_language(language: Option<&str>) -> Option<String> {
+    let code = language?.trim();
+    if code.is_empty() {
+        return None;
+    }
+    let normalized = code.to_ascii_lowercase();
+    let display = match normalized.as_str() {
+        "eng" | "en" => "English",
+        "chi" | "zho" | "zh" | "zh-cn" | "zh-hans" => "Chinese",
+        "zh-hant" | "cht" => "Chinese",
+        "jpn" | "ja" => "Japanese",
+        "kor" | "ko" => "Korean",
+        "fre" | "fra" | "fr" => "French",
+        "ger" | "deu" | "de" => "German",
+        "spa" | "es" => "Spanish",
+        "ita" | "it" => "Italian",
+        "rus" | "ru" => "Russian",
+        _ => code,
+    };
+    Some(display.to_string())
+}
+
+fn display_title_for_stream(
+    stream: &DbMediaStream,
+    stream_type: &str,
+    display_language: Option<&str>,
+) -> Option<String> {
+    if stream_type == "Audio" {
+        let codec = stream.codec.as_deref().unwrap_or("Unknown").to_uppercase();
+        let lang = display_language.unwrap_or_else(|| stream.language.as_deref().unwrap_or("Unknown"));
+        let channels = format_audio_channels(stream.channel_layout.as_deref(), stream.channels);
+        let mut title = if let Some(channels) = channels {
+            format!("{lang} {codec} {channels}")
+        } else {
+            format!("{lang} {codec}")
+        };
+        if stream.is_default {
+            title.push_str(" (默认)");
+        }
+        return Some(title);
+    }
+
+    if stream_type == "Subtitle" {
+        let lang = display_language.unwrap_or_else(|| stream.language.as_deref().unwrap_or("Unknown"));
+        let codec = stream.codec.as_deref().unwrap_or("Unknown").to_uppercase();
+        let mut title = format!("{lang} ({codec})");
+        if stream.is_forced {
+            title.push_str(" Forced");
+        }
+        if stream.is_default {
+            title.push_str(" (默认)");
+        }
+        return Some(title);
+    }
+
+    if stream_type == "Video" {
+        let codec = stream.codec.as_deref().unwrap_or("Unknown").to_uppercase();
+        return match (stream.width, stream.height) {
+            (Some(width), Some(height)) => Some(format!("{width}x{height} {codec}")),
+            _ => Some(codec),
+        };
+    }
+
+    None
+}
+
+fn format_audio_channels(channel_layout: Option<&str>, channels: Option<i32>) -> Option<String> {
+    if let Some(layout) = channel_layout {
+        let normalized = layout.trim();
+        if !normalized.is_empty() {
+            return Some(normalized.to_string());
+        }
+    }
+    channels.map(|value| match value {
+        1 => "mono".to_string(),
+        2 => "stereo".to_string(),
+        6 => "5.1".to_string(),
+        8 => "7.1".to_string(),
+        other => other.to_string(),
+    })
 }
 
 fn chapter_to_value(chapter: &DbMediaChapter) -> Value {
