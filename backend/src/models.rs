@@ -684,6 +684,64 @@ pub struct MediaStreamDto {
     pub supports_external_stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aspect_ratio: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment_size: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_frame_rate: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bit_depth: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_primaries: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_space: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_transfer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extended_video_sub_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extended_video_sub_type_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extended_video_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_anamorphic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_avc: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_external_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_hearing_impaired: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_interlaced: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_text_subtitle_stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub real_frame_rate: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_frames: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_start_time_ticks: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_range: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_layout: Option<String>,
 }
 
 #[derive(Debug, Serialize, Default)]
