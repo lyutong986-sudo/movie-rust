@@ -587,14 +587,12 @@ pub struct BaseItemDto {
     pub official_rating: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub community_rating: Option<f64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub taglines: Vec<String>,
     pub remote_trailers: Vec<Value>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub people: Vec<PersonDto>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub studios: Vec<NameIdDto>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tag_items: Vec<NameIdDto>,
+    pub local_trailer_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_preferences_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -612,14 +610,10 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub backdrop_image_tags: Vec<String>,
     pub user_data: UserItemDataDto,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub media_sources: Vec<MediaSourceDto>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub media_streams: Vec<MediaStreamDto>,
     pub part_count: i32,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub chapters: Vec<Value>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub locked_fields: Vec<String>,
     pub lock_data: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

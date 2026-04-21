@@ -1912,10 +1912,12 @@ pub async fn library_to_item_dto(
         bitrate: None,
         official_rating: None,
         community_rating: None,
+        taglines: Vec::new(),
         remote_trailers: Vec::new(),
         people: Vec::new(),
         studios: Vec::new(),
         tag_items: Vec::new(),
+        local_trailer_count: 0,
         display_preferences_id: Some(uuid_to_emby_guid(&library.id)),
         series_name: None,
         season_name: None,
@@ -1972,10 +1974,12 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         bitrate: None,
         official_rating: None,
         community_rating: None,
+        taglines: Vec::new(),
         remote_trailers: Vec::new(),
         people: Vec::new(),
         studios: Vec::new(),
         tag_items: Vec::new(),
+        local_trailer_count: 0,
         display_preferences_id: Some("root".to_string()),
         series_name: None,
         season_name: None,
@@ -2039,7 +2043,7 @@ pub async fn media_item_to_dto(
 
     let is_folder = is_folder_item(item);
     let media_sources = if !is_folder {
-        media_sources_for_item(pool, item).await?
+        media_sources_for_item(pool, item, server_id).await?
     } else {
         Vec::new()
     };
@@ -2062,7 +2066,7 @@ pub async fn media_item_to_dto(
         date_modified: Some(item.date_modified),
         can_delete: true,
         can_download: true,
-        presentation_unique_key: Some(format!("{}_", uuid_to_emby_guid(&item.id))),
+        presentation_unique_key: Some(presentation_unique_key(item, &provider_ids)),
         supports_sync: true,
         item_type: item.item_type.clone(),
         is_folder,
@@ -2088,10 +2092,12 @@ pub async fn media_item_to_dto(
         bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
         official_rating: item.official_rating.clone(),
         community_rating: item.community_rating,
+        taglines: Vec::new(),
         remote_trailers: remote_trailers_from_urls(&item.remote_trailers),
         people,
         studios: name_id_items_from_names(&item.studios),
         tag_items: name_id_items_from_names(&item.tags),
+        local_trailer_count: 0,
         display_preferences_id: Some(uuid_to_emby_guid(&item.id)),
         series_name: item.series_name.clone(),
         season_name: item.season_name.clone(),
@@ -2171,22 +2177,30 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
     }
 }
 
-fn media_source_for_item_with_type(item: &DbMediaItem, source_type: &str) -> MediaSourceDto {
-    let mut source = media_source_for_item(item);
+async fn media_source_for_item_with_type(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+    source_type: &str,
+    server_id: Uuid,
+) -> Result<MediaSourceDto, AppError> {
+    let mut source = get_media_source_with_streams(pool, item, server_id).await?;
     source.source_type = source_type.to_string();
-    source
+    source.direct_stream_url = None;
+    source.server_id = None;
+    Ok(source)
 }
 
 async fn media_sources_for_item(
     pool: &sqlx::PgPool,
     item: &DbMediaItem,
+    server_id: Uuid,
 ) -> Result<Vec<MediaSourceDto>, AppError> {
-    let mut sources = vec![media_source_for_item_with_type(item, "Default")];
+    let mut sources = vec![media_source_for_item_with_type(pool, item, "Default", server_id).await?];
     if !item.item_type.eq_ignore_ascii_case("Movie") {
         return Ok(sources);
     }
 
-    let providers = provider_ids_to_map(&item.provider_ids);
+    let providers = provider_ids_for_item(item);
     let tmdb = providers
         .get("Tmdb")
         .or_else(|| providers.get("TMDb"))
@@ -2197,6 +2211,8 @@ async fn media_sources_for_item(
         .or_else(|| providers.get("IMDb"))
         .or_else(|| providers.get("imdb"))
         .cloned();
+    let tmdb_path_token = tmdb.as_ref().map(|value| format!("%{{tmdbid={value}}}%"));
+    let imdb_path_token = imdb.as_ref().map(|value| format!("%{{imdbid={value}}}%"));
 
     if tmdb.is_none() && imdb.is_none() {
         return Ok(sources);
@@ -2220,10 +2236,12 @@ async fn media_sources_for_item(
           AND (
               ($4::text IS NOT NULL AND (
                   provider_ids->>'Tmdb' = $4 OR provider_ids->>'TMDb' = $4 OR provider_ids->>'tmdb' = $4
+                  OR path ILIKE $6
               ))
               OR
               ($5::text IS NOT NULL AND (
                   provider_ids->>'Imdb' = $5 OR provider_ids->>'IMDb' = $5 OR provider_ids->>'imdb' = $5
+                  OR path ILIKE $7
               ))
           )
         ORDER BY date_created ASC
@@ -2235,14 +2253,28 @@ async fn media_sources_for_item(
     .bind(&item.media_type)
     .bind(tmdb.as_deref())
     .bind(imdb.as_deref())
+    .bind(tmdb_path_token.as_deref())
+    .bind(imdb_path_token.as_deref())
     .fetch_all(pool)
     .await?;
 
-    sources.extend(
-        alternatives
-            .iter()
-            .map(|alternative| media_source_for_item_with_type(alternative, "Grouping")),
-    );
+    if !alternatives.is_empty() {
+        let mut grouped_sources = alternatives;
+        grouped_sources.push(item.clone());
+        grouped_sources.sort_by_key(|source| source.date_created);
+        let mut hydrated_sources = Vec::new();
+        for source in &grouped_sources {
+            let source_type = if source.id == item.id {
+                "Default"
+            } else {
+                "Grouping"
+            };
+            hydrated_sources.push(
+                media_source_for_item_with_type(pool, source, source_type, server_id).await?,
+            );
+        }
+        sources = hydrated_sources;
+    }
     Ok(sources)
 }
 
@@ -2561,6 +2593,15 @@ fn provider_ids_from_path_text(path: &str) -> BTreeMap<String, String> {
         }
     }
     providers
+}
+
+fn presentation_unique_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> String {
+    let source = providers
+        .get("Tmdb")
+        .map(|value| format!("movie:tmdb:{value}"))
+        .or_else(|| providers.get("Imdb").map(|value| format!("movie:imdb:{value}")))
+        .unwrap_or_else(|| format!("item:{}", item.id));
+    format!("{}_", uuid_to_emby_guid(&Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes())))
 }
 
 #[derive(Debug, FromRow)]
