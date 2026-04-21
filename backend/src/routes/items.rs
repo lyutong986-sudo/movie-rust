@@ -505,7 +505,7 @@ async fn item_dto(
 }
 
 async fn playback_info(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
     Query(query_info): Query<PlaybackInfoDto>,
@@ -659,7 +659,16 @@ async fn playback_info(
         if let Some(url) = media_source.direct_stream_url.as_mut() {
             url.push_str("&PlaySessionId=");
             url.push_str(&play_session_id);
+            url.push_str("&X-Emby-Token=");
+            url.push_str(&session.access_token);
         }
+        media_source
+            .required_http_headers
+            .insert("X-Emby-Token".to_string(), session.access_token.clone());
+        media_source
+            .required_http_headers
+            .insert("X-MediaBrowser-Token".to_string(), session.access_token.clone());
+        media_source.add_api_key_to_direct_stream_url = Some(true);
     }
     
     // 设备配置文件处理
@@ -713,6 +722,7 @@ async fn playback_info(
             &item_emby_id,
             &selected_media_source_id,
             &play_session_id,
+            &session.access_token,
             info.audio_stream_index,
             info.subtitle_stream_index,
             info.start_time_ticks,
@@ -811,6 +821,7 @@ fn build_transcoding_url(
     item_emby_id: &str,
     media_source_id: &str,
     play_session_id: &str,
+    access_token: &str,
     audio_stream_index: Option<i32>,
     subtitle_stream_index: Option<i32>,
     start_time_ticks: Option<i64>,
@@ -822,6 +833,7 @@ fn build_transcoding_url(
         format!("mediaSourceId={media_source_id}"),
         format!("PlaySessionId={play_session_id}"),
         format!("Container={transcoding_container}"),
+        format!("X-Emby-Token={access_token}"),
     ];
 
     if let Some(value) = audio_stream_index {

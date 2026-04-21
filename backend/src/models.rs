@@ -90,8 +90,8 @@ pub struct DbMediaStream {
     pub bit_depth: Option<i32>,
     pub channel_layout: Option<String>,
     pub aspect_ratio: Option<String>,
-    pub average_frame_rate: Option<f32>,
-    pub real_frame_rate: Option<f32>,
+    pub average_frame_rate: Option<f64>,
+    pub real_frame_rate: Option<f64>,
     pub is_interlaced: bool,
     pub color_range: Option<String>,
     pub color_space: Option<String>,
@@ -779,6 +779,8 @@ pub struct MediaStreamDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codec: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_title: Option<String>,
@@ -799,6 +801,8 @@ pub struct MediaStreamDto {
     pub delivery_method: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivery_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_chunked_response: Option<bool>,
     pub supports_external_stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -807,7 +811,7 @@ pub struct MediaStreamDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachment_size: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub average_frame_rate: Option<f32>,
+    pub average_frame_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bit_depth: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -845,7 +849,7 @@ pub struct MediaStreamDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub real_frame_rate: Option<f32>,
+    pub real_frame_rate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ref_frames: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -857,9 +861,17 @@ pub struct MediaStreamDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub video_range: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_layout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subtitle_location_type: Option<String>,
 }

@@ -10,7 +10,7 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{header, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get},
+    routing::{delete, get, post},
     Router,
 };
 use reqwest::Client;
@@ -26,6 +26,10 @@ pub fn router() -> Router<AppState> {
         .route("/videos/ActiveEncodings", delete(active_encodings))
         .route("/Video/ActiveEncodings", delete(active_encodings))
         .route("/video/ActiveEncodings", delete(active_encodings))
+        .route("/Videos/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
+        .route("/videos/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
+        .route("/Video/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
+        .route("/video/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
         .route("/Videos/{item_id}/{*stream_path}", get(stream_video))
         .route("/videos/{item_id}/{*stream_path}", get(stream_video))
         .route("/Video/{item_id}/{*stream_path}", get(stream_video))
@@ -34,6 +38,10 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
         .route("/Video/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
         .route("/video/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
+        .route("/Videos/{item_id}/live.m3u8", get(master_playlist).head(master_playlist))
+        .route("/videos/{item_id}/live.m3u8", get(master_playlist).head(master_playlist))
+        .route("/Video/{item_id}/live.m3u8", get(master_playlist).head(master_playlist))
+        .route("/video/{item_id}/live.m3u8", get(master_playlist).head(master_playlist))
         .route("/Videos/{item_id}/main.m3u8", get(main_playlist).head(main_playlist))
         .route("/videos/{item_id}/main.m3u8", get(main_playlist).head(main_playlist))
         .route("/Video/{item_id}/main.m3u8", get(main_playlist).head(main_playlist))
@@ -42,19 +50,53 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
         .route("/Video/{item_id}/subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
         .route("/video/{item_id}/subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
+        .route("/Videos/{item_id}/live_subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
+        .route("/videos/{item_id}/live_subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
+        .route("/Video/{item_id}/live_subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
+        .route("/video/{item_id}/live_subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
         .route("/Videos/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
         .route("/videos/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
         .route("/Video/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
         .route("/video/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(video_hls_segment).head(video_hls_segment))
         .route("/Audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
+        .route("/Audio/{item_id}/main.m3u8", get(audio_master_playlist).head(audio_master_playlist))
+        .route("/audio/{item_id}/main.m3u8", get(audio_master_playlist).head(audio_master_playlist))
+        .route("/Audio/{item_id}/live.m3u8", get(audio_master_playlist).head(audio_master_playlist))
+        .route("/audio/{item_id}/live.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/Audio/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(audio_hls_segment).head(audio_hls_segment))
         .route("/audio/{item_id}/hls1/{_playlist_id}/{_segment_id}.{_segment_container}", get(audio_hls_segment).head(audio_hls_segment))
+        .route("/Videos/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
+        .route("/videos/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
+        .route("/Items/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
+        .route("/items/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
+        .route("/Videos/{item_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start_legacy).head(subtitle_stream_with_start_legacy))
+        .route("/videos/{item_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start_legacy).head(subtitle_stream_with_start_legacy))
+        .route("/Items/{item_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start_legacy).head(subtitle_stream_with_start_legacy))
+        .route("/items/{item_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start_legacy).head(subtitle_stream_with_start_legacy))
+        .route("/Videos/{item_id}/{_media_source_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream).head(subtitle_stream))
+        .route("/videos/{item_id}/{_media_source_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream).head(subtitle_stream))
+        .route("/Items/{item_id}/{_media_source_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream).head(subtitle_stream))
+        .route("/items/{item_id}/{_media_source_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream).head(subtitle_stream))
+        .route("/Videos/{item_id}/{_media_source_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start).head(subtitle_stream_with_start))
+        .route("/videos/{item_id}/{_media_source_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start).head(subtitle_stream_with_start))
+        .route("/Items/{item_id}/{_media_source_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start).head(subtitle_stream_with_start))
+        .route("/items/{item_id}/{_media_source_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start).head(subtitle_stream_with_start))
+        .route("/Videos/{item_id}/{_media_source_id}/Attachments/{index}/Stream", get(attachment_stream).head(attachment_stream))
+        .route("/videos/{item_id}/{_media_source_id}/Attachments/{index}/Stream", get(attachment_stream).head(attachment_stream))
         .route("/Items/{item_id}/File", get(stream_file))
         .route("/Items/{item_id}/Download", get(stream_file))
 }
 
 async fn active_encodings(
+    State(state): State<AppState>,
+    request: Request<Body>,
+) -> Result<StatusCode, AppError> {
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn active_encodings_delete(
     State(state): State<AppState>,
     request: Request<Body>,
 ) -> Result<StatusCode, AppError> {
@@ -74,6 +116,45 @@ struct HlsSegmentPath {
     _playlist_id: String,
     _segment_id: String,
     _segment_container: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubtitlePath {
+    item_id: String,
+    _media_source_id: String,
+    index: i32,
+    _format: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubtitleStartPath {
+    item_id: String,
+    _media_source_id: String,
+    index: i32,
+    _start_position_ticks: String,
+    _format: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacySubtitlePath {
+    item_id: String,
+    index: i32,
+    _format: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacySubtitleStartPath {
+    item_id: String,
+    index: i32,
+    _start_position_ticks: String,
+    _format: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttachmentPath {
+    item_id: String,
+    _media_source_id: String,
+    index: i32,
 }
 
 async fn stream_video(
@@ -318,6 +399,61 @@ async fn audio_hls_segment(
     serve_media_item(&state, item_id, request, Some(query)).await
 }
 
+async fn subtitle_stream(
+    State(state): State<AppState>,
+    Path(path): Path<SubtitlePath>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let item_id = emby_id_to_uuid(&path.item_id)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    serve_subtitle(&state, item_id, path.index, request).await
+}
+
+async fn subtitle_stream_legacy(
+    State(state): State<AppState>,
+    Path(path): Path<LegacySubtitlePath>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let item_id = emby_id_to_uuid(&path.item_id)
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩?ID 鏍煎紡: {}", path.item_id)))?;
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    serve_subtitle(&state, item_id, path.index, request).await
+}
+
+async fn subtitle_stream_with_start(
+    State(state): State<AppState>,
+    Path(path): Path<SubtitleStartPath>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let item_id = emby_id_to_uuid(&path.item_id)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    serve_subtitle(&state, item_id, path.index, request).await
+}
+
+async fn subtitle_stream_with_start_legacy(
+    State(state): State<AppState>,
+    Path(path): Path<LegacySubtitleStartPath>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let item_id = emby_id_to_uuid(&path.item_id)
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩?ID 鏍煎紡: {}", path.item_id)))?;
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    serve_subtitle(&state, item_id, path.index, request).await
+}
+
+async fn attachment_stream(
+    State(state): State<AppState>,
+    Path(path): Path<AttachmentPath>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let item_id = emby_id_to_uuid(&path.item_id)
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩?ID 鏍煎紡: {}", path.item_id)))?;
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    serve_attachment(&state, item_id, path.index, request).await
+}
+
 async fn hls_playlist_response(
     state: &AppState,
     item_id_str: &str,
@@ -491,6 +627,45 @@ async fn serve_subtitle(
 
     if !path.exists() {
         return Err(AppError::NotFound("字幕文件不存在".to_string()));
+    }
+
+    ServeFile::new(path)
+        .oneshot(request)
+        .await
+        .map(IntoResponse::into_response)
+        .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))
+}
+
+async fn serve_attachment(
+    state: &AppState,
+    item_id: Uuid,
+    stream_index: i32,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+
+    let streams = repository::get_media_streams(&state.pool, item_id).await?;
+    let attachment_exists = streams.iter().any(|stream| {
+        stream.index == stream_index
+            && matches!(stream.stream_type.as_str(), "attachment" | "EmbeddedImage" | "embeddedimage")
+    });
+
+    if !attachment_exists {
+        return Err(AppError::NotFound("闄勪欢娴佷笉瀛樺湪".to_string()));
+    }
+
+    let fallback_image = item
+        .image_primary_path
+        .clone()
+        .or(item.thumb_path.clone())
+        .or(item.backdrop_path.clone())
+        .ok_or_else(|| AppError::NotFound("附件流暂不可用".to_string()))?;
+
+    let path = PathBuf::from(fallback_image);
+    if !path.exists() {
+        return Err(AppError::NotFound("附件文件不存在".to_string()));
     }
 
     ServeFile::new(path)

@@ -874,7 +874,8 @@ pub async fn list_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, A
             s.device_name,
             s.client,
             s.application_version,
-            s.last_activity_at
+            s.last_activity_at,
+            s.expires_at
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
         ORDER BY s.last_activity_at DESC
@@ -2264,7 +2265,9 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         supports_probing: Some(true),
         video_3d_format: None,
         timestamp: None,
-        required_http_headers: BTreeMap::new(),
+        required_http_headers: BTreeMap::from([
+            ("Accept-Ranges".to_string(), "bytes".to_string()),
+        ]),
         add_api_key_to_direct_stream_url: Some(false),
         transcoding_url: None,
         transcoding_sub_protocol: None,
@@ -2392,6 +2395,7 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             index: 0,
             stream_type: "Audio".to_string(),
             codec: item.audio_codec.clone(),
+            codec_tag: None,
             language: None,
             display_title: item
                 .audio_codec
@@ -2407,6 +2411,7 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             is_external: false,
             delivery_method: None,
             delivery_url: None,
+            is_chunked_response: Some(false),
             supports_external_stream: false,
             path: None,
             aspect_ratio: None,
@@ -2436,8 +2441,12 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             stream_start_time_ticks: None,
             time_base: None,
             title: None,
+            comment: None,
             video_range: None,
             channel_layout: None,
+            item_id: Some(uuid_to_emby_guid(&item.id)),
+            server_id: None,
+            mime_type: item.audio_codec.as_deref().and_then(mime_type_for_stream_codec),
             subtitle_location_type: None,
         }];
     }
@@ -2447,6 +2456,7 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             index: 0,
             stream_type: "Video".to_string(),
             codec: item.video_codec.clone(),
+            codec_tag: None,
             language: None,
             display_title: video_display_title(item),
             is_default: true,
@@ -2459,6 +2469,7 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             is_external: false,
             delivery_method: None,
             delivery_url: None,
+            is_chunked_response: Some(false),
             supports_external_stream: false,
             path: None,
             aspect_ratio: None,
@@ -2488,14 +2499,19 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             stream_start_time_ticks: None,
             time_base: None,
             title: None,
+            comment: None,
             video_range: None,
             channel_layout: None,
+            item_id: Some(uuid_to_emby_guid(&item.id)),
+            server_id: None,
+            mime_type: item.video_codec.as_deref().and_then(mime_type_for_stream_codec),
             subtitle_location_type: None,
         },
         MediaStreamDto {
             index: 1,
             stream_type: "Audio".to_string(),
             codec: item.audio_codec.clone(),
+            codec_tag: None,
             language: None,
             display_title: item
                 .audio_codec
@@ -2511,6 +2527,7 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             is_external: false,
             delivery_method: None,
             delivery_url: None,
+            is_chunked_response: Some(false),
             supports_external_stream: false,
             path: None,
             aspect_ratio: None,
@@ -2540,8 +2557,12 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             stream_start_time_ticks: None,
             time_base: None,
             title: None,
+            comment: None,
             video_range: None,
             channel_layout: None,
+            item_id: Some(uuid_to_emby_guid(&item.id)),
+            server_id: None,
+            mime_type: item.audio_codec.as_deref().and_then(mime_type_for_stream_codec),
             subtitle_location_type: None,
         },
     ];
@@ -2571,6 +2592,7 @@ fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
                 index,
                 stream_type: "Subtitle".to_string(),
                 codec: Some(subtitle.format.clone()),
+                codec_tag: None,
                 language: subtitle.language,
                 display_title: Some(subtitle.title),
                 is_default: false,
@@ -2586,6 +2608,7 @@ fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
                     "/Videos/{}/{}/Subtitles/{}/Stream.{}",
                     item_emby_id, media_source_id, index, subtitle.format
                 )),
+                is_chunked_response: Some(false),
                 supports_external_stream: true,
                 path: Some(subtitle.path.to_string_lossy().to_string()),
                 aspect_ratio: None,
@@ -2615,8 +2638,12 @@ fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
                 stream_start_time_ticks: None,
                 time_base: None,
                 title: None,
+                comment: None,
                 video_range: None,
                 channel_layout: None,
+                item_id: Some(item_emby_id.clone()),
+                server_id: None,
+                mime_type: Some("text/vtt".to_string()),
                 subtitle_location_type: Some("External".to_string()),
             }
         })
@@ -3340,6 +3367,7 @@ pub async fn get_media_source_with_streams(
             index: stream.index,
             stream_type,
             codec: stream.codec.clone(),
+            codec_tag: stream.codec_tag.clone(),
             language: stream.language.clone(),
             display_title,
             is_default: stream.is_default,
@@ -3352,6 +3380,7 @@ pub async fn get_media_source_with_streams(
             is_external: stream.is_external,
             delivery_method,
             delivery_url,
+            is_chunked_response: Some(false),
             supports_external_stream: stream.is_external,
             path: None,
             aspect_ratio: stream.aspect_ratio.clone(),
@@ -3381,8 +3410,12 @@ pub async fn get_media_source_with_streams(
             stream_start_time_ticks: stream.stream_start_time_ticks,
             time_base: stream.time_base.clone(),
             title: stream.title.clone(),
+            comment: stream.comment.clone(),
             video_range: stream.color_range.clone(),
             channel_layout: stream.channel_layout.clone(),
+            item_id: Some(uuid_to_emby_guid(&item.id)),
+            server_id: Some(uuid_to_emby_guid(&server_id)),
+            mime_type: stream.codec.as_deref().and_then(mime_type_for_stream_codec),
             subtitle_location_type,
         });
     }
@@ -3462,7 +3495,9 @@ pub async fn get_media_source_with_streams(
         supports_probing: Some(true),
         video_3d_format: None,
         timestamp: None,
-        required_http_headers: BTreeMap::new(),
+        required_http_headers: BTreeMap::from([
+            ("Accept-Ranges".to_string(), "bytes".to_string()),
+        ]),
         add_api_key_to_direct_stream_url: Some(false),
         transcoding_url: None,
         transcoding_sub_protocol: None,
@@ -3764,9 +3799,40 @@ fn chapter_to_value(chapter: &DbMediaChapter) -> Value {
     json!({
         "StartPositionTicks": chapter.start_position_ticks,
         "Name": chapter.name.clone().unwrap_or_else(|| format!("第 {:02} 章", chapter.chapter_index + 1)),
+        "ImageTag": chapter.image_path.as_ref().map(|_| chapter.updated_at.timestamp().to_string()),
         "MarkerType": chapter.marker_type.clone().unwrap_or_else(|| "Chapter".to_string()),
         "ChapterIndex": chapter.chapter_index
     })
+}
+
+fn mime_type_for_stream_codec(codec: &str) -> Option<String> {
+    let normalized = codec.trim().to_ascii_lowercase();
+    let mime = match normalized.as_str() {
+        "h264" | "avc" => "video/avc",
+        "hevc" | "h265" => "video/hevc",
+        "mpeg4" => "video/mp4",
+        "vp8" => "video/x-vnd.on2.vp8",
+        "vp9" => "video/x-vnd.on2.vp9",
+        "av1" => "video/av1",
+        "aac" => "audio/aac",
+        "ac3" => "audio/ac3",
+        "eac3" => "audio/eac3",
+        "dts" => "audio/vnd.dts",
+        "truehd" => "audio/true-hd",
+        "flac" => "audio/flac",
+        "mp3" => "audio/mpeg",
+        "opus" => "audio/opus",
+        "vorbis" => "audio/vorbis",
+        "srt" => "application/x-subrip",
+        "ass" | "ssa" => "text/x-ssa",
+        "vtt" | "webvtt" => "text/vtt",
+        "subrip" => "application/x-subrip",
+        "pgssub" => "application/pgs",
+        "mjpeg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        _ => return None,
+    };
+    Some(mime.to_string())
 }
 
 pub async fn find_similar_items(
