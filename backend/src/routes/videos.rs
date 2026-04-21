@@ -1,4 +1,10 @@
-use crate::{auth, error::AppError, models::{emby_id_to_uuid, VideoStreamQuery}, naming, repository, state::AppState};
+use crate::{
+    auth,
+    error::AppError,
+    models::{emby_id_to_uuid, VideoStreamQuery},
+    naming, repository,
+    state::AppState,
+};
 use axum::{
     body::Body,
     extract::{Path, Query, Request, State},
@@ -48,9 +54,17 @@ async fn stream_video(
     Query(query): Query<VideoStreamQuery>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    let item_id = emby_id_to_uuid(&path.item_id)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", path.item_id)))?;
-    let stream_path = path.stream_path.trim_start_matches('/');
+    let requested_item_id = emby_id_to_uuid(&path.item_id)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
+
+    let (path_media_source_id, stream_path) =
+        split_media_source_prefix(path.stream_path.trim_start_matches('/'));
+    let effective_media_source_id = query
+        .media_source_id
+        .as_deref()
+        .or(path_media_source_id.as_deref());
+    let item_id = resolve_stream_item_id(requested_item_id, effective_media_source_id)?;
+
     if let Some(subtitle_index) = parse_subtitle_stream_index(stream_path) {
         auth::require_auth(&state, request.headers(), request.uri().query()).await?;
         return serve_subtitle(&state, item_id, subtitle_index, request).await;
@@ -61,16 +75,18 @@ async fn stream_video(
     }
 
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-    
+
     tracing::debug!(
-        item_id = %item_id,
+        requested_item_id = %requested_item_id,
+        resolved_item_id = %item_id,
+        media_source_id = ?effective_media_source_id,
         container = ?query.container,
         video_codec = ?query.video_codec,
         audio_codec = ?query.audio_codec,
         max_video_bitrate = ?query.max_video_bitrate,
         "视频流请求参数"
     );
-    
+
     serve_media_item(&state, item_id, request, Some(query)).await
 }
 
@@ -80,7 +96,7 @@ async fn stream_file(
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     serve_media_item(&state, item_id, request, None).await
 }
@@ -123,35 +139,27 @@ async fn serve_media_item(
             || q.max_height.is_some()
             || q.max_framerate.is_some();
         if has_transcoding_params {
-            // 尝试获取用户ID和设备ID（简化实现）
-            // 在实际实现中，这些信息应从认证会话中获取
-            let user_id = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap(); // 默认用户ID
+            let user_id = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap();
             let device_id = "default-device".to_string();
-            
-            // 检查是否启用转码
+
             if state.config.enable_transcoding {
                 tracing::info!(
                     item_id = %item_id,
                     user_id = %user_id,
                     "视频转码请求，启动转码会话"
                 );
-                
-                // 尝试启动转码会话
-                match state.transcoder.start_transcoding(
-                    item_id,
-                    user_id,
-                    &device_id,
-                    q.clone(),
-                    &path,
-                ).await {
+
+                match state
+                    .transcoder
+                    .start_transcoding(item_id, user_id, &device_id, q.clone(), &path)
+                    .await
+                {
                     Ok(session) => {
                         tracing::info!(
                             session_id = %session.id,
                             protocol = %session.protocol,
                             "转码会话已启动"
                         );
-                        // 对于HLS/DASH协议，应该返回播放列表文件
-                        // 简化实现：返回一个指示转码已启动的响应
                         if session.protocol == "hls" {
                             let playlist_path = session.playlist_path;
                             if playlist_path.exists() {
@@ -159,7 +167,12 @@ async fn serve_media_item(
                                     .oneshot(request)
                                     .await
                                     .map(IntoResponse::into_response)
-                                    .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)));
+                                    .map_err(|error| {
+                                        AppError::Io(std::io::Error::new(
+                                            std::io::ErrorKind::Other,
+                                            error,
+                                        ))
+                                    });
                             }
                         }
                         tracing::warn!("转码会话已启动，但播放列表尚未生成，使用直接播放");
@@ -283,6 +296,37 @@ fn parse_subtitle_stream_index(stream_path: &str) -> Option<i32> {
     }
 
     parts.get(2)?.parse().ok()
+}
+
+fn split_media_source_prefix(stream_path: &str) -> (Option<String>, &str) {
+    let trimmed = stream_path.trim_start_matches('/');
+    let mut parts = trimmed.splitn(2, '/');
+    let first = parts.next().unwrap_or_default();
+    let rest = parts.next().unwrap_or_default();
+
+    if first.to_ascii_lowercase().starts_with("mediasource_") && !rest.is_empty() {
+        (Some(first.to_string()), rest)
+    } else {
+        (None, trimmed)
+    }
+}
+
+fn resolve_stream_item_id(default_item_id: Uuid, media_source_id: Option<&str>) -> Result<Uuid, AppError> {
+    let Some(media_source_id) = media_source_id else {
+        return Ok(default_item_id);
+    };
+
+    let normalized = media_source_id.trim();
+    let suffix = normalized
+        .strip_prefix("mediasource_")
+        .or_else(|| normalized.strip_prefix("MediaSource_"))
+        .unwrap_or(normalized);
+
+    if let Ok(media_item_id) = emby_id_to_uuid(suffix) {
+        return Ok(media_item_id);
+    }
+
+    Ok(default_item_id)
 }
 
 fn is_hop_by_hop_header(name: &str) -> bool {

@@ -561,6 +561,8 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forced_sort_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_image_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub collection_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
@@ -611,7 +613,11 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub season_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub season_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index_number: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1031,6 +1037,8 @@ pub struct ItemsQuery {
     pub start_index: Option<i64>,
     #[serde(default)]
     pub limit: Option<i64>,
+    #[serde(default, alias = "ListItemIds", alias = "listItemIds")]
+    pub list_item_ids: Option<String>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
 }
@@ -1304,6 +1312,8 @@ pub struct PersonDto {
     #[serde(rename = "Type", skip_serializing_if = "Option::is_none")]
     pub person_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_image_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overview: Option<String>,
@@ -1510,6 +1520,7 @@ where
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub struct GetSimilarItems {
     #[serde(skip)]
     pub id: Option<String>, // 从路径参数提取，不由查询字符串解析

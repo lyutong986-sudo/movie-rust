@@ -45,6 +45,7 @@ async fn get_seasons(
         ItemListOptions {
             library_id: None,
             parent_id: Some(series_id),
+            item_ids: vec![],
             include_types: vec!["Season".to_string()],
             genres: vec![],
             recursive: false,
@@ -113,6 +114,7 @@ async fn get_episodes(
         ItemListOptions {
             library_id: None,
             parent_id,
+            item_ids: vec![],
             include_types: vec!["Episode".to_string()],
             genres: vec![],
             recursive,
@@ -165,6 +167,7 @@ async fn get_episodes_by_season(
         ItemListOptions {
             library_id: None,
             parent_id: Some(season_id),
+            item_ids: vec![],
             include_types: vec!["Episode".to_string()],
             genres: vec![],
             recursive: false,

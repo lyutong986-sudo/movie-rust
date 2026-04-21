@@ -172,6 +172,7 @@ async fn list_items_for_user(
                 ItemListOptions {
                     library_id: Some(library.id),
                     parent_id: None,
+                    item_ids: parse_emby_uuid_list(query.list_item_ids.as_deref()),
                     include_types,
                     genres: parse_list(query.genres.as_deref()),
                     recursive,
@@ -194,6 +195,7 @@ async fn list_items_for_user(
         ItemListOptions {
             library_id: None,
             parent_id: query.parent_id,
+            item_ids: parse_emby_uuid_list(query.list_item_ids.as_deref()),
             include_types: parse_include_types(query.include_item_types.as_deref()),
             genres: parse_list(query.genres.as_deref()),
             recursive,
@@ -601,6 +603,14 @@ async fn playback_info(
         })
         .unwrap_or(0);
 
+    if let Some(selected_source) = media_sources.get_mut(selected_media_source_index) {
+        apply_requested_stream_selection(
+            selected_source,
+            info.audio_stream_index,
+            info.subtitle_stream_index,
+        );
+    }
+
     for media_source in &mut media_sources {
         if let Some(url) = media_source.direct_stream_url.as_mut() {
             url.push_str("&PlaySessionId=");
@@ -683,6 +693,45 @@ fn parse_list(value: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+fn parse_emby_uuid_list(value: Option<&str>) -> Vec<Uuid> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter_map(|value| emby_id_to_uuid(value).ok())
+        .collect()
+}
+
+fn apply_requested_stream_selection(
+    media_source: &mut crate::models::MediaSourceDto,
+    requested_audio_stream_index: Option<i32>,
+    requested_subtitle_stream_index: Option<i32>,
+) {
+    if let Some(audio_index) = requested_audio_stream_index {
+        media_source.default_audio_stream_index = Some(audio_index);
+        for stream in &mut media_source.media_streams {
+            if stream.stream_type == "Audio" {
+                stream.is_default = stream.index == audio_index;
+            }
+        }
+    }
+
+    if let Some(subtitle_index) = requested_subtitle_stream_index {
+        if subtitle_index >= 0 {
+            media_source.default_subtitle_stream_index = Some(subtitle_index);
+        } else {
+            media_source.default_subtitle_stream_index = None;
+        }
+
+        for stream in &mut media_source.media_streams {
+            if stream.stream_type == "Subtitle" {
+                stream.is_default = subtitle_index >= 0 && stream.index == subtitle_index;
+            }
+        }
+    }
+}
+
 async fn user_resume_items(
     _session: AuthSession,
     State(state): State<AppState>,
@@ -724,10 +773,12 @@ async fn get_similar_items(
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
     
     // 简单的相似性算法：基于类型和标签查找相似项目
+    let user_id = query.user_id.unwrap_or(session.user_id);
     let similar_items = repository::find_similar_items(
         &state.pool,
         &target_item,
         query.limit.unwrap_or(20),
+        Some(user_id),
         state.config.server_id,
     ).await?;
     

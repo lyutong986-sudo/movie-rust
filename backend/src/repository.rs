@@ -278,6 +278,7 @@ pub async fn get_persons(
                 id: uuid_to_emby_guid(&person.id),
                 role: None,
                 person_type: None,
+                primary_image_tag: person.primary_image_path.as_ref().map(|_| "primary".to_string()),
                 sort_name: person.sort_name,
                 overview: person.overview,
                 external_url: person.external_url,
@@ -325,6 +326,7 @@ pub async fn get_person_by_uuid(
             id: uuid_to_emby_guid(&person.id),
             role: None,
             person_type: None,
+            primary_image_tag: person.primary_image_path.as_ref().map(|_| "primary".to_string()),
             sort_name: person.sort_name,
             overview: person.overview,
             external_url: person.external_url,
@@ -374,6 +376,7 @@ pub async fn get_person_by_name(
             id: uuid_to_emby_guid(&person.id),
             role: None,
             person_type: None,
+            primary_image_tag: person.primary_image_path.as_ref().map(|_| "primary".to_string()),
             sort_name: person.sort_name,
             overview: person.overview,
             external_url: person.external_url,
@@ -1255,6 +1258,7 @@ fn library_paths_from_options_or_path(options: &Value, fallback_path: &str) -> V
 pub struct ItemListOptions {
     pub library_id: Option<Uuid>,
     pub parent_id: Option<Uuid>,
+    pub item_ids: Vec<Uuid>,
     pub include_types: Vec<String>,
     pub genres: Vec<String>,
     pub recursive: bool,
@@ -1317,6 +1321,10 @@ pub async fn list_media_items(
         }
     } else if !options.recursive {
         builder.push(" AND parent_id IS NULL");
+    }
+
+    if !options.item_ids.is_empty() {
+        builder.push(" AND id = ANY(").push_bind(options.item_ids).push(")");
     }
 
     if !options.include_types.is_empty() {
@@ -1889,6 +1897,7 @@ pub async fn library_to_item_dto(
         is_folder: true,
         sort_name: Some(library.name.to_lowercase()),
         forced_sort_name: Some(library.name.to_lowercase()),
+        primary_image_tag: None,
         collection_type: Some(library.collection_type.clone()),
         media_type: None,
         container: None,
@@ -1920,7 +1929,9 @@ pub async fn library_to_item_dto(
         local_trailer_count: 0,
         display_preferences_id: Some(uuid_to_emby_guid(&library.id)),
         series_name: None,
+        series_id: None,
         season_name: None,
+        season_id: None,
         index_number: None,
         index_number_end: None,
         parent_index_number: None,
@@ -1954,6 +1965,7 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         is_folder: true,
         sort_name: Some("root".to_string()),
         forced_sort_name: Some("root".to_string()),
+        primary_image_tag: None,
         collection_type: None,
         media_type: None,
         container: None,
@@ -1982,7 +1994,9 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         local_trailer_count: 0,
         display_preferences_id: Some("root".to_string()),
         series_name: None,
+        series_id: None,
         season_name: None,
+        season_id: None,
         index_number: None,
         index_number_end: None,
         parent_index_number: None,
@@ -2036,9 +2050,9 @@ pub async fn media_item_to_dto(
         get_user_item_data(pool, user_id, item.id)
             .await?
             .map(|data| user_item_data_to_dto_for_item(data, item.id))
-            .unwrap_or_else(empty_user_data)
+            .unwrap_or_else(|| empty_user_data_for_item(item.id))
     } else {
-        empty_user_data()
+        empty_user_data_for_item(item.id)
     };
 
     let is_folder = is_folder_item(item);
@@ -2064,9 +2078,14 @@ pub async fn media_item_to_dto(
     } else {
         None
     };
+    let (series_id, season_id) = resolve_series_and_season_ids(pool, item).await?;
     let genre_items = genre_items_from_names(&item.genres);
     let people = get_item_people(pool, item.id).await?;
     let provider_ids = provider_ids_for_item(item);
+    let primary_image_tag = item
+        .image_primary_path
+        .as_ref()
+        .map(|_| item.date_modified.timestamp().to_string());
 
     Ok(BaseItemDto {
         name: item.name.clone(),
@@ -2083,6 +2102,7 @@ pub async fn media_item_to_dto(
         is_folder,
         sort_name: Some(item.sort_name.clone()),
         forced_sort_name: Some(item.sort_name.clone()),
+        primary_image_tag,
         collection_type: None,
         media_type: (!is_folder).then(|| item.media_type.clone()),
         container: effective_container(item),
@@ -2111,7 +2131,9 @@ pub async fn media_item_to_dto(
         local_trailer_count: 0,
         display_preferences_id: Some(display_preferences_id(item, &provider_ids)),
         series_name: item.series_name.clone(),
+        series_id,
         season_name: item.season_name.clone(),
+        season_id,
         index_number: item.index_number,
         index_number_end: item.index_number_end,
         parent_index_number: item.parent_index_number,
@@ -2127,6 +2149,32 @@ pub async fn media_item_to_dto(
         child_count,
         primary_image_aspect_ratio: item.image_primary_path.as_ref().map(|_| 0.666_666_666_7),
     })
+}
+
+async fn resolve_series_and_season_ids(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+) -> Result<(Option<String>, Option<String>), AppError> {
+    match item.item_type.as_str() {
+        "Season" => Ok((item.parent_id.map(|id| uuid_to_emby_guid(&id)), None)),
+        "Episode" => {
+            let season_id = item.parent_id.map(|id| uuid_to_emby_guid(&id));
+            let Some(parent_id) = item.parent_id else {
+                return Ok((None, season_id));
+            };
+
+            let series_id = match get_media_item(pool, parent_id).await? {
+                Some(parent) if parent.item_type == "Season" => {
+                    parent.parent_id.map(|id| uuid_to_emby_guid(&id))
+                }
+                Some(parent) if parent.item_type == "Series" => Some(uuid_to_emby_guid(&parent.id)),
+                _ => None,
+            };
+
+            Ok((series_id, season_id))
+        }
+        _ => Ok((None, None)),
+    }
 }
 
 pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
@@ -2471,6 +2519,8 @@ pub fn subtitle_path_for_stream_index(item: &DbMediaItem, stream_index: i32) -> 
 
 fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
     let video_path = Path::new(&item.path);
+    let item_emby_id = uuid_to_emby_guid(&item.id);
+    let media_source_id = format!("mediasource_{item_emby_id}");
     naming::sidecar_subtitles(video_path)
         .into_iter()
         .enumerate()
@@ -2493,7 +2543,7 @@ fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
                 delivery_method: Some("External".to_string()),
                 delivery_url: Some(format!(
                     "/Videos/{}/{}/Subtitles/{}/Stream.{}",
-                    item.id, item.id, index, subtitle.format
+                    item_emby_id, media_source_id, index, subtitle.format
                 )),
                 supports_external_stream: true,
                 path: Some(subtitle.path.to_string_lossy().to_string()),
@@ -2776,6 +2826,10 @@ async fn get_item_people(pool: &sqlx::PgPool, item_id: Uuid) -> Result<Vec<Perso
                 id: uuid_to_emby_guid(&row.id),
                 role: row.role,
                 person_type: Some(row.role_type),
+                primary_image_tag: row
+                    .primary_image_path
+                    .as_ref()
+                    .map(|_| "primary".to_string()),
                 sort_name: row.sort_name,
                 overview: row.overview,
                 external_url: row.external_url,
@@ -3099,10 +3153,12 @@ pub async fn get_media_source_with_streams(
         // 根据流类型设置交付方法和字幕位置类型
         let (delivery_method, delivery_url, subtitle_location_type) = if stream_type == "Subtitle" {
             if stream.is_external {
+                let item_emby_id = uuid_to_emby_guid(&item.id);
+                let media_source_id = format!("mediasource_{item_emby_id}");
                 let delivery_url = Some(format!(
                     "/Videos/{}/{}/Subtitles/{}/Stream.{}",
-                    item.id,
-                    item.id,
+                    item_emby_id,
+                    media_source_id,
                     stream.index,
                     stream.codec.as_deref().unwrap_or("sub")
                 ));
@@ -3551,6 +3607,7 @@ pub async fn find_similar_items(
     pool: &sqlx::PgPool,
     target_item: &DbMediaItem,
     limit: i64,
+    user_id: Option<Uuid>,
     server_id: Uuid,
 ) -> Result<Vec<BaseItemDto>, AppError> {
     // 简单的相似性算法：基于类型和标签查找相似项目
@@ -3582,7 +3639,7 @@ pub async fn find_similar_items(
         
         let mut result = Vec::new();
         for item in similar_items {
-            result.push(media_item_to_dto(pool, &item, None, server_id.clone()).await?);
+            result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
         }
         return Ok(result);
     }
@@ -3620,7 +3677,7 @@ pub async fn find_similar_items(
     
     let mut result = Vec::new();
     for item in similar_items {
-        result.push(media_item_to_dto(pool, &item, None, server_id.clone()).await?);
+        result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
     }
     
     // 如果找到的项目不足限制数量，则用相同类型的其他项目补充
@@ -3650,9 +3707,9 @@ pub async fn find_similar_items(
         .bind(remaining_limit)
         .fetch_all(pool)
         .await?;
-        
+
         for item in additional_items {
-            result.push(media_item_to_dto(pool, &item, None, server_id.clone()).await?);
+            result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
         }
     }
     
