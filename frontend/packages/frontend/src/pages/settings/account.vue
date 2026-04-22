@@ -118,23 +118,16 @@
 <script setup lang="ts">
 import { useTranslation } from 'i18next-vue';
 import { nextTick, ref, shallowRef, watch } from 'vue';
-import { getImageApi } from '@jellyfin/sdk/lib/utils/api/image-api';
-import { getUserApi } from '@jellyfin/sdk/lib/utils/api/user-api';
 import type { UserApiUpdateUserPasswordRequest } from '@jellyfin/sdk/lib/generated-client/api/user-api';
 import type { ImageApiPostUserImageRequest } from '@jellyfin/sdk/lib/generated-client/api/image-api';
 import type { AxiosRequestConfig } from 'axios';
 import { useConfirmDialog } from '../../composables/use-confirm-dialog';
+import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 import { remote } from '#/plugins/remote/index.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
 
 const { t } = useTranslation();
-const imageApi = remote.sdk.newUserApi(getImageApi) as {
-  deleteUserImage: (payload: { userId: string }) => Promise<unknown>;
-  postUserImage: (payload: ImageApiPostUserImageRequest, config?: AxiosRequestConfig) => Promise<unknown>;
-};
-const userApi = remote.sdk.newUserApi(getUserApi) as {
-  updateUserPassword: (payload: UserApiUpdateUserPasswordRequest & { userId: string }) => Promise<unknown>;
-};
+const { accountApi } = useSettingsSdk();
 
 const currentPassword = shallowRef('');
 const newPassword = shallowRef('');
@@ -155,7 +148,7 @@ async function deleteUserImage() {
     isDeleteImageLoading.value = true;
 
     try {
-      await imageApi.deleteUserImage({ userId: remote.auth.currentUserId.value! });
+      await accountApi.deleteUserImage(remote.auth.currentUserId.value!);
     } catch {
       useSnackbar(t('failedToDeleteImage'), 'red');
     } finally {
@@ -190,7 +183,7 @@ async function changeUserImage() {
   isChangeImageLoading.value = true;
 
   try {
-    await imageApi.postUserImage(payload, config);
+    await accountApi.postUserImage(payload, config);
   } catch {
     useSnackbar(t('failedToChangeImage'), 'red');
   } finally {
@@ -221,7 +214,7 @@ async function changePassword() {
 
   try {
     isChangePasswordLoading.value = true;
-    await userApi.updateUserPassword(payload);
+    await accountApi.updateUserPassword(payload);
 
     newPassword.value = '';
     currentPassword.value = '';

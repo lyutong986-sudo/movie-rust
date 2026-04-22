@@ -1,15 +1,16 @@
 import { ref, shallowRef, watch } from 'vue';
 import { watchDeep } from '@vueuse/core';
-import RemotePluginAxiosInstance from '#/plugins/remote/axios.ts';
+import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 import { taskManager } from '#/store/task-manager.ts';
 
 type ServerConfiguration = Record<string, unknown>;
 
 export async function useServerConfiguration<T extends ServerConfiguration>(defaults: T) {
-  const response = await RemotePluginAxiosInstance.instance.get<ServerConfiguration>('/System/Configuration');
+  const { serverApi } = useSettingsSdk();
+  const response = await serverApi.getConfiguration();
   const configuration = ref<T & ServerConfiguration>({
     ...defaults,
-    ...response.data
+    ...response
   });
   const loaded = shallowRef(false);
   const saving = shallowRef(false);
@@ -24,7 +25,7 @@ export async function useServerConfiguration<T extends ServerConfiguration>(defa
     taskId ??= taskManager.startConfigSync();
 
     try {
-      await RemotePluginAxiosInstance.instance.post('/System/Configuration', configuration.value);
+      await serverApi.updateConfiguration(configuration.value);
     } finally {
       saving.value = false;
 

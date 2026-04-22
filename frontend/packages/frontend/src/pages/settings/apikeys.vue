@@ -121,16 +121,16 @@ meta:
 
 <script setup lang="ts">
 import type { AuthenticationInfo } from '@jellyfin/sdk/lib/generated-client';
-import { getApiKeyApi } from '@jellyfin/sdk/lib/utils/api/api-key-api';
 import { formatRelative, parseJSON } from 'date-fns';
 import { ref } from 'vue';
 import { useTranslation } from 'i18next-vue';
 import { isNil } from '@jellyfin-vue/shared/validation';
-import { remote } from '#/plugins/remote/index.ts';
+import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
 import { useDateFns } from '#/composables/use-datefns.ts';
 
 const { t } = useTranslation();
+const { apiKeysApi } = useSettingsSdk();
 
 const apiKeys = ref<AuthenticationInfo[]>([]);
 const addingNewKey = ref(false);
@@ -170,7 +170,7 @@ async function confirmRevocation(): Promise<void> {
 async function revokeApiKey(token: string): Promise<void> {
   loading.value = true;
   try {
-    await remote.sdk.newUserApi(getApiKeyApi).revokeKey({ key: token });
+    await apiKeysApi.revokeKey(token);
     useSnackbar(t('revokeSuccess'), 'success');
     await refreshApiKeys();
   } catch (error) {
@@ -186,7 +186,7 @@ async function revokeAllApiKeys(): Promise<void> {
   try {
     for (const key of apiKeys.value) {
       if (key.AccessToken) {
-        await remote.sdk.newUserApi(getApiKeyApi).revokeKey({ key: key.AccessToken });
+        await apiKeysApi.revokeKey(key.AccessToken);
       }
     }
     useSnackbar(t('revokeAllSuccess'), 'success');
@@ -202,7 +202,7 @@ async function revokeAllApiKeys(): Promise<void> {
 async function refreshApiKeys(): Promise<void> {
   loading.value = true;
   try {
-    apiKeys.value = (await remote.sdk.newUserApi(getApiKeyApi).getKeys()).data.Items ?? [];
+    apiKeys.value = await apiKeysApi.getKeys();
   } catch (error) {
     apiKeys.value = [];
     console.error(error);

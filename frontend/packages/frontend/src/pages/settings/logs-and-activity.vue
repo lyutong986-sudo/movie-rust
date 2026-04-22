@@ -125,25 +125,20 @@ meta:
 import type {
   ActivityLogEntry,
   LogFile,
-  QueryResultActivityLogEntry,
   QueryResultString
 } from '@jellyfin/sdk/lib/generated-client';
 import { LogLevel } from '@jellyfin/sdk/lib/generated-client';
-import { getSystemApi } from '@jellyfin/sdk/lib/utils/api/system-api';
 import { format, formatRelative, parseJSON } from 'date-fns';
 import { ref } from 'vue';
 import { useTranslation } from 'i18next-vue';
 import { useTheme } from 'vuetify';
-import RemotePluginAxiosInstance from '#/plugins/remote/axios.ts';
+import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 import { remote } from '#/plugins/remote/index.ts';
 import { useDateFns } from '#/composables/use-datefns.ts';
 
 const { t } = useTranslation();
 const theme = useTheme();
-const systemApi = remote.sdk.newUserApi(getSystemApi) as {
-  getSystemLogs: () => Promise<{ data: LogFile[] }>;
-  getSystemLogsByNameLines: (name: string) => Promise<{ data: QueryResultString }>;
-};
+const { logsApi } = useSettingsSdk();
 
 const refreshing = ref(false);
 const previewName = ref<string>();
@@ -207,11 +202,11 @@ async function refreshData(): Promise<void> {
   refreshing.value = true;
   try {
     const [logsResponse, activityResponse] = await Promise.all([
-      systemApi.getSystemLogs(),
-      RemotePluginAxiosInstance.instance.get<QueryResultActivityLogEntry>('/System/ActivityLog/Entries')
+      logsApi.getLogs(),
+      logsApi.getActivityLogEntries()
     ]);
-    logs.value = logsResponse.data ?? [];
-    activityList.value = activityResponse.data.Items ?? [];
+    logs.value = logsResponse;
+    activityList.value = activityResponse.Items ?? [];
   } finally {
     refreshing.value = false;
   }
@@ -221,8 +216,8 @@ async function previewLog(name: string): Promise<void> {
   previewName.value = name;
   previewContent.value = 'Loading...';
   try {
-    const response = await systemApi.getSystemLogsByNameLines(name);
-    previewContent.value = response.data.Items?.join('\n') ?? '';
+    const response: QueryResultString = await logsApi.getLogLines(name);
+    previewContent.value = response.Items?.join('\n') ?? '';
   } catch {
     previewContent.value = 'Failed to load log preview.';
   }

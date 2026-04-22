@@ -139,40 +139,32 @@
 
 <script setup lang="ts">
 import { onScopeDispose, shallowRef, watch } from 'vue';
-import { getLocalizationApi } from '@jellyfin/sdk/lib/utils/api/localization-api';
+import type {
+  BrandingBrandingOptions,
+  GlobalizationLocalizatonOption,
+  ServerConfiguration,
+  SystemInfo
+} from '@jellyfin/sdk/lib/generated-client';
 import { getConfigurationApi } from '@jellyfin/sdk/lib/utils/api/configuration-api';
-import { getBrandingApi } from '@jellyfin/sdk/lib/utils/api/branding-api';
 import { SomeItemSelectedRule } from '@jellyfin-vue/shared/validation';
 import { watchDeep } from '@vueuse/core';
-import RemotePluginAxiosInstance from '#/plugins/remote/axios.ts';
 import { useApi } from '#/composables/apis.ts';
+import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 import { taskManager } from '#/store/task-manager.ts';
-
-type SystemInfo = {
-  ServerName?: string;
-  Version?: string;
-  ProductName?: string;
-  OperatingSystem?: string;
-  LocalAddress?: string;
-  StartupWizardCompleted?: boolean;
-  CanSelfRestart?: boolean;
-};
 
 const tasks = new Map<number, string>();
 const signal = shallowRef(false);
-const [
-  { data: culturesList },
-  { data: serverSettings },
-  { data: brandingSettings },
-  systemInfoResponse
-] = await Promise.all([
-  useApi(getLocalizationApi, 'getLocalizationOptions')(),
-  useApi(getConfigurationApi, 'getConfiguration')(),
-  useApi(getBrandingApi, 'getBrandingOptions')(),
-  RemotePluginAxiosInstance.instance.get<SystemInfo>('/System/Info')
-]);
-
-const systemInfo = systemInfoResponse.data;
+const { serverApi } = useSettingsSdk();
+const culturesList = shallowRef<GlobalizationLocalizatonOption[]>(
+  await serverApi.getLocalizationOptions()
+);
+const serverSettings = shallowRef<ServerConfiguration>(
+  await serverApi.getConfiguration()
+);
+const brandingSettings = shallowRef<BrandingBrandingOptions>(
+  await serverApi.getBrandingOptions()
+);
+const systemInfo = await serverApi.getSystemInfo();
 
 const { loading: l1 } = await useApi(
   getConfigurationApi,

@@ -683,3 +683,27 @@ ode/pnpm，本轮前端为代码级静态校对。
 - rontend/packages/frontend/src/pages/settings/devices.vue 移除页面内 DeviceOptions 弱类型与松散列表类型，改用 EmbySDK 的 DevicesDeviceInfo、DevicesDeviceOptions、QueryResultDevicesDeviceInfo；仅对后端额外补出的 ReportedDeviceId 做最小扩展。
 - 本轮未新增后端接口；由于当前环境仍无法执行 
 ode/pnpm，前端验证依旧为代码级静态校对。
+
+## rg 模板对照审计补充（四十一）
+- 新增前端共用包装 rontend/packages/frontend/src/composables/use-settings-sdk.ts，把设置页里重复出现的 typed facade 收口到统一 composable。
+- ccount.vue 改为通过 useSettingsSdk().accountApi 调用头像删除、头像上传、密码修改，页面不再直接内联 SDK 兼容 facade。
+- logs-and-activity.vue 改为通过 useSettingsSdk().logsApi 读取日志列表、日志行预览、活动日志列表，设置页自身只保留展示逻辑与格式化逻辑。
+- devices.vue 改为通过 useSettingsSdk().devicesApi 读取设备列表、设备详情、设备选项与删除操作；ReportedDeviceId 最小扩展类型也随 composable 统一导出。
+- 本轮未新增后端接口；前端当前环境仍无法执行 
+ode/pnpm，因此验证仍为代码级静态校对。
+
+## rg 模板对照审计补充（四十二）
+- 继续把 useSettingsSdk 扩展到 pikeys / media-players / server，进一步收平设置页里零散的 SDK 兼容包装。
+- rontend/packages/frontend/src/pages/settings/apikeys.vue 与 rontend/packages/frontend/src/components/System/AddApiKey.vue 现改为统一使用 useSettingsSdk().apiKeysApi 读取 Key 列表、创建 Key、撤销 Key。
+- rontend/packages/frontend/src/pages/settings/media-players.vue 现改为统一使用 useSettingsSdk().sessionsApi 读取会话列表、发送播放命令、发送消息，页面移除本地手写会话请求包装。
+- rontend/packages/frontend/src/pages/settings/server.vue 现通过 useSettingsSdk().serverApi.getSystemInfo() 读取系统信息摘要，保留现有 useApi(...) 的配置缓存与自动同步逻辑不变。
+- 本轮未新增后端接口；前端当前环境仍无法执行 
+ode/pnpm，因此验证仍为代码级静态校对。
+
+## rg 模板对照审计补充（四十三）
+- useSettingsSdk().serverApi 新增配置层方法：getConfiguration、updateConfiguration、updateNamedConfiguration，让设置相关 composable 不再直接依赖 axios 调用 /System/Configuration。
+- rontend/packages/frontend/src/composables/server-configuration.ts 已改为通过 serverApi.getConfiguration() / serverApi.updateConfiguration() 读写服务器配置，移除对 RemotePluginAxiosInstance 的直接依赖。
+- rontend/packages/frontend/src/pages/settings/server.vue 的初始化读取已统一改为 serverApi.getLocalizationOptions()、serverApi.getConfiguration()、serverApi.getBrandingOptions()、serverApi.getSystemInfo()；配置保存阶段仍保留现有 useApi(getConfigurationApi, ...) 以继续复用页面已有的缓存与自动同步逻辑。
+- 审计前端剩余非 EmbySDK 直接调用面，当前仍明显存在于：settings/libraries.vue、settings/networking.vue、settings/plugins.vue、settings/scheduled-tasks.vue、settings/transcoding.vue，以及登录探测阶段 plugins/remote/auth.ts 的 server bootstrap 请求。下一轮应按“存在 EmbySDK 方法优先切回 SDK，不存在再评估保留兼容层”的规则继续收口。
+- 本轮未新增后端接口；前端当前环境仍无法执行 
+ode/pnpm，因此验证仍为代码级静态校对。

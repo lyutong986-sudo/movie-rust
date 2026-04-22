@@ -167,34 +167,23 @@ meta:
 <script setup lang="ts">
 import type {
   DevicesDeviceInfo,
-  DevicesDeviceOptions,
-  QueryResultDevicesDeviceInfo
+  DevicesDeviceOptions
 } from '@jellyfin/sdk/lib/generated-client';
-import { getDevicesApi } from '@jellyfin/sdk/lib/utils/api/devices-api';
 import { formatRelative, parseJSON } from 'date-fns';
 import { ref } from 'vue';
 import { useTranslation } from 'i18next-vue';
 import { isNil } from '@jellyfin-vue/shared/validation';
+import { useSettingsSdk, type SettingsDeviceDetails } from '#/composables/use-settings-sdk.ts';
 import { remote } from '#/plugins/remote/index.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
 import { useDateFns } from '#/composables/use-datefns.ts';
 
-type DeviceDetails = DevicesDeviceInfo & {
-  ReportedDeviceId?: string;
-};
-
 const { t } = useTranslation();
-const devicesApi = remote.sdk.newUserApi(getDevicesApi) as {
-  getDevices: () => Promise<{ data: QueryResultDevicesDeviceInfo }>;
-  getDevicesInfo: (id: string) => Promise<{ data: DeviceDetails }>;
-  getDevicesOptions: (id: string) => Promise<{ data: DevicesDeviceOptions }>;
-  postDevicesOptions: (body: DevicesDeviceOptions, id: string) => Promise<unknown>;
-  deleteDevice: (payload: { id: string }) => Promise<unknown>;
-};
+const { devicesApi } = useSettingsSdk();
 
 const devices = ref<DevicesDeviceInfo[]>([]);
 const selectedDevice = ref<DevicesDeviceInfo>();
-const deviceInfo = ref<Partial<DeviceDetails>>({});
+const deviceInfo = ref<Partial<SettingsDeviceDetails>>({});
 const deviceOptions = ref<DevicesDeviceOptions>({});
 const loading = ref(false);
 const refreshing = ref(false);

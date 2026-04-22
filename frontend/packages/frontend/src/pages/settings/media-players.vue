@@ -135,38 +135,21 @@
 
 <script setup lang="ts">
 import { ref } from 'vue';
-import RemotePluginAxiosInstance from '#/plugins/remote/axios.ts';
+import { useSettingsSdk, type SettingsSessionInfo } from '#/composables/use-settings-sdk.ts';
 
-type SessionInfo = {
-  Id: string;
-  UserName?: string;
-  Client?: string;
-  DeviceId?: string;
-  DeviceName?: string;
-  ApplicationVersion?: string;
-  RemoteEndPoint?: string;
-  SupportsRemoteControl?: boolean;
-  SupportedCommands?: string[];
-  NowPlayingItem?: {
-    Name?: string;
-  };
-  PlayState?: {
-    IsPaused?: boolean;
-  };
-};
-
-const sessions = ref<SessionInfo[]>([]);
+const { sessionsApi } = useSettingsSdk();
+const sessions = ref<SettingsSessionInfo[]>([]);
 const reloading = ref(false);
 const busyId = ref<string>();
 const busyAction = ref<string>();
-const messageTarget = ref<SessionInfo>();
+const messageTarget = ref<SettingsSessionInfo>();
 const messageTitle = ref('');
 const messageBody = ref('');
 
 async function reloadSessions(): Promise<void> {
   reloading.value = true;
   try {
-    sessions.value = (await RemotePluginAxiosInstance.instance.get<SessionInfo[]>('/Sessions')).data;
+    sessions.value = await sessionsApi.getSessions();
   } finally {
     reloading.value = false;
   }
@@ -176,10 +159,7 @@ async function sendCommand(id: string, command: string, action: string): Promise
   busyId.value = id;
   busyAction.value = action;
   try {
-    await RemotePluginAxiosInstance.instance.post(`/Sessions/${id}/Playing/${command}`, {
-      Name: command,
-      Command: command
-    });
+    await sessionsApi.sendPlayingCommand(id, command);
     await reloadSessions();
   } finally {
     busyId.value = undefined;
@@ -187,7 +167,7 @@ async function sendCommand(id: string, command: string, action: string): Promise
   }
 }
 
-function openMessageDialog(session: SessionInfo): void {
+function openMessageDialog(session: SettingsSessionInfo): void {
   messageTarget.value = session;
   messageTitle.value = '';
   messageBody.value = '';
@@ -201,7 +181,7 @@ async function sendMessage(): Promise<void> {
   busyId.value = messageTarget.value.Id;
   busyAction.value = 'message';
   try {
-    await RemotePluginAxiosInstance.instance.post(`/Sessions/${messageTarget.value.Id}/Message`, {
+    await sessionsApi.sendMessage(messageTarget.value.Id, {
       Header: messageTitle.value,
       Text: messageBody.value,
       TimeoutMs: 5000

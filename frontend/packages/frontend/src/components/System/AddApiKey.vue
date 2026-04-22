@@ -32,11 +32,10 @@
 </template>
 
 <script setup lang="ts">
-import { getApiKeyApi } from '@jellyfin/sdk/lib/utils/api/api-key-api';
 import { computed, ref } from 'vue';
 import { useTranslation } from 'i18next-vue';
 import { useDisplay } from 'vuetify';
-import { remote } from '#/plugins/remote/index.ts';
+import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
 
 const { addingNewKey } = defineProps<{ addingNewKey: boolean }>();
@@ -48,6 +47,7 @@ const emit = defineEmits<{
 
 const { t } = useTranslation();
 const display = useDisplay();
+const { apiKeysApi } = useSettingsSdk();
 
 const newKeyAppName = ref('');
 const loading = ref(false);
@@ -74,9 +74,7 @@ async function addApiKey(): Promise<void> {
   loading.value = true;
 
   try {
-    await remote.sdk.newUserApi(getApiKeyApi).createKey({
-      app: newKeyAppName.value
-    });
+    await apiKeysApi.createKey(newKeyAppName.value);
 
     useSnackbar(t('createKeySuccess'), 'success');
 
