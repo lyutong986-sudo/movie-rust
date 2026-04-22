@@ -277,7 +277,6 @@ async fn server_domains(
 }
 
 async fn branding_configuration(
-    _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<BrandingConfiguration>, crate::error::AppError> {
     Ok(Json(

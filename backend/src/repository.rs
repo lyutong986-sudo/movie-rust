@@ -262,6 +262,38 @@ pub async fn update_named_system_configuration(
     .await
 }
 
+pub async fn delete_named_system_configuration(
+    pool: &sqlx::PgPool,
+    name: &str,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM system_settings WHERE key = $1")
+        .bind(format!("system_configuration:{}", name.to_ascii_lowercase()))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn list_named_system_configurations_by_prefix(
+    pool: &sqlx::PgPool,
+    prefix: &str,
+) -> Result<Vec<(String, Value)>, AppError> {
+    let rows = sqlx::query_as::<_, (String, Value)>(
+        r#"
+        SELECT key, value
+        FROM system_settings
+        WHERE key LIKE $1
+        ORDER BY key ASC
+        "#,
+    )
+    .bind(format!(
+        "system_configuration:{}%",
+        prefix.to_ascii_lowercase()
+    ))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 pub async fn get_user_connect_link(
     pool: &sqlx::PgPool,
     user_id: Uuid,

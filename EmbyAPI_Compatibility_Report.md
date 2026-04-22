@@ -737,3 +737,37 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 - `cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。
 ### 仍待继续
 - 这轮先解决了设置页“结构为空”和品牌配置读写分裂，后续仍要继续沿着 WebDashboard 实际页面，把 `DLNA Profiles`、`Notifications` 单项配置页、`App Services`、`Dashboard` 首页的剩余真实操作接口继续补全到 Emby 形状。
+## 2026-04-23 WebDashboard 适配进展（二十一）
+### 本轮完成
+- 把 `DLNA Profiles` 从固定假数据推进到真实持久化：
+  - [backend/src/routes/client_compat.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/routes/client_compat.rs:1) 的 `GET /Dlna/ProfileInfos`、`GET /Dlna/Profiles`、`GET /Dlna/Profiles/{id}` 现在都会从数据库命名配置里读取用户自建 DLNA profile，而不是永远只返回固定的 `HTML5`。
+  - `POST /Dlna/Profiles` 创建 profile 时会写入 `dlna_profile_{id}` 并标记 `Type = "User"`。
+  - `POST /Dlna/Profiles/{id}` 更新时会保留 `Id` 与 `Type`，兼容 `dlnaprofile.js` 整页保存。
+  - `DELETE /Dlna/Profiles/{id}` 改为真实删除配置记录，不再只是把值写成 `null`。
+- 新增仓库层辅助能力，方便后续继续做 Emby 风格配置型接口：
+  - [backend/src/repository.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/repository.rs:1) 新增 `delete_named_system_configuration`
+  - [backend/src/repository.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/repository.rs:1) 新增 `list_named_system_configurations_by_prefix`
+- `DLNA Profiles` 列表现在会同时返回系统 profile（`Default`、`HTML5`）与数据库中保存的用户 profile，详情读取时也会自动补齐缺失默认字段，避免旧 profile 因字段不全导致编辑页空白。
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+- `cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。
+### 仍待继续
+- `DLNA Profiles` 当前已经具备列表、详情、创建、保存、删除闭环，但系统 profile 仍是内置模板；后续还可以继续补导入/复制系统 profile、条件编辑细节校验和更完整的 Emby 设备模板集。
+- 下一步仍应继续顺着 WebDashboard 管理页，把 `Notifications` 单项配置、`App Services` 以及 dashboard 首页剩余真实管理动作往后端补齐。
+
+## 2026-04-23 WebDashboard 适配进展（二十二）
+### 本轮完成
+- 修复“首次启动无账号时仍停留登录页”的首启流程断点：
+  - [frontend/dashboard-ui/scripts/site.js](/C:/Users/11797/Desktop/movie-rust/frontend/dashboard-ui/scripts/site.js:1) 现在恢复识别 Emby 路由层传入的 `manualLogin` 语义；当连接结果是 `ServerSignIn` 且公开用户列表为空时，本地模式会直接导航到 `wizardstart.html`，不再把这条分支错误地压扁回 `login.html`。
+  - [frontend/dashboard-ui/scripts/loginpage.js](/C:/Users/11797/Desktop/movie-rust/frontend/dashboard-ui/scripts/loginpage.js:1) 也补上了兜底判断：如果当前页已经进入登录页、但 `GET /Users/Public` 返回空列表，会继续读取 `GET /System/Info/Public`；当 `StartupWizardCompleted = false` 时，前端自动跳转到 `wizardstart.html`，进入创建首个管理员账号的初始化向导，而不是显示一个注定无法登录的空手动登录表单。
+- 这样处理后，首启链路变成：
+  - 无用户 + 向导未完成：进入 `wizardstart.html` -> `wizarduser.html` 创建首个用户 -> 后续完成向导。
+  - 已有用户：保持原来的登录页/用户选择页行为，不影响正常登录流。
+### 验证
+- 已检查前端实际调用链：
+  - `router.js` 在 `ServerSignIn` 时会依据 `getPublicUsers()` 结果传入 `manualLogin`
+  - `site.js` 之前错误忽略了这个参数，现已修正
+  - `loginpage.js` 现已增加无用户时按 `StartupWizardCompleted` 跳转向导的兜底逻辑
+### 仍待继续
+- 这轮修复的是前端首启路由逻辑，远端实例仍需重新部署后才能在 `https://test.emby.yun:4443/` 上看到实际效果。
+- 部署后还应继续实测首个用户创建完成后的 `wizardlibrary.html`、`wizardremoteaccess.html`、`wizardfinish.html`，确认初始化闭环没有新的后端字段缺口。

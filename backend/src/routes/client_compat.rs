@@ -290,20 +290,53 @@ async fn movie_recommendations(_session: AuthSession) -> Json<Vec<Value>> {
     Json(Vec::new())
 }
 
-async fn dlna_profile_infos(_session: AuthSession) -> Json<Vec<Value>> {
-    Json(vec![json!({
-        "Id": "html5",
-        "Name": "HTML5",
-        "Type": "System"
-    })])
+async fn dlna_profile_infos(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    let profiles = load_dlna_profiles(&state).await?;
+    Ok(Json(
+        profiles
+            .into_iter()
+            .map(|profile| {
+                json!({
+                    "Id": profile.get("Id").cloned().unwrap_or(Value::Null),
+                    "Name": profile.get("Name").cloned().unwrap_or(Value::Null),
+                    "Type": profile.get("Type").cloned().unwrap_or(json!("User"))
+                })
+            })
+            .collect(),
+    ))
 }
 
-async fn dlna_profiles(_session: AuthSession) -> Json<Vec<Value>> {
-    Json(vec![default_dlna_profile("html5", "HTML5", "System")])
+async fn dlna_profiles(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    Ok(Json(load_dlna_profiles(&state).await?))
 }
 
-async fn dlna_profile(_session: AuthSession, Path(id): Path<String>) -> Json<Value> {
-    Json(default_dlna_profile(&id, &id, "User"))
+async fn dlna_profile(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    if id.eq_ignore_ascii_case("default") {
+        return Ok(Json(default_dlna_profile("default", "Default", "System")));
+    }
+
+    let profiles = load_dlna_profiles(&state).await?;
+    let profile = profiles
+        .into_iter()
+        .find(|profile| {
+            profile
+                .get("Id")
+                .and_then(Value::as_str)
+                .map(|value| value.eq_ignore_ascii_case(&id))
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| default_dlna_profile(&id, &id, "User"));
+    Ok(Json(profile))
 }
 
 async fn create_dlna_profile(
@@ -318,6 +351,7 @@ async fn create_dlna_profile(
         .map(str::to_string)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     payload["Id"] = json!(id);
+    payload["Type"] = json!("User");
     repository::update_named_system_configuration(&state.pool, &format!("dlna_profile_{id}"), &payload).await?;
     Ok(Json(payload))
 }
@@ -329,6 +363,10 @@ async fn update_dlna_profile(
     Json(mut payload): Json<Value>,
 ) -> Result<StatusCode, AppError> {
     payload["Id"] = json!(id.clone());
+    payload["Type"] = payload
+        .get("Type")
+        .cloned()
+        .unwrap_or_else(|| json!("User"));
     repository::update_named_system_configuration(&state.pool, &format!("dlna_profile_{id}"), &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -338,7 +376,7 @@ async fn delete_dlna_profile(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    repository::update_named_system_configuration(&state.pool, &format!("dlna_profile_{id}"), &json!(null)).await?;
+    repository::delete_named_system_configuration(&state.pool, &format!("dlna_profile_{id}")).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -941,6 +979,36 @@ fn default_dlna_profile(id: &str, name: &str, profile_type: &str) -> Value {
         "CodecProfiles": [],
         "SubtitleProfiles": []
     })
+}
+
+async fn load_dlna_profiles(state: &AppState) -> Result<Vec<Value>, AppError> {
+    let mut profiles = vec![
+        default_dlna_profile("default", "Default", "System"),
+        default_dlna_profile("html5", "HTML5", "System"),
+    ];
+
+    for (_, value) in repository::list_named_system_configurations_by_prefix(&state.pool, "dlna_profile_").await? {
+        if value.is_null() {
+            continue;
+        }
+
+        let mut profile = value;
+        repository::merge_missing_json_fields(
+            &mut profile,
+            &default_dlna_profile("custom", "Custom Profile", "User"),
+        );
+        profiles.push(profile);
+    }
+
+    profiles.sort_by(|left, right| {
+        let left_type = left.get("Type").and_then(Value::as_str).unwrap_or_default();
+        let right_type = right.get("Type").and_then(Value::as_str).unwrap_or_default();
+        let left_name = left.get("Name").and_then(Value::as_str).unwrap_or_default();
+        let right_name = right.get("Name").and_then(Value::as_str).unwrap_or_default();
+        left_type.cmp(right_type).then_with(|| left_name.cmp(right_name))
+    });
+
+    Ok(profiles)
 }
 
 async fn collection_query_result(
