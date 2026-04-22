@@ -320,3 +320,13 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - `frontend/packages/frontend/src/pages/search.vue`
   已将人物搜索参数从 `searchTerm` 调整为当前后端 `Persons` 路由实际兼容的 `nameStartsWith`，修复搜索页人物结果为空的问题。
 - 这一轮优先修复的是“前端自身校验/参数名导致的兼容问题”；后续仍需继续对照首页、库页、剧集页、播放页逐条核对 SDK 调用与后端真实响应。
+
+## 2026-04-22 CI/CD 适配补充
+
+- 已修复 `Dockerfile` 与当前前端 monorepo 结构不匹配的问题：
+  前端构建阶段从旧的 `npm + frontend/src` 单项目结构切换为 `node:24 + corepack + pnpm workspace`。
+- `Dockerfile` 现在会在 `frontend/` 目录执行 `pnpm install --frozen-lockfile`，并使用 `pnpm --filter @jellyfin-vue/frontend build` 构建真实前端入口。
+- 运行时静态资源复制路径已更新为 `frontend/packages/frontend/dist`，与当前 Vite 包输出目录对齐。
+- GitHub Actions 工作流 `.github/workflows/docker-image.yml` 已补充前置校验阶段：
+  先跑后端 `cargo check`，再跑前端 `pnpm` 安装与构建，最后才执行 Docker 镜像构建/推送。
+- 当前已在本地确认 `cargo check --manifest-path backend/Cargo.toml` 可通过；但由于本地终端缺少可直接使用的 Node/pnpm 运行环境，本轮无法在本机复现前端和 Docker 阶段，只能保证工作流与仓库结构已对齐。

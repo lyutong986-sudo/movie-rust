@@ -10,8 +10,58 @@ env:
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
+  backend-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: Cargo check
+        run: cargo check --manifest-path backend/Cargo.toml
+
+  frontend-build:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.11.0
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm --filter @jellyfin-vue/frontend build
+
   docker:
     runs-on: ubuntu-latest
+    needs:
+      - backend-check
+      - frontend-build
 
     steps:
       - name: Checkout

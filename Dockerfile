@@ -1,16 +1,15 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22-alpine AS frontend-builder
+FROM node:24-bookworm AS frontend-builder
 
 WORKDIR /app/frontend
 
-COPY frontend/package*.json ./
-RUN npm install
+RUN corepack enable
 
-COPY frontend/index.html frontend/tsconfig.json frontend/vite.config.ts ./
-COPY frontend/src ./src
+COPY frontend/ ./
 
-RUN npm run build
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @jellyfin-vue/frontend build
 
 FROM rust:1-bookworm AS backend-builder
 
@@ -33,7 +32,7 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=backend-builder /app/backend/target/release/movie-rust-backend /usr/local/bin/movie-rust-backend
-COPY --from=frontend-builder /app/frontend/dist /app/public
+COPY --from=frontend-builder /app/frontend/packages/frontend/dist /app/public
 
 ENV APP_HOST=0.0.0.0 \
     APP_PORT=8096 \
