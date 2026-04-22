@@ -9,3 +9,23 @@ script = ""
 name = "rg"
 icon = "tool"
 command = "rg"
+
+[[actions]]
+name = "pnpm"
+icon = "tool"
+command = "pnpm"
+
+[[actions]]
+name = "node"
+icon = "tool"
+command = "node"
+
+[[actions]]
+name = "npm"
+icon = "tool"
+command = "npm"
+
+[[actions]]
+name = "docker"
+icon = "tool"
+command = "docker"

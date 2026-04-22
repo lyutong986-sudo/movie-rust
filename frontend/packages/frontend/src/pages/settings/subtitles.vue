@@ -53,28 +53,28 @@
         <VTable>
           <tbody>
             <tr>
-              <td>Custom subtitles</td>
-              <td>{{ subtitleSettings.state.value.enabled ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ $t('customSubtitles') }}</td>
+              <td>{{ subtitleSettings.state.value.enabled ? $t('enabled') : $t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Font family</td>
+              <td>{{ $t('fontFamily') }}</td>
               <td>{{ subtitleSettings.state.value.fontFamily }}</td>
             </tr>
             <tr>
-              <td>Font size</td>
+              <td>{{ $t('fontSize') }}</td>
               <td>{{ subtitleSettings.state.value.fontSize }}em</td>
             </tr>
             <tr>
-              <td>Bottom offset</td>
+              <td>{{ $t('bottomOffset') }}</td>
               <td>{{ subtitleSettings.state.value.positionFromBottom }}vh</td>
             </tr>
             <tr>
-              <td>Backdrop</td>
-              <td>{{ subtitleSettings.state.value.backdrop ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ $t('backdrop') }}</td>
+              <td>{{ subtitleSettings.state.value.backdrop ? $t('enabled') : $t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Stroke</td>
-              <td>{{ subtitleSettings.state.value.stroke ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ $t('stroke') }}</td>
+              <td>{{ subtitleSettings.state.value.stroke ? $t('enabled') : $t('disabled') }}</td>
             </tr>
           </tbody>
         </VTable>
@@ -82,15 +82,15 @@
         <VTable class="uno-mt-4">
           <tbody>
             <tr>
-              <td>Current subtitle track</td>
+              <td>{{ $t('currentSubtitleTrack') }}</td>
               <td>{{ currentSubtitleTrack }}</td>
             </tr>
             <tr>
-              <td>Available subtitle tracks</td>
+              <td>{{ $t('availableSubtitleTracks') }}</td>
               <td>{{ playbackManager.currentItemSubtitleTracks.value?.length ?? 0 }}</td>
             </tr>
             <tr>
-              <td>External parsed tracks</td>
+              <td>{{ $t('externalParsedTracks') }}</td>
               <td>{{ playerElement.currentItemExternalParsedSubtitleTracks.value?.length ?? 0 }}</td>
             </tr>
           </tbody>
@@ -102,13 +102,15 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import { useTranslation } from 'i18next-vue';
 import { subtitleSettings } from '#/store/settings/subtitle.ts';
 import { playbackManager } from '#/store/playback-manager.ts';
 import { playerElement } from '#/store/player-element.ts';
 
+const { t } = useTranslation();
 const currentSubtitleTrack = computed(() =>
   playbackManager.currentSubtitleTrack.value?.DisplayTitle
   ?? playbackManager.currentSubtitleTrack.value?.Title
-  ?? 'None'
+  ?? t('none')
 );
 </script>

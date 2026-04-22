@@ -73,40 +73,40 @@
         <VTable>
           <tbody>
             <tr>
-              <td>User name</td>
+              <td>{{ t('userName') }}</td>
               <td>{{ remote.auth.currentUser.value?.Name }}</td>
             </tr>
             <tr>
-              <td>User ID</td>
+              <td>{{ t('userId') }}</td>
               <td>{{ remote.auth.currentUser.value?.Id }}</td>
             </tr>
             <tr>
-              <td>Administrator</td>
-              <td>{{ remote.auth.currentUser.value?.Policy?.IsAdministrator ? 'Yes' : 'No' }}</td>
+              <td>{{ t('administrator') }}</td>
+              <td>{{ remote.auth.currentUser.value?.Policy?.IsAdministrator ? t('yes') : t('no') }}</td>
             </tr>
             <tr>
-              <td>Disabled</td>
-              <td>{{ remote.auth.currentUser.value?.Policy?.IsDisabled ? 'Yes' : 'No' }}</td>
+              <td>{{ t('disabled') }}</td>
+              <td>{{ remote.auth.currentUser.value?.Policy?.IsDisabled ? t('yes') : t('no') }}</td>
             </tr>
             <tr>
-              <td>Hidden</td>
-              <td>{{ remote.auth.currentUser.value?.Policy?.IsHidden ? 'Yes' : 'No' }}</td>
+              <td>{{ t('hidden') }}</td>
+              <td>{{ remote.auth.currentUser.value?.Policy?.IsHidden ? t('yes') : t('no') }}</td>
             </tr>
             <tr>
-              <td>Has password</td>
-              <td>{{ remote.auth.currentUser.value?.HasPassword ? 'Yes' : 'No' }}</td>
+              <td>{{ t('hasPassword') }}</td>
+              <td>{{ remote.auth.currentUser.value?.HasPassword ? t('yes') : t('no') }}</td>
             </tr>
             <tr>
-              <td>Auto play next episode</td>
-              <td>{{ remote.auth.currentUser.value?.Configuration?.EnableNextEpisodeAutoPlay ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ t('autoPlayNextEpisode') }}</td>
+              <td>{{ remote.auth.currentUser.value?.Configuration?.EnableNextEpisodeAutoPlay ? t('enabled') : t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Play default audio track</td>
-              <td>{{ remote.auth.currentUser.value?.Configuration?.PlayDefaultAudioTrack ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ t('playDefaultAudioTrack') }}</td>
+              <td>{{ remote.auth.currentUser.value?.Configuration?.PlayDefaultAudioTrack ? t('enabled') : t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Play default subtitle track</td>
-              <td>{{ remote.auth.currentUser.value?.Configuration?.PlayDefaultSubtitleTrack ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ t('playDefaultSubtitleTrack') }}</td>
+              <td>{{ remote.auth.currentUser.value?.Configuration?.PlayDefaultSubtitleTrack ? t('enabled') : t('disabled') }}</td>
             </tr>
           </tbody>
         </VTable>

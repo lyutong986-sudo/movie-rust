@@ -42,7 +42,7 @@
             cols="12"
             md="8">
             <VCard variant="tonal">
-              <VCardTitle>Selectable media folders</VCardTitle>
+              <VCardTitle>{{ t('selectableMediaFolders') }}</VCardTitle>
               <VCardText>{{ selectableFolders.length }}</VCardText>
             </VCard>
           </VCol>
@@ -59,7 +59,7 @@
                     {{ library.Name }}
                   </div>
                   <div class="uno-text-sm text-medium-emphasis">
-                    {{ formatLocations(library.LibraryOptions.PathInfos) || 'No paths configured' }}
+                    {{ formatLocations(library.LibraryOptions.PathInfos) || t('noPathsConfigured') }}
                   </div>
                 </div>
                 <VChip
@@ -76,7 +76,7 @@
                   md="6">
                   <VTextField
                     v-model="library._draftName"
-                    label="Library name"
+                    :label="t('libraryName')"
                     density="comfortable"
                     variant="outlined" />
                 </VCol>
@@ -85,7 +85,7 @@
                   md="6">
                   <VSelect
                     :model-value="library.CollectionType || 'mixed'"
-                    label="Content type"
+                    :label="t('contentType')"
                     density="comfortable"
                     variant="outlined"
                     :items="collectionTypes"
@@ -101,7 +101,7 @@
 
               <div class="uno-mt-4">
                 <div class="uno-mb-2 uno-text-sm uno-font-medium">
-                  Paths
+                  {{ t('paths') }}
                 </div>
                 <VList
                   density="comfortable"
@@ -121,7 +121,7 @@
                     </template>
                   </VListItem>
                   <VListItem v-if="!library.LibraryOptions.PathInfos.length">
-                    <VListItemTitle>No paths</VListItemTitle>
+                    <VListItemTitle>{{ t('noPaths') }}</VListItemTitle>
                   </VListItem>
                 </VList>
                 <VRow class="uno-mt-3">
@@ -130,7 +130,7 @@
                     md="5">
                     <VTextField
                       v-model="library._newPath"
-                      label="Folder path"
+                      :label="t('folderPath')"
                       density="comfortable"
                       variant="outlined"
                       hide-details />
@@ -140,7 +140,7 @@
                     md="5">
                     <VTextField
                       v-model="library._newNetworkPath"
-                      label="Network path"
+                      :label="t('networkPath')"
                       density="comfortable"
                       variant="outlined"
                       hide-details />
@@ -178,7 +178,7 @@
 
         <VCard v-else>
           <VCardTitle>{{ t('libraries') }}</VCardTitle>
-          <VCardText>No libraries yet. Add one to start scanning and managing media.</VCardText>
+          <VCardText>{{ t('noLibrariesYet') }}</VCardText>
         </VCard>
       </VCol>
 
@@ -186,7 +186,7 @@
         v-model="createDialog"
         max-width="920">
         <VCard>
-          <VCardTitle>Create library</VCardTitle>
+          <VCardTitle>{{ t('createLibrary') }}</VCardTitle>
           <VCardText>
             <VRow>
               <VCol
@@ -194,7 +194,7 @@
                 md="6">
                 <VTextField
                   v-model="createForm.name"
-                  label="Library name"
+                  :label="t('libraryName')"
                   density="comfortable"
                   variant="outlined" />
               </VCol>
@@ -203,7 +203,7 @@
                 md="6">
                 <VSelect
                   v-model="createForm.collectionType"
-                  label="Content type"
+                  :label="t('contentType')"
                   density="comfortable"
                   variant="outlined"
                   :items="collectionTypes"
@@ -213,7 +213,7 @@
               <VCol cols="12">
                 <VTextarea
                   v-model="createForm.pathsText"
-                  label="Paths, one per line. Use path | network path when needed."
+                  :label="t('pathsOnePerLine')"
                   rows="4"
                   density="comfortable"
                   variant="outlined" />
@@ -250,7 +250,7 @@ meta:
 </route>
 
 <script setup lang="ts">
-import { defineComponent, h, ref, type PropType } from 'vue';
+import { computed, defineComponent, h, ref, type PropType } from 'vue';
 import {
   VCol,
   VCombobox,
@@ -307,15 +307,15 @@ const selectableFolders = ref<SelectableMediaFolderDto[]>([]);
 const loading = ref(false);
 const errorMessage = ref('');
 const createDialog = ref(false);
-const collectionTypes = [
-  { title: 'Movies', value: 'movies' },
-  { title: 'TV Shows', value: 'tvshows' },
-  { title: 'Music', value: 'music' },
-  { title: 'Music Videos', value: 'musicvideos' },
-  { title: 'Home Videos', value: 'homevideos' },
-  { title: 'Books', value: 'books' },
-  { title: 'Mixed', value: 'mixed' }
-];
+const collectionTypes = computed(() => [
+  { title: t('movies'), value: 'movies' },
+  { title: t('shows'), value: 'tvshows' },
+  { title: t('music'), value: 'music' },
+  { title: t('musicVideos'), value: 'musicvideos' },
+  { title: t('homeVideos'), value: 'homevideos' },
+  { title: t('books'), value: 'books' },
+  { title: t('mixedContent'), value: 'mixed' }
+]);
 
 const createForm = ref({
   name: '',
@@ -358,50 +358,50 @@ const LibraryOptionsFields = defineComponent({
       h(VRow, {}, () => [
         showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
           modelValue: props.modelValue.PreferredMetadataLanguage,
-          label: 'Metadata language',
+          label: t('metadataLanguage'),
           density: 'comfortable',
           variant: 'outlined',
           'onUpdate:modelValue': (value: string) => update('PreferredMetadataLanguage', value || null)
         })),
         showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
           modelValue: props.modelValue.MetadataCountryCode,
-          label: 'Country code',
+          label: t('countryCode'),
           density: 'comfortable',
           variant: 'outlined',
           'onUpdate:modelValue': (value: string) => update('MetadataCountryCode', value || null)
         })),
         showTv && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
           modelValue: props.modelValue.SeasonZeroDisplayName,
-          label: 'Season zero display name',
+          label: t('seasonZeroDisplayName'),
           density: 'comfortable',
           variant: 'outlined',
           'onUpdate:modelValue': (value: string) => update('SeasonZeroDisplayName', value || 'Specials')
         })),
         h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
           modelValue: props.modelValue.AutomaticRefreshIntervalDays,
-          label: 'Automatic refresh interval days',
+          label: t('automaticRefreshIntervalDays'),
           density: 'comfortable',
           variant: 'outlined',
           type: 'number',
           min: 0,
           'onUpdate:modelValue': (value: string) => update('AutomaticRefreshIntervalDays', Number(value) || 0)
         })),
-        h(VCol, { cols: '12', md: '4' }, () => field('Enabled', 'Enabled')),
-        props.collectionType === 'homevideos' && h(VCol, { cols: '12', md: '4' }, () => field('EnablePhotos', 'Enable photos')),
-        h(VCol, { cols: '12', md: '4' }, () => field('EnableRealtimeMonitor', 'Realtime monitor')),
-        showMetadata && h(VCol, { cols: '12', md: '4' }, () => field('EnableInternetProviders', 'Download internet metadata')),
-        showMetadata && h(VCol, { cols: '12', md: '4' }, () => field('DownloadImagesInAdvance', 'Download images in advance')),
-        props.collectionType !== 'photos' && h(VCol, { cols: '12', md: '4' }, () => field('SaveLocalMetadata', 'Save local metadata')),
-        showTv && h(VCol, { cols: '12', md: '4' }, () => field('ImportMissingEpisodes', 'Import missing episodes')),
-        showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableAutomaticSeriesGrouping', 'Automatically group series')),
-        showChapters && h(VCol, { cols: '12', md: '4' }, () => field('EnableChapterImageExtraction', 'Extract chapter images')),
-        showChapters && h(VCol, { cols: '12', md: '4' }, () => field('ExtractChapterImagesDuringLibraryScan', 'Extract chapters during scan')),
-        h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedTitles', 'Use embedded titles')),
-        showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedEpisodeInfos', 'Use embedded episode info')),
-        h(VCol, { cols: '12', md: '4' }, () => field('EnableArchiveMediaFiles', 'Archive media files')),
+        h(VCol, { cols: '12', md: '4' }, () => field('Enabled', t('enabled'))),
+        props.collectionType === 'homevideos' && h(VCol, { cols: '12', md: '4' }, () => field('EnablePhotos', t('enablePhotos'))),
+        h(VCol, { cols: '12', md: '4' }, () => field('EnableRealtimeMonitor', t('realtimeMonitor'))),
+        showMetadata && h(VCol, { cols: '12', md: '4' }, () => field('EnableInternetProviders', t('downloadInternetMetadata'))),
+        showMetadata && h(VCol, { cols: '12', md: '4' }, () => field('DownloadImagesInAdvance', t('downloadImagesInAdvance'))),
+        props.collectionType !== 'photos' && h(VCol, { cols: '12', md: '4' }, () => field('SaveLocalMetadata', t('saveLocalMetadata'))),
+        showTv && h(VCol, { cols: '12', md: '4' }, () => field('ImportMissingEpisodes', t('importMissingEpisodes'))),
+        showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableAutomaticSeriesGrouping', t('automaticallyGroupSeries'))),
+        showChapters && h(VCol, { cols: '12', md: '4' }, () => field('EnableChapterImageExtraction', t('extractChapterImages'))),
+        showChapters && h(VCol, { cols: '12', md: '4' }, () => field('ExtractChapterImagesDuringLibraryScan', t('extractChaptersDuringScan'))),
+        h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedTitles', t('useEmbeddedTitles'))),
+        showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedEpisodeInfos', t('useEmbeddedEpisodeInfo'))),
+        h(VCol, { cols: '12', md: '4' }, () => field('EnableArchiveMediaFiles', t('archiveMediaFiles'))),
         h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
           modelValue: props.modelValue.MetadataSavers,
-          label: 'Metadata savers',
+          label: t('metadataSavers'),
           density: 'comfortable',
           variant: 'outlined',
           multiple: true,
@@ -411,7 +411,7 @@ const LibraryOptionsFields = defineComponent({
         })),
         h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
           modelValue: props.modelValue.LocalMetadataReaderOrder,
-          label: 'Local metadata reader order',
+          label: t('localMetadataReaderOrder'),
           density: 'comfortable',
           variant: 'outlined',
           multiple: true,
@@ -421,7 +421,7 @@ const LibraryOptionsFields = defineComponent({
         })),
         h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
           modelValue: props.modelValue.DisabledLocalMetadataReaders,
-          label: 'Disabled local metadata readers',
+          label: t('disabledLocalMetadataReaders'),
           density: 'comfortable',
           variant: 'outlined',
           multiple: true,
@@ -522,7 +522,7 @@ async function loadLibraries(): Promise<void> {
     console.error(error);
     libraries.value = [];
     selectableFolders.value = [];
-    errorMessage.value = 'Failed to load libraries. Check EmbySDK-compatible Library endpoints.';
+    errorMessage.value = t('failedToLoadLibraries');
   } finally {
     loading.value = false;
   }
@@ -531,11 +531,11 @@ async function loadLibraries(): Promise<void> {
 async function refreshAllLibraries(): Promise<void> {
   try {
     await librariesApi.postLibraryRefresh();
-    useSnackbar('Library refresh started', 'success');
+    useSnackbar(t('libraryRefreshStarted'), 'success');
     await loadLibraries();
   } catch (error) {
     console.error(error);
-    useSnackbar('Failed to refresh libraries', 'error');
+    useSnackbar(t('failedToRefreshLibraries'), 'error');
   }
 }
 
@@ -557,11 +557,11 @@ async function saveLibrary(library: VirtualFolderInfoDto): Promise<void> {
       LibraryOptions: library.LibraryOptions
     });
 
-    useSnackbar(`${library.Name} saved`, 'success');
+    useSnackbar(t('librarySaved', { name: library.Name }), 'success');
     await loadLibraries();
   } catch (error) {
     console.error(error);
-    useSnackbar('Failed to save library', 'error');
+    useSnackbar(t('failedToSaveLibrary'), 'error');
   }
 }
 
@@ -586,11 +586,11 @@ async function addLibraryPath(library: VirtualFolderInfoDto): Promise<void> {
 
     library._newPath = '';
     library._newNetworkPath = '';
-    useSnackbar('Path added', 'success');
+    useSnackbar(t('pathAdded'), 'success');
     await loadLibraries();
   } catch (error) {
     console.error(error);
-    useSnackbar('Failed to add path', 'error');
+    useSnackbar(t('failedToAddPath'), 'error');
   }
 }
 
@@ -601,11 +601,11 @@ async function removeLibraryPath(library: VirtualFolderInfoDto, path: string): P
       Name: library.Name,
       Path: path
     });
-    useSnackbar('Path removed', 'success');
+    useSnackbar(t('pathRemoved'), 'success');
     await loadLibraries();
   } catch (error) {
     console.error(error);
-    useSnackbar('Failed to remove path', 'error');
+    useSnackbar(t('failedToRemovePath'), 'error');
   }
 }
 
@@ -615,11 +615,11 @@ async function removeLibrary(library: VirtualFolderInfoDto): Promise<void> {
       Id: library.ItemId,
       Name: library.Name
     });
-    useSnackbar(`${library.Name} removed`, 'success');
+    useSnackbar(t('libraryRemoved', { name: library.Name }), 'success');
     await loadLibraries();
   } catch (error) {
     console.error(error);
-    useSnackbar('Failed to remove library', 'error');
+    useSnackbar(t('failedToRemoveLibrary'), 'error');
   }
 }
 
@@ -627,7 +627,7 @@ async function createLibrary(): Promise<void> {
   const pathInfos = parsePathInfos(createForm.value.pathsText);
 
   if (!createForm.value.name.trim() || !pathInfos.length) {
-    useSnackbar('Provide a name and at least one path', 'error');
+    useSnackbar(t('provideNameAndPath'), 'error');
     return;
   }
 
@@ -651,12 +651,12 @@ async function createLibrary(): Promise<void> {
       pathsText: '',
       libraryOptions: defaultLibraryOptions()
     };
-    useSnackbar('Library created', 'success');
+    useSnackbar(t('libraryCreated'), 'success');
     await loadLibraries();
     await refreshAllLibraries();
   } catch (error) {
     console.error(error);
-    useSnackbar('Failed to create library', 'error');
+    useSnackbar(t('failedToCreateLibrary'), 'error');
   }
 }
 

@@ -10,24 +10,24 @@
         class="uno-pb-4 uno-pt-0">
         <VCheckbox
           v-model="configuration.EnableRemoteAccess"
-          label="Enable remote access" />
+          :label="$t('enableRemoteAccess')" />
         <VCheckbox
           v-model="configuration.EnableUPnP"
-          label="Enable automatic port mapping" />
+          :label="$t('enableAutomaticPortMapping')" />
         <VTextField
           v-model="configuration.PublicUrl"
-          label="Public URL" />
+          :label="$t('publicUrl')" />
         <VTextField
           v-model.number="configuration.PublicPort"
-          label="HTTP port"
+          :label="$t('httpPort')"
           type="number" />
         <VTextField
           v-model.number="configuration.HttpsPortNumber"
-          label="HTTPS port"
+          :label="$t('httpsPort')"
           type="number" />
         <VTextarea
           v-model="configuration.LocalNetworkSubnetsText"
-          label="Local network subnets"
+          :label="$t('localNetworkSubnets')"
           rows="3" />
         <VProgressLinear
           v-if="saving"
@@ -40,24 +40,24 @@
         <VTable>
           <tbody>
             <tr>
-              <td>Server name</td>
+              <td>{{ $t('serverName') }}</td>
               <td>{{ systemInfo.ServerName }}</td>
             </tr>
             <tr>
-              <td>Local address</td>
+              <td>{{ $t('localAddress') }}</td>
               <td>{{ systemInfo.LocalAddress }}</td>
             </tr>
             <tr>
-              <td>Version</td>
+              <td>{{ $t('version') }}</td>
               <td>{{ systemInfo.Version }}</td>
             </tr>
             <tr>
-              <td>In network</td>
-              <td>{{ endpointInfo.IsInNetwork ? 'Yes' : 'No' }}</td>
+              <td>{{ $t('inNetwork') }}</td>
+              <td>{{ endpointInfo.IsInNetwork ? $t('yes') : $t('no') }}</td>
             </tr>
             <tr>
-              <td>Local only</td>
-              <td>{{ endpointInfo.IsLocal ? 'Yes' : 'No' }}</td>
+              <td>{{ $t('localOnly') }}</td>
+              <td>{{ endpointInfo.IsLocal ? $t('yes') : $t('no') }}</td>
             </tr>
           </tbody>
         </VTable>
@@ -65,8 +65,8 @@
         <VTable class="uno-mt-4">
           <thead>
             <tr>
-              <th>Endpoint</th>
-              <th>Type</th>
+              <th>{{ $t('endpoint') }}</th>
+              <th>{{ $t('type') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -74,13 +74,13 @@
               v-for="domain in domains"
               :key="domain.url">
               <td>{{ domain.url }}</td>
-              <td>{{ domain.isLocal ? 'Local' : 'Remote' }}</td>
+              <td>{{ domain.isLocal ? $t('local') : $t('remote') }}</td>
             </tr>
             <tr v-if="!domains.length">
               <td
                 colspan="2"
                 class="uno-opacity-70">
-                No endpoints available
+                {{ $t('noEndpointsAvailable') }}
               </td>
             </tr>
           </tbody>
@@ -89,7 +89,7 @@
         <VTable class="uno-mt-4">
           <thead>
             <tr>
-              <th>Wake on LAN</th>
+              <th>{{ $t('wakeOnLan') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -100,7 +100,7 @@
             </tr>
             <tr v-if="!wakeOnLanInfo.length">
               <td class="uno-opacity-70">
-                No Wake on LAN targets configured
+                {{ $t('noWakeOnLanTargetsConfigured') }}
               </td>
             </tr>
           </tbody>

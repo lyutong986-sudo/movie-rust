@@ -74,32 +74,32 @@
         <VTable>
           <tbody>
             <tr>
-              <td>Server name</td>
+              <td>{{ $t('serverName') }}</td>
               <td>{{ systemInfo.ServerName }}</td>
             </tr>
             <tr>
-              <td>Version</td>
+              <td>{{ $t('version') }}</td>
               <td>{{ systemInfo.Version }}</td>
             </tr>
             <tr>
-              <td>Product</td>
+              <td>{{ $t('product') }}</td>
               <td>{{ systemInfo.ProductName }}</td>
             </tr>
             <tr>
-              <td>Operating system</td>
+              <td>{{ $t('operatingSystem') }}</td>
               <td>{{ systemInfo.OperatingSystem }}</td>
             </tr>
             <tr>
-              <td>Local address</td>
+              <td>{{ $t('localAddress') }}</td>
               <td>{{ systemInfo.LocalAddress }}</td>
             </tr>
             <tr>
-              <td>Startup wizard</td>
-              <td>{{ systemInfo.StartupWizardCompleted ? 'Completed' : 'Pending' }}</td>
+              <td>{{ $t('startupWizard') }}</td>
+              <td>{{ systemInfo.StartupWizardCompleted ? $t('completed') : $t('pending') }}</td>
             </tr>
             <tr>
-              <td>Can self restart</td>
-              <td>{{ systemInfo.CanSelfRestart ? 'Yes' : 'No' }}</td>
+              <td>{{ $t('canSelfRestart') }}</td>
+              <td>{{ systemInfo.CanSelfRestart ? $t('yes') : $t('no') }}</td>
             </tr>
           </tbody>
         </VTable>
@@ -107,27 +107,27 @@
         <VTable class="uno-mt-4">
           <tbody>
             <tr>
-              <td>UI culture</td>
+              <td>{{ $t('uiCulture') }}</td>
               <td>{{ serverSettings.UICulture || '-' }}</td>
             </tr>
             <tr>
-              <td>Quick Connect</td>
-              <td>{{ serverSettings.QuickConnectAvailable ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ $t('quickConnect') }}</td>
+              <td>{{ serverSettings.QuickConnectAvailable ? $t('enabled') : $t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Cache path</td>
+              <td>{{ $t('cachePath') }}</td>
               <td>{{ serverSettings.CachePath || '-' }}</td>
             </tr>
             <tr>
-              <td>Metadata path</td>
+              <td>{{ $t('metadataPath') }}</td>
               <td>{{ serverSettings.MetadataPath || '-' }}</td>
             </tr>
             <tr>
-              <td>Library scan concurrency</td>
+              <td>{{ $t('libraryScanConcurrency') }}</td>
               <td>{{ serverSettings.LibraryScanFanoutConcurrency ?? '-' }}</td>
             </tr>
             <tr>
-              <td>Image encoding concurrency</td>
+              <td>{{ $t('imageEncodingConcurrency') }}</td>
               <td>{{ serverSettings.ParallelImageEncodingLimit ?? '-' }}</td>
             </tr>
           </tbody>

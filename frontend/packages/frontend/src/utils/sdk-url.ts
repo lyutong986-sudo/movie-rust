@@ -2,14 +2,14 @@ import auth from '#/plugins/remote/auth.ts';
 import sdk from '#/plugins/remote/sdk/index.ts';
 
 type PlaybackMediaSource = {
-  Id?: string;
-  Type?: string;
-  Container?: string;
+  Id?: string | null;
+  Type?: string | null;
+  Container?: string | null;
   SupportsDirectStream?: boolean;
   SupportsTranscoding?: boolean;
-  TranscodingUrl?: string;
-  ETag?: string;
-  LiveStreamId?: string;
+  TranscodingUrl?: string | null;
+  ETag?: string | null;
+  LiveStreamId?: string | null;
 };
 
 function appendPath(basePath: string, path: string): string {
@@ -42,7 +42,7 @@ export function getSdkItemDownloadUrl(itemId: string): string | undefined {
 }
 
 export function getSdkSystemLogUrl(name: string): string | undefined {
-  return authenticatedUrl(`/System/Logs/${encodeURIComponent(name)}`);
+  return authenticatedUrl('/System/Logs/Log', { name });
 }
 
 export function getSdkSubtitleDeliveryUrl(deliveryUrl: string | undefined): string | undefined {

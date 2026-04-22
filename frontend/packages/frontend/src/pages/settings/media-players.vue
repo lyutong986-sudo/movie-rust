@@ -9,7 +9,7 @@
         variant="elevated"
         :loading="reloading"
         @click="reloadSessions">
-        Reload
+        {{ t('reload') }}
       </VBtn>
     </template>
 
@@ -20,11 +20,11 @@
         <VTable>
           <thead>
             <tr>
-              <th>Device</th>
-              <th>Client</th>
-              <th>User</th>
-              <th>Playback</th>
-              <th>Capabilities</th>
+              <th>{{ t('device') }}</th>
+              <th>{{ t('client') }}</th>
+              <th>{{ t('user') }}</th>
+              <th>{{ t('playback') }}</th>
+              <th>{{ t('capabilities') }}</th>
               <th />
             </tr>
           </thead>
@@ -43,18 +43,18 @@
               <td>
                 <div>{{ session.Client }} {{ session.ApplicationVersion }}</div>
                 <div class="uno-text-sm uno-opacity-70">
-                  {{ session.RemoteEndPoint || 'Local' }}
+                  {{ session.RemoteEndPoint || t('local') }}
                 </div>
               </td>
               <td>{{ session.UserName }}</td>
               <td>
-                <div>{{ session.NowPlayingItem?.Name ?? 'Idle' }}</div>
+                <div>{{ session.NowPlayingItem?.Name ?? t('idle') }}</div>
                 <div class="uno-text-sm uno-opacity-70">
-                  {{ session.PlayState?.IsPaused ? 'Paused' : session.NowPlayingItem ? 'Playing' : '-' }}
+                  {{ session.PlayState?.IsPaused ? t('paused') : session.NowPlayingItem ? t('playing') : '-' }}
                 </div>
               </td>
               <td>
-                <div>{{ session.SupportsRemoteControl ? 'Remote control' : 'Read only' }}</div>
+                <div>{{ session.SupportsRemoteControl ? t('remoteControl') : t('readOnly') }}</div>
                 <div class="uno-text-sm uno-opacity-70">
                   {{ (session.SupportedCommands ?? []).slice(0, 3).join(', ') || '-' }}
                 </div>
@@ -66,7 +66,7 @@
                   class="uno-mr-2"
                   :disabled="busyId === session.Id"
                   @click="openMessageDialog(session)">
-                  Message
+                  {{ t('message') }}
                 </VBtn>
                 <VBtn
                   size="small"
@@ -75,7 +75,7 @@
                   :loading="busyId === session.Id && busyAction === 'pause'"
                   :disabled="!session.SupportsRemoteControl"
                   @click="sendCommand(session.Id, 'Pause', 'pause')">
-                  Pause
+                  {{ t('pause') }}
                 </VBtn>
                 <VBtn
                   size="small"
@@ -84,7 +84,7 @@
                   :loading="busyId === session.Id && busyAction === 'stop'"
                   :disabled="!session.SupportsRemoteControl"
                   @click="sendCommand(session.Id, 'Stop', 'stop')">
-                  Stop
+                  {{ t('stop') }}
                 </VBtn>
               </td>
             </tr>
@@ -92,7 +92,7 @@
               <td
                 colspan="6"
                 class="uno-opacity-70">
-                No active media players
+                {{ t('noActiveMediaPlayers') }}
               </td>
             </tr>
           </tbody>
@@ -104,27 +104,27 @@
         :model-value="!!messageTarget"
         @update:model-value="messageTarget = undefined">
         <VCard>
-          <VCardTitle>Send Message</VCardTitle>
+          <VCardTitle>{{ t('sendMessage') }}</VCardTitle>
           <VCardText>
             <VTextField
               v-model="messageTitle"
-              label="Title" />
+              :label="t('title')" />
             <VTextarea
               v-model="messageBody"
               class="uno-mt-3"
               rows="4"
-              label="Message" />
+              :label="t('message')" />
           </VCardText>
           <VCardActions>
             <VSpacer />
             <VBtn @click="messageTarget = undefined">
-              Cancel
+              {{ t('cancel') }}
             </VBtn>
             <VBtn
               color="primary"
               :loading="busyId === messageTarget?.Id && busyAction === 'message'"
               @click="sendMessage">
-              Send
+              {{ t('send') }}
             </VBtn>
           </VCardActions>
         </VCard>
@@ -135,8 +135,10 @@
 
 <script setup lang="ts">
 import { ref } from 'vue';
+import { useTranslation } from 'i18next-vue';
 import { useSettingsSdk, type SettingsSessionInfo } from '#/composables/use-settings-sdk.ts';
 
+const { t } = useTranslation();
 const { sessionsApi } = useSettingsSdk();
 const sessions = ref<SettingsSessionInfo[]>([]);
 const reloading = ref(false);

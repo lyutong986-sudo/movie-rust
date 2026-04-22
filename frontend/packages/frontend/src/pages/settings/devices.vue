@@ -9,7 +9,7 @@
         variant="elevated"
         :loading="refreshing"
         @click="refreshDevices">
-        Refresh
+        {{ t('refresh') }}
       </VBtn>
       <VBtn
         v-if="devices.length"
@@ -27,10 +27,10 @@
         <VTable>
           <thead>
             <tr>
-              <th>User</th>
-              <th>Device</th>
-              <th>Client</th>
-              <th>Last active</th>
+              <th>{{ t('user') }}</th>
+              <th>{{ t('device') }}</th>
+              <th>{{ t('client') }}</th>
+              <th>{{ t('lastActive') }}</th>
               <th />
             </tr>
           </thead>
@@ -56,7 +56,7 @@
                   class="uno-mr-2"
                   :disabled="loading"
                   @click="openDetails(device)">
-                  Details
+                  {{ t('details') }}
                 </VBtn>
                 <VBtn
                   color="error"
@@ -71,7 +71,7 @@
               <td
                 colspan="5"
                 class="uno-opacity-70">
-                No remembered devices
+                {{ t('noRememberedDevices') }}
               </td>
             </tr>
           </tbody>
@@ -83,35 +83,35 @@
         :model-value="!!selectedDevice"
         @update:model-value="selectedDevice = undefined">
         <VCard v-if="selectedDevice">
-          <VCardTitle>Device Details</VCardTitle>
+          <VCardTitle>{{ t('deviceDetails') }}</VCardTitle>
           <VCardText>
             <VTextField
               v-model="deviceOptions.CustomName"
-              label="Custom name" />
+              :label="t('customName')" />
             <VTable class="uno-mt-4">
               <tbody>
                 <tr>
-                  <td>Device ID</td>
+                  <td>{{ t('deviceId') }}</td>
                   <td>{{ deviceInfo.Id }}</td>
                 </tr>
                 <tr>
-                  <td>Reported device ID</td>
+                  <td>{{ t('reportedDeviceId') }}</td>
                   <td>{{ deviceInfo.ReportedDeviceId ?? '-' }}</td>
                 </tr>
                 <tr>
-                  <td>Name</td>
+                  <td>{{ t('name') }}</td>
                   <td>{{ deviceInfo.Name }}</td>
                 </tr>
                 <tr>
-                  <td>Client</td>
+                  <td>{{ t('client') }}</td>
                   <td>{{ deviceInfo.AppName }} {{ deviceInfo.AppVersion }}</td>
                 </tr>
                 <tr>
-                  <td>Last user</td>
+                  <td>{{ t('lastUser') }}</td>
                   <td>{{ deviceInfo.LastUserName }}</td>
                 </tr>
                 <tr>
-                  <td>Last active</td>
+                  <td>{{ t('lastActive') }}</td>
                   <td>{{ formatActivity(deviceInfo.DateLastActivity) }}</td>
                 </tr>
               </tbody>
@@ -120,13 +120,13 @@
           <VCardActions>
             <VSpacer />
             <VBtn @click="selectedDevice = undefined">
-              Cancel
+              {{ t('cancel') }}
             </VBtn>
             <VBtn
               color="primary"
               :loading="loading"
               @click="saveDeviceOptions">
-              Save
+              {{ t('save') }}
             </VBtn>
           </VCardActions>
         </VCard>
@@ -231,12 +231,12 @@ async function saveDeviceOptions(): Promise<void> {
   loading.value = true;
   try {
     await devicesApi.postDevicesOptions(deviceOptions.value, selectedDevice.value.Id);
-    useSnackbar('Device options saved', 'success');
+    useSnackbar(t('deviceOptionsSaved'), 'success');
     selectedDevice.value = undefined;
     await refreshDevices();
   } catch (error) {
     console.error(error);
-    useSnackbar('Failed to save device options', 'error');
+    useSnackbar(t('failedToSaveDeviceOptions'), 'error');
   } finally {
     loading.value = false;
   }

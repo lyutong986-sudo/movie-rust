@@ -10,17 +10,17 @@
         class="uno-pb-4 uno-pt-0">
         <VCheckbox
           v-model="configuration.EnablePlugins"
-          label="启用插件系统" />
+          :label="t('enablePluginSystem')" />
         <VTextarea
           v-model="configuration.PluginRepositoriesText"
-          label="插件仓库"
+          :label="t('pluginRepositories')"
           rows="4" />
         <VTable class="uno-mt-4">
           <thead>
             <tr>
-              <th>插件</th>
-              <th>版本</th>
-              <th>状态</th>
+              <th>{{ t('plugins') }}</th>
+              <th>{{ t('version') }}</th>
+              <th>{{ t('status') }}</th>
               <th />
             </tr>
           </thead>
@@ -37,14 +37,14 @@
                 </div>
               </td>
               <td>{{ plugin.Version }}</td>
-              <td>{{ plugin.Enabled ? '已启用' : '已禁用' }}</td>
+              <td>{{ plugin.Enabled ? t('enabled') : t('disabled') }}</td>
               <td class="uno-text-right">
                 <VBtn
                   size="small"
                   variant="tonal"
                   :loading="busyId === plugin.Id"
                   @click="togglePlugin(plugin)">
-                  {{ plugin.Enabled ? '禁用' : '启用' }}
+                  {{ plugin.Enabled ? t('disable') : t('enable') }}
                 </VBtn>
               </td>
             </tr>
@@ -65,10 +65,12 @@ meta:
 
 <script setup lang="ts">
 import { ref } from 'vue';
+import { useTranslation } from 'i18next-vue';
 import type { SettingsPluginInfo } from '#/composables/use-settings-sdk.ts';
 import { useServerConfiguration } from '#/composables/server-configuration.ts';
 import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 
+const { t } = useTranslation();
 const { configuration, saving } = await useServerConfiguration({
   EnablePlugins: false,
   PluginRepositoriesText: '',

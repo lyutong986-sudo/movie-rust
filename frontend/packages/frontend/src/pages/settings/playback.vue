@@ -10,34 +10,34 @@
         class="uno-pb-4 uno-pt-0">
         <VSelect
           v-model="playbackManager.playbackSpeed.value"
-          label="Default playback speed"
+          :label="$t('defaultPlaybackSpeed')"
           :items="playbackSpeeds" />
         <VCheckbox
           v-model="playerElement.state.value.isStretched"
-          label="Stretch video to fill" />
+          :label="$t('stretchVideoToFill')" />
         <VCheckbox
           v-model="subtitleSettings.state.value.enabled"
-          label="Enable custom subtitle rendering" />
+          :label="$t('enableCustomSubtitleRendering')" />
         <VSlider
           v-model="subtitleSettings.state.value.fontSize"
-          label="Subtitle font size"
+          :label="$t('subtitleFontSize')"
           min="0.8"
           max="4"
           step="0.1" />
         <VSlider
           v-model="subtitleSettings.state.value.positionFromBottom"
-          label="Subtitle bottom offset"
+          :label="$t('subtitleBottomOffset')"
           min="0"
           max="40"
           step="1" />
         <VCheckbox
           v-model="subtitleSettings.state.value.backdrop"
           :disabled="!subtitleSettings.state.value.enabled"
-          label="Subtitle backdrop" />
+          :label="$t('subtitleBackdrop')" />
         <VCheckbox
           v-model="subtitleSettings.state.value.stroke"
           :disabled="!subtitleSettings.state.value.enabled"
-          label="Subtitle stroke" />
+          :label="$t('subtitleStroke')" />
       </VCol>
 
       <VCol
@@ -46,35 +46,35 @@
         <VTable>
           <tbody>
             <tr>
-              <td>Current status</td>
+              <td>{{ $t('currentStatus') }}</td>
               <td>{{ playbackStatusText }}</td>
             </tr>
             <tr>
-              <td>Playback speed</td>
+              <td>{{ $t('playbackSpeed') }}</td>
               <td>{{ playbackManager.playbackSpeed.value }}x</td>
             </tr>
             <tr>
-              <td>Stretch mode</td>
-              <td>{{ playerElement.state.value.isStretched ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ $t('stretchMode') }}</td>
+              <td>{{ playerElement.state.value.isStretched ? $t('enabled') : $t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Custom subtitles</td>
-              <td>{{ subtitleSettings.state.value.enabled ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ $t('customSubtitles') }}</td>
+              <td>{{ subtitleSettings.state.value.enabled ? $t('enabled') : $t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Subtitle font size</td>
+              <td>{{ $t('subtitleFontSize') }}</td>
               <td>{{ subtitleSettings.state.value.fontSize }}em</td>
             </tr>
             <tr>
-              <td>Subtitle offset</td>
+              <td>{{ $t('subtitleOffset') }}</td>
               <td>{{ subtitleSettings.state.value.positionFromBottom }}vh</td>
             </tr>
             <tr>
-              <td>Current item</td>
+              <td>{{ $t('currentItem') }}</td>
               <td>{{ playbackManager.currentItem.value?.Name ?? '-' }}</td>
             </tr>
             <tr>
-              <td>Active play session</td>
+              <td>{{ $t('activePlaySession') }}</td>
               <td>{{ playbackManager.playSessionId.value ?? '-' }}</td>
             </tr>
           </tbody>
@@ -86,24 +86,26 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import { useTranslation } from 'i18next-vue';
 import { PlaybackStatus, playbackManager } from '#/store/playback-manager.ts';
 import { playerElement } from '#/store/player-element.ts';
 import { subtitleSettings } from '#/store/settings/subtitle.ts';
 
+const { t } = useTranslation();
 const playbackSpeeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 const playbackStatusText = computed(() => {
   switch (playbackManager.status.value) {
     case PlaybackStatus.Playing:
-      return 'Playing';
+      return t('playing');
     case PlaybackStatus.Paused:
-      return 'Paused';
+      return t('paused');
     case PlaybackStatus.Buffering:
-      return 'Buffering';
+      return t('buffering');
     case PlaybackStatus.Error:
-      return 'Error';
+      return t('error');
     default:
-      return 'Stopped';
+      return t('stopped');
   }
 });
 </script>

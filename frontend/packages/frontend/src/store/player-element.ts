@@ -264,8 +264,10 @@ class PlayerElementStore extends CommonStore<PlayerElementState, 'isStretched' |
        * Check if client is able to display custom subtitle track
        * otherwise show default subtitle track
        */
-      if (!this._useCustomSubtitleTrack.value && !isNil(mediaElementRef.value.textTracks[subtitleTrack.srcIndex])) {
-        mediaElementRef.value.textTracks[subtitleTrack.srcIndex].mode = 'showing';
+      const textTrack = mediaElementRef.value.textTracks[subtitleTrack.srcIndex];
+
+      if (!this._useCustomSubtitleTrack.value && !isNil(textTrack)) {
+        textTrack.mode = 'showing';
       }
     }
   };

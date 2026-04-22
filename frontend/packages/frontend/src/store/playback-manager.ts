@@ -781,15 +781,16 @@ class PlaybackManagerStore extends CommonStore<PlaybackManagerState> {
      */
     watchEffect(() => {
       const { t } = i18next;
+      const currentItem = this.currentItem.value;
 
-      globalThis.navigator.mediaSession.metadata = this.currentItem.value
+      globalThis.navigator.mediaSession.metadata = currentItem
         ? new MediaMetadata({
-            title: this.currentItem.value.Name ?? t('unknownTitle'),
-            artist: this.currentItem.value.AlbumArtist ?? t('unknownArtist'),
-            album: this.currentItem.value.Album ?? t('unknownAlbum'),
+            title: currentItem.Name ?? t('unknownTitle'),
+            artist: currentItem.AlbumArtist ?? t('unknownArtist'),
+            album: currentItem.Album ?? t('unknownAlbum'),
             artwork: [96, 128, 192, 256, 384, 512].map(size => ({
               src:
-                getImageInfo(this.currentItem.value, {
+                getImageInfo(currentItem, {
                   width: size
                 }).url ?? '',
               sizes: `${size}x${size}`

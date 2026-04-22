@@ -23,6 +23,7 @@ import { getImageApi } from '@jellyfin/sdk/lib/utils/api/image-api';
 import { getLocalizationApi } from '@jellyfin/sdk/lib/utils/api/localization-api';
 import { getSystemApi } from '@jellyfin/sdk/lib/utils/api/system-api';
 import { getUserApi } from '@jellyfin/sdk/lib/utils/api/user-api';
+import auth from '#/plugins/remote/auth.ts';
 import { remote } from '#/plugins/remote/index.ts';
 import { getSdkSystemLogUrl } from '#/utils/sdk-url.ts';
 
@@ -158,7 +159,16 @@ export type SettingsActiveEncoding = {
 };
 
 export function useSettingsSdk() {
-  const sdkAxios = () => remote.sdk.api!.axiosInstance;
+  const sdkAxios = () => {
+    const axios = remote.sdk.api!.axiosInstance;
+    const token = auth.currentUserToken.value;
+
+    if (token) {
+      axios.defaults.headers.common['X-Emby-Token'] = token;
+    }
+
+    return axios;
+  };
 
   const accountApi = {
     deleteUserImage: (userId: string) =>
@@ -178,12 +188,13 @@ export function useSettingsSdk() {
   const logsApi = {
     getLogs: async (): Promise<LogFile[]> =>
       ((await (remote.sdk.newUserApi(getSystemApi) as {
-        getSystemLogs: () => Promise<{ data: LogFile[] }>;
-      }).getSystemLogs()).data ?? []),
+        getServerLogs: () => Promise<{ data: LogFile[] }>;
+      }).getServerLogs()).data ?? []),
     getLogLines: async (name: string): Promise<QueryResultString> =>
-      ((await (remote.sdk.newUserApi(getSystemApi) as {
-        getSystemLogsByNameLines: (value: string) => Promise<{ data: QueryResultString }>;
-      }).getSystemLogsByNameLines(name)).data),
+      ((await sdkAxios().get<QueryResultString>(
+        `/System/Logs/${encodeURIComponent(name)}/Lines`,
+        { params: { Limit: 200 } }
+      )).data),
     getLogFileUrl: (name: string): string | undefined =>
       getSdkSystemLogUrl(name),
     getActivityLogEntries: async (limit = 50): Promise<QueryResultActivityLogEntry> =>

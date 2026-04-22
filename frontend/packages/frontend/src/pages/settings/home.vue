@@ -10,22 +10,22 @@
         class="uno-pb-4 uno-pt-0">
         <VCheckbox
           v-model="configuration.showResume"
-          label="继续观看" />
+          :label="t('continueWatching')" />
         <VCheckbox
           v-model="configuration.showNextUp"
-          label="下一集" />
+          :label="t('nextUp')" />
         <VCheckbox
           v-model="configuration.showLatest"
-          label="最新媒体" />
+          :label="t('latestMedia')" />
         <VTextField
           v-model.number="configuration.latestLimit"
-          label="最新媒体数量"
+          :label="t('latestMediaCount')"
           type="number" />
         <VSelect
           v-model="configuration.sections"
           chips
           multiple
-          label="主页栏目"
+          :label="t('homeSections')"
           item-title="title"
           item-value="value"
           :items="sections" />
@@ -35,13 +35,16 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue';
+import { useTranslation } from 'i18next-vue';
 import { homeSettings } from '#/store/settings/home.ts';
 
+const { t } = useTranslation();
 const configuration = homeSettings.state;
-const sections = [
-  { title: '媒体库', value: 'libraries' },
-  { title: '继续观看', value: 'resumevideo' },
-  { title: '下一集', value: 'nextup' },
-  { title: '最新媒体', value: 'latestmedia' }
-];
+const sections = computed(() => [
+  { title: t('libraries'), value: 'libraries' },
+  { title: t('continueWatching'), value: 'resumevideo' },
+  { title: t('nextUp'), value: 'nextup' },
+  { title: t('latestMedia'), value: 'latestmedia' }
+]);
 </script>

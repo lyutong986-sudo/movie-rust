@@ -10,14 +10,14 @@
         class="uno-pb-4 uno-pt-0">
         <VCheckbox
           v-model="configuration.EnableLiveTv"
-          label="Enable Live TV" />
+          :label="$t('enableLiveTv')" />
         <VTextarea
           v-model="configuration.LiveTvTunerHostsText"
-          label="Tuner hosts"
+          :label="$t('tunerHosts')"
           rows="4" />
         <VTextarea
           v-model="configuration.LiveTvListingProvidersText"
-          label="Listing providers"
+          :label="$t('listingProviders')"
           rows="4" />
         <VProgressLinear
           v-if="saving"
@@ -30,15 +30,15 @@
         <VTable>
           <tbody>
             <tr>
-              <td>Live TV</td>
-              <td>{{ configuration.EnableLiveTv ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ $t('liveTv') }}</td>
+              <td>{{ configuration.EnableLiveTv ? $t('enabled') : $t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Tuner count</td>
+              <td>{{ $t('tunerCount') }}</td>
               <td>{{ tunerHosts.length }}</td>
             </tr>
             <tr>
-              <td>Listing provider count</td>
+              <td>{{ $t('listingProviderCount') }}</td>
               <td>{{ listingProviders.length }}</td>
             </tr>
           </tbody>
@@ -47,7 +47,7 @@
         <VTable class="uno-mt-4">
           <thead>
             <tr>
-              <th>Tuner host</th>
+              <th>{{ $t('tunerHost') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -58,7 +58,7 @@
             </tr>
             <tr v-if="!tunerHosts.length">
               <td class="uno-opacity-70">
-                No tuner hosts configured
+                {{ $t('noTunerHostsConfigured') }}
               </td>
             </tr>
           </tbody>
@@ -67,7 +67,7 @@
         <VTable class="uno-mt-4">
           <thead>
             <tr>
-              <th>Listing provider</th>
+              <th>{{ $t('listingProvider') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -78,7 +78,7 @@
             </tr>
             <tr v-if="!listingProviders.length">
               <td class="uno-opacity-70">
-                No listing providers configured
+                {{ $t('noListingProvidersConfigured') }}
               </td>
             </tr>
           </tbody>

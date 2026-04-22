@@ -9,7 +9,7 @@
         variant="elevated"
         :loading="refreshing"
         @click="refreshData">
-        Refresh
+        {{ t('refresh') }}
       </VBtn>
     </template>
 
@@ -23,8 +23,8 @@
         <VTable v-if="logs.length">
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Modified</th>
+              <th>{{ t('name') }}</th>
+              <th>{{ t('modified') }}</th>
               <th />
             </tr>
           </thead>
@@ -40,7 +40,7 @@
                   size="small"
                   class="uno-mr-2"
                   @click="previewLog(file.Name ?? '')">
-                  Preview
+                  {{ t('preview') }}
                 </VBtn>
                 <VBtn
                   variant="tonal"
@@ -48,7 +48,7 @@
                   :href="getLogFileLink(file.Name ?? '')"
                   target="_blank"
                   rel="noopener">
-                  Open
+                  {{ t('open') }}
                 </VBtn>
               </td>
             </tr>
@@ -107,7 +107,7 @@
           <VCardActions>
             <VSpacer />
             <VBtn @click="previewName = undefined">
-              Close
+              {{ t('close') }}
             </VBtn>
           </VCardActions>
         </VCard>
@@ -211,12 +211,12 @@ async function refreshData(): Promise<void> {
 
 async function previewLog(name: string): Promise<void> {
   previewName.value = name;
-  previewContent.value = 'Loading...';
+  previewContent.value = t('loading');
   try {
     const response: QueryResultString = await logsApi.getLogLines(name);
     previewContent.value = response.Items?.join('\n') ?? '';
   } catch {
-    previewContent.value = 'Failed to load log preview.';
+    previewContent.value = t('failedToLoadLogPreview');
   }
 }
 

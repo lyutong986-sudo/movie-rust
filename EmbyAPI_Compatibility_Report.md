@@ -741,3 +741,26 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - `useSettingsSdk().logsApi.getLogFileUrl(...)` 已改为调用 `getSdkSystemLogUrl(...)`，日志页面继续通过 `logsApi` 获取打开链接，页面侧不再拼 `/System/Logs/{Name}`。
 - 当前 `rg` 复扫结果：`basePath/api_key/Download/socket/DeliveryUrl/TranscodingUrl` 相关拼装已集中在 `utils/sdk-url.ts`；其余命中为 SDK 调用、类型/状态读取或 facade 调用点。
 - 验证情况：`cargo check` 在 `backend` 目录通过，只剩项目既有 warning；`git diff --check` 通过。前端 typecheck/build 仍受本机 `node`/`pnpm` 环境限制未执行。
+
+## 2026-04-22 编译运行与 EmbySDK 端点测试补充（四十七）
+- 本轮按“编译并运行项目，然后使用 EmbySDK 端点测试”的要求完成本地验证。后端 `cargo build` 通过，仅保留项目既有 warning；前端依赖已安装，`vite build --configLoader runner` 在 `frontend/packages/frontend` 下通过并生成 `dist`。
+- 启动运行时发现初始化阻断：`backend/migrations` 目录中存在重复 SQLx migration version，`0012_user_configuration.sql` 与 `0012_emby_images_and_trailers.sql` 冲突，`0013_media_chapters.sql` 与 `0013_emby_taglines.sql` 冲突，导致空库首次启动也会报 `_sqlx_migrations_pkey` duplicate key。已将重复迁移改名为 `0021_user_configuration.sql` 与 `0022_media_chapters.sql`，内容保持不变，确保自建数据库初始化自带完整结构。
+- 使用独立测试库 `movie_rust_codex_test` 启动当前 backend，静态目录指向已构建的 `frontend/packages/frontend/dist`，服务成功监听 `http://127.0.0.1:8096`。初始化日志确认 `session_commands`、`display_preferences`、`media_chapters`、`users.configuration` 等前端/实时链路需要的表和字段会在初始化阶段具备。
+- 端点测试按 EmbySDK 客户端常用调用形态执行：`/System/Info/Public`、`/Branding/Configuration`、`/Startup/Configuration`、`/Startup/User`、`/Startup/Complete`、`/Users/AuthenticateByName`、`/System/Info`、`/System/Configuration`、`/System/Configuration/branding`、`/Users/Public`、`/Users/Me`、`/UserViews`、`/Library/VirtualFolders/Query`、`/Library/SelectableMediaFolders`、`/ScheduledTasks`、`/Sessions`、`/System/ActivityLog/Entries`、`/System/Logs/Query`、`/Devices`、`/Plugins`、`/System/Endpoint`、`/System/WakeOnLanInfo` 均返回 200/204。
+- WebSocket 标准入口 `/socket?api_key=...&deviceId=...` 使用 `ClientWebSocket` 验证为 `Open`，不再复现早前日志中的 `/socket` 404；这说明当前路由注册和认证参数形态已能被 EmbySDK 风格客户端握手命中。
+- 前端 `vue-tsc` 全量类型检查仍失败，但剩余错误来自项目既有的 Vuetify/Dexie/Storybook 等类型噪音；本轮 URL builder facade 相关的 `sdk-url.ts`、`playback-manager.ts`、`player-element.ts` 新增类型问题已修正，并通过过滤检查确认不再出现在 typecheck 错误中。
+
+## 2026-04-22 Chrome DevTools MCP 网页端验证补充（四十八）
+- 按要求使用 `chrome-devtools-mcp` 对本地网页端做实际交互验证：打开 `http://127.0.0.1:8096/`，使用测试库管理员 `codex` 登录，首屏认证、DisplayPreferences、UserViews、Resume/Latest/NextUp 请求均返回 200/204，没有首屏 loading 卡死。
+- MCP 首轮进入 `#/settings/libraries` 时抓到真实浏览器问题：页面渲染不再空白，但 `GET /Library/VirtualFolders/Query` 与 `GET /Library/SelectableMediaFolders` 返回 401。原因是 `useSettingsSdk` 中集中 facade 的少数 `sdkAxios().get/post/delete(...)` 调用没有像 generated SDK API 方法一样自动带当前 token。已在 `sdkAxios()` 集中入口注入 `X-Emby-Token`，让 libraries、sessions、scheduled-tasks、plugins、transcoding、server/networking 等 facade 直连点共享认证上下文。
+- 重新构建并用隔离浏览器上下文复测后，`settings/libraries` 加载新 chunk，`/Library/VirtualFolders/Query` 与 `/Library/SelectableMediaFolders` 均返回 200；页面显示空库引导和 Add Libraries 操作，不再出现失败提示。
+- 继续巡检 `settings/scheduled-tasks` 与 `settings/networking`：`/ScheduledTasks`、`/System/Configuration`、`/System/Info`、`/System/Endpoint`、`/System/Ext/ServerDomains`、`/System/WakeOnLanInfo` 均返回 200，页面正常渲染任务列表和网络摘要。
+- MCP 进入 `settings/logs-and-activity` 时又抓到运行时错误：前端调用了当前 EmbySDK 中不存在的 `getSystemLogs` / `getSystemLogsByNameLines`。已改为 SDK 真实方法 `getServerLogs`；日志预览行读取继续通过集中认证 facade 调用项目扩展 `/System/Logs/{Name}/Lines`；日志打开链接改为 EmbySDK 生成代码标准路径 `/System/Logs/Log?name=...`。
+- 重新构建并复测日志页后，`/System/Logs` 与 `/System/ActivityLog/Entries` 均返回 200；日志列表、Open 链接、Preview 弹窗均可用。控制台仅剩当前用户无头像导致的图片 preload 警告，未再出现 401/404 或前端 TypeError。
+
+## 2026-04-22 前端语言持久化与 i18n 补充（四十九）
+- 本轮排查“切换中文后仍有英文、提示不跟随语言、语言选择不持久化”的原因：`LocaleSwitcher` 点击具体语言时直接调用 `i18next.changeLanguage(item)`，绕过了 `clientSettings.locale`。这样 UI 会临时切换，但不会写入当前用户的 DisplayPreferences/CustomPrefs，刷新或重新登录后容易回到旧状态。
+- 已将 `frontend/packages/frontend/src/components/System/LocaleSwitcher.vue` 的具体语言选择改为写入 `clientSettings.locale.value = item`。该设置由 `SyncedStore` 统一同步到 `/DisplayPreferences/{displayPreferencesId}?userId=...&client=vue`，和主题、客户端设置保持同一套持久化链路；“自动”语言仍写入 `undefined`，继续按浏览器/系统语言回退。
+- 对设置区做了一轮硬编码文案审计并收口到 i18n：`account`、`apikeys`、`devices`、`dlna`、`home`、`libraries`、`live-tv`、`logs-and-activity`、`media-players`、`networking`、`notifications`、`playback`、`plugins`、`scheduled-tasks`、`server`、`subtitles`、`transcoding` 中明显残留的英文状态、按钮、表头、空状态、错误提示和此前乱码中文均改为 `$t(...)` / `t(...)`。
+- `frontend/packages/i18n/strings/en.json` 与 `zh-CN.json` 已补齐这些设置页新增 key。其他语言包暂未逐一人工翻译，但页面代码已经不再硬编码英文；未翻译语言会按当前 i18next fallback 机制回落，而不是把英文写死在 Vue 模板里。
+- 验证情况：`node` JSON 解析确认 `en.json` 与 `zh-CN.json` 合法；新增设置页翻译 key 与英文基准包对齐；`vite build --configLoader runner` 在 `frontend/packages/frontend` 下通过。完整 `vue-tsc` 未在本轮重新跑，项目此前仍存在既有 Vuetify/Dexie/Storybook 类型噪声。

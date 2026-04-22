@@ -10,21 +10,21 @@
         class="uno-pb-4 uno-pt-0">
         <VCheckbox
           v-model="configuration.EnableTranscoding"
-          label="Enable transcoding" />
+          :label="$t('enableTranscoding')" />
         <VTextField
           v-model="configuration.TranscodingTempPath"
-          label="Transcoding temp path" />
+          :label="$t('transcodingTempPath')" />
         <VTextField
           v-model.number="configuration.MaxStreamingBitrate"
-          label="Max streaming bitrate"
+          :label="$t('maxStreamingBitrate')"
           type="number" />
         <VSelect
           v-model="configuration.HardwareAccelerationType"
-          label="Hardware acceleration"
+          :label="$t('hardwareAcceleration')"
           :items="hardwareAcceleration" />
         <VCheckbox
           v-model="configuration.EnableTranscodingThrottle"
-          label="Enable transcoding throttle" />
+          :label="$t('enableTranscodingThrottle')" />
         <VProgressLinear
           v-if="saving"
           indeterminate />
@@ -36,10 +36,10 @@
         <VTable>
           <thead>
             <tr>
-              <th>Play session</th>
-              <th>Item</th>
-              <th>State</th>
-              <th>Progress</th>
+              <th>{{ $t('playSession') }}</th>
+              <th>{{ $t('item') }}</th>
+              <th>{{ $t('state') }}</th>
+              <th>{{ $t('progress') }}</th>
               <th />
             </tr>
           </thead>
@@ -57,7 +57,7 @@
                   variant="tonal"
                   :loading="busyId === encoding.Id"
                   @click="stopEncoding(encoding.Id)">
-                  Stop
+                  {{ $t('stop') }}
                 </VBtn>
               </td>
             </tr>
@@ -65,7 +65,7 @@
               <td
                 colspan="5"
                 class="uno-opacity-70">
-                No active transcoding sessions
+                {{ $t('noActiveTranscodingSessions') }}
               </td>
             </tr>
           </tbody>

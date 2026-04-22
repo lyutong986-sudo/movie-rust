@@ -10,16 +10,16 @@
         class="uno-pb-4 uno-pt-0">
         <VCheckbox
           v-model="configuration.EnableDlnaServer"
-          label="Enable DLNA server" />
+          :label="$t('enableDlnaServer')" />
         <VCheckbox
           v-model="configuration.EnableDlnaPlayTo"
-          label="Enable DLNA Play To" />
+          :label="$t('enableDlnaPlayTo')" />
         <VCheckbox
           v-model="configuration.EnableBlastAliveMessages"
-          label="Send alive broadcasts" />
+          :label="$t('sendAliveBroadcasts')" />
         <VTextField
           v-model.number="configuration.BlastAliveMessageIntervalSeconds"
-          label="Alive broadcast interval (seconds)"
+          :label="$t('aliveBroadcastIntervalSeconds')"
           type="number" />
         <VProgressLinear
           v-if="saving"
@@ -32,19 +32,19 @@
         <VTable>
           <tbody>
             <tr>
-              <td>DLNA server</td>
-              <td>{{ configuration.EnableDlnaServer ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ $t('dlnaServer') }}</td>
+              <td>{{ configuration.EnableDlnaServer ? $t('enabled') : $t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Play To</td>
-              <td>{{ configuration.EnableDlnaPlayTo ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ $t('playTo') }}</td>
+              <td>{{ configuration.EnableDlnaPlayTo ? $t('enabled') : $t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Alive broadcasts</td>
-              <td>{{ configuration.EnableBlastAliveMessages ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ $t('aliveBroadcasts') }}</td>
+              <td>{{ configuration.EnableBlastAliveMessages ? $t('enabled') : $t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Broadcast interval</td>
+              <td>{{ $t('broadcastInterval') }}</td>
               <td>{{ configuration.BlastAliveMessageIntervalSeconds }} s</td>
             </tr>
           </tbody>

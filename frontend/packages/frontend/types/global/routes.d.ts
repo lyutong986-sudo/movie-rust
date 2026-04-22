@@ -160,9 +160,79 @@ declare module 'vue-router/auto-routes' {
       Record<never, never>,
       | never
     >,
+    '/settings/dlna': RouteRecordInfo<
+      '/settings/dlna',
+      '/settings/dlna',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
+    '/settings/home': RouteRecordInfo<
+      '/settings/home',
+      '/settings/home',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
+    '/settings/libraries': RouteRecordInfo<
+      '/settings/libraries',
+      '/settings/libraries',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
+    '/settings/live-tv': RouteRecordInfo<
+      '/settings/live-tv',
+      '/settings/live-tv',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
     '/settings/logs-and-activity': RouteRecordInfo<
       '/settings/logs-and-activity',
       '/settings/logs-and-activity',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
+    '/settings/media-players': RouteRecordInfo<
+      '/settings/media-players',
+      '/settings/media-players',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
+    '/settings/networking': RouteRecordInfo<
+      '/settings/networking',
+      '/settings/networking',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
+    '/settings/notifications': RouteRecordInfo<
+      '/settings/notifications',
+      '/settings/notifications',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
+    '/settings/playback': RouteRecordInfo<
+      '/settings/playback',
+      '/settings/playback',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
+    '/settings/plugins': RouteRecordInfo<
+      '/settings/plugins',
+      '/settings/plugins',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
+    '/settings/scheduled-tasks': RouteRecordInfo<
+      '/settings/scheduled-tasks',
+      '/settings/scheduled-tasks',
       Record<never, never>,
       Record<never, never>,
       | never
@@ -177,6 +247,13 @@ declare module 'vue-router/auto-routes' {
     '/settings/subtitles': RouteRecordInfo<
       '/settings/subtitles',
       '/settings/subtitles',
+      Record<never, never>,
+      Record<never, never>,
+      | never
+    >,
+    '/settings/transcoding': RouteRecordInfo<
+      '/settings/transcoding',
+      '/settings/transcoding',
       Record<never, never>,
       Record<never, never>,
       | never
@@ -336,9 +413,69 @@ declare module 'vue-router/auto-routes' {
       views:
         | never
     }
+    'src/pages/settings/dlna.vue': {
+      routes:
+        | '/settings/dlna'
+      views:
+        | never
+    }
+    'src/pages/settings/home.vue': {
+      routes:
+        | '/settings/home'
+      views:
+        | never
+    }
+    'src/pages/settings/libraries.vue': {
+      routes:
+        | '/settings/libraries'
+      views:
+        | never
+    }
+    'src/pages/settings/live-tv.vue': {
+      routes:
+        | '/settings/live-tv'
+      views:
+        | never
+    }
     'src/pages/settings/logs-and-activity.vue': {
       routes:
         | '/settings/logs-and-activity'
+      views:
+        | never
+    }
+    'src/pages/settings/media-players.vue': {
+      routes:
+        | '/settings/media-players'
+      views:
+        | never
+    }
+    'src/pages/settings/networking.vue': {
+      routes:
+        | '/settings/networking'
+      views:
+        | never
+    }
+    'src/pages/settings/notifications.vue': {
+      routes:
+        | '/settings/notifications'
+      views:
+        | never
+    }
+    'src/pages/settings/playback.vue': {
+      routes:
+        | '/settings/playback'
+      views:
+        | never
+    }
+    'src/pages/settings/plugins.vue': {
+      routes:
+        | '/settings/plugins'
+      views:
+        | never
+    }
+    'src/pages/settings/scheduled-tasks.vue': {
+      routes:
+        | '/settings/scheduled-tasks'
       views:
         | never
     }
@@ -351,6 +488,12 @@ declare module 'vue-router/auto-routes' {
     'src/pages/settings/subtitles.vue': {
       routes:
         | '/settings/subtitles'
+      views:
+        | never
+    }
+    'src/pages/settings/transcoding.vue': {
+      routes:
+        | '/settings/transcoding'
       views:
         | never
     }

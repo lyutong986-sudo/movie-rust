@@ -10,16 +10,16 @@
         class="uno-pb-4 uno-pt-0">
         <VCheckbox
           v-model="configuration.EnableNotifications"
-          label="Enable notifications" />
+          :label="$t('enableNotifications')" />
         <VCheckbox
           v-model="configuration.NotifyOnPlaybackStart"
-          label="Notify on playback start" />
+          :label="$t('notifyOnPlaybackStart')" />
         <VCheckbox
           v-model="configuration.NotifyOnLibraryScan"
-          label="Notify on library scan" />
+          :label="$t('notifyOnLibraryScan')" />
         <VTextarea
           v-model="configuration.NotificationTargetsText"
-          label="Notification targets"
+          :label="$t('notificationTargets')"
           rows="4" />
         <VProgressLinear
           v-if="saving"
@@ -32,19 +32,19 @@
         <VTable>
           <tbody>
             <tr>
-              <td>Notifications</td>
-              <td>{{ configuration.EnableNotifications ? 'Enabled' : 'Disabled' }}</td>
+              <td>{{ $t('notifications') }}</td>
+              <td>{{ configuration.EnableNotifications ? $t('enabled') : $t('disabled') }}</td>
             </tr>
             <tr>
-              <td>Playback event</td>
-              <td>{{ configuration.NotifyOnPlaybackStart ? 'Subscribed' : 'Muted' }}</td>
+              <td>{{ $t('playbackEvent') }}</td>
+              <td>{{ configuration.NotifyOnPlaybackStart ? $t('subscribed') : $t('muted') }}</td>
             </tr>
             <tr>
-              <td>Library scan event</td>
-              <td>{{ configuration.NotifyOnLibraryScan ? 'Subscribed' : 'Muted' }}</td>
+              <td>{{ $t('libraryScanEvent') }}</td>
+              <td>{{ configuration.NotifyOnLibraryScan ? $t('subscribed') : $t('muted') }}</td>
             </tr>
             <tr>
-              <td>Target count</td>
+              <td>{{ $t('targetCount') }}</td>
               <td>{{ notificationTargets.length }}</td>
             </tr>
           </tbody>
@@ -53,7 +53,7 @@
         <VTable class="uno-mt-4">
           <thead>
             <tr>
-              <th>Notification target</th>
+              <th>{{ $t('notificationTarget') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -64,7 +64,7 @@
             </tr>
             <tr v-if="!notificationTargets.length">
               <td class="uno-opacity-70">
-                No notification targets configured
+                {{ $t('noNotificationTargetsConfigured') }}
               </td>
             </tr>
           </tbody>

@@ -10,14 +10,14 @@
         class="uno-pb-4 uno-pt-0">
         <VCheckbox
           v-model="configuration.EnableScheduledTasks"
-          label="启用计划任务" />
+          :label="$t('enableScheduledTasks')" />
         <VTable class="uno-mt-4">
           <thead>
             <tr>
-              <th>任务</th>
-              <th>分类</th>
-              <th>状态</th>
-              <th>上次运行</th>
+              <th>{{ $t('tasks') }}</th>
+              <th>{{ $t('category') }}</th>
+              <th>{{ $t('status') }}</th>
+              <th>{{ $t('lastRun') }}</th>
               <th />
             </tr>
           </thead>
@@ -42,7 +42,7 @@
                   variant="tonal"
                   :loading="busyId === task.Id"
                   @click="runTask(task.Id)">
-                  立即运行
+                  {{ $t('runNow') }}
                 </VBtn>
               </td>
             </tr>

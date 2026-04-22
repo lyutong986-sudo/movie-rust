@@ -9,7 +9,7 @@
         variant="elevated"
         :loading="loading"
         @click="refreshApiKeys">
-        Refresh
+        {{ t('refresh') }}
       </VBtn>
       <VBtn
         color="primary"
@@ -33,10 +33,10 @@
         <VTable>
           <thead>
             <tr>
-              <th>Application</th>
-              <th>Token</th>
-              <th>Created</th>
-              <th>Status</th>
+              <th>{{ t('application') }}</th>
+              <th>{{ t('token') }}</th>
+              <th>{{ t('created') }}</th>
+              <th>{{ t('status') }}</th>
               <th />
             </tr>
           </thead>
@@ -56,7 +56,7 @@
                 <code>{{ truncateToken(apiKey.AccessToken) }}</code>
               </td>
               <td>{{ formatCreated(apiKey.DateCreated) }}</td>
-              <td>{{ apiKey.IsActive === false ? 'Expired' : 'Active' }}</td>
+              <td>{{ apiKey.IsActive === false ? t('expired') : t('active') }}</td>
               <td class="uno-text-right">
                 <VBtn
                   color="error"
@@ -70,7 +70,7 @@
               <td
                 colspan="5"
                 class="uno-opacity-70">
-                No API keys created yet
+                {{ t('noApiKeysCreatedYet') }}
               </td>
             </tr>
           </tbody>
