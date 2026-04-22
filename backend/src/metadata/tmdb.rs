@@ -166,6 +166,46 @@ impl TmdbProvider {
         Ok(response.json().await?)
     }
 
+    async fn get_movie_images_internal(&self, movie_id: &str) -> Result<TmdbImageCollection, AppError> {
+        let mut params = HashMap::new();
+        self.add_api_key(&mut params);
+        params.insert(
+            "include_image_language".to_string(),
+            format!("{},null,en", language_code(&self.config.language)),
+        );
+
+        let url = self.build_url(&format!("/movie/{movie_id}/images"));
+        let response = self
+            .client
+            .get(&url)
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
+    }
+
+    async fn get_tv_images_internal(&self, tv_id: &str) -> Result<TmdbImageCollection, AppError> {
+        let mut params = HashMap::new();
+        self.add_api_key(&mut params);
+        params.insert(
+            "include_image_language".to_string(),
+            format!("{},null,en", language_code(&self.config.language)),
+        );
+
+        let url = self.build_url(&format!("/tv/{tv_id}/images"));
+        let response = self
+            .client
+            .get(&url)
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
+    }
+
     async fn get_tv_season_details_internal(
         &self,
         tv_id: &str,
@@ -590,14 +630,58 @@ impl MetadataProvider for TmdbProvider {
             let details = self.get_tv_details_internal(provider_id).await?;
             push_tmdb_remote_image(&mut images, details.poster_path, "Primary", &self.config.image_base_url);
             push_tmdb_remote_image(&mut images, details.backdrop_path, "Backdrop", &self.config.image_base_url);
+            if let Ok(collection) = self.get_tv_images_internal(provider_id).await {
+                push_tmdb_image_collection(&mut images, collection, &self.config.image_base_url);
+            }
         } else {
             let details = self.get_movie_details_internal(provider_id).await?;
             push_tmdb_remote_image(&mut images, details.poster_path, "Primary", &self.config.image_base_url);
             push_tmdb_remote_image(&mut images, details.backdrop_path, "Backdrop", &self.config.image_base_url);
+            if let Ok(collection) = self.get_movie_images_internal(provider_id).await {
+                push_tmdb_image_collection(&mut images, collection, &self.config.image_base_url);
+            }
         }
 
         Ok(images)
     }
+}
+
+fn push_tmdb_image_collection(
+    images: &mut Vec<ExternalRemoteImage>,
+    collection: TmdbImageCollection,
+    image_base_url: &str,
+) {
+    for image in collection.posters {
+        push_tmdb_remote_image_info(images, image, "Primary", image_base_url);
+    }
+    for image in collection.backdrops {
+        push_tmdb_remote_image_info(images, image, "Backdrop", image_base_url);
+    }
+    for image in collection.logos {
+        push_tmdb_remote_image_info(images, image, "Logo", image_base_url);
+    }
+}
+
+fn push_tmdb_remote_image_info(
+    images: &mut Vec<ExternalRemoteImage>,
+    image: TmdbImageInfo,
+    image_type: &str,
+    image_base_url: &str,
+) {
+    let Some(path) = image.file_path.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    images.push(ExternalRemoteImage {
+        provider_name: "TheMovieDb".to_string(),
+        url: format!("{image_base_url}/original{path}"),
+        thumbnail_url: Some(format!("{image_base_url}/w500{path}")),
+        image_type: image_type.to_string(),
+        language: image.iso_639_1,
+        width: image.width,
+        height: image.height,
+        community_rating: image.vote_average,
+        vote_count: image.vote_count,
+    });
 }
 
 fn push_tmdb_remote_image(
@@ -620,6 +704,14 @@ fn push_tmdb_remote_image(
         community_rating: None,
         vote_count: None,
     });
+}
+
+fn language_code(value: &str) -> &str {
+    value
+        .split(['-', '_'])
+        .next()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("en")
 }
 
 fn parse_tmdb_date(value: Option<&str>) -> Option<chrono::NaiveDate> {
@@ -874,6 +966,26 @@ struct TmdbVideoResult {
     site: String,
     #[serde(rename = "type")]
     kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbImageCollection {
+    #[serde(default)]
+    backdrops: Vec<TmdbImageInfo>,
+    #[serde(default)]
+    posters: Vec<TmdbImageInfo>,
+    #[serde(default)]
+    logos: Vec<TmdbImageInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbImageInfo {
+    file_path: Option<String>,
+    width: Option<i32>,
+    height: Option<i32>,
+    iso_639_1: Option<String>,
+    vote_average: Option<f64>,
+    vote_count: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

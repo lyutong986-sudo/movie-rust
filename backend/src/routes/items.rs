@@ -1773,10 +1773,8 @@ fn device_profile_supports_transcoding(
                 .container
                 .as_deref()
                 .is_none_or(|value| !value.trim().is_empty())
-            && match (source.bitrate.map(i64::from), profile.max_streaming_bitrate) {
-                (Some(source_bitrate), Some(max_bitrate)) => source_bitrate <= max_bitrate,
-                _ => true,
-            }
+            && codec_profile_matches(transcoding_profile.video_codec.as_deref(), source, "Video")
+            && codec_profile_matches(transcoding_profile.audio_codec.as_deref(), source, "Audio")
     })
 }
 
@@ -1817,13 +1815,60 @@ fn should_force_transcoding(
     media_source: &crate::models::MediaSourceDto,
     effective_max_bitrate: Option<i64>,
 ) -> bool {
+    if matches!(info.enable_transcoding, Some(false)) {
+        return false;
+    }
+
     if matches!(info.enable_direct_play, Some(false)) || matches!(info.enable_direct_stream, Some(false)) {
         return true;
     }
 
-    if matches!(info.enable_transcoding, Some(true))
-        && matches!(info.enable_direct_play, Some(false) | None)
-        && matches!(info.enable_direct_stream, Some(false) | None)
+    if let Some(profile) = &info.device_profile {
+        if !profile.direct_play_profiles.is_empty()
+            && !device_profile_supports_direct_play(profile, media_source)
+        {
+            return true;
+        }
+
+        if let Some(max_audio_channels) = info.max_audio_channels {
+            if media_source.media_streams.iter().any(|stream| {
+                stream.stream_type.eq_ignore_ascii_case("Audio")
+                    && stream.channels.is_some_and(|channels| channels > max_audio_channels)
+            }) {
+                return true;
+            }
+        }
+
+        if matches!(info.allow_video_stream_copy, Some(false))
+            && media_source
+                .media_streams
+                .iter()
+                .any(|stream| stream.stream_type.eq_ignore_ascii_case("Video"))
+        {
+            return true;
+        }
+
+        if matches!(info.allow_audio_stream_copy, Some(false))
+            && media_source
+                .media_streams
+                .iter()
+                .any(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"))
+        {
+            return true;
+        }
+
+        if matches!(info.allow_interlaced_video_stream_copy, Some(false))
+            && media_source.media_streams.iter().any(|stream| {
+                stream.stream_type.eq_ignore_ascii_case("Video")
+                    && stream.is_interlaced.unwrap_or(false)
+            })
+        {
+            return true;
+        }
+    }
+
+    if matches!(info.always_burn_in_subtitle_when_transcoding, Some(true))
+        && selected_subtitle_stream(media_source, info.subtitle_stream_index).is_some()
     {
         return true;
     }
@@ -1837,6 +1882,19 @@ fn should_force_transcoding(
     }
 
     false
+}
+
+fn selected_subtitle_stream<'a>(
+    media_source: &'a crate::models::MediaSourceDto,
+    subtitle_stream_index: Option<i32>,
+) -> Option<&'a crate::models::MediaStreamDto> {
+    let index = subtitle_stream_index?;
+    if index < 0 {
+        return None;
+    }
+    media_source.media_streams.iter().find(|stream| {
+        stream.stream_type.eq_ignore_ascii_case("Subtitle") && stream.index == index
+    })
 }
 
 fn preferred_transcoding_container(info: &PlaybackInfoDto) -> String {

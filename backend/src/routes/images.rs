@@ -172,7 +172,14 @@ async fn list_item_remote_images(
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-    let images = remote_images_for_item(&state, &item, query.image_type.as_deref()).await?;
+    let images = remote_images_for_item(
+        &state,
+        &item,
+        query.image_type.as_deref(),
+        query.provider_name.as_deref(),
+        query.include_all_languages.unwrap_or(false),
+    )
+    .await?;
     let total_record_count = images.len();
     let start = query.start_index.unwrap_or(0).max(0) as usize;
     let limit = query.limit.unwrap_or(100).clamp(1, 500) as usize;
@@ -209,6 +216,12 @@ async fn list_item_remote_image_providers(
 struct RemoteImagesQuery {
     #[serde(default, rename = "Type", alias = "type")]
     image_type: Option<String>,
+    #[serde(default, alias = "providerName")]
+    provider_name: Option<String>,
+    #[serde(default, alias = "includeAllLanguages")]
+    include_all_languages: Option<bool>,
+    #[serde(default, alias = "enableSeriesImages")]
+    enable_series_images: Option<bool>,
     #[serde(default, alias = "StartIndex", alias = "startIndex")]
     start_index: Option<i32>,
     #[serde(default, alias = "Limit", alias = "limit")]
@@ -281,6 +294,8 @@ async fn remote_images_for_item(
     state: &AppState,
     item: &crate::models::DbMediaItem,
     image_type: Option<&str>,
+    provider_name: Option<&str>,
+    include_all_languages: bool,
 ) -> Result<Vec<ExternalRemoteImage>, AppError> {
     let mut images = Vec::new();
     push_existing_remote_image(&mut images, item.image_primary_path.as_deref(), "Primary");
@@ -302,10 +317,27 @@ async fn remote_images_for_item(
         let normalized = normalized_item_image_type(image_type);
         images.retain(|image| image.image_type.eq_ignore_ascii_case(&normalized));
     }
+    if let Some(provider_name) = provider_name.filter(|value| !value.trim().is_empty()) {
+        images.retain(|image| image.provider_name.eq_ignore_ascii_case(provider_name));
+    }
+    if !include_all_languages {
+        images.retain(|image| {
+            image
+                .language
+                .as_deref()
+                .is_none_or(|language| language.eq_ignore_ascii_case("zh") || language.eq_ignore_ascii_case("en"))
+        });
+    }
 
     images.sort_by(|left, right| {
         left.image_type
             .cmp(&right.image_type)
+            .then_with(|| {
+                right
+                    .community_rating
+                    .partial_cmp(&left.community_rating)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| left.provider_name.cmp(&right.provider_name))
             .then_with(|| left.url.cmp(&right.url))
     });

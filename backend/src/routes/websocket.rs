@@ -3,8 +3,7 @@ use axum::{
     response::Response,
 };
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -25,6 +24,7 @@ pub struct WebSocketSession {
     pub id: Uuid,
     pub user_id: Option<Uuid>,
     pub device_id: Option<String>,
+    pub access_token: Option<String>,
 }
 
 pub type Sessions = Arc<RwLock<HashMap<Uuid, WebSocketSession>>>;
@@ -40,6 +40,8 @@ pub async fn emby_websocket_handler(
         .or(query.api_key.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
+    let mut access_token = None;
     let user_id = if let Some(token) = token {
         if state
             .config
@@ -49,18 +51,21 @@ pub async fn emby_websocket_handler(
         {
             Some(state.config.server_id)
         } else {
-            crate::repository::get_session(&state.pool, token)
-                .await?
-                .map(|session| session.user_id)
+            let auth_session = crate::repository::get_session(&state.pool, token).await?;
+            if auth_session.is_some() {
+                access_token = Some(token.to_string());
+            }
+            auth_session.map(|session| session.user_id)
         }
     } else {
         None
     };
-    
+
     let session = WebSocketSession {
         id: Uuid::new_v4(),
         user_id,
         device_id: query.device_id,
+        access_token,
     };
 
     Ok(ws.on_upgrade(move |socket| handle_socket(socket, session, state)))
@@ -68,38 +73,99 @@ pub async fn emby_websocket_handler(
 
 async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: AppState) {
     let session_id = session.id;
-    
     let sessions = state.websocket_sessions.clone();
-    
     sessions.write().await.insert(session_id, session.clone());
-    
-    tracing::info!(session_id = %session_id, user_id = ?session.user_id, "WebSocket 连接已建立");
-    
+
+    tracing::info!(
+        session_id = %session_id,
+        user_id = ?session.user_id,
+        device_id = ?session.device_id,
+        "WebSocket connection opened"
+    );
+
     let mut close_reason = None;
-    
-    while let Some(msg) = socket.recv().await {
-        match msg {
-            Ok(msg) => {
-                match msg {
-                    axum::extract::ws::Message::Text(text) => {
-                        tracing::debug!(session_id = %session_id, message = %text, "收到 WebSocket 消息");
-                        // 简单回显
-                        let _ = socket.send(axum::extract::ws::Message::Text(text)).await;
-                    }
-                    axum::extract::ws::Message::Close(frame) => {
-                        close_reason = frame.map(|f| f.reason.to_string());
+
+    loop {
+        match tokio::time::timeout(Duration::from_secs(1), socket.recv()).await {
+            Ok(Some(Ok(message))) => match message {
+                axum::extract::ws::Message::Text(text) => {
+                    tracing::debug!(session_id = %session_id, message = %text, "received WebSocket message");
+                    let payload = serde_json::json!({
+                        "MessageType": "KeepAlive",
+                        "Data": text.to_string()
+                    });
+                    if socket
+                        .send(axum::extract::ws::Message::Text(payload.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        close_reason = Some("send failed".to_string());
                         break;
                     }
-                    _ => {}
                 }
-            }
-            Err(e) => {
-                tracing::error!(session_id = %session_id, error = %e, "WebSocket 接收错误");
+                axum::extract::ws::Message::Ping(bytes) => {
+                    if socket
+                        .send(axum::extract::ws::Message::Pong(bytes))
+                        .await
+                        .is_err()
+                    {
+                        close_reason = Some("pong failed".to_string());
+                        break;
+                    }
+                }
+                axum::extract::ws::Message::Close(frame) => {
+                    close_reason = frame.map(|frame| frame.reason.to_string());
+                    break;
+                }
+                _ => {}
+            },
+            Ok(Some(Err(error))) => {
+                tracing::error!(session_id = %session_id, error = %error, "WebSocket receive failed");
+                close_reason = Some(error.to_string());
                 break;
+            }
+            Ok(None) => break,
+            Err(_) => {}
+        }
+
+        if let (Some(access_token), Some(user_id)) = (&session.access_token, session.user_id) {
+            match crate::repository::list_session_commands(
+                &state.pool,
+                access_token,
+                user_id,
+                false,
+                0,
+                50,
+                true,
+            )
+            .await
+            {
+                Ok(result) => {
+                    for command in result.items {
+                        let payload = serde_json::json!({
+                            "MessageType": "Command",
+                            "Data": command
+                        });
+                        if socket
+                            .send(axum::extract::ws::Message::Text(payload.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            close_reason = Some("command push failed".to_string());
+                            break;
+                        }
+                    }
+                    if close_reason.is_some() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(session_id = %session_id, error = %error, "failed to push session commands");
+                }
             }
         }
     }
-    
+
     sessions.write().await.remove(&session_id);
-    tracing::info!(session_id = %session_id, reason = ?close_reason, "WebSocket 连接已关闭");
+    tracing::info!(session_id = %session_id, reason = ?close_reason, "WebSocket connection closed");
 }

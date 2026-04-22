@@ -2075,6 +2075,10 @@ pub async fn list_media_items(
         }
     }
 
+    if options.project_to_media {
+        builder.push(" AND NOT (item_type = ANY(ARRAY['CollectionFolder','Folder','BoxSet']))");
+    }
+
     if let Some(is_folder) = options.is_folder {
         if is_folder {
             builder.push(" AND item_type = ANY(ARRAY['Series','Season','BoxSet','Folder','CollectionFolder'])");
@@ -2199,8 +2203,60 @@ pub async fn list_media_items(
                 .push_bind(user_id)
                 .push(" AND uid.item_id = media_items.id AND uid.playback_position_ticks > 0)");
         }
+
+        let filters = parse_option_filters(options.filters.as_deref());
+        for filter in filters {
+            match filter.as_str() {
+                "isplayed" => {
+                    builder
+                        .push(" AND EXISTS (SELECT 1 FROM user_item_data uid WHERE uid.user_id = ")
+                        .push_bind(user_id)
+                        .push(" AND uid.item_id = media_items.id AND uid.is_played = true)");
+                }
+                "isunplayed" => {
+                    builder
+                        .push(" AND NOT EXISTS (SELECT 1 FROM user_item_data uid WHERE uid.user_id = ")
+                        .push_bind(user_id)
+                        .push(" AND uid.item_id = media_items.id AND uid.is_played = true)");
+                }
+                "isfavorite" => {
+                    builder
+                        .push(" AND EXISTS (SELECT 1 FROM user_item_data uid WHERE uid.user_id = ")
+                        .push_bind(user_id)
+                        .push(" AND uid.item_id = media_items.id AND uid.is_favorite = true)");
+                }
+                "isresumable" => {
+                    builder
+                        .push(" AND EXISTS (SELECT 1 FROM user_item_data uid WHERE uid.user_id = ")
+                        .push_bind(user_id)
+                        .push(" AND uid.item_id = media_items.id AND uid.playback_position_ticks > 0)");
+                }
+                "isfolder" => {
+                    builder.push(" AND item_type = ANY(ARRAY['Series','Season','BoxSet','Folder','CollectionFolder'])");
+                }
+                "isnotfolder" => {
+                    builder.push(" AND NOT (item_type = ANY(ARRAY['Series','Season','BoxSet','Folder','CollectionFolder']))");
+                }
+                _ => {}
+            }
+        }
     } else if options.resume_only {
         builder.push(" AND false");
+    } else {
+        for filter in parse_option_filters(options.filters.as_deref()) {
+            match filter.as_str() {
+                "isfolder" => {
+                    builder.push(" AND item_type = ANY(ARRAY['Series','Season','BoxSet','Folder','CollectionFolder'])");
+                }
+                "isnotfolder" => {
+                    builder.push(" AND NOT (item_type = ANY(ARRAY['Series','Season','BoxSet','Folder','CollectionFolder']))");
+                }
+                "isplayed" | "isunplayed" | "isfavorite" | "isresumable" => {
+                    builder.push(" AND false");
+                }
+                _ => {}
+            }
+        }
     }
 
     if let Some(search_term) = options.search_term.filter(|value| !value.trim().is_empty()) {
@@ -5220,6 +5276,16 @@ fn lowercase_list(values: &[String]) -> Vec<String> {
         .iter()
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn parse_option_filters(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split([',', '|', ';'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
         .collect()
 }
 
