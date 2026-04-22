@@ -762,6 +762,59 @@ async fn ensure_initial_system_settings(
     config: &config::Config,
 ) -> Result<()> {
     let cache_path = config.transcode_dir.to_string_lossy().to_string();
+    let mut server_configuration = serde_json::Map::new();
+    server_configuration.insert("ServerName".to_string(), json!(config.server_name));
+    server_configuration.insert("UICulture".to_string(), json!(config.ui_culture));
+    server_configuration.insert("MetadataCountryCode".to_string(), json!(config.metadata_country_code));
+    server_configuration.insert(
+        "PreferredMetadataLanguage".to_string(),
+        json!(config.preferred_metadata_language),
+    );
+    server_configuration.insert("EnableRemoteAccess".to_string(), json!(config.enable_remote_access));
+    server_configuration.insert("EnableUPnP".to_string(), json!(config.enable_automatic_port_mapping));
+    server_configuration.insert("QuickConnectAvailable".to_string(), json!(false));
+    server_configuration.insert("CachePath".to_string(), json!(cache_path.clone()));
+    server_configuration.insert("MetadataPath".to_string(), json!("metadata"));
+    server_configuration.insert("LibraryScanFanoutConcurrency".to_string(), json!(0));
+    server_configuration.insert("ParallelImageEncodingLimit".to_string(), json!(0));
+    server_configuration.insert("HomeScreenShowResume".to_string(), json!(true));
+    server_configuration.insert("HomeScreenShowNextUp".to_string(), json!(true));
+    server_configuration.insert("HomeScreenShowLatest".to_string(), json!(true));
+    server_configuration.insert("HomeScreenLatestLimit".to_string(), json!(16));
+    server_configuration.insert("HomeScreenSections".to_string(), json!(["Resume", "NextUp", "Latest"]));
+    server_configuration.insert("EnableTranscoding".to_string(), json!(config.enable_transcoding));
+    server_configuration.insert(
+        "TranscodingTempPath".to_string(),
+        json!(config.transcode_dir.to_string_lossy().to_string()),
+    );
+    server_configuration.insert("MaxStreamingBitrate".to_string(), json!(120000000));
+    server_configuration.insert("HardwareAccelerationType".to_string(), json!("none"));
+    server_configuration.insert("EnableTranscodingThrottle".to_string(), json!(true));
+    server_configuration.insert("EnableDlnaServer".to_string(), json!(false));
+    server_configuration.insert("EnableDlnaPlayTo".to_string(), json!(false));
+    server_configuration.insert("EnableBlastAliveMessages".to_string(), json!(true));
+    server_configuration.insert("BlastAliveMessageIntervalSeconds".to_string(), json!(1800));
+    server_configuration.insert("EnableLiveTv".to_string(), json!(false));
+    server_configuration.insert("LiveTvTunerHostsText".to_string(), json!(""));
+    server_configuration.insert("LiveTvListingProvidersText".to_string(), json!(""));
+    server_configuration.insert(
+        "PublicUrl".to_string(),
+        json!(config.public_url.clone().unwrap_or_default()),
+    );
+    server_configuration.insert("PublicPort".to_string(), json!(config.port));
+    server_configuration.insert("HttpsPortNumber".to_string(), json!(8920));
+    server_configuration.insert("LocalNetworkSubnetsText".to_string(), json!(""));
+    server_configuration.insert("EnablePlugins".to_string(), json!(false));
+    server_configuration.insert("PluginRepositoriesText".to_string(), json!(""));
+    server_configuration.insert("DisabledPluginsText".to_string(), json!(""));
+    server_configuration.insert("EnableScheduledTasks".to_string(), json!(true));
+    server_configuration.insert("LibraryScanIntervalHours".to_string(), json!(24));
+    server_configuration.insert("MetadataRefreshIntervalHours".to_string(), json!(72));
+    server_configuration.insert("EnableNotifications".to_string(), json!(false));
+    server_configuration.insert("NotifyOnPlaybackStart".to_string(), json!(false));
+    server_configuration.insert("NotifyOnLibraryScan".to_string(), json!(true));
+    server_configuration.insert("NotificationTargetsText".to_string(), json!(""));
+
     let seeds = [
         (
             "startup_configuration",
@@ -789,19 +842,7 @@ async fn ensure_initial_system_settings(
         ),
         (
             "server_configuration",
-            json!({
-                "ServerName": config.server_name,
-                "UICulture": config.ui_culture,
-                "MetadataCountryCode": config.metadata_country_code,
-                "PreferredMetadataLanguage": config.preferred_metadata_language,
-                "EnableRemoteAccess": config.enable_remote_access,
-                "EnableUPnP": config.enable_automatic_port_mapping,
-                "QuickConnectAvailable": false,
-                "CachePath": cache_path,
-                "MetadataPath": "metadata",
-                "LibraryScanFanoutConcurrency": 0,
-                "ParallelImageEncodingLimit": 0
-            }),
+            Value::Object(server_configuration),
         ),
         (
             "display_preferences_defaults:vue",

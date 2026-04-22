@@ -11,10 +11,11 @@ use axum::{
     http::{header, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
-    Router,
+    Json, Router,
 };
 use reqwest::Client;
 use serde::Deserialize;
+use serde_json::Value;
 use std::path::{Path as StdPath, PathBuf};
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
@@ -72,6 +73,18 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
         .route("/Items/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
         .route("/items/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
+        .route("/Items/{item_id}/RemoteSearch/Subtitles/{subtitle_key}", get(search_remote_subtitles).post(download_remote_subtitle))
+        .route("/items/{item_id}/RemoteSearch/Subtitles/{subtitle_key}", get(search_remote_subtitles).post(download_remote_subtitle))
+        .route("/Providers/Subtitles/Subtitles/{subtitle_id}", get(provider_subtitle))
+        .route("/providers/Subtitles/Subtitles/{subtitle_id}", get(provider_subtitle))
+        .route("/Items/{item_id}/Subtitles/{index}", delete(delete_subtitle))
+        .route("/items/{item_id}/Subtitles/{index}", delete(delete_subtitle))
+        .route("/Videos/{item_id}/Subtitles/{index}", delete(delete_subtitle))
+        .route("/videos/{item_id}/Subtitles/{index}", delete(delete_subtitle))
+        .route("/Items/{item_id}/Subtitles/{index}/Delete", post(delete_subtitle))
+        .route("/items/{item_id}/Subtitles/{index}/Delete", post(delete_subtitle))
+        .route("/Videos/{item_id}/Subtitles/{index}/Delete", post(delete_subtitle))
+        .route("/videos/{item_id}/Subtitles/{index}/Delete", post(delete_subtitle))
         .route("/Videos/{item_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start_legacy).head(subtitle_stream_with_start_legacy))
         .route("/videos/{item_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start_legacy).head(subtitle_stream_with_start_legacy))
         .route("/Items/{item_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start_legacy).head(subtitle_stream_with_start_legacy))
@@ -200,6 +213,36 @@ struct AttachmentPath {
     item_id: String,
     _media_source_id: String,
     index: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteSubtitlePath {
+    item_id: String,
+    subtitle_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProviderSubtitlePath {
+    subtitle_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubtitleDeletePath {
+    item_id: String,
+    index: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SubtitleActionQuery {
+    #[serde(default, alias = "mediaSourceId")]
+    media_source_id: Option<String>,
+    #[serde(default, alias = "isPerfectMatch")]
+    is_perfect_match: Option<bool>,
+    #[serde(default, alias = "isForced")]
+    is_forced: Option<bool>,
+    #[serde(default, alias = "isHearingImpaired")]
+    is_hearing_impaired: Option<bool>,
 }
 
 async fn stream_video(
@@ -514,6 +557,59 @@ async fn subtitle_stream_with_start_legacy(
     serve_subtitle(&state, item_id, path.index, request).await
 }
 
+async fn search_remote_subtitles(
+    State(state): State<AppState>,
+    Path(path): Path<RemoteSubtitlePath>,
+    Query(query): Query<SubtitleActionQuery>,
+    request: Request<Body>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let item_id = parse_video_item_id(&path.item_id)?;
+    ensure_video_item_exists(&state, item_id).await?;
+    let _language = path.subtitle_key;
+    let _media_source_id = query.media_source_id;
+    let _flags = (query.is_perfect_match, query.is_forced, query.is_hearing_impaired);
+    Ok(Json(Vec::new()))
+}
+
+async fn download_remote_subtitle(
+    State(state): State<AppState>,
+    Path(path): Path<RemoteSubtitlePath>,
+    Query(query): Query<SubtitleActionQuery>,
+    request: Request<Body>,
+) -> Result<StatusCode, AppError> {
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let item_id = parse_video_item_id(&path.item_id)?;
+    ensure_video_item_exists(&state, item_id).await?;
+    let _subtitle_id = path.subtitle_key;
+    let _media_source_id = query.media_source_id;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn provider_subtitle(
+    State(state): State<AppState>,
+    Path(path): Path<ProviderSubtitlePath>,
+    request: Request<Body>,
+) -> Result<StatusCode, AppError> {
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let _subtitle_id = path.subtitle_id;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_subtitle(
+    State(state): State<AppState>,
+    Path(path): Path<SubtitleDeletePath>,
+    Query(query): Query<SubtitleActionQuery>,
+    request: Request<Body>,
+) -> Result<StatusCode, AppError> {
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let item_id = parse_video_item_id(&path.item_id)?;
+    ensure_video_item_exists(&state, item_id).await?;
+    let _index = path.index;
+    let _media_source_id = query.media_source_id;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn attachment_stream(
     State(state): State<AppState>,
     Path(path): Path<AttachmentPath>,
@@ -523,6 +619,18 @@ async fn attachment_stream(
         .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩?ID 鏍煎紡: {}", path.item_id)))?;
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     serve_attachment(&state, item_id, path.index, request).await
+}
+
+fn parse_video_item_id(item_id_str: &str) -> Result<Uuid, AppError> {
+    emby_id_to_uuid(item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {item_id_str}")))
+}
+
+async fn ensure_video_item_exists(state: &AppState, item_id: Uuid) -> Result<(), AppError> {
+    repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    Ok(())
 }
 
 async fn hls_playlist_response(

@@ -142,19 +142,19 @@ const userItems = computed<MenuOptions[]>(() => {
       icon: 'i-mdi:home',
       name: t('homeScreen'),
       description: t('homeScreenSettingsDescription'),
-      link: undefined
+      link: '/settings/home'
     },
     {
       icon: 'i-mdi:play-pause',
       name: t('playback'),
       description: t('playbackSettingsDescription'),
-      link: undefined
+      link: '/settings/playback'
     },
     {
       icon: 'i-mdi:disc-player',
       name: t('mediaPlayers'),
       description: t('mediaPlayersSettingsDescription'),
-      link: undefined
+      link: '/settings/media-players'
     },
     {
       icon: 'i-mdi:subtitles',
@@ -206,25 +206,25 @@ const adminSections = computed<MenuOptions[][]>(() => {
         icon: 'i-mdi:play-network',
         name: t('transcodingAndStreaming'),
         description: t('transcodingSettingsDescription'),
-        link: undefined
+        link: '/settings/transcoding'
       },
       {
         icon: 'i-mdi:dlna',
         name: t('dlna'),
         description: t('dlnaSettingsDescription'),
-        link: undefined
+        link: '/settings/dlna'
       },
       {
         icon: 'i-mdi:television-classic',
         name: t('liveTv'),
         description: t('liveTvSettingsDescription'),
-        link: undefined
+        link: '/settings/live-tv'
       },
       {
         icon: 'i-mdi:network',
         name: t('networking'),
         description: t('networkingSettingsDescription'),
-        link: undefined
+        link: '/settings/networking'
       }
     ],
     [
@@ -232,19 +232,19 @@ const adminSections = computed<MenuOptions[][]>(() => {
         icon: 'i-mdi:puzzle',
         name: t('plugins'),
         description: t('pluginsSettingsDescription'),
-        link: undefined
+        link: '/settings/plugins'
       },
       {
         icon: 'i-mdi:calendar-clock',
         name: t('scheduledTasks'),
         description: t('scheduledTasksSettingsDescription'),
-        link: undefined
+        link: '/settings/scheduled-tasks'
       },
       {
         icon: 'i-mdi:bell',
         name: t('notifications'),
         description: t('notificationsSettingsDescription'),
-        link: undefined
+        link: '/settings/notifications'
       },
       {
         icon: 'i-mdi:text-box',

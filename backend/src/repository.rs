@@ -205,6 +205,99 @@ pub async fn server_configuration_value(
     object
         .entry("ParallelImageEncodingLimit".to_string())
         .or_insert_with(|| json!(0));
+    object
+        .entry("HomeScreenShowResume".to_string())
+        .or_insert_with(|| json!(true));
+    object
+        .entry("HomeScreenShowNextUp".to_string())
+        .or_insert_with(|| json!(true));
+    object
+        .entry("HomeScreenShowLatest".to_string())
+        .or_insert_with(|| json!(true));
+    object
+        .entry("HomeScreenLatestLimit".to_string())
+        .or_insert_with(|| json!(16));
+    object
+        .entry("HomeScreenSections".to_string())
+        .or_insert_with(|| json!(["Resume", "NextUp", "Latest"]));
+    object
+        .entry("EnableTranscoding".to_string())
+        .or_insert_with(|| json!(config.enable_transcoding));
+    object
+        .entry("TranscodingTempPath".to_string())
+        .or_insert_with(|| json!(config.transcode_dir.to_string_lossy().to_string()));
+    object
+        .entry("MaxStreamingBitrate".to_string())
+        .or_insert_with(|| json!(120000000));
+    object
+        .entry("HardwareAccelerationType".to_string())
+        .or_insert_with(|| json!("none"));
+    object
+        .entry("EnableTranscodingThrottle".to_string())
+        .or_insert_with(|| json!(true));
+    object
+        .entry("EnableDlnaServer".to_string())
+        .or_insert_with(|| json!(false));
+    object
+        .entry("EnableDlnaPlayTo".to_string())
+        .or_insert_with(|| json!(false));
+    object
+        .entry("EnableBlastAliveMessages".to_string())
+        .or_insert_with(|| json!(true));
+    object
+        .entry("BlastAliveMessageIntervalSeconds".to_string())
+        .or_insert_with(|| json!(1800));
+    object
+        .entry("EnableLiveTv".to_string())
+        .or_insert_with(|| json!(false));
+    object
+        .entry("LiveTvTunerHostsText".to_string())
+        .or_insert_with(|| json!(""));
+    object
+        .entry("LiveTvListingProvidersText".to_string())
+        .or_insert_with(|| json!(""));
+    object
+        .entry("PublicUrl".to_string())
+        .or_insert_with(|| json!(config.public_url.clone().unwrap_or_default()));
+    object
+        .entry("PublicPort".to_string())
+        .or_insert_with(|| json!(config.port));
+    object
+        .entry("HttpsPortNumber".to_string())
+        .or_insert_with(|| json!(8920));
+    object
+        .entry("LocalNetworkSubnetsText".to_string())
+        .or_insert_with(|| json!(""));
+    object
+        .entry("EnablePlugins".to_string())
+        .or_insert_with(|| json!(false));
+    object
+        .entry("PluginRepositoriesText".to_string())
+        .or_insert_with(|| json!(""));
+    object
+        .entry("DisabledPluginsText".to_string())
+        .or_insert_with(|| json!(""));
+    object
+        .entry("EnableScheduledTasks".to_string())
+        .or_insert_with(|| json!(true));
+    object
+        .entry("LibraryScanIntervalHours".to_string())
+        .or_insert_with(|| json!(24));
+    object
+        .entry("MetadataRefreshIntervalHours".to_string())
+        .or_insert_with(|| json!(72));
+    object
+        .entry("EnableNotifications".to_string())
+        .or_insert_with(|| json!(false));
+    object
+        .entry("NotifyOnPlaybackStart".to_string())
+        .or_insert_with(|| json!(false));
+    object
+        .entry("NotifyOnLibraryScan".to_string())
+        .or_insert_with(|| json!(true));
+    object
+        .entry("NotificationTargetsText".to_string())
+        .or_insert_with(|| json!(""));
 
     Ok(value)
 }
@@ -281,7 +374,7 @@ pub async fn update_server_configuration_value(
     let current_object = current
         .as_object()
         .ok_or_else(|| AppError::Internal("current server configuration is not an object".to_string()))?;
-    let mut normalized = serde_json::Map::new();
+    let mut normalized = current_object.clone();
 
     normalized.insert("ServerName".to_string(), json!(server_name));
     normalized.insert("UICulture".to_string(), json!(ui_culture));

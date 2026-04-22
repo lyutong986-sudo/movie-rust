@@ -608,3 +608,21 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - 后端新增 `GET /Items/{Id}/ThemeMedia`、`GET /Items/{Id}/ThemeSongs`、`GET /Items/{Id}/ThemeVideos`，返回 Emby 风格的 `ThemeMediaResult` 载荷；当前基于已有子项查询能力按 `ThemeSong`/`ThemeVideo` 类型取数，没有真实主题媒体时稳定返回空集合而不是 404。
 - 后端新增 `POST /Items/{Id}/Tags/Add` 与 `POST /Items/{Id}/Tags/Delete`，请求体按 EmbySDK 常见的 `Tags: [{ Name|Id }]` 接收，实际更新 `media_items.tags` 并广播 `LibraryChanged { ItemsUpdated: [...] }`，使元数据编辑页的标签增删具备真实落库语义。
 - 本轮验证：`cargo check --manifest-path backend\Cargo.toml` 已通过；仍只有既有 warning，未新增编译错误。
+
+## 2026-04-22 rg 模板对照审计补充（三十二）
+
+- 继续使用 `rg` 对照 EmbySDK `SubtitleServiceApi`、`DeviceServiceApi`、当前 frontend 和本地播放器模板。本轮重点处理“播放/设置页不一定高频直接点击，但 SDK 标准探测会命中”的字幕与设备端点，减少客户端 404 噪声。
+- 字幕服务补齐 EmbySDK 标准路径：`GET /Items/{Id}/RemoteSearch/Subtitles/{Language}`、`POST /Items/{Id}/RemoteSearch/Subtitles/{SubtitleId}`、`GET /Providers/Subtitles/Subtitles/{Id}`、`DELETE /Items/{Id}/Subtitles/{Index}`、`DELETE /Videos/{Id}/Subtitles/{Index}`、`POST /Items/{Id}/Subtitles/{Index}/Delete`、`POST /Videos/{Id}/Subtitles/{Index}/Delete`，并补了大小写兼容路径。
+- 字幕搜索当前返回空数组，安装/下载/删除返回 204，并且会先按 Emby GUID 校验媒体项存在；这保持了 EmbySDK 可调用的接口形状，同时不伪造项目尚未接入的外部字幕供应商和真实文件删除能力。
+- 设备服务补齐 EmbySDK 标准路径：`GET /Devices/Info`、`GET /Devices/Options`、`POST /Devices/Options`、`GET /Devices/CameraUploads`、`POST /Devices/CameraUploads`。其中设备详情从现有 sessions 聚合出 `DeviceInfo` 常读字段，Options 返回 `CustomName` 占位，CameraUploads 返回 `ContentUploadHistory` 空列表或 204。
+- 当前 frontend `settings/devices.vue` 已直接使用 `/Devices` 与删除设备路径；本轮补的 Info/Options/CameraUploads 主要面向 EmbySDK 客户端和后续设置页扩展，避免功能探测时被误判为后端不兼容。
+- 本轮验证：`cargo check --manifest-path backend\Cargo.toml` 已通过；仍只有既有 warning，未新增编译错误。
+
+## 2026-04-22 frontend 设置入口补全（三十三）
+
+- 针对用户指出的 `class="v-item-group v-theme--dark"` 设置入口灰项，本轮审计了 `frontend/packages/frontend/src/pages/settings/index.vue` 中所有 `VItemGroup` 条目；原先 `homeScreen`、`playback`、`mediaPlayers`、`transcodingAndStreaming`、`dlna`、`liveTv`、`networking`、`plugins`、`scheduledTasks`、`notifications` 都是 `link: undefined`，导致前端显示为禁用入口。
+- frontend 已新增对应设置页：`/settings/home`、`/settings/playback`、`/settings/media-players`、`/settings/transcoding`、`/settings/dlna`、`/settings/live-tv`、`/settings/networking`、`/settings/plugins`、`/settings/scheduled-tasks`、`/settings/notifications`，并将设置首页入口全部接到真实路由。
+- 新增 `frontend/packages/frontend/src/composables/server-configuration.ts`，让这些设置页统一读写 EmbySDK 标准 `System/Configuration`；播放页复用现有 `playbackManager`、`playerElement`、`subtitleSettings`，媒体播放器页复用后端现有 `/Sessions`。
+- 后端 `server_configuration` 初始化自带新增模块默认值，不依赖数据库迁移；`repository::server_configuration_value(...)` 也会对旧库缺失字段做默认值回填。
+- 后端 `repository::update_server_configuration_value(...)` 改为保留当前配置对象里的未知字段，再覆盖核心字段，避免旧 server.vue 保存基础设置时把新补的转码、DLNA、Live TV、网络、插件、计划任务、通知等模块配置抹掉。
+- 本轮验证：`cargo check --manifest-path backend\Cargo.toml` 已通过；`rg` 确认 settings 首页已无 `link: undefined`。前端 Docker 构建因本机 Docker daemon 未启动失败；本机 `node --version` 也因 `Access is denied` 无法执行，因此前端本轮为代码级静态审计，未完成实际 typecheck/build。

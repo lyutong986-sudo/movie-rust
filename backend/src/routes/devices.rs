@@ -7,7 +7,8 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    extract::{Path, Query, State},
+    body::Body,
+    extract::{Path, Query, Request, State},
     http::StatusCode,
     routing::{delete, get},
     Json, Router,
@@ -20,6 +21,9 @@ use std::collections::BTreeMap;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/Devices", get(get_devices).delete(delete_device_by_query))
+        .route("/Devices/Info", get(get_device_info))
+        .route("/Devices/Options", get(get_device_options).post(update_device_options))
+        .route("/Devices/CameraUploads", get(camera_uploads).post(camera_upload))
         .route("/Devices/{id}", delete(delete_device_by_path))
 }
 
@@ -41,6 +45,17 @@ struct DeviceRow {
     last_user_id: String,
     last_user_name: String,
     date_last_activity: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct CameraUploadQuery {
+    #[serde(default, alias = "id")]
+    id: Option<String>,
+    #[serde(default, alias = "album")]
+    album: Option<String>,
+    #[serde(default, alias = "name")]
+    name: Option<String>,
 }
 
 async fn get_devices(
@@ -125,6 +140,59 @@ async fn get_devices(
     }))
 }
 
+async fn get_device_info(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<DevicesQuery>,
+) -> Result<Json<Value>, AppError> {
+    auth::require_admin(&session)?;
+    let id = required_device_id(query.id.as_deref())?;
+    let device = latest_device_row(&state, id).await?;
+    Ok(Json(device_to_json(device)))
+}
+
+async fn get_device_options(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<DevicesQuery>,
+) -> Result<Json<Value>, AppError> {
+    auth::require_admin(&session)?;
+    let id = required_device_id(query.id.as_deref())?;
+    let device = latest_device_row(&state, id).await?;
+    Ok(Json(json!({
+        "CustomName": device.name
+    })))
+}
+
+async fn update_device_options(
+    session: AuthSession,
+    Query(query): Query<DevicesQuery>,
+    Json(_payload): Json<Value>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    let _id = required_device_id(query.id.as_deref())?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn camera_uploads(
+    _session: AuthSession,
+    Query(query): Query<CameraUploadQuery>,
+) -> Json<Value> {
+    Json(json!({
+        "DeviceId": query.id.unwrap_or_default(),
+        "FilesUploaded": []
+    }))
+}
+
+async fn camera_upload(
+    _session: AuthSession,
+    Query(query): Query<CameraUploadQuery>,
+    _request: Request<Body>,
+) -> StatusCode {
+    let _metadata = (query.id, query.album, query.name);
+    StatusCode::NO_CONTENT
+}
+
 async fn delete_device_by_query(
     session: AuthSession,
     State(state): State<AppState>,
@@ -149,4 +217,51 @@ async fn delete_device_by_path(
     auth::require_admin(&session)?;
     repository::delete_sessions_by_device_id(&state.pool, id.trim()).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn required_device_id(id: Option<&str>) -> Result<&str, AppError> {
+    id.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Device Id is required".to_string()))
+}
+
+async fn latest_device_row(state: &AppState, device_id: &str) -> Result<DeviceRow, AppError> {
+    repository::list_all_sessions(&state.pool)
+        .await?
+        .into_iter()
+        .filter(|session| session.device_id.as_deref() == Some(device_id))
+        .max_by_key(|session| session.last_activity_at)
+        .map(|session| DeviceRow {
+            id: device_id.to_string(),
+            name: session
+                .device_name
+                .unwrap_or_else(|| "Unknown device".to_string()),
+            app_name: session
+                .client
+                .unwrap_or_else(|| "Movie Rust Client".to_string()),
+            app_version: session
+                .application_version
+                .unwrap_or_else(|| "0.1.0".to_string()),
+            last_user_id: uuid_to_emby_guid(&session.user_id),
+            last_user_name: session.user_name,
+            date_last_activity: session.last_activity_at,
+        })
+        .ok_or_else(|| AppError::NotFound("Device not found".to_string()))
+}
+
+fn device_to_json(device: DeviceRow) -> Value {
+    json!({
+        "Id": device.id,
+        "ReportedDeviceId": device.id,
+        "Name": device.name,
+        "AppName": device.app_name,
+        "AppVersion": device.app_version,
+        "LastUserId": device.last_user_id,
+        "LastUserName": device.last_user_name,
+        "DateLastActivity": device.date_last_activity,
+        "IconUrl": null,
+        "IpAddress": null,
+        "CameraUploadPath": null,
+        "Capabilities": {}
+    })
 }
