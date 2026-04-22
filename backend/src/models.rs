@@ -1624,6 +1624,25 @@ fn parse_optional_bool(value: &str) -> Option<bool> {
     }
 }
 
+#[cfg(test)]
+mod items_query_tests {
+    use super::ItemsQuery;
+
+    #[test]
+    fn items_query_merges_duplicate_emby_list_parameters() {
+        let query = ItemsQuery::from_raw_query(Some(
+            "fields=AirTime&fields=CanDelete&enableImageTypes=Primary&enableImageTypes=Backdrop",
+        ))
+        .expect("raw query should parse");
+
+        assert_eq!(query.fields.as_deref(), Some("AirTime,CanDelete"));
+        assert_eq!(
+            query.enable_image_types.as_deref(),
+            Some("Primary,Backdrop")
+        );
+    }
+}
+
 fn parse_optional_i64(value: &str) -> Option<i64> {
     value.trim().parse::<i64>().ok()
 }

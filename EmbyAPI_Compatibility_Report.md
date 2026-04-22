@@ -764,3 +764,16 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - 对设置区做了一轮硬编码文案审计并收口到 i18n：`account`、`apikeys`、`devices`、`dlna`、`home`、`libraries`、`live-tv`、`logs-and-activity`、`media-players`、`networking`、`notifications`、`playback`、`plugins`、`scheduled-tasks`、`server`、`subtitles`、`transcoding` 中明显残留的英文状态、按钮、表头、空状态、错误提示和此前乱码中文均改为 `$t(...)` / `t(...)`。
 - `frontend/packages/i18n/strings/en.json` 与 `zh-CN.json` 已补齐这些设置页新增 key。其他语言包暂未逐一人工翻译，但页面代码已经不再硬编码英文；未翻译语言会按当前 i18next fallback 机制回落，而不是把英文写死在 Vue 模板里。
 - 验证情况：`node` JSON 解析确认 `en.json` 与 `zh-CN.json` 合法；新增设置页翻译 key 与英文基准包对齐；`vite build --configLoader runner` 在 `frontend/packages/frontend` 下通过。完整 `vue-tsc` 未在本轮重新跑，项目此前仍存在既有 Vuetify/Dexie/Storybook 类型噪声。
+
+## 2026-04-22 Items 重复查询参数兼容补充（五十）
+- 针对 EmbySDK/Emby Web 实际会重复发送 `fields=...&fields=...`、`enableImageTypes=...&enableImageTypes=...` 的查询形式，排查发现 `backend/src/models.rs` 里的 `ItemsQuery::from_raw_query(...)` 已经实现了按 Emby 风格合并重复参数，但 `backend/src/routes/items.rs` 中大量入口仍直接使用 `axum::extract::Query<ItemsQuery>`。
+- 这会导致请求在进入项目自定义合并逻辑之前，就被 axum 默认查询串反序列化拦下，并报 `Failed to deserialize query string: duplicate field 'EnableImageTypes'`。因此 `/Items`、`/Users/{userId}/Items` 以及同样复用 `ItemsQuery` 的 artist/studio/tag items、suggestions、section items、latest、filters、instant mix、additional parts、resume 等路由，现已统一切换为 `RawQuery` + `ItemsQuery::from_raw_query(...)`。
+- 这样后端现在会把重复的 `fields`、`enableImageTypes`、`includeItemTypes`、`sortBy` 等列表型参数按逗号聚合，和 EmbySDK/Emby 客户端的真实调用方式保持一致，不再因为重复 query key 直接返回 400。
+- 额外补充了 `ItemsQuery::from_raw_query(...)` 的单元测试，锁定 `fields` 与 `enableImageTypes` 的重复参数合并行为，避免后续回归。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；仍仅有项目既有 warning，未新增编译错误。
+## 2026-04-22 库页空白与 NextUp 500 修补（五十一）
+- 使用 Chrome DevTools MCP 实测 `https://test.emby.yun:4443/#/library/601615B8ED924287B4CEA8052E72E01A` 后，确认库页空白由两段问题叠加触发：其一是 `/Items?...&ids=...&enableImageTypes=...` 在旧后端行为下会因重复 `EnableImageTypes` 返回 400；其二是 `frontend/packages/frontend/src/pages/library/[itemId].vue` 直接读取 `libraryQuery.value[0]!`，导致接口失败或返回空数组时前端抛出 `TypeError: Cannot read properties of undefined (reading '0')`。
+- 前端库页现已改成对 `libraryQuery.value?.[0]` 做空值兜底，并在未拿到库对象且请求结束时展示错误提示；工具栏、筛选、播放按钮和 ItemGrid 仅在库对象存在时渲染，避免单个接口失败把整个页面挂死。
+- 同次实测还抓到首页 `GET /Shows/NextUp` 返回 `{"ErrorCode":"DatabaseError","ErrorMessage":"数据库错误: no column found for name: critic_rating"}`。原因是 `backend/src/repository.rs` 中 `get_next_up_episodes(...)` 与 `get_upcoming_episodes(...)` 的 SELECT 列表遗漏了 `critic_rating`，而映射目标 `DbMediaItem` 已要求该字段存在。
+- 现已为上述两个查询补回 `critic_rating` 列，保持 `DbMediaItem` 映射与 EmbySDK 相关首页链路一致，避免 NextUp/Upcoming 因字段缺失直接 500。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；库页前端修补为代码级修复，本轮未重新跑前端完整构建。

@@ -288,8 +288,9 @@ async fn artist_items(
     session: AuthSession,
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let query = parse_items_query(raw_query)?;
     virtual_folder_items(&state, &session, query, VirtualFilter::Artist(name)).await
 }
 
@@ -305,8 +306,9 @@ async fn studio_items(
     session: AuthSession,
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let query = parse_items_query(raw_query)?;
     virtual_folder_items(&state, &session, query, VirtualFilter::Studio(name)).await
 }
 
@@ -338,8 +340,9 @@ async fn tag_items(
     session: AuthSession,
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let query = parse_items_query(raw_query)?;
     virtual_folder_items(&state, &session, query, VirtualFilter::Tag(name)).await
 }
 
@@ -401,8 +404,9 @@ async fn years(
 async fn items(
     session: AuthSession,
     State(state): State<AppState>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let query = parse_items_query(raw_query)?;
     list_items_for_user(&state, session.user_id, query).await
 }
 
@@ -410,8 +414,9 @@ async fn user_items(
     _session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<String>,
-    Query(mut query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let mut query = parse_items_query(raw_query)?;
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     query.user_id = Some(user_id);
     list_items_for_user(&state, user_id, query).await
@@ -435,6 +440,10 @@ fn query_result_from_items(items: Vec<Value>) -> Value {
         "TotalRecordCount": total,
         "StartIndex": 0
     })
+}
+
+fn parse_items_query(raw_query: Option<String>) -> Result<ItemsQuery, AppError> {
+    ItemsQuery::from_raw_query(raw_query.as_deref()).map_err(AppError::BadRequest)
 }
 
 fn virtual_folder_item(name: &str, item_type: &str, server_id: Uuid) -> BaseItemDto {
@@ -563,8 +572,9 @@ async fn user_suggestions(
     session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<String>,
-    Query(mut query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let mut query = parse_items_query(raw_query)?;
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
@@ -582,8 +592,9 @@ async fn user_section_items(
     session: AuthSession,
     State(state): State<AppState>,
     Path((user_id, section_id)): Path<(String, String)>,
-    Query(mut query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let mut query = parse_items_query(raw_query)?;
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     if let Ok(parent_id) = emby_id_to_uuid(&section_id) {
@@ -599,8 +610,9 @@ async fn latest_items(
     _session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<String>,
-    Query(mut query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let mut query = parse_items_query(raw_query)?;
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     latest_items_for_user(&state, user_id, &mut query).await
 }
@@ -760,8 +772,9 @@ async fn list_items_for_user(
 async fn item_filters(
     session: AuthSession,
     State(state): State<AppState>,
-    Query(mut query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<Value>, AppError> {
+    let mut query = parse_items_query(raw_query)?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
@@ -772,8 +785,9 @@ async fn user_item_filters(
     session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<String>,
-    Query(mut query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<Value>, AppError> {
+    let mut query = parse_items_query(raw_query)?;
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
@@ -1392,8 +1406,9 @@ async fn instant_mix_from_item(
     session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_or_name): Path<String>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let query = parse_items_query(raw_query)?;
     instant_mix_for_seed(&state, session.user_id, &item_id_or_name, query).await
 }
 
@@ -1401,8 +1416,9 @@ async fn instant_mix_from_user_item(
     session: AuthSession,
     State(state): State<AppState>,
     Path((user_id, item_id_or_name)): Path<(String, String)>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let query = parse_items_query(raw_query)?;
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     instant_mix_for_seed(&state, user_id, &item_id_or_name, query).await
@@ -1412,8 +1428,9 @@ async fn instant_mix_from_artist(
     session: AuthSession,
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let query = parse_items_query(raw_query)?;
     instant_mix_for_scope(
         &state,
         session.user_id,
@@ -1436,8 +1453,9 @@ async fn instant_mix_from_genre(
     session: AuthSession,
     State(state): State<AppState>,
     Path(name): Path<String>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let query = parse_items_query(raw_query)?;
     instant_mix_for_scope(
         &state,
         session.user_id,
@@ -2063,8 +2081,9 @@ async fn additional_parts(
     session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let query = parse_items_query(raw_query)?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     let item_id = emby_id_to_uuid(&item_id_str)
@@ -3242,8 +3261,9 @@ async fn user_resume_items(
     _session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<String>,
-    Query(mut query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let mut query = parse_items_query(raw_query)?;
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     resume_items_for_user(&state, user_id, &mut query).await
 }

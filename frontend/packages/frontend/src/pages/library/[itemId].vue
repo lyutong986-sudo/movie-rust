@@ -4,12 +4,12 @@
       density="compact"
       flat>
       <span class="text-h6 uno-hidden uno-min-[960px]:block">
-        {{ library.Name }}
+        {{ library?.Name ?? t('error') }}
       </span>
       <VChip
         size="small"
         class="uno-m-2 uno-hidden uno-min-[960px]:flex">
-        <template v-if="loading && items.length === lazyLoadLimit && initialId === route.params.itemId">
+        <template v-if="library && loading && items.length === lazyLoadLimit && initialId === route.params.itemId">
           {{ t('lazyLoading', { value: items.length }) }}
         </template>
         <JProgressCircular
@@ -26,16 +26,16 @@
         inset
         class="uno-mx-2 uno-hidden uno-min-[960px]:flex" />
       <TypeButton
-        v-if="hasViewTypes"
+        v-if="library && hasViewTypes"
         v-model="viewType"
         :type="library.CollectionType" />
       <VDivider
-        v-if="isSortable && hasViewTypes"
+        v-if="library && isSortable && hasViewTypes"
         inset
         vertical
         class="uno-mx-2" />
       <SortButton
-        v-if="isSortable"
+        v-if="library && isSortable"
         :ascending="sortAscending"
         @change="onChangeSort" />
       <FilterButton
@@ -52,7 +52,15 @@
         :item="library" />
     </VAppBar>
     <VContainer>
+      <VAlert
+        v-if="!library && !loading"
+        type="error"
+        variant="tonal"
+        class="uno-mb-4">
+        {{ t('anErrorHappened') }}
+      </VAlert>
       <ItemGrid
+        v-if="library"
         :items="items">
         <h1
           v-if="!hasFilters"
@@ -126,11 +134,13 @@ function onChangeFilter(changedFilters: Filters): void {
 const { data: libraryQuery } = await useBaseItem(getItemsApi, 'getItems')(() => ({
   ids: [route.params.itemId]
 }));
-const library = computed(() => libraryQuery.value[0]!);
+const library = computed(() => libraryQuery.value?.[0]);
 const viewType = computed({
   get() {
     if (innerItemKind.value) {
       return innerItemKind.value;
+    } else if (!library.value) {
+      return undefined;
     } else {
       return library.value.CollectionType ? COLLECTION_TYPES_MAPPINGS[library.value.CollectionType] : undefined;
     }
@@ -145,9 +155,12 @@ const hasFilters = computed(() =>
 );
 const hasViewTypes = computed(
   () =>
+    !!library.value
+    && (
     library.value.CollectionType === 'movies'
     || library.value.CollectionType === 'music'
     || library.value.CollectionType === 'tvshows'
+    )
 );
 const isSortable = computed(
   () =>
@@ -166,6 +179,9 @@ const isSortable = computed(
 );
 
 const recursive = computed(() =>
+  !library.value
+    ? undefined
+    :
   library.value.CollectionType === 'homevideos'
   || library.value.Type === 'Folder'
   || (library.value.Type === 'CollectionFolder'
