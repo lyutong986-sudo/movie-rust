@@ -430,3 +430,22 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - 本轮 backend 已重新执行：
   `cargo check --manifest-path backend/Cargo.toml`
   结果通过，仍只有既有 warning。
+
+## 2026-04-22 前端适配补充（十一）
+- 本轮开始核对管理页面链路，优先覆盖前端设置页实际调用的 `Auth/Keys`、`Devices`、`System/Configuration`、`System/Configuration/{Key}` 与日志下载路径；冲突时按本地 `模板项目/EmbySDK/SampleCode/RestApi/TypeScript/api.ts` 的路径语义处理。
+- `backend/src/routes/devices.rs` 新增 EmbySDK 兼容设备管理路由：`GET /Devices` 返回 `QueryResult<DeviceInfo>`，字段包含 `Id`、`Name`、`AppName`、`AppVersion`、`LastUserId`、`LastUserName`、`DateLastActivity`；`DELETE /Devices?Id=...` 与 `DELETE /Devices/{id}` 会按 `device_id` 删除该设备关联 sessions。
+- `backend/src/routes/sessions.rs` 与 `backend/src/repository.rs` 已给 Auth Keys 管理页补齐 `DateCreated`，来源为 `sessions.created_at`，避免 API Key 列表日期列为空；同时新增按设备删除 sessions 的 repository 能力。
+- `backend/src/routes/system.rs` 与 `backend/src/repository.rs` 新增 `GET/POST /System/Configuration`，返回并持久化管理页实际依赖的 `ServerName`、`UICulture`、`QuickConnectAvailable`、`CachePath`、`MetadataPath`、`LibraryScanFanoutConcurrency`、`ParallelImageEncodingLimit` 等字段；保存时会同步更新 startup 配置与 remote access 配置。
+- `backend/src/routes/system.rs` 新增 `GET/POST /System/Configuration/{Key}`，其中 `branding` 命名配置会读写 `BrandingConfiguration`，兼容前端 `updateNamedConfiguration({ key: 'branding' })`；同时新增 `/System/Logs/Log?name=...` 日志下载别名，适配管理页直接打开日志链接的行为。
+- `frontend/packages/frontend/src/pages/settings/devices.vue` 修复“删除全部设备”条件：现在只删除存在 `Id` 且不是当前前端 `deviceInfo.id` 的设备，避免批量清理时把当前正在使用的设备会话一起删掉。
+- `backend/src/models.rs` 已给 `UserPolicyDto` 补齐 EmbySDK/Jellyfin 管理页父母控制实际使用的 `BlockUnratedItems` 字段，避免保存未分级内容拦截项时被后端模型丢弃。
+- `frontend/packages/frontend/src/pages/settings/users/new.vue` 现在会在创建用户后把新建页填写的密码通过 `updateUserPassword(NewPw)` 提交给后端，不再出现“输入了密码但新用户仍为空密码”的管理页行为。
+- `frontend/packages/frontend/src/pages/settings/users/[id].vue` 修复用户详情页密码修改参数：`CurrentPw` 现在使用当前密码输入框，而不是误用确认密码；父母控制保存时也会同时提交 `BlockedTags`。
+- 本轮 backend 已重新执行：`cargo check --manifest-path backend/Cargo.toml`，结果通过；仍只有既有 warning。前端类型检查本轮未执行，原因仍是当前本地环境未提供可直接运行的 `pnpm` 前端工具链。
+
+## 2026-04-22 前端适配补充（十二）
+- 根据部署日志复核登录前链路，确认 `GET /Branding/Configuration` 和 `GET /Localization/Options` 会在无 token 的启动/登录前阶段被 frontend 调用；这类端点如果由 `AuthSession` 提取器保护，会直接 401 并导致语言下拉为空、向导按钮长时间 loading。
+- `backend/src/routes/system.rs` 已将 `Branding/Configuration` 与 `Branding/Css` 调整为匿名可读；写入品牌配置仍通过管理页使用 `System/Configuration/{Key}`，继续要求管理员认证。
+- `backend/src/routes/compat.rs` 已将 `Localization/Options` 与 `Localization/Cultures` 调整为匿名可读，保证首次启动向导语言页、元数据语言页在未登录状态下也能加载选项。
+- `backend/src/routes/compat.rs` 新增 EmbySDK 路径 `GET /Localization/Countries` 与 `GET /Localization/ParentalRatings`，覆盖启动向导国家下拉和用户管理父母控制页实际依赖的 localization 端点。
+- 本轮已重新执行：`cargo check --manifest-path backend/Cargo.toml` 与 `cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture`，结果均通过；仍只有既有 warning。前端类型检查仍受限于本地缺少可直接运行的 `pnpm`。

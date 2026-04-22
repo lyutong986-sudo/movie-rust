@@ -148,9 +148,135 @@ pub async fn branding_configuration(
     })
 }
 
+pub async fn update_branding_configuration(
+    pool: &sqlx::PgPool,
+    configuration: &BrandingConfiguration,
+) -> Result<(), AppError> {
+    set_system_setting(pool, "branding_configuration", json!(configuration)).await
+}
+
 pub async fn branding_css(pool: &sqlx::PgPool, config: &Config) -> Result<String, AppError> {
     let configuration = branding_configuration(pool, config).await?;
     Ok(configuration.custom_css)
+}
+
+pub async fn server_configuration_value(
+    pool: &sqlx::PgPool,
+    config: &Config,
+) -> Result<Value, AppError> {
+    let mut value = get_system_setting(pool, "server_configuration")
+        .await?
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let startup = startup_configuration(pool, config).await?;
+    let remote = startup_remote_access(pool, config).await?;
+
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| AppError::Internal("stored server configuration is not an object".to_string()))?;
+    object.insert("ServerName".to_string(), json!(startup.server_name));
+    object.insert("UICulture".to_string(), json!(startup.ui_culture));
+    object
+        .entry("MetadataCountryCode".to_string())
+        .or_insert_with(|| json!(startup.metadata_country_code));
+    object
+        .entry("PreferredMetadataLanguage".to_string())
+        .or_insert_with(|| json!(startup.preferred_metadata_language));
+    object.insert(
+        "EnableRemoteAccess".to_string(),
+        json!(remote.enable_remote_access),
+    );
+    object.insert(
+        "EnableUPnP".to_string(),
+        json!(remote.enable_automatic_port_mapping.unwrap_or(false)),
+    );
+    object
+        .entry("QuickConnectAvailable".to_string())
+        .or_insert_with(|| json!(false));
+    object
+        .entry("CachePath".to_string())
+        .or_insert_with(|| json!(config.transcode_dir.to_string_lossy().to_string()));
+    object
+        .entry("MetadataPath".to_string())
+        .or_insert_with(|| json!("metadata"));
+    object
+        .entry("LibraryScanFanoutConcurrency".to_string())
+        .or_insert_with(|| json!(0));
+    object
+        .entry("ParallelImageEncodingLimit".to_string())
+        .or_insert_with(|| json!(0));
+
+    Ok(value)
+}
+
+pub async fn update_server_configuration_value(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    value: Value,
+) -> Result<(), AppError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("ServerConfiguration must be a JSON object".to_string()))?;
+    let current_startup = startup_configuration(pool, config).await?;
+    let server_name = object
+        .get("ServerName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(current_startup.server_name.as_str())
+        .to_string();
+    let ui_culture = object
+        .get("UICulture")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(current_startup.ui_culture.as_str())
+        .to_string();
+    let metadata_country_code = object
+        .get("MetadataCountryCode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(current_startup.metadata_country_code.as_str())
+        .to_string();
+    let preferred_metadata_language = object
+        .get("PreferredMetadataLanguage")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(current_startup.preferred_metadata_language.as_str())
+        .to_string();
+
+    update_startup_configuration(
+        pool,
+        &StartupConfiguration {
+            server_name,
+            ui_culture,
+            metadata_country_code,
+            preferred_metadata_language,
+        },
+    )
+    .await?;
+
+    let current_remote = startup_remote_access(pool, config).await?;
+    update_remote_access(
+        pool,
+        &StartupRemoteAccessRequest {
+            enable_remote_access: object
+                .get("EnableRemoteAccess")
+                .and_then(Value::as_bool)
+                .unwrap_or(current_remote.enable_remote_access),
+            enable_automatic_port_mapping: Some(
+                object
+                    .get("EnableUPnP")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(current_remote.enable_automatic_port_mapping.unwrap_or(false)),
+            ),
+        },
+    )
+    .await?;
+
+    set_system_setting(pool, "server_configuration", value).await
 }
 
 pub async fn get_session_capabilities(
@@ -1255,6 +1381,7 @@ pub async fn get_session(
             s.device_name,
             s.client,
             s.application_version,
+            s.created_at,
             s.last_activity_at,
             s.expires_at
         FROM sessions s
@@ -1290,6 +1417,7 @@ pub async fn list_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, A
             s.device_name,
             s.client,
             s.application_version,
+            s.created_at,
             s.last_activity_at,
             s.expires_at
         FROM sessions s
@@ -1314,6 +1442,7 @@ pub async fn list_all_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow
             s.device_name,
             s.client,
             s.application_version,
+            s.created_at,
             s.last_activity_at,
             s.expires_at
         FROM sessions s
@@ -1333,6 +1462,24 @@ pub async fn delete_session(pool: &sqlx::PgPool, access_token: &str) -> Result<(
     delete_session_capabilities(pool, access_token).await?;
     delete_session_viewing(pool, access_token).await?;
     delete_session_state_summary(pool, access_token).await?;
+    Ok(())
+}
+
+pub async fn delete_sessions_by_device_id(
+    pool: &sqlx::PgPool,
+    device_id: &str,
+) -> Result<(), AppError> {
+    let sessions = sqlx::query_scalar::<_, String>(
+        "SELECT access_token FROM sessions WHERE device_id = $1",
+    )
+    .bind(device_id)
+    .fetch_all(pool)
+    .await?;
+
+    for access_token in sessions {
+        delete_session(pool, &access_token).await?;
+    }
+
     Ok(())
 }
 

@@ -8,6 +8,7 @@ use crate::{
     state::AppState,
 };
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
     http::{header::CONTENT_TYPE, StatusCode},
     response::IntoResponse,
@@ -35,8 +36,11 @@ pub fn router() -> Router<AppState> {
         .route("/Branding/Css.css", get(branding_css))
         .route("/branding/css", get(branding_css))
         .route("/branding/css.css", get(branding_css))
+        .route("/System/Configuration", get(system_configuration).post(update_system_configuration))
+        .route("/System/Configuration/{key}", get(named_configuration).post(update_named_configuration))
         .route("/System/Logs", get(server_logs))
         .route("/System/Logs/Query", get(server_logs_query))
+        .route("/System/Logs/Log", get(server_log_content_by_query))
         .route("/System/Logs/{name}", get(server_log_content))
         .route("/System/Logs/{name}/Lines", get(server_log_lines))
         .route("/system/logs", get(server_logs))
@@ -53,6 +57,8 @@ struct LogQuery {
     limit: Option<i64>,
     #[serde(default, alias = "searchTerm")]
     search_term: Option<String>,
+    #[serde(default, alias = "name")]
+    name: Option<String>,
 }
 
 async fn public_info(
@@ -139,7 +145,6 @@ async fn server_domains(
 }
 
 async fn branding_configuration(
-    _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<BrandingConfiguration>, crate::error::AppError> {
     Ok(Json(
@@ -148,11 +153,82 @@ async fn branding_configuration(
 }
 
 async fn branding_css(
-    _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, crate::error::AppError> {
     let css = repository::branding_css(&state.pool, &state.config).await?;
     Ok(([(CONTENT_TYPE, "text/css; charset=utf-8")], css))
+}
+
+async fn system_configuration(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    Ok(Json(
+        repository::server_configuration_value(&state.pool, &state.config).await?,
+    ))
+}
+
+async fn update_system_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> Result<StatusCode, crate::error::AppError> {
+    if !session.is_admin {
+        return Err(crate::error::AppError::Unauthorized);
+    }
+    repository::update_server_configuration_value(&state.pool, &state.config, payload).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn named_configuration(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    let key = key.trim().to_ascii_lowercase();
+    if key == "branding" {
+        return Ok(Json(json!(
+            repository::branding_configuration(&state.pool, &state.config).await?
+        )));
+    }
+
+    Ok(Json(json!({})))
+}
+
+async fn update_named_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    body: Bytes,
+) -> Result<StatusCode, crate::error::AppError> {
+    if !session.is_admin {
+        return Err(crate::error::AppError::Unauthorized);
+    }
+
+    let key = key.trim().to_ascii_lowercase();
+    if key == "branding" {
+        let payload = parse_named_configuration_body(&body)?;
+        let current = repository::branding_configuration(&state.pool, &state.config).await?;
+        let next = BrandingConfiguration {
+            login_disclaimer: payload
+                .get("LoginDisclaimer")
+                .and_then(Value::as_str)
+                .unwrap_or(current.login_disclaimer.as_str())
+                .to_string(),
+            custom_css: payload
+                .get("CustomCss")
+                .and_then(Value::as_str)
+                .unwrap_or(current.custom_css.as_str())
+                .to_string(),
+            splashscreen_enabled: payload
+                .get("SplashscreenEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(current.splashscreen_enabled),
+        };
+        repository::update_branding_configuration(&state.pool, &next).await?;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn server_logs(
@@ -202,6 +278,20 @@ async fn server_log_content(
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, crate::error::AppError> {
     let path = log_file_path(&state.config.log_dir, &name)?;
+    let content = tokio::fs::read_to_string(path).await?;
+    Ok(([(CONTENT_TYPE, "text/plain; charset=utf-8")], content))
+}
+
+async fn server_log_content_by_query(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<LogQuery>,
+) -> Result<impl IntoResponse, crate::error::AppError> {
+    let name = query
+        .name
+        .as_deref()
+        .ok_or_else(|| crate::error::AppError::BadRequest("Log name is required".to_string()))?;
+    let path = log_file_path(&state.config.log_dir, name)?;
     let content = tokio::fs::read_to_string(path).await?;
     Ok(([(CONTENT_TYPE, "text/plain; charset=utf-8")], content))
 }
@@ -285,4 +375,16 @@ fn log_file_path(log_dir: &FsPath, name: &str) -> Result<std::path::PathBuf, cra
         return Err(crate::error::AppError::NotFound(format!("日志文件不存在: {file_name}")));
     }
     Ok(path)
+}
+
+fn parse_named_configuration_body(body: &[u8]) -> Result<Value, crate::error::AppError> {
+    if body.is_empty() {
+        return Ok(json!({}));
+    }
+
+    let value = serde_json::from_slice::<Value>(body)?;
+    match value {
+        Value::String(inner) => Ok(serde_json::from_str::<Value>(&inner)?),
+        other => Ok(other),
+    }
 }

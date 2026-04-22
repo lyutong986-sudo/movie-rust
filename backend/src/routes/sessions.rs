@@ -170,6 +170,7 @@ async fn list_auth_keys(
                 "AppVersion": session.application_version.unwrap_or_else(|| "0.1.0".to_string()),
                 "DeviceId": session.device_id,
                 "DeviceName": session.device_name,
+                "DateCreated": session.created_at,
                 "DateLastActivity": session.last_activity_at,
                 "ExpirationDate": session.expires_at,
                 "IsActive": session.expires_at.is_none_or(|expires_at| expires_at > Utc::now())
@@ -216,6 +217,7 @@ async fn create_auth_key(
         "AppVersion": created.application_version,
         "DeviceId": created.device_id,
         "DeviceName": created.device_name,
+        "DateCreated": created.created_at,
         "DateLastActivity": created.last_activity_at,
         "ExpirationDate": created.expires_at,
         "IsActive": created.expires_at.is_none_or(|value| value > Utc::now())

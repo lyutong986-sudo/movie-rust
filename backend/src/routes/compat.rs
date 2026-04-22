@@ -24,6 +24,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Localization/Options", get(localization_options))
         .route("/Localization/Cultures", get(localization_cultures))
+        .route("/Localization/Countries", get(localization_countries))
+        .route("/Localization/ParentalRatings", get(localization_parental_ratings))
         .route("/UserSettings/{user_id}", get(user_settings).post(update_user_settings))
         .route("/UserSettings/{user_id}/Partial", post(update_user_settings_partial))
         .route("/Users/{user_id}/Settings", get(user_settings).post(update_user_settings))
@@ -214,7 +216,6 @@ fn display_preferences_value(id: String, user_id: Uuid, client: &str, ui_culture
 }
 
 async fn localization_options(
-    _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
     let startup = repository::startup_configuration(&state.pool, &state.config).await?;
@@ -233,7 +234,6 @@ async fn localization_options(
     Ok(Json(json!(options)))
 }
 async fn localization_cultures(
-    _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
     let startup = repository::startup_configuration(&state.pool, &state.config).await?;
@@ -253,6 +253,35 @@ async fn localization_cultures(
         .collect::<Vec<_>>();
     Ok(Json(json!(cultures)))
 }
+
+async fn localization_countries() -> Result<Json<Value>, AppError> {
+    Ok(Json(json!([
+        country_info("China", "中国", "CN", "CHN"),
+        country_info("United States", "United States", "US", "USA"),
+        country_info("Taiwan", "台湾", "TW", "TWN"),
+        country_info("Hong Kong", "香港", "HK", "HKG"),
+        country_info("Japan", "日本", "JP", "JPN"),
+        country_info("South Korea", "대한민국", "KR", "KOR"),
+        country_info("United Kingdom", "United Kingdom", "GB", "GBR")
+    ])))
+}
+
+async fn localization_parental_ratings() -> Result<Json<Value>, AppError> {
+    Ok(Json(json!([
+        { "Name": "G", "Value": 1 },
+        { "Name": "PG", "Value": 5 },
+        { "Name": "PG-13", "Value": 7 },
+        { "Name": "R", "Value": 9 },
+        { "Name": "NC-17", "Value": 10 },
+        { "Name": "TV-Y", "Value": 1 },
+        { "Name": "TV-Y7", "Value": 3 },
+        { "Name": "TV-G", "Value": 4 },
+        { "Name": "TV-PG", "Value": 5 },
+        { "Name": "TV-14", "Value": 7 },
+        { "Name": "TV-MA", "Value": 9 }
+    ])))
+}
+
 async fn user_settings(
     session: AuthSession,
     State(state): State<AppState>,
@@ -353,4 +382,13 @@ fn to_three_letter_language(language: &str) -> String {
         "en" => "eng".to_string(),
         other => other.to_string(),
     }
+}
+
+fn country_info(name: &str, display_name: &str, two_letter: &str, three_letter: &str) -> Value {
+    json!({
+        "Name": name,
+        "DisplayName": display_name,
+        "TwoLetterISORegionName": two_letter,
+        "ThreeLetterISORegionName": three_letter
+    })
 }

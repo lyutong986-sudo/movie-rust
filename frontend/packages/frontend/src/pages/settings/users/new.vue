@@ -118,6 +118,15 @@ async function createUser(): Promise<void> {
       }
     })).data;
 
+    if (password.value && res.Id) {
+      await remote.sdk.newUserApi(getUserApi).updateUserPassword({
+        userId: res.Id,
+        updateUserPassword: {
+          NewPw: password.value
+        }
+      });
+    }
+
     // Set the library access policy
     await remote.sdk.newUserApi(getUserApi).updateUserPolicy({
       userId: res.Id ?? '',

@@ -318,6 +318,7 @@ pub struct AuthSessionRow {
     pub device_name: Option<String>,
     pub client: Option<String>,
     pub application_version: Option<String>,
+    pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
 }
@@ -426,6 +427,7 @@ pub struct UserPolicyDto {
     pub enable_user_preference_access: bool,
     pub max_parental_rating: Option<i32>,
     pub max_parental_sub_rating: Option<i32>,
+    pub block_unrated_items: Vec<String>,
     pub max_active_sessions: i32,
     pub login_attempts_before_lockout: i32,
     pub remote_client_bitrate_limit: i32,
@@ -470,6 +472,7 @@ impl Default for UserPolicyDto {
             enable_user_preference_access: true,
             max_parental_rating: None,
             max_parental_sub_rating: None,
+            block_unrated_items: Vec::new(),
             max_active_sessions: 0,
             login_attempts_before_lockout: -1,
             remote_client_bitrate_limit: 0,

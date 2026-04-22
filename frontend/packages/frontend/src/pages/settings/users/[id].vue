@@ -472,7 +472,8 @@ async function saveParentalControl(): Promise<void> {
     userPolicy: {
       ...user.value.Policy as UserPolicy,
       MaxParentalRating: model.value.maxParentalRating,
-      BlockUnratedItems: model.value.BlockUnratedItems
+      BlockUnratedItems: model.value.BlockUnratedItems,
+      BlockedTags: model.value.BlockedTags
     }
   });
   loading.value = false;
@@ -493,7 +494,7 @@ async function submitPassword(): Promise<void> {
   }
 
   loading.value = true;
-  await remote.sdk.newUserApi(getUserApi).updateUserPassword({ userId: user.value.Id, updateUserPassword: { NewPw: model.value.Password, ...(user.value.HasPassword && { CurrentPw: model.value.ConfirmPassword }) } });
+  await remote.sdk.newUserApi(getUserApi).updateUserPassword({ userId: user.value.Id, updateUserPassword: { NewPw: model.value.Password, ...(user.value.HasPassword && { CurrentPw: model.value.CurrentPassword }) } });
   model.value = { ...model.value, CurrentPassword: '', Password: '', ConfirmPassword: '' };
   await refreshData();
   loading.value = false;
