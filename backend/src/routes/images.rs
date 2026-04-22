@@ -694,6 +694,20 @@ async fn serve_item_image(
     }
 
     let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
+        if let Some(library) = repository::get_library(&state.pool, item_id).await? {
+            let path = match image_type.to_ascii_lowercase().as_str() {
+                "backdrop" => repository::library_paths(&library)
+                    .first()
+                    .and_then(|path| crate::naming::find_backdrop_image(StdPath::new(path))),
+                "primary" => repository::library_paths(&library)
+                    .first()
+                    .and_then(|path| crate::naming::find_folder_image(StdPath::new(path))),
+                _ => None,
+            };
+            if let Some(path) = path {
+                return serve_image(&path.to_string_lossy(), request).await;
+            }
+        }
         if image_type.eq_ignore_ascii_case("Primary") {
             if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
                 if let Some(path) = repository::get_person_image_path(&state.pool, &person.id, &image_type).await? {

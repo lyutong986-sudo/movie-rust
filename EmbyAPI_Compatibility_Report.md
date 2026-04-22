@@ -980,3 +980,12 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - 播放页实测 `PLAY` 后发现 `POST /Items/{Id}/PlaybackInfo` 偶发 500，响应为 PostgreSQL 唯一键冲突 `media_streams_media_item_id_index_stream_type_key`。根因是网页播放器会短时间连续触发 PlaybackInfo，后端对同一媒体项执行 `DELETE media_streams` 后重新插入时存在并发窗口。`backend/src/repository.rs::save_media_streams` 已改为事务内执行，并使用 `pg_advisory_xact_lock(hashtextextended(item_id, 0))` 按媒体项串行化流重建，避免并发 DELETE/INSERT 撞唯一索引。
 - 播放页还发现浏览器会请求 `/undefined`，根因是 `PlayerElement.vue` 把缺失海报图通过 `String(posterUrl)` 写成了字面量 `undefined`。现在改为直接绑定 `posterUrl`，无海报图时不再生成错误 URL。
 - 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过，仅剩项目既有 warning；`corepack pnpm --filter @jellyfin-vue/frontend build` 通过。MCP 上的线上站点仍是部署版本，需部署本次构建后才能在远端复验库页空白、PlaybackInfo 并发 500 和 `/undefined` 请求是否消失。
+## 2026-04-23 日志巡检图片 404 与 WebSocket 降噪修复（七十六）
+
+- 针对 `log/movie-rust-20260423031820.log` 的巡检结果，本轮修复集中处理实际暴露的 `/undefined`、媒体库/人物图片误请求 404、以及刷新/跳转时 WebSocket 正常断开被记录为 `ERROR` 的问题。该日志中未出现 `status=500`、`status=401`、`DatabaseError`、`duplicate key` 或 panic；`PlaybackInfo` 在该时间窗口内均返回 200。
+- `frontend/packages/frontend/src/utils/images.ts` 现在只有在确实存在 `ImageType`、图片 tag 与有效 item id 时才生成图片 URL；同时当后端返回 `PrimaryImageItemId` 时，Primary 图片会按 Emby 语义请求该真实图片条目，而不是继续请求当前虚拟库/聚合对象自身。这可以阻止无图片人物、无图聚合项和空 poster 继续生成错误图片请求。
+- `backend/src/repository.rs` 为媒体库 DTO 补上真实封面来源解析：优先使用媒体库目录中的 folder poster；没有目录封面时，从该库下真实拥有 `image_primary_path` 的媒体条目中选一个作为 `PrimaryImageItemId`。同时移除过去用 `library.created_at` 伪造 `PrimaryImageTag` 的行为，避免前端误以为媒体库本身一定有图。
+- `backend/src/models.rs` 与 `backend/src/routes/admin.rs` 同步让 `/Library/VirtualFolders` 返回 `PrimaryImageItemId` / `PrimaryImageTag`，使 settings/libraries 的 Emby 风格列表可以显示真实封面；没有真实封面时前端会自然回退到类型图标，而不是请求必定 404 的 `/Items/{libraryId}/Images/Primary`。
+- `backend/src/routes/images.rs` 补齐了媒体库 id 的图片服务能力：当 `/Items/{libraryId}/Images/Primary|Backdrop` 命中的是媒体库而非普通媒体条目时，会从库目录查找真实 folder/backdrop 图片并返回。这样目录级封面不再只是 DTO 字段，而是真正可被 Emby 图片接口读取。
+- `backend/src/routes/websocket.rs` 将 `Connection reset without closing handshake` 这类浏览器刷新、路由跳转、页面关闭导致的正常断开从 `ERROR` 降级为 `DEBUG`，保留真正异常的 WebSocket receive failure 仍按 `ERROR` 记录，避免日志告警被正常断开噪声淹没。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过；在 `frontend` 工作区执行 `corepack pnpm@10.33.0 --filter @jellyfin-vue/frontend build` 通过。后端仍有项目既有 warning；根目录直接执行 pnpm 会被模板项目同名 package 干扰，需在 `frontend` 工作区执行。

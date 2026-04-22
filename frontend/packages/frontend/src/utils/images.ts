@@ -348,6 +348,7 @@ export function getImageInfo(
   } else if (item.ImageTags?.Primary && (item.Type !== BaseItemKind.Episode || item.ChildCount !== 0)) {
     imgType = ImageType.Primary;
     imgTag = item.ImageTags.Primary;
+    itemId = item.PrimaryImageItemId ?? item.Id;
     height
       = width && item.PrimaryImageAspectRatio
         ? Math.round(width / item.PrimaryImageAspectRatio)
@@ -397,11 +398,7 @@ export function getImageInfo(
     itemId = item.ParentBackdropItemId;
   }
 
-  if (!itemId && item.Id) {
-    itemId = item.Id;
-  }
-
-  if (!itemId) {
+  if (!imgType || !imgTag || !itemId) {
     return {
       url: undefined,
       blurhash: undefined

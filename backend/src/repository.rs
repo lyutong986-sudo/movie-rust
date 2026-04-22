@@ -2355,6 +2355,62 @@ pub fn library_paths(library: &DbLibrary) -> Vec<String> {
     library_paths_from_options_or_path(&library.library_options, &library.path)
 }
 
+struct LibraryPrimaryImageSource {
+    item_id: Uuid,
+    tag: String,
+}
+
+fn library_folder_primary_image_path(library: &DbLibrary) -> Option<PathBuf> {
+    library_paths(library)
+        .first()
+        .and_then(|path| naming::find_folder_image(Path::new(path)))
+}
+
+fn library_folder_backdrop_image_path(library: &DbLibrary) -> Option<PathBuf> {
+    library_paths(library)
+        .first()
+        .and_then(|path| naming::find_backdrop_image(Path::new(path)))
+}
+
+async fn library_primary_image_source(
+    pool: &sqlx::PgPool,
+    library: &DbLibrary,
+) -> Result<Option<LibraryPrimaryImageSource>, AppError> {
+    if let Some(path) = library_folder_primary_image_path(library) {
+        if let Some(tag) = image_tag_from_path(&path) {
+            return Ok(Some(LibraryPrimaryImageSource {
+                item_id: library.id,
+                tag,
+            }));
+        }
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT id, image_primary_path
+        FROM media_items
+        WHERE library_id = $1
+          AND image_primary_path IS NOT NULL
+          AND image_primary_path <> ''
+        ORDER BY date_created DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(library.id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let item_id = row.try_get::<Uuid, _>("id")?;
+    let image_path = row.try_get::<String, _>("image_primary_path")?;
+    let tag = image_tag_from_path(Path::new(&image_path))
+        .unwrap_or_else(|| library.created_at.timestamp().to_string());
+
+    Ok(Some(LibraryPrimaryImageSource { item_id, tag }))
+}
+
 pub fn library_to_virtual_folder_dto(library: &DbLibrary) -> VirtualFolderInfoDto {
     let options = library_options(library);
     let locations = options
@@ -2362,14 +2418,35 @@ pub fn library_to_virtual_folder_dto(library: &DbLibrary) -> VirtualFolderInfoDt
         .iter()
         .map(|path| path.path.clone())
         .collect::<Vec<_>>();
+    let primary_image_tag = library_folder_primary_image_path(library)
+        .as_ref()
+        .and_then(|path| image_tag_from_path(path.as_path()));
 
     VirtualFolderInfoDto {
         name: library.name.clone(),
         collection_type: library.collection_type.clone(),
         item_id: uuid_to_emby_guid(&library.id),
+        primary_image_item_id: primary_image_tag
+            .as_ref()
+            .map(|_| uuid_to_emby_guid(&library.id)),
+        primary_image_tag,
         locations,
         library_options: options,
     }
+}
+
+pub async fn library_to_virtual_folder_dto_with_images(
+    pool: &sqlx::PgPool,
+    library: &DbLibrary,
+) -> Result<VirtualFolderInfoDto, AppError> {
+    let mut dto = library_to_virtual_folder_dto(library);
+    if dto.primary_image_item_id.is_none() {
+        if let Some(source) = library_primary_image_source(pool, library).await? {
+            dto.primary_image_item_id = Some(uuid_to_emby_guid(&source.item_id));
+            dto.primary_image_tag = Some(source.tag);
+        }
+    }
+    Ok(dto)
 }
 
 fn normalize_collection_type(value: &str) -> String {
@@ -5500,16 +5577,9 @@ pub async fn library_to_item_dto(
     let movie_count = count_library_items_by_type(pool, library.id, "Movie").await?;
     let series_count = count_library_items_by_type(pool, library.id, "Series").await?;
     let locations = library_paths(library);
-    let primary_image_path = locations
-        .first()
-        .and_then(|path| naming::find_folder_image(Path::new(path)));
-    let backdrop_path = locations
-        .first()
-        .and_then(|path| naming::find_backdrop_image(Path::new(path)));
-    let primary_image_tag = primary_image_path
-        .as_ref()
-        .and_then(|path| image_tag_from_path(path.as_path()))
-        .or_else(|| Some(library.created_at.timestamp().to_string()));
+    let primary_image_source = library_primary_image_source(pool, library).await?;
+    let backdrop_path = library_folder_backdrop_image_path(library);
+    let primary_image_tag = primary_image_source.as_ref().map(|source| source.tag.clone());
     let mut image_tags = BTreeMap::new();
 
     if let Some(tag) = primary_image_tag.clone() {
@@ -5613,7 +5683,9 @@ pub async fn library_to_item_dto(
         parent_thumb_item_id: None,
         parent_thumb_image_tag: None,
         series_primary_image_tag: None,
-        primary_image_item_id: None,
+        primary_image_item_id: primary_image_source
+            .as_ref()
+            .map(|source| uuid_to_emby_guid(&source.item_id)),
         series_studio: None,
         user_data: {
             let mut value = empty_user_data();

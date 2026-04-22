@@ -2006,6 +2006,10 @@ pub struct VirtualFolderInfoDto {
     pub name: String,
     pub collection_type: String,
     pub item_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_image_item_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_image_tag: Option<String>,
     pub locations: Vec<String>,
     pub library_options: LibraryOptionsDto,
 }

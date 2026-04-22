@@ -124,9 +124,16 @@ async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: 
                 _ => {}
                 },
                 Some(Err(error)) => {
-                tracing::error!(session_id = %session_id, error = %error, "WebSocket receive failed");
-                close_reason = Some(error.to_string());
-                break;
+                    let error = error.to_string();
+                    if error.contains("Connection reset without closing handshake")
+                        || error.contains("reset without closing handshake")
+                    {
+                        tracing::debug!(session_id = %session_id, error = %error, "WebSocket closed without close frame");
+                    } else {
+                        tracing::error!(session_id = %session_id, error = %error, "WebSocket receive failed");
+                    }
+                    close_reason = Some(error);
+                    break;
                 }
                 None => break,
             },

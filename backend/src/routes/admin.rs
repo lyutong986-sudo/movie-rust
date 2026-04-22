@@ -121,12 +121,11 @@ async fn virtual_folders(
 ) -> Result<Json<Vec<VirtualFolderInfoDto>>, AppError> {
     auth::require_admin(&session)?;
     let libraries = repository::list_libraries(&state.pool).await?;
-    Ok(Json(
-        libraries
-            .iter()
-            .map(repository::library_to_virtual_folder_dto)
-            .collect(),
-    ))
+    let mut items = Vec::with_capacity(libraries.len());
+    for library in &libraries {
+        items.push(repository::library_to_virtual_folder_dto_with_images(&state.pool, library).await?);
+    }
+    Ok(Json(items))
 }
 
 async fn add_virtual_folder(
