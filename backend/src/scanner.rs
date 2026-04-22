@@ -135,7 +135,7 @@ async fn import_movie_file(
     file: &Path,
 ) -> Result<(), AppError> {
     let parsed = naming::parse_media_path(file);
-    let nfo = read_video_nfo(file).unwrap_or_default();
+    let nfo = read_movie_nfo(file).unwrap_or_default();
     let container = file
         .extension()
         .and_then(OsStr::to_str)
@@ -221,7 +221,7 @@ async fn import_tv_file(
     file: &Path,
 ) -> Result<(), AppError> {
     let parsed = naming::parse_media_path(file);
-    let episode_nfo = read_video_nfo(file).unwrap_or_default();
+    let episode_nfo = read_episode_nfo(file).unwrap_or_default();
 
     let preliminary_series_name = episode_nfo
         .series_name
@@ -775,10 +775,26 @@ async fn analyze_imported_media(
     repository::update_media_item_metadata(pool, item_id, &analysis).await
 }
 
-fn read_video_nfo(file: &Path) -> Option<NfoMetadata> {
+fn read_movie_nfo(file: &Path) -> Option<NfoMetadata> {
     let parent = file.parent()?;
     let stem = file.file_stem()?.to_string_lossy();
     for candidate in [parent.join(format!("{stem}.nfo")), parent.join("movie.nfo")] {
+        if let Some(metadata) = read_nfo_file(&candidate) {
+            return Some(metadata);
+        }
+    }
+
+    None
+}
+
+fn read_episode_nfo(file: &Path) -> Option<NfoMetadata> {
+    let parent = file.parent()?;
+    let stem = file.file_stem()?.to_string_lossy();
+    for candidate in [
+        parent.join(format!("{stem}.nfo")),
+        parent.join("episodedetails.nfo"),
+        parent.join("episode.nfo"),
+    ] {
         if let Some(metadata) = read_nfo_file(&candidate) {
             return Some(metadata);
         }
@@ -1396,7 +1412,11 @@ fn season_virtual_path(
         return parent.to_path_buf();
     }
 
-    series_path.join(format!("Season {season_number:02}"))
+    if season_number == 0 {
+        series_path.join("Specials")
+    } else {
+        series_path.join(format!("Season {season_number}"))
+    }
 }
 
 fn season_number_from_file(file: &Path) -> Option<i32> {
@@ -1518,4 +1538,21 @@ fn simple_episode_regex() -> &'static Regex {
         )
         .expect("valid episode number regex")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn season_zero_virtual_path_uses_specials() {
+        let path = season_virtual_path(
+            Path::new("C:/media/TV"),
+            Path::new("C:/media/TV/Show/Episode S00E01.mkv"),
+            Path::new("C:/media/TV/Show"),
+            0,
+        );
+
+        assert_eq!(path, PathBuf::from("C:/media/TV/Show/Specials"));
+    }
 }

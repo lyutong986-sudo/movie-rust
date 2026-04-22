@@ -1761,22 +1761,22 @@ pub async fn list_media_items(
 
     if !options.include_types.is_empty() {
         builder
-            .push(" AND item_type = ANY(")
-            .push_bind(options.include_types)
+            .push(" AND lower(item_type) = ANY(")
+            .push_bind(lowercase_list(&options.include_types))
             .push(")");
     }
 
     if !options.exclude_types.is_empty() {
         builder
-            .push(" AND NOT (item_type = ANY(")
-            .push_bind(options.exclude_types)
+            .push(" AND NOT (lower(item_type) = ANY(")
+            .push_bind(lowercase_list(&options.exclude_types))
             .push("))");
     }
 
     if !options.media_types.is_empty() {
         builder
-            .push(" AND media_type = ANY(")
-            .push_bind(options.media_types)
+            .push(" AND lower(media_type) = ANY(")
+            .push_bind(lowercase_list(&options.media_types))
             .push(")");
     }
 
@@ -1926,8 +1926,8 @@ pub async fn list_media_items(
 
     if !options.series_status.is_empty() {
         builder
-            .push(" AND status = ANY(")
-            .push_bind(options.series_status)
+            .push(" AND lower(COALESCE(status, '')) = ANY(")
+            .push_bind(lowercase_list(&options.series_status))
             .push(")");
     }
 
@@ -1989,20 +1989,34 @@ pub async fn list_media_items(
     }
 
     if let Some(search_term) = options.search_term.filter(|value| !value.trim().is_empty()) {
+        let search_pattern = format!("%{}%", search_term.trim());
         builder
-            .push(" AND name ILIKE ")
-            .push_bind(format!("%{}%", search_term.trim()));
+            .push(" AND (name ILIKE ")
+            .push_bind(search_pattern.clone())
+            .push(" OR COALESCE(original_title, '') ILIKE ")
+            .push_bind(search_pattern.clone())
+            .push(" OR sort_name ILIKE ")
+            .push_bind(search_pattern.clone())
+            .push(" OR COALESCE(series_name, '') ILIKE ")
+            .push_bind(search_pattern.clone())
+            .push(" OR COALESCE(overview, '') ILIKE ")
+            .push_bind(search_pattern.clone())
+            .push(
+                " OR EXISTS (SELECT 1 FROM person_roles pr INNER JOIN persons p ON p.id = pr.person_id WHERE pr.media_item_id = media_items.id AND p.name ILIKE ",
+            )
+            .push_bind(search_pattern)
+            .push(")")
+            .push(")");
     }
 
-    let sort_column = match options.sort_by.as_deref().unwrap_or("SortName") {
-        "DateCreated" | "DateLastContentAdded" => "date_created",
-        "IndexNumber" => "index_number",
-        "PremiereDate" => "premiere_date",
-        "ProductionYear" => "production_year",
-        "Random" => "random()",
-        "DatePlayed" => "date_created",
-        _ => "sort_name",
-    };
+    let sort_keys: Vec<&str> = options
+        .sort_by
+        .as_deref()
+        .unwrap_or("SortName")
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect();
     let sort_order = if options
         .sort_order
         .as_deref()
@@ -2013,12 +2027,71 @@ pub async fn list_media_items(
         "ASC"
     };
 
+    builder.push(" ORDER BY ");
+
+    let effective_sort_keys = if sort_keys.is_empty() {
+        vec!["SortName"]
+    } else {
+        sort_keys
+    };
+
+    for (index, sort_key) in effective_sort_keys.iter().enumerate() {
+        if index > 0 {
+            builder.push(", ");
+        }
+
+        match *sort_key {
+            "DatePlayed" => {
+                if let Some(user_id) = options.user_id {
+                    builder
+                        .push(
+                            "COALESCE((SELECT uid.last_played_date FROM user_item_data uid WHERE uid.user_id = ",
+                        )
+                        .push_bind(user_id)
+                        .push(" AND uid.item_id = media_items.id), to_timestamp(0))");
+                } else {
+                    builder.push("date_created");
+                }
+            }
+            "DateCreated" | "DateLastContentAdded" => {
+                builder.push("date_created");
+            }
+            "ParentIndexNumber" => {
+                builder.push("parent_index_number");
+            }
+            "IndexNumber" => {
+                builder.push("index_number");
+            }
+            "PremiereDate" => {
+                builder.push("premiere_date");
+            }
+            "ProductionYear" => {
+                builder.push("production_year");
+            }
+            "CommunityRating" => {
+                builder.push("community_rating");
+            }
+            "OfficialRating" => {
+                builder.push("official_rating");
+            }
+            "Runtime" => {
+                builder.push("runtime_ticks");
+            }
+            "Random" => {
+                builder.push("random()");
+            }
+            _ => {
+                builder.push("sort_name");
+            }
+        }
+
+        builder
+            .push(" ")
+            .push(sort_order)
+            .push(" NULLS LAST");
+    }
+
     builder
-        .push(" ORDER BY ")
-        .push(sort_column)
-        .push(" ")
-        .push(sort_order)
-        .push(" NULLS LAST")
         .push(" OFFSET ")
         .push_bind(options.start_index.max(0))
         .push(" LIMIT ")
@@ -2028,12 +2101,12 @@ pub async fn list_media_items(
         .build_query_as::<MediaItemRow>()
         .fetch_all(pool)
         .await?;
+    let total_record_count = rows.first().map(|row| row.total_count).unwrap_or(0);
     let items = if options.group_items_into_collections {
         deduplicate_media_items(rows.into_iter().map(DbMediaItem::from).collect())
     } else {
         rows.into_iter().map(DbMediaItem::from).collect()
     };
-    let total_record_count = items.len() as i64;
 
     Ok(QueryResult {
         items,
@@ -4864,17 +4937,47 @@ fn provider_ids_from_local_nfo(item: &DbMediaItem) -> BTreeMap<String, String> {
 fn nfo_candidates_for_item(item: &DbMediaItem, media_path: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
-    if let Some(parent) = media_path.parent() {
-        if let Some(stem) = media_path.file_stem().map(|value| value.to_string_lossy().to_string()) {
-            candidates.push(parent.join(format!("{stem}.nfo")));
+    match item.item_type.as_str() {
+        "Movie" | "Trailer" | "Video" => {
+            if let Some(parent) = media_path.parent() {
+                if let Some(stem) = media_path.file_stem().map(|value| value.to_string_lossy().to_string()) {
+                    candidates.push(parent.join(format!("{stem}.nfo")));
+                }
+                candidates.push(parent.join("movie.nfo"));
+            }
         }
-        candidates.push(parent.join("movie.nfo"));
-        candidates.push(parent.join("tvshow.nfo"));
-    }
-
-    if matches!(item.item_type.as_str(), "Season" | "Episode") {
-        if let Some(parent) = media_path.parent().and_then(Path::parent) {
-            candidates.push(parent.join("tvshow.nfo"));
+        "Series" => {
+            candidates.push(media_path.join("tvshow.nfo"));
+            if let Some(parent) = media_path.parent() {
+                candidates.push(parent.join("tvshow.nfo"));
+            }
+        }
+        "Season" => {
+            candidates.push(media_path.join("season.nfo"));
+            candidates.push(media_path.join("tvshow.nfo"));
+            if let Some(parent) = media_path.parent() {
+                candidates.push(parent.join("tvshow.nfo"));
+            }
+        }
+        "Episode" => {
+            if let Some(parent) = media_path.parent() {
+                if let Some(stem) = media_path.file_stem().map(|value| value.to_string_lossy().to_string()) {
+                    candidates.push(parent.join(format!("{stem}.nfo")));
+                }
+                candidates.push(parent.join("episodedetails.nfo"));
+                candidates.push(parent.join("episode.nfo"));
+                candidates.push(parent.join("season.nfo"));
+                if let Some(series_parent) = parent.parent() {
+                    candidates.push(series_parent.join("tvshow.nfo"));
+                }
+            }
+        }
+        _ => {
+            if let Some(parent) = media_path.parent() {
+                if let Some(stem) = media_path.file_stem().map(|value| value.to_string_lossy().to_string()) {
+                    candidates.push(parent.join(format!("{stem}.nfo")));
+                }
+            }
         }
     }
 
@@ -4998,12 +5101,19 @@ fn item_identity_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -
             provider_value(providers, &["Tvdb", "TVDb", "tvdb"])
                 .map(|value| format!("{scope}:tvdb:{value}"))
         });
+    let fallback = fallback_item_identity_base(item);
+    let identity_base = base.or(fallback);
 
     match item.item_type.as_str() {
-        "Season" => base.map(|value| {
+        "Season" => identity_base.map(|value| {
             format!("{value}:season:{}", item.index_number.unwrap_or_default())
         }),
-        "Episode" => base.map(|value| {
+        "Episode" => identity_base.map(|value| {
+            if item.index_number.is_none() && item.index_number_end.is_none() {
+                if let Some(date) = item.premiere_date {
+                    return format!("{value}:aired:{date}");
+                }
+            }
             format!(
                 "{value}:season:{}:episode:{}:{}",
                 item.parent_index_number.unwrap_or_default(),
@@ -5011,8 +5121,44 @@ fn item_identity_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -
                 item.index_number_end.unwrap_or_default()
             )
         }),
-        _ => base,
+        _ => identity_base,
     }
+}
+
+fn fallback_item_identity_base(item: &DbMediaItem) -> Option<String> {
+    let scope = item_identity_scope(item);
+    let parent_folder_name = parent_folder_name(&item.path);
+    let normalized_name = normalized_identity_text(
+        item.series_name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                if item.item_type == "Series" {
+                    Some(item.name.as_str())
+                } else {
+                    None
+                }
+            })
+            .or(parent_folder_name.as_deref()),
+    )?;
+    let year = item.production_year.unwrap_or_default();
+    Some(format!("{scope}:name:{normalized_name}:year:{year}"))
+}
+
+fn normalized_identity_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(naming::clean_display_name)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn parent_folder_name(path: &str) -> Option<String> {
+    Path::new(path)
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .map(str::to_string)
 }
 
 fn presentation_unique_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> String {

@@ -497,10 +497,19 @@ fn item_list_options_from_query(
     let mut is_folder = query.is_folder;
     let mut is_played = query.is_played;
     let mut resume_only = false;
+    let requested_folder_like_type = include_types
+        .iter()
+        .any(|item_type| is_folder_like_item_type(item_type));
     for filter in &filters {
         if filter.eq_ignore_ascii_case("IsFolder") {
+            if !include_types.is_empty() && !requested_folder_like_type {
+                continue;
+            }
             is_folder = Some(true);
         } else if filter.eq_ignore_ascii_case("IsNotFolder") {
+            if requested_folder_like_type {
+                continue;
+            }
             is_folder = Some(false);
         } else if filter.eq_ignore_ascii_case("IsResumable") {
             resume_only = true;
@@ -566,6 +575,13 @@ fn item_list_options_from_query(
         group_items_into_collections: query.group_items_into_collections.unwrap_or(true),
         ..ItemListOptions::default()
     }
+}
+
+fn is_folder_like_item_type(item_type: &str) -> bool {
+    matches!(
+        item_type.trim().to_ascii_lowercase().as_str(),
+        "series" | "season" | "boxset" | "folder" | "collectionfolder"
+    )
 }
 
 fn is_top_level_items_request(
@@ -1570,4 +1586,35 @@ async fn get_user_similar_items(
     ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
     get_similar_items(session, State(state), Path(item_id_str), Query(query)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn explicit_series_request_is_not_cancelled_by_is_not_folder_filter() {
+        let query: ItemsQuery = serde_json::from_value(json!({
+            "Filters": "IsNotFolder",
+            "IncludeItemTypes": "Series,Movie"
+        }))
+        .expect("valid items query");
+
+        let options = item_list_options_from_query(
+            &query,
+            Uuid::nil(),
+            None,
+            None,
+            Vec::new(),
+            vec!["Series".to_string(), "Movie".to_string()],
+            true,
+        );
+
+        assert_eq!(options.is_folder, None);
+        assert_eq!(
+            options.include_types,
+            vec!["Series".to_string(), "Movie".to_string()]
+        );
+    }
 }
