@@ -94,7 +94,7 @@ async fn public_info(
     Ok(Json(PublicSystemInfo {
         local_address,
         server_name: startup.server_name,
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: emby_compatible_server_version(),
         product_name: "Movie Rust".to_string(),
         operating_system: std::env::consts::OS.to_string(),
         id: uuid_to_emby_guid(&state.config.server_id),
@@ -147,7 +147,7 @@ async fn system_info(
     Ok(Json(SystemInfo {
         local_address,
         server_name: startup.server_name,
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: emby_compatible_server_version(),
         product_name: "Movie Rust".to_string(),
         operating_system: std::env::consts::OS.to_string(),
         id: uuid_to_emby_guid(&state.config.server_id),
@@ -284,7 +284,6 @@ async fn branding_configuration(
 }
 
 async fn branding_css(
-    _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, crate::error::AppError> {
     let css = repository::branding_css(&state.pool, &state.config).await?;
@@ -357,6 +356,14 @@ fn local_server_address(state: &AppState) -> String {
     };
 
     format!("http://{}:{}", client_host, state.config.port)
+}
+
+fn emby_compatible_server_version() -> String {
+    std::env::var("EMBY_COMPAT_VERSION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "4.8.10.0".to_string())
 }
 
 async fn server_log_content_by_query(
