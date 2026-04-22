@@ -1844,6 +1844,13 @@ fn device_profile_supports_direct_play(
     profile: &crate::models::DeviceProfile,
     source: &crate::models::MediaSourceDto,
 ) -> bool {
+    if !container_profiles_match(&profile.container_profiles, source) {
+        return false;
+    }
+    if !codec_profiles_match(&profile.codec_profiles, source) {
+        return false;
+    }
+
     profile.direct_play_profiles.iter().any(|direct_profile| {
         direct_profile
             .r#type
@@ -1859,6 +1866,10 @@ fn device_profile_supports_transcoding(
     profile: &crate::models::DeviceProfile,
     source: &crate::models::MediaSourceDto,
 ) -> bool {
+    if !codec_profiles_match(&profile.codec_profiles, source) {
+        return false;
+    }
+
     profile.transcoding_profiles.iter().any(|transcoding_profile| {
         transcoding_profile
             .r#type
@@ -1871,6 +1882,218 @@ fn device_profile_supports_transcoding(
             && codec_profile_matches(transcoding_profile.video_codec.as_deref(), source, "Video")
             && codec_profile_matches(transcoding_profile.audio_codec.as_deref(), source, "Audio")
     })
+}
+
+fn container_profiles_match(
+    profiles: &[Value],
+    source: &crate::models::MediaSourceDto,
+) -> bool {
+    profiles.iter().all(|profile| {
+        if !profile_type_matches(profile, "Video") {
+            return true;
+        }
+        profile_conditions_match(profile, None, Some(source))
+    })
+}
+
+fn codec_profiles_match(
+    profiles: &[Value],
+    source: &crate::models::MediaSourceDto,
+) -> bool {
+    profiles.iter().all(|profile| {
+        if !profile_type_matches(profile, "Video") {
+            return true;
+        }
+        let codec_filter = profile
+            .get("Codec")
+            .or_else(|| profile.get("codec"))
+            .and_then(Value::as_str)
+            .map(|value| {
+                parse_list(Some(value))
+                    .into_iter()
+                    .map(|codec| codec.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let profile_type = profile
+            .get("Type")
+            .or_else(|| profile.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("Video");
+
+        source.media_streams.iter().all(|stream| {
+            if !stream.stream_type.eq_ignore_ascii_case("Video")
+                && !stream.stream_type.eq_ignore_ascii_case("Audio")
+                && !stream.stream_type.eq_ignore_ascii_case("Subtitle")
+            {
+                return true;
+            }
+            if !stream.stream_type.eq_ignore_ascii_case(profile_type) {
+                return true;
+            }
+            if !codec_filter.is_empty() {
+                let Some(codec) = stream.codec.as_deref() else {
+                    return true;
+                };
+                if !codec_filter.iter().any(|candidate| candidate.eq_ignore_ascii_case(codec)) {
+                    return true;
+                }
+            }
+            profile_conditions_match(profile, Some(stream), Some(source))
+        })
+    })
+}
+
+fn profile_type_matches(profile: &Value, expected: &str) -> bool {
+    profile
+        .get("Type")
+        .or_else(|| profile.get("type"))
+        .and_then(Value::as_str)
+        .is_none_or(|value| value.eq_ignore_ascii_case(expected))
+}
+
+fn profile_conditions_match(
+    profile: &Value,
+    stream: Option<&crate::models::MediaStreamDto>,
+    source: Option<&crate::models::MediaSourceDto>,
+) -> bool {
+    let Some(conditions) = profile
+        .get("Conditions")
+        .or_else(|| profile.get("conditions"))
+        .and_then(Value::as_array)
+    else {
+        return true;
+    };
+
+    conditions.iter().all(|condition| profile_condition_matches(condition, stream, source))
+}
+
+fn profile_condition_matches(
+    condition: &Value,
+    stream: Option<&crate::models::MediaStreamDto>,
+    source: Option<&crate::models::MediaSourceDto>,
+) -> bool {
+    let property = condition
+        .get("Property")
+        .or_else(|| condition.get("property"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let condition_name = condition
+        .get("Condition")
+        .or_else(|| condition.get("condition"))
+        .and_then(Value::as_str)
+        .unwrap_or("Equals");
+    let target = condition
+        .get("Value")
+        .or_else(|| condition.get("value"));
+
+    let Some(actual) = profile_property_value(property, stream, source) else {
+        return !condition
+            .get("IsRequired")
+            .or_else(|| condition.get("isRequired"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    };
+
+    match (actual, target) {
+        (ProfileValue::Number(actual), Some(target)) => target
+            .as_f64()
+            .or_else(|| target.as_str().and_then(|value| value.parse::<f64>().ok()))
+            .is_none_or(|target| compare_profile_number(actual, target, condition_name)),
+        (ProfileValue::Text(actual), Some(target)) => target
+            .as_str()
+            .is_none_or(|target| compare_profile_text(&actual, target, condition_name)),
+        (ProfileValue::Bool(actual), Some(target)) => target
+            .as_bool()
+            .or_else(|| target.as_str().map(|value| value.eq_ignore_ascii_case("true")))
+            .is_none_or(|target| compare_profile_bool(actual, target, condition_name)),
+        _ => true,
+    }
+}
+
+enum ProfileValue {
+    Number(f64),
+    Text(String),
+    Bool(bool),
+}
+
+fn profile_property_value(
+    property: &str,
+    stream: Option<&crate::models::MediaStreamDto>,
+    source: Option<&crate::models::MediaSourceDto>,
+) -> Option<ProfileValue> {
+    let normalized = property.to_ascii_lowercase();
+    let stream = stream.or_else(|| {
+        source.and_then(|source| {
+            source
+                .media_streams
+                .iter()
+                .find(|stream| stream.stream_type.eq_ignore_ascii_case("Video"))
+        })
+    });
+    match normalized.as_str() {
+        "width" => stream.and_then(|stream| stream.width).map(|value| ProfileValue::Number(f64::from(value))),
+        "height" => stream.and_then(|stream| stream.height).map(|value| ProfileValue::Number(f64::from(value))),
+        "videobitrate" | "bitrate" => stream
+            .and_then(|stream| stream.bit_rate)
+            .or_else(|| source.and_then(|source| source.bitrate))
+            .map(|value| ProfileValue::Number(f64::from(value))),
+        "videobitdepth" | "bitdepth" => stream.and_then(|stream| stream.bit_depth).map(|value| ProfileValue::Number(f64::from(value))),
+        "videolevel" | "level" => stream.and_then(|stream| stream.level).map(|value| ProfileValue::Number(f64::from(value))),
+        "videoprofile" | "profile" => stream.and_then(|stream| stream.profile.clone()).map(ProfileValue::Text),
+        "videorange" => stream.and_then(|stream| stream.video_range.clone()).map(ProfileValue::Text),
+        "videocodec" | "codec" => stream.and_then(|stream| stream.codec.clone()).map(ProfileValue::Text),
+        "audiocodec" => source
+            .and_then(|source| {
+                source
+                    .media_streams
+                    .iter()
+                    .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"))
+                    .and_then(|stream| stream.codec.clone())
+            })
+            .map(ProfileValue::Text),
+        "audiochannels" => source
+            .and_then(|source| {
+                source
+                    .media_streams
+                    .iter()
+                    .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"))
+                    .and_then(|stream| stream.channels)
+            })
+            .map(|value| ProfileValue::Number(f64::from(value))),
+        "isinterlaced" => stream.and_then(|stream| stream.is_interlaced).map(ProfileValue::Bool),
+        _ => None,
+    }
+}
+
+fn compare_profile_number(actual: f64, target: f64, condition: &str) -> bool {
+    match condition.to_ascii_lowercase().as_str() {
+        "lessthanequal" => actual <= target,
+        "lessthan" => actual < target,
+        "greaterthanequal" => actual >= target,
+        "greaterthan" => actual > target,
+        "notequals" => (actual - target).abs() > f64::EPSILON,
+        _ => (actual - target).abs() <= f64::EPSILON,
+    }
+}
+
+fn compare_profile_text(actual: &str, target: &str, condition: &str) -> bool {
+    let contains = parse_list(Some(target))
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(actual));
+    match condition.to_ascii_lowercase().as_str() {
+        "notequals" => !actual.eq_ignore_ascii_case(target),
+        "notcontains" => !contains,
+        _ => contains || actual.eq_ignore_ascii_case(target),
+    }
+}
+
+fn compare_profile_bool(actual: bool, target: bool, condition: &str) -> bool {
+    match condition.to_ascii_lowercase().as_str() {
+        "notequals" => actual != target,
+        _ => actual == target,
+    }
 }
 
 fn codec_profile_matches(
@@ -2346,6 +2569,81 @@ mod tests {
         assert_eq!(profile.codec_profiles.len(), 1);
         assert_eq!(profile.response_profiles.len(), 1);
         assert_eq!(profile.subtitle_profiles.len(), 1);
+    }
+
+    #[test]
+    fn device_profile_conditions_evaluate_stream_properties() {
+        let stream = crate::models::MediaStreamDto {
+            index: 0,
+            stream_type: "Video".to_string(),
+            codec: Some("hevc".to_string()),
+            codec_tag: None,
+            language: None,
+            display_title: None,
+            is_default: true,
+            is_forced: false,
+            width: Some(3840),
+            height: Some(2160),
+            bit_rate: Some(80_000_000),
+            channels: None,
+            sample_rate: None,
+            is_external: false,
+            delivery_method: None,
+            delivery_url: None,
+            is_chunked_response: None,
+            supports_external_stream: false,
+            path: None,
+            aspect_ratio: Some("16:9".to_string()),
+            attachment_size: None,
+            average_frame_rate: Some(24.0),
+            bit_depth: Some(10),
+            color_primaries: None,
+            color_space: None,
+            color_transfer: None,
+            display_language: None,
+            extended_video_sub_type: None,
+            extended_video_sub_type_description: None,
+            extended_video_type: None,
+            is_anamorphic: Some(false),
+            is_avc: Some(false),
+            is_external_url: None,
+            is_hearing_impaired: Some(false),
+            is_interlaced: Some(false),
+            is_text_subtitle_stream: Some(false),
+            level: Some(153),
+            pixel_format: Some("yuv420p10le".to_string()),
+            profile: Some("Main 10".to_string()),
+            protocol: Some("File".to_string()),
+            real_frame_rate: Some(24.0),
+            ref_frames: Some(1),
+            rotation: None,
+            stream_start_time_ticks: None,
+            time_base: None,
+            title: None,
+            comment: None,
+            video_range: Some("HDR10".to_string()),
+            channel_layout: None,
+            item_id: None,
+            server_id: None,
+            mime_type: None,
+            subtitle_location_type: None,
+        };
+
+        let condition = json!({
+            "Property": "VideoBitDepth",
+            "Condition": "LessThanEqual",
+            "Value": "10",
+            "IsRequired": true
+        });
+        assert!(profile_condition_matches(&condition, Some(&stream), None));
+
+        let failing_condition = json!({
+            "Property": "Width",
+            "Condition": "LessThan",
+            "Value": "1920",
+            "IsRequired": true
+        });
+        assert!(!profile_condition_matches(&failing_condition, Some(&stream), None));
     }
 }
 

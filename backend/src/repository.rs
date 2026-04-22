@@ -6887,7 +6887,7 @@ fn user_item_data_to_dto_for_item(data: DbUserItemData, item_id: Uuid) -> UserIt
     dto
 }
 
-fn empty_user_data_for_item(item_id: Uuid) -> UserItemDataDto {
+pub fn empty_user_data_for_item(item_id: Uuid) -> UserItemDataDto {
     let mut dto = empty_user_data();
     let emby_id = uuid_to_emby_guid(&item_id);
     dto.key = Some(emby_id.clone());

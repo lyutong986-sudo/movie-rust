@@ -1309,6 +1309,14 @@ pub struct ItemsQuery {
     pub filters: Option<String>,
     #[serde(default, alias = "Fields")]
     pub fields: Option<String>,
+    #[serde(default, alias = "EnableImages", alias = "enableImages")]
+    pub enable_images: Option<bool>,
+    #[serde(default, alias = "ImageTypeLimit", alias = "imageTypeLimit")]
+    pub image_type_limit: Option<i64>,
+    #[serde(default, alias = "EnableImageTypes", alias = "enableImageTypes")]
+    pub enable_image_types: Option<String>,
+    #[serde(default, alias = "EnableUserData", alias = "enableUserData")]
+    pub enable_user_data: Option<bool>,
     #[serde(default, alias = "StartIndex", alias = "startIndex")]
     pub start_index: Option<i64>,
     #[serde(default, alias = "Limit", alias = "limit")]

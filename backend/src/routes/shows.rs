@@ -491,12 +491,77 @@ fn apply_items_query_to_show_result(
     let total_record_count = items.len() as i64;
     let start_index = query.start_index.unwrap_or(0).max(0) as usize;
     let limit = query.limit.unwrap_or(100).clamp(1, 200) as usize;
-    let items = items.into_iter().skip(start_index).take(limit).collect::<Vec<_>>();
+    let items = items
+        .into_iter()
+        .skip(start_index)
+        .take(limit)
+        .map(|item| apply_show_response_shape(item, query))
+        .collect::<Vec<_>>();
 
     QueryResult {
         items,
         total_record_count,
         start_index: Some(start_index as i64),
+    }
+}
+
+fn apply_show_response_shape(mut item: BaseItemDto, query: &ItemsQuery) -> BaseItemDto {
+    let enable_image_types = parse_list(query.enable_image_types.as_deref());
+    let images_disabled = query.enable_images == Some(false)
+        || query.image_type_limit == Some(0)
+        || (query.image_type_limit.is_some_and(|limit| limit <= 0));
+
+    if images_disabled {
+        clear_item_images(&mut item);
+    } else if !enable_image_types.is_empty() {
+        retain_item_images(&mut item, &enable_image_types);
+    }
+
+    if query.enable_user_data == Some(false) {
+        item.user_data = repository::empty_user_data_for_item(
+            emby_id_to_uuid(&item.id).unwrap_or_else(|_| Uuid::nil()),
+        );
+    }
+
+    item
+}
+
+fn clear_item_images(item: &mut BaseItemDto) {
+    item.primary_image_tag = None;
+    item.image_tags.clear();
+    item.backdrop_image_tags.clear();
+    item.parent_logo_item_id = None;
+    item.parent_logo_image_tag = None;
+    item.parent_backdrop_item_id = None;
+    item.parent_backdrop_image_tags.clear();
+    item.parent_thumb_item_id = None;
+    item.parent_thumb_image_tag = None;
+    item.series_primary_image_tag = None;
+    item.primary_image_item_id = None;
+    item.primary_image_aspect_ratio = None;
+}
+
+fn retain_item_images(item: &mut BaseItemDto, image_types: &[String]) {
+    item.image_tags
+        .retain(|key, _| contains_ignore_case(image_types, key));
+    if !contains_ignore_case(image_types, "Primary") {
+        item.primary_image_tag = None;
+        item.series_primary_image_tag = None;
+        item.primary_image_item_id = None;
+        item.primary_image_aspect_ratio = None;
+    }
+    if !contains_ignore_case(image_types, "Backdrop") {
+        item.backdrop_image_tags.clear();
+        item.parent_backdrop_item_id = None;
+        item.parent_backdrop_image_tags.clear();
+    }
+    if !contains_ignore_case(image_types, "Logo") {
+        item.parent_logo_item_id = None;
+        item.parent_logo_image_tag = None;
+    }
+    if !contains_ignore_case(image_types, "Thumb") {
+        item.parent_thumb_item_id = None;
+        item.parent_thumb_image_tag = None;
     }
 }
 
