@@ -1837,6 +1837,16 @@ pub struct LibraryOptionsDto {
     #[serde(default)]
     pub disabled_subtitle_fetchers: Vec<String>,
     #[serde(default)]
+    pub subtitle_fetcher_order: Vec<String>,
+    #[serde(default)]
+    pub subtitle_download_languages: Vec<String>,
+    #[serde(default)]
+    pub skip_subtitles_if_embedded_subtitles_present: bool,
+    #[serde(default)]
+    pub skip_subtitles_if_audio_track_matches: bool,
+    #[serde(default)]
+    pub require_perfect_subtitle_match: bool,
+    #[serde(default)]
     pub save_subtitles_with_media: bool,
     #[serde(default)]
     pub collapse_single_item_folders: bool,
@@ -1903,6 +1913,11 @@ impl Default for LibraryOptionsDto {
             disabled_lyrics_fetchers: Vec::new(),
             save_lyrics_with_media: false,
             disabled_subtitle_fetchers: Vec::new(),
+            subtitle_fetcher_order: Vec::new(),
+            subtitle_download_languages: Vec::new(),
+            skip_subtitles_if_embedded_subtitles_present: false,
+            skip_subtitles_if_audio_track_matches: false,
+            require_perfect_subtitle_match: false,
             save_subtitles_with_media: false,
             collapse_single_item_folders: false,
             force_collapse_single_item_folders: false,
@@ -1932,6 +1947,20 @@ pub struct LibraryOptionInfoDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
+pub struct LibraryTypeOptionsDto {
+    pub r#type: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_fetchers: Vec<LibraryOptionInfoDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_fetchers: Vec<LibraryOptionInfoDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_image_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_image_options: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "PascalCase")]
 pub struct LibraryOptionsResultDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata_savers: Vec<LibraryOptionInfoDto>,
@@ -1942,7 +1971,7 @@ pub struct LibraryOptionsResultDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lyrics_fetchers: Vec<LibraryOptionInfoDto>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub type_options: Vec<serde_json::Value>,
+    pub type_options: Vec<LibraryTypeOptionsDto>,
     pub default_library_options: LibraryOptionsDto,
 }
 
@@ -2006,6 +2035,15 @@ pub struct RemoveVirtualFolderDto {
 pub struct UpdateLibraryOptionsDto {
     pub id: String,
     pub library_options: LibraryOptionsDto,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibraryAvailableOptionsQuery {
+    #[serde(default)]
+    pub library_content_type: Option<String>,
+    #[serde(default)]
+    pub is_new_library: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

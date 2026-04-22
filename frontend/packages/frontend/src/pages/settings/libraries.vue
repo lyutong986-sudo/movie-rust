@@ -14,7 +14,7 @@
         <VBtn
           color="primary"
           variant="elevated"
-          @click="createDialog = true">
+          @click="openCreateDialog">
           {{ t('add') }} {{ t('libraries') }}
         </VBtn>
       </div>
@@ -98,6 +98,9 @@
               <LibraryOptionsFields
                 v-model="library.LibraryOptions"
                 :collection-type="library.CollectionType" />
+              <LibraryTypeOptionsFields
+                v-model="library.LibraryOptions"
+                :advanced-visible="true" />
 
               <div class="uno-mt-4">
                 <div class="uno-mb-2 uno-text-sm uno-font-medium">
@@ -186,18 +189,17 @@
         v-model="createDialog"
         max-width="920">
         <VCard>
-          <VCardTitle>{{ t('createLibrary') }}</VCardTitle>
+          <VCardTitle class="uno-flex uno-items-center uno-justify-between uno-gap-4">
+            <span>{{ t('createLibrary') }}</span>
+            <VSwitch
+              v-model="createAdvanced"
+              color="primary"
+              hide-details
+              inset
+              :label="t('showAdvancedSettings')" />
+          </VCardTitle>
           <VCardText>
             <VRow>
-              <VCol
-                cols="12"
-                md="6">
-                <VTextField
-                  v-model="createForm.name"
-                  :label="t('libraryName')"
-                  density="comfortable"
-                  variant="outlined" />
-              </VCol>
               <VCol
                 cols="12"
                 md="6">
@@ -209,20 +211,81 @@
                   :items="collectionTypes"
                   item-title="title"
                   item-value="value" />
+                <div
+                  v-if="createCollectionTypeDescription"
+                  class="uno-mt-2 uno-text-sm text-medium-emphasis">
+                  {{ createCollectionTypeDescription }}
+                </div>
               </VCol>
-              <VCol cols="12">
-                <VTextarea
-                  v-model="createForm.pathsText"
-                  :label="t('pathsOnePerLine')"
-                  rows="4"
+              <VCol
+                cols="12"
+                md="6">
+                <VTextField
+                  v-model="createForm.name"
+                  :label="t('libraryName')"
                   density="comfortable"
                   variant="outlined" />
               </VCol>
             </VRow>
 
+            <div class="uno-mt-4">
+              <div class="uno-mb-2 uno-flex uno-items-center uno-justify-between uno-gap-3">
+                <div class="uno-text-sm uno-font-medium">
+                  {{ t('paths') }}
+                </div>
+                <VBtn
+                  size="small"
+                  variant="outlined"
+                  @click="createPathDialog = true">
+                  {{ t('add') }}
+                </VBtn>
+              </div>
+              <VList
+                density="comfortable"
+                class="uno-border uno-rounded">
+                <VListItem
+                  v-for="pathInfo in createForm.pathInfos"
+                  :key="`${pathInfo.Path}-${pathInfo.NetworkPath ?? ''}`"
+                  :title="pathInfo.Path"
+                  :subtitle="pathInfo.NetworkPath || undefined">
+                  <template #append>
+                    <VBtn
+                      variant="text"
+                      color="error"
+                      @click="removeCreatePath(pathInfo.Path)">
+                      {{ t('remove') }}
+                    </VBtn>
+                  </template>
+                </VListItem>
+                <VListItem v-if="!createForm.pathInfos.length">
+                  <VListItemTitle>{{ t('noPaths') }}</VListItemTitle>
+                </VListItem>
+              </VList>
+              <div
+                v-if="selectablePathOptions.length"
+                class="uno-mt-3">
+                <div class="uno-mb-2 uno-text-sm text-medium-emphasis">
+                  {{ t('selectableMediaFolders') }}
+                </div>
+                <div class="uno-flex uno-flex-wrap uno-gap-2">
+                  <VChip
+                    v-for="pathInfo in selectablePathOptions.slice(0, 12)"
+                    :key="`preset-${pathInfo.Path}`"
+                    size="small"
+                    variant="outlined"
+                    @click="appendCreatePath(pathInfo)">
+                    {{ pathInfo.Path }}
+                  </VChip>
+                </div>
+              </div>
+            </div>
             <LibraryOptionsFields
               v-model="createForm.libraryOptions"
-              :collection-type="createForm.collectionType" />
+              :collection-type="createForm.collectionType"
+              :advanced-visible="createAdvanced" />
+            <LibraryTypeOptionsFields
+              v-model="createForm.libraryOptions"
+              :advanced-visible="createAdvanced" />
           </VCardText>
           <VCardActions>
             <VSpacer />
@@ -240,6 +303,74 @@
           </VCardActions>
         </VCard>
       </VDialog>
+
+      <VDialog
+        v-model="createPathDialog"
+        max-width="760">
+        <VCard>
+          <VCardTitle>{{ t('add') }} {{ t('paths') }}</VCardTitle>
+          <VCardText>
+            <VRow>
+              <VCol
+                cols="12"
+                md="6">
+                <VTextField
+                  v-model="createForm.path"
+                  :label="t('folderPath')"
+                  density="comfortable"
+                  variant="outlined" />
+              </VCol>
+              <VCol
+                cols="12"
+                md="6">
+                <VTextField
+                  v-model="createForm.networkPath"
+                  :label="t('networkPath')"
+                  density="comfortable"
+                  variant="outlined" />
+              </VCol>
+            </VRow>
+            <div
+              v-if="selectablePathOptions.length"
+              class="uno-mt-2">
+              <div class="uno-mb-2 uno-text-sm text-medium-emphasis">
+                {{ t('selectableMediaFolders') }}
+              </div>
+              <VList
+                density="comfortable"
+                class="uno-border uno-rounded">
+                <VListItem
+                  v-for="pathInfo in selectablePathOptions"
+                  :key="`picker-${pathInfo.Path}`"
+                  :title="pathInfo.Path">
+                  <template #append>
+                    <VBtn
+                      variant="text"
+                      color="primary"
+                      @click="chooseSuggestedCreatePath(pathInfo)">
+                      {{ t('add') }}
+                    </VBtn>
+                  </template>
+                </VListItem>
+              </VList>
+            </div>
+          </VCardText>
+          <VCardActions>
+            <VSpacer />
+            <VBtn
+              variant="text"
+              @click="createPathDialog = false">
+              {{ t('cancel') }}
+            </VBtn>
+            <VBtn
+              color="primary"
+              variant="elevated"
+              @click="commitCreatePath">
+              {{ t('add') }}
+            </VBtn>
+          </VCardActions>
+        </VCard>
+      </VDialog>
     </template>
   </SettingsPage>
 </template>
@@ -250,16 +381,31 @@ meta:
 </route>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, ref, type PropType } from 'vue';
+import { computed, defineComponent, h, ref, watch, type PropType } from 'vue';
 import {
+  VBtn,
+  VCard,
+  VCardActions,
+  VCardText,
+  VCardTitle,
   VCol,
   VCombobox,
+  VDialog,
+  VList,
+  VListItem,
   VRow,
+  VSelect,
+  VSpacer,
   VSwitch,
   VTextField
 } from 'vuetify/components';
 import { useTranslation } from 'i18next-vue';
 import type {
+  SettingsCountryInfo,
+  SettingsCultureInfo,
+  SettingsLibraryImageOption,
+  SettingsLibraryAvailableTypeOptions,
+  SettingsLibraryItemTypeOptions,
   SettingsLibraryOptionInfo,
   SettingsLibraryOptions,
   SettingsLibraryOptionsResult,
@@ -307,6 +453,11 @@ type EditableLibraryOptionsFields = Required<Pick<SettingsLibraryOptions,
   | 'DisabledLyricsFetchers'
   | 'SaveLyricsWithMedia'
   | 'DisabledSubtitleFetchers'
+  | 'SubtitleFetcherOrder'
+  | 'SubtitleDownloadLanguages'
+  | 'SkipSubtitlesIfEmbeddedSubtitlesPresent'
+  | 'SkipSubtitlesIfAudioTrackMatches'
+  | 'RequirePerfectSubtitleMatch'
   | 'SaveSubtitlesWithMedia'
   | 'CollapseSingleItemFolders'
   | 'ForceCollapseSingleItemFolders'
@@ -335,13 +486,18 @@ interface VirtualFolderInfoDto extends Omit<SettingsVirtualFolderInfo, 'LibraryO
 interface SelectableMediaFolderDto extends SettingsSelectableMediaFolder {}
 
 const { t } = useTranslation();
-const { librariesApi } = useSettingsSdk();
+const { librariesApi, localizationApi } = useSettingsSdk();
 const libraries = ref<VirtualFolderInfoDto[]>([]);
 const selectableFolders = ref<SelectableMediaFolderDto[]>([]);
 const availableLibraryOptions = ref<SettingsLibraryOptionsResult>({});
+const cultureOptions = ref<SettingsCultureInfo[]>([]);
+const countryOptions = ref<SettingsCountryInfo[]>([]);
 const loading = ref(false);
 const errorMessage = ref('');
 const createDialog = ref(false);
+const createAdvanced = ref(false);
+const createPathDialog = ref(false);
+const lastAutoName = ref('');
 const collectionTypes = computed(() => [
   { title: t('movies'), value: 'movies' },
   { title: t('shows'), value: 'tvshows' },
@@ -351,11 +507,37 @@ const collectionTypes = computed(() => [
   { title: t('books'), value: 'books' },
   { title: t('mixedContent'), value: 'mixed' }
 ]);
+const collectionTypeDescriptions = computed<Record<string, string>>(() => ({
+  movies: '电影资料将按电影库方式整理和抓取元数据。',
+  tvshows: '电视剧资料将按剧集与季的结构整理。',
+  music: '音乐资料将启用音乐专辑、艺术家与歌词相关选项。',
+  musicvideos: '音乐视频资料会按视频媒体库方式整理。',
+  homevideos: '家庭视频资料适合个人录像和普通视频文件。',
+  books: '图书资料会按书籍媒体库方式整理。',
+  mixed: '混合内容库适合暂不区分媒体类型的文件夹。'
+}));
+const createCollectionTypeDescription = computed(() =>
+  collectionTypeDescriptions.value[createForm.value.collectionType] ?? ''
+);
+const selectablePathOptions = computed(() => selectableFolders.value.flatMap((folder) => {
+  const options: MediaPathInfoDto[] = [];
+
+  for (const subFolder of folder.SubFolders ?? []) {
+    options.push({
+      Path: subFolder.Path || subFolder.Id,
+      NetworkPath: null
+    });
+  }
+
+  return options.filter(pathInfo => pathInfo.Path);
+}));
 
 const createForm = ref({
   name: '',
   collectionType: 'movies',
-  pathsText: '',
+  pathInfos: [] as MediaPathInfoDto[],
+  path: '',
+  networkPath: '',
   libraryOptions: defaultLibraryOptions()
 });
 
@@ -368,6 +550,10 @@ const LibraryOptionsFields = defineComponent({
     collectionType: {
       type: String,
       required: true
+    },
+    advancedVisible: {
+      type: Boolean,
+      default: true
     }
   },
   emits: ['update:modelValue'],
@@ -390,6 +576,7 @@ const LibraryOptionsFields = defineComponent({
     const showTv = props.collectionType === 'tvshows';
     const showMovieLike = ['movies', 'tvshows', 'homevideos', 'musicvideos', 'mixed', ''].includes(props.collectionType);
     const showMusic = props.collectionType === 'music';
+    const showAdvanced = props.advancedVisible;
     const metadataSaverItems = computed(() => libraryOptionNames(availableLibraryOptions.value.MetadataSavers, props.modelValue.MetadataSavers));
     const metadataReaderItems = computed(() => libraryOptionNames(availableLibraryOptions.value.MetadataReaders, [
       ...props.modelValue.LocalMetadataReaderOrder,
@@ -397,6 +584,13 @@ const LibraryOptionsFields = defineComponent({
     ]));
     const subtitleFetcherItems = computed(() => libraryOptionNames(availableLibraryOptions.value.SubtitleFetchers, props.modelValue.DisabledSubtitleFetchers));
     const lyricsFetcherItems = computed(() => libraryOptionNames(availableLibraryOptions.value.LyricsFetchers, props.modelValue.DisabledLyricsFetchers));
+    const subtitleLanguageItems = computed(() => cultureOptions.value
+      .filter(culture => culture.ThreeLetterISOLanguageName)
+      .map(culture => ({
+        title: culture.DisplayName || culture.Name || culture.ThreeLetterISOLanguageName!,
+        value: culture.ThreeLetterISOLanguageName!.toLowerCase()
+      })));
+    const showSubtitleDownloads = showMovieLike && Boolean(availableLibraryOptions.value.SubtitleFetchers?.length);
     const optionalNumber = (key: keyof LibraryOptionsDto, label: string) => h(VTextField, {
       modelValue: props.modelValue[key] ?? '',
       label,
@@ -412,13 +606,27 @@ const LibraryOptionsFields = defineComponent({
 
     return () => h('div', { class: 'uno-mt-4' }, [
       h(VRow, {}, () => [
-        showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
-          modelValue: props.modelValue.PreferredMetadataLanguage,
-          label: t('metadataLanguage'),
-          density: 'comfortable',
-          variant: 'outlined',
-          'onUpdate:modelValue': (value: string) => update('PreferredMetadataLanguage', value || null)
-        })),
+        showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(
+          cultureOptions.value.length ? VSelect : VTextField,
+          cultureOptions.value.length
+            ? {
+              modelValue: props.modelValue.PreferredMetadataLanguage,
+              label: t('metadataLanguage'),
+              density: 'comfortable',
+              variant: 'outlined',
+              items: cultureOptions.value,
+              itemTitle: 'DisplayName',
+              itemValue: 'TwoLetterISOLanguageName',
+              'onUpdate:modelValue': (value: string) => update('PreferredMetadataLanguage', value || null)
+            }
+            : {
+              modelValue: props.modelValue.PreferredMetadataLanguage,
+              label: t('metadataLanguage'),
+              density: 'comfortable',
+              variant: 'outlined',
+              'onUpdate:modelValue': (value: string) => update('PreferredMetadataLanguage', value || null)
+            }
+        )),
         showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
           modelValue: props.modelValue.PreferredImageLanguage,
           label: t('preferredImageLanguage'),
@@ -426,13 +634,27 @@ const LibraryOptionsFields = defineComponent({
           variant: 'outlined',
           'onUpdate:modelValue': (value: string) => update('PreferredImageLanguage', value || null)
         })),
-        showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
-          modelValue: props.modelValue.MetadataCountryCode,
-          label: t('countryCode'),
-          density: 'comfortable',
-          variant: 'outlined',
-          'onUpdate:modelValue': (value: string) => update('MetadataCountryCode', value || null)
-        })),
+        showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(
+          countryOptions.value.length ? VSelect : VTextField,
+          countryOptions.value.length
+            ? {
+              modelValue: props.modelValue.MetadataCountryCode,
+              label: t('countryCode'),
+              density: 'comfortable',
+              variant: 'outlined',
+              items: countryOptions.value,
+              itemTitle: 'DisplayName',
+              itemValue: 'TwoLetterISORegionName',
+              'onUpdate:modelValue': (value: string) => update('MetadataCountryCode', value || null)
+            }
+            : {
+              modelValue: props.modelValue.MetadataCountryCode,
+              label: t('countryCode'),
+              density: 'comfortable',
+              variant: 'outlined',
+              'onUpdate:modelValue': (value: string) => update('MetadataCountryCode', value || null)
+            }
+        )),
         showTv && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
           modelValue: props.modelValue.SeasonZeroDisplayName,
           label: t('seasonZeroDisplayName'),
@@ -449,7 +671,7 @@ const LibraryOptionsFields = defineComponent({
           min: 0,
           'onUpdate:modelValue': (value: string) => update('AutomaticRefreshIntervalDays', Number(value) || 0)
         })),
-        showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
+        showAdvanced && showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
           modelValue: props.modelValue.PlaceholderMetadataRefreshIntervalDays,
           label: t('placeholderMetadataRefreshIntervalDays'),
           density: 'comfortable',
@@ -460,37 +682,37 @@ const LibraryOptionsFields = defineComponent({
         })),
         h(VCol, { cols: '12', md: '4' }, () => field('Enabled', t('enabled'))),
         props.collectionType === 'homevideos' && h(VCol, { cols: '12', md: '4' }, () => field('EnablePhotos', t('enablePhotos'))),
-        h(VCol, { cols: '12', md: '4' }, () => field('EnableRealtimeMonitor', t('realtimeMonitor'))),
-        h(VCol, { cols: '12', md: '4' }, () => field('CacheImages', t('cacheImages'))),
-        h(VCol, { cols: '12', md: '4' }, () => field('ExcludeFromSearch', t('excludeFromSearch'))),
-        h(VCol, { cols: '12', md: '4' }, () => field('IgnoreHiddenFiles', t('ignoreHiddenFiles'))),
+        showAdvanced && h(VCol, { cols: '12', md: '4' }, () => field('EnableRealtimeMonitor', t('realtimeMonitor'))),
+        showAdvanced && h(VCol, { cols: '12', md: '4' }, () => field('CacheImages', t('cacheImages'))),
+        showAdvanced && h(VCol, { cols: '12', md: '4' }, () => field('ExcludeFromSearch', t('excludeFromSearch'))),
+        showAdvanced && h(VCol, { cols: '12', md: '4' }, () => field('IgnoreHiddenFiles', t('ignoreHiddenFiles'))),
         showMetadata && h(VCol, { cols: '12', md: '4' }, () => field('EnableInternetProviders', t('downloadInternetMetadata'))),
-        showMetadata && h(VCol, { cols: '12', md: '4' }, () => field('DownloadImagesInAdvance', t('downloadImagesInAdvance'))),
+        showAdvanced && showMetadata && h(VCol, { cols: '12', md: '4' }, () => field('DownloadImagesInAdvance', t('downloadImagesInAdvance'))),
         props.collectionType !== 'photos' && h(VCol, { cols: '12', md: '4' }, () => field('SaveLocalMetadata', t('saveLocalMetadata'))),
-        props.collectionType !== 'photos' && h(VCol, { cols: '12', md: '4' }, () => field('SaveMetadataHidden', t('saveMetadataHidden'))),
-        props.collectionType !== 'photos' && h(VCol, { cols: '12', md: '4' }, () => field('SaveLocalThumbnailSets', t('saveLocalThumbnailSets'))),
-        showTv && h(VCol, { cols: '12', md: '4' }, () => field('ImportMissingEpisodes', t('importMissingEpisodes'))),
-        showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableAutomaticSeriesGrouping', t('automaticallyGroupSeries'))),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMarkerDetection', t('enableMarkerDetection'))),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMarkerDetectionDuringLibraryScan', t('enableMarkerDetectionDuringLibraryScan'))),
+        showAdvanced && props.collectionType !== 'photos' && h(VCol, { cols: '12', md: '4' }, () => field('SaveMetadataHidden', t('saveMetadataHidden'))),
+        showAdvanced && props.collectionType !== 'photos' && h(VCol, { cols: '12', md: '4' }, () => field('SaveLocalThumbnailSets', t('saveLocalThumbnailSets'))),
+        showAdvanced && showTv && h(VCol, { cols: '12', md: '4' }, () => field('ImportMissingEpisodes', t('importMissingEpisodes'))),
+        showAdvanced && showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableAutomaticSeriesGrouping', t('automaticallyGroupSeries'))),
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMarkerDetection', t('enableMarkerDetection'))),
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMarkerDetectionDuringLibraryScan', t('enableMarkerDetectionDuringLibraryScan'))),
         showChapters && h(VCol, { cols: '12', md: '4' }, () => field('EnableChapterImageExtraction', t('extractChapterImages'))),
-        showChapters && h(VCol, { cols: '12', md: '4' }, () => field('ExtractChapterImagesDuringLibraryScan', t('extractChaptersDuringScan'))),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('AutoGenerateChapters', t('autoGenerateChapters'))),
-        h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedTitles', t('useEmbeddedTitles'))),
-        showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedEpisodeInfos', t('useEmbeddedEpisodeInfo'))),
-        h(VCol, { cols: '12', md: '4' }, () => field('EnableArchiveMediaFiles', t('archiveMediaFiles'))),
-        showMusic && h(VCol, { cols: '12', md: '4' }, () => field('ImportPlaylists', t('importPlaylists'))),
-        showMusic && h(VCol, { cols: '12', md: '4' }, () => field('ShareEmbeddedMusicAlbumImages', t('shareEmbeddedMusicAlbumImages'))),
-        showMusic && h(VCol, { cols: '12', md: '4' }, () => field('EnableAudioResume', t('enableAudioResume'))),
-        showMusic && h(VCol, { cols: '12', md: '4' }, () => field('SaveLyricsWithMedia', t('saveLyricsWithMedia'))),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('SaveSubtitlesWithMedia', t('saveSubtitlesWithMedia'))),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('MergeTopLevelFolders', t('mergeTopLevelFolders'))),
-        h(VCol, { cols: '12', md: '4' }, () => field('CollapseSingleItemFolders', t('collapseSingleItemFolders'))),
-        h(VCol, { cols: '12', md: '4' }, () => field('ForceCollapseSingleItemFolders', t('forceCollapseSingleItemFolders'))),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('ImportCollections', t('importCollections'))),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMultiVersionByFiles', t('enableMultiVersionByFiles'))),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMultiVersionByMetadata', t('enableMultiVersionByMetadata'))),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMultiPartItems', t('enableMultiPartItems'))),
+        showAdvanced && showChapters && h(VCol, { cols: '12', md: '4' }, () => field('ExtractChapterImagesDuringLibraryScan', t('extractChaptersDuringScan'))),
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('AutoGenerateChapters', t('autoGenerateChapters'))),
+        showAdvanced && h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedTitles', t('useEmbeddedTitles'))),
+        showAdvanced && showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedEpisodeInfos', t('useEmbeddedEpisodeInfo'))),
+        showAdvanced && h(VCol, { cols: '12', md: '4' }, () => field('EnableArchiveMediaFiles', t('archiveMediaFiles'))),
+        showAdvanced && showMusic && h(VCol, { cols: '12', md: '4' }, () => field('ImportPlaylists', t('importPlaylists'))),
+        showAdvanced && showMusic && h(VCol, { cols: '12', md: '4' }, () => field('ShareEmbeddedMusicAlbumImages', t('shareEmbeddedMusicAlbumImages'))),
+        showAdvanced && showMusic && h(VCol, { cols: '12', md: '4' }, () => field('EnableAudioResume', t('enableAudioResume'))),
+        showAdvanced && showMusic && h(VCol, { cols: '12', md: '4' }, () => field('SaveLyricsWithMedia', t('saveLyricsWithMedia'))),
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('SaveSubtitlesWithMedia', t('saveSubtitlesWithMedia'))),
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('MergeTopLevelFolders', t('mergeTopLevelFolders'))),
+        showAdvanced && h(VCol, { cols: '12', md: '4' }, () => field('CollapseSingleItemFolders', t('collapseSingleItemFolders'))),
+        showAdvanced && h(VCol, { cols: '12', md: '4' }, () => field('ForceCollapseSingleItemFolders', t('forceCollapseSingleItemFolders'))),
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('ImportCollections', t('importCollections'))),
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMultiVersionByFiles', t('enableMultiVersionByFiles'))),
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMultiVersionByMetadata', t('enableMultiVersionByMetadata'))),
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMultiPartItems', t('enableMultiPartItems'))),
         h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
           modelValue: props.modelValue.MetadataSavers,
           label: t('metadataSavers'),
@@ -501,7 +723,7 @@ const LibraryOptionsFields = defineComponent({
           items: metadataSaverItems.value,
           'onUpdate:modelValue': (value: string[]) => update('MetadataSavers', value)
         })),
-        h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
+        showAdvanced && h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
           modelValue: props.modelValue.LocalMetadataReaderOrder,
           label: t('localMetadataReaderOrder'),
           density: 'comfortable',
@@ -511,7 +733,7 @@ const LibraryOptionsFields = defineComponent({
           items: metadataReaderItems.value,
           'onUpdate:modelValue': (value: string[]) => update('LocalMetadataReaderOrder', value)
         })),
-        h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
+        showAdvanced && h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
           modelValue: props.modelValue.DisabledLocalMetadataReaders,
           label: t('disabledLocalMetadataReaders'),
           density: 'comfortable',
@@ -521,7 +743,7 @@ const LibraryOptionsFields = defineComponent({
           items: metadataReaderItems.value,
           'onUpdate:modelValue': (value: string[]) => update('DisabledLocalMetadataReaders', value)
         })),
-        h(VCol, { cols: '12', md: '6' }, () => h(VCombobox, {
+        showAdvanced && h(VCol, { cols: '12', md: '6' }, () => h(VCombobox, {
           modelValue: props.modelValue.IgnoreFileExtensions,
           label: t('ignoreFileExtensions'),
           density: 'comfortable',
@@ -530,7 +752,7 @@ const LibraryOptionsFields = defineComponent({
           chips: true,
           'onUpdate:modelValue': (value: string[]) => update('IgnoreFileExtensions', value)
         })),
-        showMusic && h(VCol, { cols: '12', md: '6' }, () => h(VCombobox, {
+        showAdvanced && showMusic && h(VCol, { cols: '12', md: '6' }, () => h(VCombobox, {
           modelValue: props.modelValue.DisabledLyricsFetchers,
           label: t('disabledLyricsFetchers'),
           density: 'comfortable',
@@ -540,21 +762,351 @@ const LibraryOptionsFields = defineComponent({
           items: lyricsFetcherItems.value,
           'onUpdate:modelValue': (value: string[]) => update('DisabledLyricsFetchers', value)
         })),
-        showMovieLike && h(VCol, { cols: '12', md: '6' }, () => h(VCombobox, {
-          modelValue: props.modelValue.DisabledSubtitleFetchers,
-          label: t('disabledSubtitleFetchers'),
-          density: 'comfortable',
-          variant: 'outlined',
-          multiple: true,
-          chips: true,
-          items: subtitleFetcherItems.value,
-          'onUpdate:modelValue': (value: string[]) => update('DisabledSubtitleFetchers', value)
-        })),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => optionalNumber('MinResumePct', t('minResumePct'))),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => optionalNumber('MaxResumePct', t('maxResumePct'))),
-        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => optionalNumber('MinResumeDurationSeconds', t('minResumeDurationSeconds')))
-      ])
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => optionalNumber('MinResumePct', t('minResumePct'))),
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => optionalNumber('MaxResumePct', t('maxResumePct'))),
+        showAdvanced && showMovieLike && h(VCol, { cols: '12', md: '4' }, () => optionalNumber('MinResumeDurationSeconds', t('minResumeDurationSeconds')))
+      ]),
+      showSubtitleDownloads
+        ? h('div', { class: 'uno-mt-6 uno-space-y-4' }, [
+          h('div', { class: 'uno-text-base uno-font-medium' }, t('subtitleDownloads')),
+          h(VRow, {}, () => [
+            h(VCol, { cols: '12' }, () => h(VCombobox, {
+              modelValue: props.modelValue.SubtitleDownloadLanguages,
+              label: t('subtitleDownloadLanguages'),
+              density: 'comfortable',
+              variant: 'outlined',
+              multiple: true,
+              chips: true,
+              items: subtitleLanguageItems.value,
+              itemTitle: 'title',
+              itemValue: 'value',
+              'onUpdate:modelValue': (value: string[]) => update('SubtitleDownloadLanguages', value)
+            })),
+            h(VCol, { cols: '12', md: '4' }, () => field('RequirePerfectSubtitleMatch', t('requirePerfectSubtitleMatch'))),
+            showAdvanced && h(VCol, { cols: '12', md: '4' }, () => field('SkipSubtitlesIfAudioTrackMatches', t('skipSubtitlesIfAudioTrackMatches'))),
+            showAdvanced && h(VCol, { cols: '12', md: '4' }, () => field('SkipSubtitlesIfEmbeddedSubtitlesPresent', t('skipSubtitlesIfEmbeddedSubtitlesPresent'))),
+            showAdvanced && h(VCol, { cols: '12', md: '4' }, () => field('SaveSubtitlesWithMedia', t('saveSubtitlesWithMedia'))),
+            showAdvanced && h(VCol, { cols: '12', md: '8' }, () => h(VCombobox, {
+              modelValue: props.modelValue.DisabledSubtitleFetchers,
+              label: t('disabledSubtitleFetchers'),
+              density: 'comfortable',
+              variant: 'outlined',
+              multiple: true,
+              chips: true,
+              items: subtitleFetcherItems.value,
+              'onUpdate:modelValue': (value: string[]) => update('DisabledSubtitleFetchers', value)
+            }))
+          ])
+        ])
+        : null
     ]);
+  }
+});
+
+const LibraryTypeOptionsFields = defineComponent({
+  props: {
+    modelValue: {
+      type: Object as PropType<LibraryOptionsDto>,
+      required: true
+    },
+    advancedVisible: {
+      type: Boolean,
+      default: true
+    }
+  },
+  emits: ['update:modelValue'],
+  setup(props, { emit }) {
+    const imageOptionsDialog = ref(false);
+    const imageOptionsType = ref<string | null>(null);
+    const updateTypeOptions = (nextTypeOptions: SettingsLibraryItemTypeOptions[]): void => {
+      emit('update:modelValue', {
+        ...props.modelValue,
+        TypeOptions: nextTypeOptions
+      });
+    };
+
+    const reorder = (
+      items: string[],
+      index: number,
+      direction: -1 | 1
+    ): string[] => {
+      const next = [...items];
+      const target = index + direction;
+
+      if (target < 0 || target >= next.length) {
+        return next;
+      }
+
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    };
+
+    const setChecked = (
+      availableType: SettingsLibraryAvailableTypeOptions,
+      field: 'MetadataFetchers' | 'ImageFetchers',
+      name: string,
+      checked: boolean
+    ): void => {
+      const type = availableType.Type || 'default';
+      const next = normalizeTypeOptions(props.modelValue.TypeOptions, availableLibraryOptions.value.TypeOptions);
+      const target = ensureLibraryTypeOption({ ...props.modelValue, TypeOptions: next } as LibraryOptionsDto, type);
+      const values = new Set((target[field] ?? []) as string[]);
+
+      if (checked) {
+        values.add(name);
+      } else {
+        values.delete(name);
+      }
+
+      target[field] = [...values];
+      updateTypeOptions(next);
+    };
+
+    const move = (
+      availableType: SettingsLibraryAvailableTypeOptions,
+      field: 'MetadataFetcherOrder' | 'ImageFetcherOrder',
+      index: number,
+      direction: -1 | 1
+    ): void => {
+      const type = availableType.Type || 'default';
+      const next = normalizeTypeOptions(props.modelValue.TypeOptions, availableLibraryOptions.value.TypeOptions);
+      const target = ensureLibraryTypeOption({ ...props.modelValue, TypeOptions: next } as LibraryOptionsDto, type);
+      target[field] = reorder([...(target[field] ?? [])], index, direction);
+      updateTypeOptions(next);
+    };
+
+    const updateImageOptions = (type: string, nextImageOptions: SettingsLibraryImageOption[]): void => {
+      const next = normalizeTypeOptions(props.modelValue.TypeOptions, availableLibraryOptions.value.TypeOptions);
+      const target = ensureLibraryTypeOption({ ...props.modelValue, TypeOptions: next } as LibraryOptionsDto, type);
+      target.ImageOptions = nextImageOptions;
+      updateTypeOptions(next);
+    };
+
+    const itemsForType = (
+      availableType: SettingsLibraryAvailableTypeOptions,
+      field: 'MetadataFetchers' | 'ImageFetchers',
+      orderField: 'MetadataFetcherOrder' | 'ImageFetcherOrder'
+    ): Array<{ name: string; checked: boolean }> => {
+      const type = availableType.Type || 'default';
+      const normalized = normalizeTypeOptions(props.modelValue.TypeOptions, availableLibraryOptions.value.TypeOptions);
+      const target = normalized.find(option => (option.Type || 'default') === type);
+      const optionMap = new Map(
+        typeOptionNames(field === 'MetadataFetchers' ? availableType.MetadataFetchers : availableType.ImageFetchers)
+          .map(name => [name, name])
+      );
+      const ordered = target?.[orderField]?.filter((name): name is string => optionMap.has(name)) ?? [];
+      const rest = [...optionMap.keys()].filter(name => !ordered.includes(name));
+      const names = [...ordered, ...rest];
+      const checkedValues = new Set((target?.[field] ?? []) as string[]);
+
+      return names.map(name => ({
+        name,
+        checked: checkedValues.has(name)
+      }));
+    };
+
+    const openImageOptions = (type: string): void => {
+      imageOptionsType.value = type;
+      imageOptionsDialog.value = true;
+    };
+
+    return () => {
+      const types = availableLibraryOptions.value.TypeOptions ?? [];
+      const selectedType = types.find(type => (type.Type || 'default') === (imageOptionsType.value || 'default'));
+      const selectedTypeOptions = selectedType
+        ? normalizeImageOptions(
+          ensureLibraryTypeOption(
+            { ...props.modelValue, TypeOptions: normalizeTypeOptions(props.modelValue.TypeOptions, availableLibraryOptions.value.TypeOptions) } as LibraryOptionsDto,
+            selectedType.Type || 'default'
+          ).ImageOptions,
+          selectedType
+        )
+        : [];
+
+      if (!types.length) {
+        return null;
+      }
+
+      return h('div', { class: 'uno-mt-6 uno-space-y-4' }, [
+        ...types.map((availableType) => {
+          const metadataItems = itemsForType(availableType, 'MetadataFetchers', 'MetadataFetcherOrder');
+          const imageItems = itemsForType(availableType, 'ImageFetchers', 'ImageFetcherOrder');
+
+          return h('div', {
+            class: 'uno-border uno-rounded uno-p-4'
+          }, [
+            h('div', { class: 'uno-mb-3 uno-text-sm uno-font-medium' }, availableType.Type || t('contentType')),
+            metadataItems.length
+              ? h('div', { class: 'uno-mb-4' }, [
+                h('div', { class: 'uno-mb-2 uno-text-sm text-medium-emphasis' }, t('metadataFetchers')),
+                h(VList, { density: 'compact', class: 'uno-border uno-rounded' }, () =>
+                  metadataItems.map((item, index) => h(VListItem, {
+                    key: `metadata-${availableType.Type}-${item.name}`,
+                    title: item.name
+                  }, {
+                    prepend: () => h(VSwitch, {
+                      modelValue: item.checked,
+                      color: 'primary',
+                      inset: true,
+                      hideDetails: true,
+                      'onUpdate:modelValue': (value: boolean) =>
+                        setChecked(availableType, 'MetadataFetchers', item.name, value)
+                    }),
+                    append: () => h('div', { class: 'uno-flex uno-gap-1' }, [
+                      h(VBtn, {
+                        size: 'small',
+                        variant: 'text',
+                        icon: 'mdi-arrow-up',
+                        disabled: index === 0,
+                        onClick: () => move(availableType, 'MetadataFetcherOrder', index, -1)
+                      }),
+                      h(VBtn, {
+                        size: 'small',
+                        variant: 'text',
+                        icon: 'mdi-arrow-down',
+                        disabled: index === metadataItems.length - 1,
+                        onClick: () => move(availableType, 'MetadataFetcherOrder', index, 1)
+                      })
+                    ])
+                  }))
+                )
+              ])
+              : null,
+            props.advancedVisible && imageItems.length
+              ? h('div', [
+                h('div', { class: 'uno-mb-2 uno-flex uno-items-center uno-justify-between uno-gap-2' }, [
+                  h('div', { class: 'uno-text-sm text-medium-emphasis' }, t('imageFetchers')),
+                  h(VBtn, {
+                    size: 'small',
+                    variant: 'outlined',
+                    disabled: !(availableType.SupportedImageTypes?.length),
+                    onClick: () => openImageOptions(availableType.Type || 'default')
+                  }, () => t('fetcherSettings'))
+                ]),
+                h(VList, { density: 'compact', class: 'uno-border uno-rounded' }, () =>
+                  imageItems.map((item, index) => h(VListItem, {
+                    key: `image-${availableType.Type}-${item.name}`,
+                    title: item.name,
+                    subtitle: availableType.SupportedImageTypes?.join(', ') || undefined
+                  }, {
+                    prepend: () => h(VSwitch, {
+                      modelValue: item.checked,
+                      color: 'primary',
+                      inset: true,
+                      hideDetails: true,
+                      'onUpdate:modelValue': (value: boolean) =>
+                        setChecked(availableType, 'ImageFetchers', item.name, value)
+                    }),
+                    append: () => h('div', { class: 'uno-flex uno-gap-1' }, [
+                      h(VBtn, {
+                        size: 'small',
+                        variant: 'text',
+                        icon: 'mdi-arrow-up',
+                        disabled: index === 0,
+                        onClick: () => move(availableType, 'ImageFetcherOrder', index, -1)
+                      }),
+                      h(VBtn, {
+                        size: 'small',
+                        variant: 'text',
+                        icon: 'mdi-arrow-down',
+                        disabled: index === imageItems.length - 1,
+                        onClick: () => move(availableType, 'ImageFetcherOrder', index, 1)
+                      })
+                    ])
+                  }))
+                )
+              ])
+              : null
+          ]);
+        }),
+        h(VDialog, {
+          modelValue: imageOptionsDialog.value,
+          maxWidth: '760',
+          'onUpdate:modelValue': (value: boolean) => {
+            imageOptionsDialog.value = value;
+            if (!value) {
+              imageOptionsType.value = null;
+            }
+          }
+        }, () => selectedType ? h(VCard, {}, {
+          default: () => [
+            h(VCardTitle, {}, () => t('imageFetchOptions')),
+            h(VCardText, {}, () => [
+              h(VRow, {}, () => selectedTypeOptions.map((option) => {
+                const imageType = option.Type || '';
+                const title = imageTypeLabel(imageType);
+                const isBackdrop = imageType === 'Backdrop';
+                const isScreenshot = imageType === 'Screenshot';
+
+                return h(VCol, { cols: '12', md: isBackdrop || isScreenshot ? '12' : '6' }, () => h('div', {
+                  class: 'uno-border uno-rounded uno-p-4'
+                }, [
+                  h(VSwitch, {
+                    modelValue: Number(option.Limit ?? 0) > 0,
+                    color: 'primary',
+                    inset: true,
+                    label: title,
+                    'onUpdate:modelValue': (value: boolean) => {
+                      updateImageOptions(selectedType.Type || 'default', selectedTypeOptions.map(item =>
+                        (item.Type || '') === imageType
+                          ? { ...item, Limit: value ? Math.max(1, Number(item.Limit ?? 1)) : 0 }
+                          : item
+                      ));
+                    }
+                  }),
+                  (isBackdrop || isScreenshot) && Number(option.Limit ?? 0) > 0
+                    ? h(VRow, { class: 'uno-mt-2' }, () => [
+                      h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
+                        modelValue: option.Limit ?? 0,
+                        label: isBackdrop ? t('maxBackdropsPerItem') : t('maxScreenshotsPerItem'),
+                        density: 'comfortable',
+                        variant: 'outlined',
+                        type: 'number',
+                        min: 0,
+                        'onUpdate:modelValue': (value: string) => {
+                          const numericValue = Math.max(0, Number(value) || 0);
+                          updateImageOptions(selectedType.Type || 'default', selectedTypeOptions.map(item =>
+                            (item.Type || '') === imageType
+                              ? { ...item, Limit: numericValue }
+                              : item
+                          ));
+                        }
+                      })),
+                      h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
+                        modelValue: option.MinWidth ?? 0,
+                        label: isBackdrop ? t('minBackdropDownloadWidth') : t('minScreenshotDownloadWidth'),
+                        density: 'comfortable',
+                        variant: 'outlined',
+                        type: 'number',
+                        min: 0,
+                        'onUpdate:modelValue': (value: string) => {
+                          const numericValue = Math.max(0, Number(value) || 0);
+                          updateImageOptions(selectedType.Type || 'default', selectedTypeOptions.map(item =>
+                            (item.Type || '') === imageType
+                              ? { ...item, MinWidth: numericValue }
+                              : item
+                          ));
+                        }
+                      }))
+                    ])
+                    : null
+                ]));
+              }))
+            ]),
+            h(VCardActions, {}, () => [
+              h(VSpacer),
+              h(VBtn, {
+                variant: 'text',
+                onClick: () => {
+                  imageOptionsDialog.value = false;
+                  imageOptionsType.value = null;
+                }
+              }, () => t('close'))
+            ])
+          ]
+        }) : null)
+      ]);
+    };
   }
 });
 
@@ -565,6 +1117,196 @@ function libraryOptionNames(options: SettingsLibraryOptionInfo[] | undefined, fa
   ];
 
   return [...new Set(values.filter(Boolean))];
+}
+
+function typeOptionNames(options: SettingsLibraryOptionInfo[] | undefined): string[] {
+  return options?.map(option => option.Name).filter((value): value is string => Boolean(value)) ?? [];
+}
+
+function imageTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    Primary: t('downloadPrimaryImage'),
+    Art: t('downloadArtImage'),
+    BoxRear: t('downloadBackImage'),
+    Banner: t('downloadBannerImage'),
+    Box: t('downloadBoxImage'),
+    Disc: t('downloadDiscImage'),
+    Logo: t('downloadLogoImage'),
+    Menu: t('downloadMenuImage'),
+    Thumb: t('downloadThumbImage'),
+    Backdrop: t('downloadBackdropImage'),
+    Screenshot: t('downloadScreenshotImage')
+  };
+
+  return labels[type] ?? type;
+}
+
+function normalizeImageOptions(
+  imageOptions: SettingsLibraryImageOption[] | undefined,
+  availableType: SettingsLibraryAvailableTypeOptions
+): SettingsLibraryImageOption[] {
+  const supportedTypes = availableType.SupportedImageTypes ?? [];
+  const defaultOptions = availableType.DefaultImageOptions ?? [];
+  const existing = new Map(
+    (imageOptions ?? []).map(option => [option.Type || '', { ...option }])
+  );
+
+  return supportedTypes.map((type) => {
+    const current = existing.get(type);
+    const fallback = defaultOptions.find((option): option is SettingsLibraryImageOption =>
+      typeof option === 'object' && option !== null && 'Type' in option && option.Type === type
+    );
+
+    return {
+      Type: type,
+      Limit: current?.Limit ?? fallback?.Limit ?? (type === 'Primary' ? 1 : 0),
+      MinWidth: current?.MinWidth ?? fallback?.MinWidth ?? 0
+    };
+  });
+}
+
+function ensureLibraryTypeOption(
+  options: LibraryOptionsDto,
+  type: string
+): SettingsLibraryItemTypeOptions {
+  const normalized = type || 'default';
+  options.TypeOptions ??= [];
+  let result = options.TypeOptions.find(option => (option.Type || 'default') === normalized);
+
+  if (!result) {
+    result = {
+      Type: normalized,
+      MetadataFetchers: [],
+      MetadataFetcherOrder: [],
+      ImageFetchers: [],
+      ImageFetcherOrder: [],
+      ImageOptions: []
+    };
+    options.TypeOptions.push(result);
+  }
+
+  result.MetadataFetchers ??= [];
+  result.MetadataFetcherOrder ??= [];
+  result.ImageFetchers ??= [];
+  result.ImageFetcherOrder ??= [];
+  result.ImageOptions ??= [];
+  return result;
+}
+
+function normalizeTypeOptions(
+  options: SettingsLibraryItemTypeOptions[] | undefined,
+  available: SettingsLibraryAvailableTypeOptions[] | undefined
+): SettingsLibraryItemTypeOptions[] {
+  const existing = [...(options ?? [])].map(option => ({
+    ...option,
+    MetadataFetchers: [...(option.MetadataFetchers ?? [])],
+    MetadataFetcherOrder: [...(option.MetadataFetcherOrder ?? [])],
+    ImageFetchers: [...(option.ImageFetchers ?? [])],
+    ImageFetcherOrder: [...(option.ImageFetcherOrder ?? [])],
+    ImageOptions: [...(option.ImageOptions ?? [])]
+  }));
+
+  for (const availableOption of available ?? []) {
+    const type = availableOption.Type || 'default';
+    const target = existing.find(option => (option.Type || 'default') === type) ?? (() => {
+      const created: SettingsLibraryItemTypeOptions = {
+        Type: type,
+        MetadataFetchers: [],
+        MetadataFetcherOrder: [],
+        ImageFetchers: [],
+        ImageFetcherOrder: [],
+        ImageOptions: []
+      };
+      existing.push(created);
+      return created;
+    })();
+
+    const metadataNames = typeOptionNames(availableOption.MetadataFetchers);
+    const imageNames = typeOptionNames(availableOption.ImageFetchers);
+
+    if (!target.MetadataFetcherOrder?.length) {
+      target.MetadataFetcherOrder = metadataNames;
+    }
+    if (!target.ImageFetcherOrder?.length) {
+      target.ImageFetcherOrder = imageNames;
+    }
+    if (!target.MetadataFetchers?.length) {
+      target.MetadataFetchers = metadataNames.filter(name =>
+        availableOption.MetadataFetchers?.find(option => option.Name === name)?.DefaultEnabled ?? true
+      );
+    }
+    if (!target.ImageFetchers?.length) {
+      target.ImageFetchers = imageNames.filter(name =>
+        availableOption.ImageFetchers?.find(option => option.Name === name)?.DefaultEnabled ?? true
+      );
+    }
+  }
+
+  return existing;
+}
+
+function appendCreatePath(pathInfo: MediaPathInfoDto): void {
+  const path = pathInfo.Path.trim();
+
+  if (!path) {
+    return;
+  }
+
+  if (createForm.value.pathInfos.some(item => item.Path.toLowerCase() === path.toLowerCase())) {
+    return;
+  }
+
+  createForm.value.pathInfos.push({
+    Path: path,
+    NetworkPath: pathInfo.NetworkPath || null
+  });
+}
+
+function removeCreatePath(path: string): void {
+  createForm.value.pathInfos = createForm.value.pathInfos.filter(item => item.Path !== path);
+}
+
+function commitCreatePath(): void {
+  appendCreatePath({
+    Path: createForm.value.path,
+    NetworkPath: createForm.value.networkPath || null
+  });
+  createForm.value.path = '';
+  createForm.value.networkPath = '';
+  createPathDialog.value = false;
+}
+
+function chooseSuggestedCreatePath(pathInfo: MediaPathInfoDto): void {
+  appendCreatePath(pathInfo);
+  createPathDialog.value = false;
+}
+
+function resetCreateForm(): void {
+  createForm.value = {
+    name: '',
+    collectionType: 'movies',
+    pathInfos: [],
+    path: '',
+    networkPath: '',
+    libraryOptions: defaultLibraryOptions(availableLibraryOptions.value.DefaultLibraryOptions)
+  };
+  createAdvanced.value = false;
+  lastAutoName.value = '';
+}
+
+async function refreshCreateAvailableOptions(): Promise<void> {
+  availableLibraryOptions.value = await librariesApi.getLibrariesAvailableoptions({
+    LibraryContentType: createForm.value.collectionType === 'mixed' ? '' : createForm.value.collectionType,
+    IsNewLibrary: true
+  });
+
+  createForm.value.libraryOptions = normalizeOptions(createForm.value.libraryOptions, createForm.value.pathInfos.map(path => path.Path));
+}
+
+async function openCreateDialog(): Promise<void> {
+  resetCreateForm();
+  createDialog.value = true;
+  await refreshCreateAvailableOptions();
 }
 
 function defaultLibraryOptions(base?: Partial<SettingsLibraryOptions>): LibraryOptionsDto {
@@ -607,6 +1349,11 @@ function defaultLibraryOptions(base?: Partial<SettingsLibraryOptions>): LibraryO
     DisabledLyricsFetchers: [],
     SaveLyricsWithMedia: false,
     DisabledSubtitleFetchers: [],
+    SubtitleFetcherOrder: [],
+    SubtitleDownloadLanguages: [],
+    SkipSubtitlesIfEmbeddedSubtitlesPresent: false,
+    SkipSubtitlesIfAudioTrackMatches: false,
+    RequirePerfectSubtitleMatch: false,
     SaveSubtitlesWithMedia: false,
     CollapseSingleItemFolders: false,
     ForceCollapseSingleItemFolders: false,
@@ -631,6 +1378,7 @@ function normalizeOptions(options: Partial<LibraryOptionsDto> | undefined, locat
   return {
     ...defaults,
     ...options,
+    TypeOptions: normalizeTypeOptions(options?.TypeOptions, availableLibraryOptions.value.TypeOptions),
     PathInfos: pathInfos.map(pathInfo => ({
       Path: pathInfo.Path,
       NetworkPath: pathInfo.NetworkPath || null
@@ -647,6 +1395,19 @@ function normalizeLibrary(library: Omit<VirtualFolderInfoDto, '_draftName' | '_n
     LibraryOptions: normalizeOptions(library.LibraryOptions, library.Locations)
   };
 }
+
+watch(() => createForm.value.collectionType, async (value) => {
+  const title = collectionTypes.value.find(item => item.value === value)?.title ?? '';
+
+  if (!createForm.value.name || createForm.value.name === lastAutoName.value) {
+    createForm.value.name = title;
+    lastAutoName.value = title;
+  }
+
+  if (createDialog.value) {
+    await refreshCreateAvailableOptions();
+  }
+});
 
 function formatLocations(pathInfos: MediaPathInfoDto[]): string {
   return pathInfos.map(pathInfo => pathInfo.Path).filter(Boolean).join(' | ');
@@ -673,14 +1434,18 @@ async function loadLibraries(): Promise<void> {
   errorMessage.value = '';
 
   try {
-    const [virtualFolders, mediaFolders, availableOptions] = await Promise.all([
+    const [virtualFolders, mediaFolders, availableOptions, cultures, countries] = await Promise.all([
       librariesApi.getLibraryVirtualfoldersQuery(),
       librariesApi.getLibrarySelectablemediafolders(),
-      librariesApi.getLibrariesAvailableoptions()
+      librariesApi.getLibrariesAvailableoptions(),
+      localizationApi.getCultures(),
+      localizationApi.getCountries()
     ]);
 
     availableLibraryOptions.value = availableOptions;
-    if (!createForm.value.name && !createForm.value.pathsText) {
+    cultureOptions.value = cultures;
+    countryOptions.value = countries;
+    if (!createForm.value.name && !createForm.value.pathInfos.length) {
       createForm.value.libraryOptions = defaultLibraryOptions(availableOptions.DefaultLibraryOptions);
     }
     libraries.value = virtualFolders.map(normalizeLibrary);
@@ -690,6 +1455,8 @@ async function loadLibraries(): Promise<void> {
     libraries.value = [];
     selectableFolders.value = [];
     availableLibraryOptions.value = {};
+    cultureOptions.value = [];
+    countryOptions.value = [];
     errorMessage.value = t('failedToLoadLibraries');
   } finally {
     loading.value = false;
@@ -792,7 +1559,7 @@ async function removeLibrary(library: VirtualFolderInfoDto): Promise<void> {
 }
 
 async function createLibrary(): Promise<void> {
-  const pathInfos = parsePathInfos(createForm.value.pathsText);
+  const pathInfos = createForm.value.pathInfos;
 
   if (!createForm.value.name.trim() || !pathInfos.length) {
     useSnackbar(t('provideNameAndPath'), 'error');
@@ -813,12 +1580,7 @@ async function createLibrary(): Promise<void> {
     });
 
     createDialog.value = false;
-    createForm.value = {
-      name: '',
-      collectionType: 'movies',
-      pathsText: '',
-      libraryOptions: defaultLibraryOptions(availableLibraryOptions.value.DefaultLibraryOptions)
-    };
+    resetCreateForm();
     useSnackbar(t('libraryCreated'), 'success');
     await loadLibraries();
     await refreshAllLibraries();

@@ -798,3 +798,20 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - 媒体库页对集合类型做了基础分流：音乐库才显示播放列表/专辑图片/歌词相关项，影视类库显示片头片尾标记、字幕、多版本与合集相关项，避免把明显不适用的 Emby 选项全部平铺到所有库类型。
 - `frontend/packages/i18n/strings/en.json` 与 `zh-CN.json` 已补齐上述新字段对应的设置页文案，确保这些新放开的 Emby 参数在中英文界面下都不会回落成硬编码或空 key。
 - 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`npm.cmd exec vite build -- --configLoader runner` 通过。当前这仍是本地代码与构建验证，线上环境需要重新部署后才会看到这些新字段。
+
+## 2026-04-22 添加媒体库创建器对齐 Emby Web（五十五）
+- 对照 `模板项目/Emby模板/MediaBrowser.WebDashboard/dashboard-ui/components/medialibrarycreator/*`、`medialibraryeditor/*` 与 `libraryoptionseditor/*` 审计发现，当前项目的 `settings/libraries.vue` 创建流程此前还是“单个大表单 + 路径文本框”的简化版，和 Emby Web 原始逻辑差异较大。Emby 原始流程是专门的创建器弹窗：内容类型先行、按类型刷新 `Libraries/AvailableOptions`、路径列表独立管理、目录选择器入口、高级设置折叠、LibraryOptions 区块按内容类型动态显隐。
+- 这一轮已把当前前端创建逻辑拉回到 Emby 风格的创建器形态：`frontend/packages/frontend/src/pages/settings/libraries.vue` 的“添加媒体库”按钮现在打开专门创建弹窗，顶部提供“显示高级设置”开关；内容类型切换会自动填充建议显示名，并即时按 `LibraryContentType + IsNewLibrary=true` 重新请求 `/Libraries/AvailableOptions`。
+- 路径录入不再是单个多行文本框，而是改成“路径列表 + 添加路径弹窗 + 可选择的媒体文件夹快捷选择”。添加路径弹窗支持手动输入 `folderPath / networkPath`，也支持直接从 `/Library/SelectableMediaFolders` 返回的可选文件夹列表里一键加入，整体结构贴近 Emby 创建器里的 folder list 与 add folder 入口。
+- 前端 `use-settings-sdk.ts` 新增 `localizationApi.getCultures()`、`localizationApi.getCountries()`，并把 `librariesApi.getLibrariesAvailableoptions()` 扩展为支持 `LibraryContentType` 与 `IsNewLibrary` 参数；后端 `backend/src/routes/admin.rs` / `backend/src/models.rs` 也同步接受这组查询参数，保证创建器按 EmbySDK 方式传参时不会落到不兼容分支。
+- `LibraryOptionsFields` 现已支持 `advancedVisible`，因此创建器弹窗在默认状态下只展示更接近 Emby 原版“基础可见”的参数，打开高级设置后才展开实时监控、缓存图片、片头片尾标记、多版本、合集、文件夹折叠等扩展项；编辑现有媒体库时仍维持完整可见，避免把现有管理能力反而藏住。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过，`npm.cmd exec vite build -- --configLoader runner` 通过。当前这轮已经显著拉近了“添加媒体库”的 UI 与交互，但还没有完全复刻 Emby `libraryoptionseditor` 里的 `TypeOptions` 元数据抓取器/图片抓取器排序与图片选项子弹层；如果要做到更接近 1:1，下一轮应继续补这部分动态扩展编辑器。
+
+## 2026-04-22 添加媒体库动态扩展编辑器继续对齐 Emby Web（五十六）
+- 继续对照 `模板项目/Emby模板/MediaBrowser.WebDashboard/dashboard-ui/components/libraryoptionseditor/libraryoptionseditor.js` 与 `imageoptionseditor/*`，把创建器里此前仍缺的两段 Emby 风格链路补深：字幕下载设置和按媒体类型的图片抓取选项弹窗。
+- 后端 `backend/src/models.rs` 的 `LibraryOptionsDto` 现已显式补齐原先只靠 `flatten` 暂存的字幕下载相关字段：`SubtitleFetcherOrder`、`SubtitleDownloadLanguages`、`SkipSubtitlesIfEmbeddedSubtitlesPresent`、`SkipSubtitlesIfAudioTrackMatches`、`RequirePerfectSubtitleMatch`。这样前端即使不依赖兼容兜底，也能按 EmbySDK 字段名稳定提交和回读。
+- 前端 `frontend/packages/frontend/src/composables/use-settings-sdk.ts` 同步扩展了 `SettingsLibraryOptions` 与 `SettingsLibraryItemTypeOptions`，新增字幕下载相关字段以及 `SettingsLibraryImageOption`，不再把 `TypeOptions.ImageOptions` 继续留在弱类型 `unknown[]` 里。
+- `frontend/packages/frontend/src/pages/settings/libraries.vue` 里的 `LibraryOptionsFields` 现在新增了更接近 Emby `HeaderSubtitleDownloads` 的字幕区块：当 `/Libraries/AvailableOptions` 返回 `SubtitleFetchers` 时，会显示字幕下载语言、完全匹配、音轨匹配跳过、内嵌字幕跳过、字幕随媒体保存以及禁用抓取器等字段；创建器默认仍遵循 Emby 的高级区块显隐逻辑。
+- 同文件的 `LibraryTypeOptionsFields` 继续向 Emby `renderMetadataFetchers/renderImageFetchers/showImageOptionsForType` 靠拢：元数据抓取器和图片抓取器标题已改为 i18n 文案，图片抓取器在高级模式下会出现“抓取器设置”按钮，并弹出独立图片抓取选项对话框，可按 `SupportedImageTypes` 配置 Primary/Art/Backdrop/Screenshot 等图片类型的启用状态、背景图数量、截图数量及最小下载宽度。
+- `frontend/packages/i18n/strings/en.json` 与 `zh-CN.json` 已补充这轮新增的字幕下载、抓取器设置、图片抓取选项相关文案，避免新增 UI 回退成英文硬编码。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`npm.cmd exec vite build -- --configLoader runner` 通过。当前仍有一个已知差距：后端 `/Libraries/AvailableOptions` 里的 `SubtitleFetchers` / `LyricsFetchers` 目前还是按项目实际能力返回，未为了“像 Emby”伪造未实现抓取器，因此字幕下载区块只有在后端真实声明可用抓取器时才会显示。

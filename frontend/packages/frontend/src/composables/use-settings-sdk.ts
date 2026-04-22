@@ -95,6 +95,11 @@ export type SettingsLibraryOptions = {
   DisabledLyricsFetchers?: string[];
   SaveLyricsWithMedia?: boolean;
   DisabledSubtitleFetchers?: string[];
+  SubtitleFetcherOrder?: string[];
+  SubtitleDownloadLanguages?: string[];
+  SkipSubtitlesIfEmbeddedSubtitlesPresent?: boolean;
+  SkipSubtitlesIfAudioTrackMatches?: boolean;
+  RequirePerfectSubtitleMatch?: boolean;
   SaveSubtitlesWithMedia?: boolean;
   CollapseSingleItemFolders?: boolean;
   ForceCollapseSingleItemFolders?: boolean;
@@ -105,6 +110,7 @@ export type SettingsLibraryOptions = {
   MinResumePct?: number | null;
   MaxResumePct?: number | null;
   MinResumeDurationSeconds?: number | null;
+  TypeOptions?: SettingsLibraryItemTypeOptions[];
   PathInfos?: SettingsMediaPathInfo[];
 } & Record<string, unknown>;
 
@@ -120,8 +126,31 @@ export type SettingsLibraryOptionsResult = {
   MetadataReaders?: SettingsLibraryOptionInfo[];
   SubtitleFetchers?: SettingsLibraryOptionInfo[];
   LyricsFetchers?: SettingsLibraryOptionInfo[];
-  TypeOptions?: unknown[];
+  TypeOptions?: SettingsLibraryAvailableTypeOptions[];
   DefaultLibraryOptions?: SettingsLibraryOptions;
+};
+
+export type SettingsLibraryAvailableTypeOptions = {
+  Type?: string;
+  MetadataFetchers?: SettingsLibraryOptionInfo[];
+  ImageFetchers?: SettingsLibraryOptionInfo[];
+  SupportedImageTypes?: string[];
+  DefaultImageOptions?: unknown[];
+};
+
+export type SettingsLibraryItemTypeOptions = {
+  Type?: string;
+  MetadataFetchers?: string[];
+  MetadataFetcherOrder?: string[];
+  ImageFetchers?: string[];
+  ImageFetcherOrder?: string[];
+  ImageOptions?: SettingsLibraryImageOption[];
+};
+
+export type SettingsLibraryImageOption = {
+  Type?: string;
+  Limit?: number | string;
+  MinWidth?: number | string;
 };
 
 export type SettingsVirtualFolderInfo = {
@@ -143,6 +172,19 @@ export type SettingsSelectableMediaFolder = {
     IsUserAccessConfigurable?: boolean;
   }>;
   IsUserAccessConfigurable?: boolean;
+};
+
+export type SettingsCultureInfo = {
+  DisplayName?: string;
+  Name?: string;
+  TwoLetterISOLanguageName?: string;
+  ThreeLetterISOLanguageName?: string;
+};
+
+export type SettingsCountryInfo = {
+  DisplayName?: string;
+  Name?: string;
+  TwoLetterISORegionName?: string;
 };
 
 export type SettingsTaskInfo = {
@@ -297,8 +339,13 @@ export function useSettingsSdk() {
 
       return Array.isArray(data) ? data : data.Items ?? [];
     },
-    getLibrariesAvailableoptions: async (): Promise<SettingsLibraryOptionsResult> =>
-      ((await sdkAxios().get<SettingsLibraryOptionsResult>('/Libraries/AvailableOptions')).data ?? {}),
+    getLibrariesAvailableoptions: async (params?: {
+      LibraryContentType?: string;
+      IsNewLibrary?: boolean;
+    }): Promise<SettingsLibraryOptionsResult> =>
+      ((await sdkAxios().get<SettingsLibraryOptionsResult>('/Libraries/AvailableOptions', {
+        params
+      })).data ?? {}),
     postLibraryRefresh: () =>
       sdkAxios().post('/Library/Refresh'),
     postLibraryVirtualfolders: (body: {
@@ -344,6 +391,13 @@ export function useSettingsSdk() {
       sdkAxios().post('/Library/VirtualFolders/Delete', body, {
         params: body
       })
+  };
+
+  const localizationApi = {
+    getCultures: async (): Promise<SettingsCultureInfo[]> =>
+      ((await sdkAxios().get<SettingsCultureInfo[]>('/Localization/Cultures')).data ?? []),
+    getCountries: async (): Promise<SettingsCountryInfo[]> =>
+      ((await sdkAxios().get<SettingsCountryInfo[]>('/Localization/Countries')).data ?? [])
   };
 
   const scheduledTasksApi = {
@@ -434,6 +488,7 @@ export function useSettingsSdk() {
     apiKeysApi,
     sessionsApi,
     librariesApi,
+    localizationApi,
     scheduledTasksApi,
     pluginsApi,
     transcodingApi,

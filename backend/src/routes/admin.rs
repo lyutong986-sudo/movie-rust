@@ -3,7 +3,7 @@ use crate::{
     error::AppError,
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, LibraryMediaFolderDto,
-        LibraryOptionInfoDto, LibraryOptionsResultDto, LibrarySubFolderDto, MediaPathDto, ScanSummary, UpdateLibraryOptionsDto,
+        LibraryAvailableOptionsQuery, LibraryOptionInfoDto, LibraryOptionsResultDto, LibrarySubFolderDto, LibraryTypeOptionsDto, MediaPathDto, ScanSummary, UpdateLibraryOptionsDto,
         RemoveMediaPathDto, RemoveVirtualFolderDto, UpdateMediaPathRequestDto, VirtualFolderInfoDto,
         VirtualFolderQuery,
     },
@@ -337,7 +337,8 @@ async fn refresh_libraries(
 
 async fn library_available_options(
     session: AuthSession,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
+    Query(query): Query<LibraryAvailableOptionsQuery>,
 ) -> Result<Json<LibraryOptionsResultDto>, AppError> {
     auth::require_admin(&session)?;
 
@@ -348,14 +349,71 @@ async fn library_available_options(
         features: Vec::new(),
     };
 
+    let metadata_fetchers = state
+        .metadata_manager
+        .as_ref()
+        .map(|manager| {
+            manager
+                .providers()
+                .into_iter()
+                .map(|provider| LibraryOptionInfoDto {
+                    name: provider.name().to_string(),
+                    setup_url: None,
+                    default_enabled: true,
+                    features: Vec::new(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let image_fetchers = metadata_fetchers.clone();
+    let requested_type = query
+        .library_content_type
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let target_types = if requested_type.is_empty() || requested_type == "mixed" {
+        vec!["movies", "tvshows", "music", "musicvideos", "homevideos", "books"]
+    } else {
+        vec![requested_type.as_str()]
+    };
+
+    let type_options = target_types
+        .into_iter()
+        .map(|content_type| LibraryTypeOptionsDto {
+            r#type: content_type.to_string(),
+            metadata_fetchers: metadata_fetchers.clone(),
+            image_fetchers: image_fetchers.clone(),
+            supported_image_types: supported_image_types_for(content_type),
+            default_image_options: Vec::new(),
+        })
+        .collect();
+
     Ok(Json(LibraryOptionsResultDto {
         metadata_savers: vec![nfo_enabled.clone()],
         metadata_readers: vec![nfo_enabled],
         subtitle_fetchers: Vec::new(),
         lyrics_fetchers: Vec::new(),
-        type_options: Vec::new(),
+        type_options,
         default_library_options: crate::models::LibraryOptionsDto::default(),
     }))
+}
+
+fn supported_image_types_for(content_type: &str) -> Vec<String> {
+    match content_type {
+        "music" => vec!["Primary", "Backdrop", "Logo"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        "books" => vec!["Primary", "Backdrop"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        _ => vec!["Primary", "Backdrop", "Banner", "Logo", "Thumb"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    }
 }
 
 fn broadcast_library_refresh_started(state: &AppState, library_ids: &[String]) {
