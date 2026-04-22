@@ -93,22 +93,10 @@ async fn main() -> Result<()> {
 }
 
 async fn run_startup_schema_tasks(pool: &sqlx::PgPool) -> Result<()> {
-    match sqlx::migrate!("./migrations").run(pool).await {
-        Ok(_) => {}
-        Err(error) => {
-            let error_text = error.to_string();
-            if error_text.contains("previously applied but has been modified") {
-                tracing::debug!(
-                    "检测到 sqlx 迁移校验失败（已应用迁移文件被修改），继续执行兼容性补齐 SQL：{}",
-                    error_text
-                );
-            } else {
-                return Err(error).context("执行数据库迁移失败");
-            }
-        }
-    }
-
-    ensure_schema_compatibility(pool).await?;
+    sqlx::migrate!("./migrations")
+        .run(pool)
+        .await
+        .context("执行数据库迁移失败")?;
     Ok(())
 }
 
@@ -130,103 +118,4 @@ fn log_filter() -> EnvFilter {
                 .expect("内置日志过滤规则必须有效"),
         )
     })
-}
-
-async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
-    let compatibility_sql = [
-        r#"
-        ALTER TABLE media_streams
-            ADD COLUMN IF NOT EXISTS attachment_size INTEGER,
-            ADD COLUMN IF NOT EXISTS extended_video_sub_type TEXT,
-            ADD COLUMN IF NOT EXISTS extended_video_sub_type_description TEXT,
-            ADD COLUMN IF NOT EXISTS extended_video_type TEXT,
-            ADD COLUMN IF NOT EXISTS is_anamorphic BOOLEAN,
-            ADD COLUMN IF NOT EXISTS is_avc BOOLEAN,
-            ADD COLUMN IF NOT EXISTS is_external_url TEXT,
-            ADD COLUMN IF NOT EXISTS is_text_subtitle_stream BOOLEAN,
-            ADD COLUMN IF NOT EXISTS level INTEGER,
-            ADD COLUMN IF NOT EXISTS pixel_format TEXT,
-            ADD COLUMN IF NOT EXISTS ref_frames INTEGER,
-            ADD COLUMN IF NOT EXISTS stream_start_time_ticks BIGINT
-        "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS media_chapters (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            media_item_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
-            chapter_index INTEGER NOT NULL,
-            start_position_ticks BIGINT NOT NULL,
-            name TEXT,
-            marker_type TEXT,
-            image_path TEXT,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            UNIQUE (media_item_id, chapter_index)
-        )
-        "#,
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_media_chapters_media_item_id
-            ON media_chapters(media_item_id)
-        "#,
-        r#"
-        ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS primary_image_path TEXT,
-            ADD COLUMN IF NOT EXISTS backdrop_image_path TEXT,
-            ADD COLUMN IF NOT EXISTS logo_image_path TEXT,
-            ADD COLUMN IF NOT EXISTS date_modified TIMESTAMPTZ NOT NULL DEFAULT now()
-        "#,
-        r#"
-        ALTER TABLE media_items
-            ADD COLUMN IF NOT EXISTS critic_rating DOUBLE PRECISION
-        "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS series_episode_catalog (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            series_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
-            provider TEXT NOT NULL,
-            external_series_id TEXT NOT NULL,
-            external_season_id TEXT,
-            external_episode_id TEXT,
-            season_number INTEGER NOT NULL,
-            episode_number INTEGER NOT NULL,
-            episode_number_end INTEGER,
-            name TEXT NOT NULL,
-            overview TEXT,
-            premiere_date DATE,
-            image_path TEXT,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            UNIQUE (series_id, provider, season_number, episode_number)
-        )
-        "#,
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_series_episode_catalog_series_id
-            ON series_episode_catalog(series_id)
-        "#,
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_series_episode_catalog_series_date
-            ON series_episode_catalog(series_id, premiere_date)
-        "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS collection_items (
-            collection_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
-            item_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
-            display_order INTEGER NOT NULL DEFAULT 0,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            PRIMARY KEY (collection_id, item_id)
-        )
-        "#,
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_collection_items_item
-            ON collection_items(item_id)
-        "#,
-    ];
-
-    for statement in compatibility_sql {
-        sqlx::query(statement)
-            .execute(pool)
-            .await
-            .with_context(|| format!("执行兼容性补齐 SQL 失败: {statement}"))?;
-    }
-
-    Ok(())
 }

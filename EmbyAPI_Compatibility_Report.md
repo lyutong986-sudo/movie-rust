@@ -651,3 +651,18 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 ### 仍待继续
 - `Games/SystemSummaries` 当前是兼容空结果，后续若引入游戏库模型，需要接入真实游戏系统统计。
 - `Artists/AlbumArtists` 当前复用艺术家聚合，后续需要区分 AlbumArtist / Artist 角色来源。
+## 2026-04-23 WebDashboard 适配进展（十六）
+### 本轮完成
+- 修复 dashboard 首页黑屏的两个直接根因：
+  - [frontend/dashboard-ui/index.html](/C:/Users/11797/Desktop/movie-rust/frontend/dashboard-ui/index.html:1) 补回 `scripts/apploader.js` 启动脚本，避免 `/web/` 虽能访问但页面完全不执行 Emby 前端初始化。
+  - [backend/src/routes/dashboard.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/routes/dashboard.rs:1) 将 `/web` 静态托管改为 `ServeDir + index.html fallback`，让 `/web/emby` 这类 dashboard 前端路由回落到入口页，而不是 404 后黑屏。
+- 把数据库演进从“启动时兼容补丁 SQL”收敛回正式迁移：
+  - [backend/src/main.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/main.rs:1) 移除 `ensure_schema_compatibility(...)` 启动补字段逻辑，启动阶段只执行 `sqlx` 正式迁移。
+  - 现有 Emby/WebDashboard 所需字段已分别落在正式迁移里：`0011_media_stream_emby_fields.sql`、`0013_media_chapters.sql`、`0015_user_image_fields.sql`、`0016_series_episode_catalog.sql`、`0017_media_items_critic_rating.sql`、`0021_collection_items.sql`。
+  - 将重复版本号的 `0012_emby_images_and_trailers.sql` 重编号为 [backend/migrations/0022_emby_images_and_trailers.sql](/C:/Users/11797/Desktop/movie-rust/backend/migrations/0022_emby_images_and_trailers.sql:1)，避免继续污染 `sqlx` 迁移版本序列。
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+- `cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。
+### 仍待继续
+- 这次已去掉运行时补字段机制，但如果某个已部署数据库历史上写入过错误的 `sqlx` checksum，仍可能需要一次性手工修复 `_sqlx_migrations` 记录后再启动；当前仓库层面的迁移编号冲突已经修正。
+- HTTP request trace 目前仍按 `INFO` 输出访问日志；如果后续还嫌噪声大，可以再单独把 `tower_http` 请求跟踪收敛到更低级别。

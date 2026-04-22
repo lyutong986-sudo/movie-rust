@@ -7,7 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::state::AppState;
 
@@ -37,6 +37,9 @@ struct ConfigurationPageInfo {
 
 pub fn router(static_dir: PathBuf) -> Router<AppState> {
     let dashboard_dir = dashboard_dir(&static_dir);
+    let dashboard_index = dashboard_dir.join("index.html");
+    let dashboard_service =
+        ServeDir::new(&dashboard_dir).not_found_service(ServeFile::new(dashboard_index));
 
     Router::new()
         .route("/", get(root_redirect))
@@ -45,7 +48,7 @@ pub fn router(static_dir: PathBuf) -> Router<AppState> {
         .route("/web/ConfigurationPage", get(configuration_page))
         .route("/favicon.ico", get(favicon_redirect))
         .route("/robots.txt", get(robots_redirect))
-        .nest_service("/web", ServeDir::new(dashboard_dir))
+        .nest_service("/web", dashboard_service)
 }
 
 fn dashboard_dir(static_dir: &std::path::Path) -> PathBuf {
