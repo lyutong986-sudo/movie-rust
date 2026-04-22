@@ -272,6 +272,23 @@ const typeFilters: { label: string; name: TypeFilters }[] = [
   { label: '3D', name: 'is3D' }
 ];
 
+const includeItemTypes = computed(() => {
+  switch (item.CollectionType) {
+    case 'movies':
+      return ['Movie'];
+    case 'tvshows':
+      return ['Series'];
+    case 'music':
+      return ['MusicAlbum'];
+    case 'books':
+      return ['Book'];
+    case 'boxsets':
+      return ['BoxSet'];
+    default:
+      return item.Type ? [item.Type] : undefined;
+  }
+});
+
 /**
  * Refresh the list of items that are displayed in the grid,
  * applying filters and sorting
@@ -286,7 +303,7 @@ async function refreshItems(): Promise<void> {
       await remote.sdk.newUserApi(getFilterApi).getQueryFiltersLegacy({
         userId: remote.auth.currentUserId.value,
         parentId: item.Id,
-        includeItemTypes: [item.Type]
+        includeItemTypes: includeItemTypes.value
       })
     ).data;
 
@@ -318,7 +335,7 @@ function emitFilterChange(): void {
     years: selectedYearFilters.value
   });
 }
-watch(() => item, refreshItems);
+watch(() => item.Id, refreshItems, { immediate: true });
 </script>
 
 <style scoped>

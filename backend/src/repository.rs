@@ -390,45 +390,61 @@ pub async fn get_persons(
     pool: &sqlx::PgPool,
     start_index: Option<i32>,
     limit: Option<i32>,
+    search_term: Option<String>,
     name_starts_with: Option<String>,
 ) -> Result<Vec<PersonDto>, AppError> {
     let start_index = start_index.unwrap_or(0);
     let limit = limit.unwrap_or(100).min(200); // 限制最大返回200条
     
-    let mut query = sqlx::query_as::<_, DbPerson>(
-        r#"
-        SELECT *
-        FROM persons
-        WHERE 1=1
-        "#,
-    );
-    
-    if let Some(name_prefix) = name_starts_with {
-        let name_pattern = format!("{}%", name_prefix);
-        query = sqlx::query_as::<_, DbPerson>(
+    let normalized_search_term = search_term.and_then(|term| {
+        let trimmed = term.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    let normalized_name_starts_with = name_starts_with.and_then(|prefix| {
+        let trimmed = prefix.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+
+    let query = if let Some(search_term) = normalized_search_term {
+        let search_pattern = format!("%{}%", search_term);
+        sqlx::query_as::<_, DbPerson>(
             r#"
             SELECT *
             FROM persons
             WHERE name ILIKE $1
             ORDER BY name
             LIMIT $2 OFFSET $3
-            "#
+            "#,
+        )
+        .bind(search_pattern)
+        .bind(limit as i64)
+        .bind(start_index as i64)
+    } else if let Some(name_prefix) = normalized_name_starts_with {
+        let name_pattern = format!("{}%", name_prefix);
+        sqlx::query_as::<_, DbPerson>(
+            r#"
+            SELECT *
+            FROM persons
+            WHERE name ILIKE $1
+            ORDER BY name
+            LIMIT $2 OFFSET $3
+            "#,
         )
         .bind(name_pattern)
         .bind(limit as i64)
-        .bind(start_index as i64);
+        .bind(start_index as i64)
     } else {
-        query = sqlx::query_as::<_, DbPerson>(
+        sqlx::query_as::<_, DbPerson>(
             r#"
             SELECT *
             FROM persons
             ORDER BY name
             LIMIT $1 OFFSET $2
-            "#
+            "#,
         )
         .bind(limit as i64)
-        .bind(start_index as i64);
-    }
+        .bind(start_index as i64)
+    };
     
     let persons = query.fetch_all(pool).await?;
     

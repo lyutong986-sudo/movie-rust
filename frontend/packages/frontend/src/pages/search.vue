@@ -122,7 +122,7 @@ const [
     useBaseItem(getPersonsApi, peopleSearchMethod, {
       skipCache: { request: true }
     })(() => ({
-      nameStartsWith: searchDebounced.value
+      searchTerm: searchDebounced.value
     }))
   ]);
 

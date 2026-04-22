@@ -1,5 +1,5 @@
 {
   "defaultServerURLs": [],
-  "allowServerSelection": true,
+  "allowServerSelection": false,
   "routerMode": "hash"
 }

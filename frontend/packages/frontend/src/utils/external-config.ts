@@ -65,3 +65,19 @@ async function getJSONConfig(): Promise<ExternalJSONConfig> {
 }
 
 export const jsonConfig = await getJSONConfig();
+
+export function getDefaultServerURLs(): string[] {
+  const configuredServers = jsonConfig.defaultServerURLs
+    .map(serverUrl => serverUrl.trim())
+    .filter(Boolean);
+
+  if (configuredServers.length) {
+    return configuredServers;
+  }
+
+  if (typeof window !== 'undefined' && window.location.origin) {
+    return [window.location.origin];
+  }
+
+  return [];
+}

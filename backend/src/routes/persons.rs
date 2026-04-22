@@ -29,6 +29,8 @@ pub struct GetPersonsQuery {
     sort_by: Option<String>,
     #[serde(default, alias = "SortOrder", alias = "sortOrder")]
     sort_order: Option<String>,
+    #[serde(default, alias = "SearchTerm", alias = "searchTerm")]
+    search_term: Option<String>,
     #[serde(default, alias = "NameStartsWith", alias = "nameStartsWith")]
     name_starts_with: Option<String>,
 }
@@ -42,6 +44,7 @@ pub async fn get_persons(
         &state.pool,
         query.start_index,
         query.limit,
+        query.search_term,
         query.name_starts_with,
     )
     .await?;

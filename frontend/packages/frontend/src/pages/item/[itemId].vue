@@ -312,7 +312,7 @@ import { useBaseItem } from '#/composables/apis.ts';
 import { useItemBackdrop } from '#/composables/backdrop.ts';
 import { useItemPageTitle } from '#/composables/page-title.ts';
 
-const route = useRoute('/genre/[itemId]');
+const route = useRoute('/item/[itemId]');
 
 const [
   { data: item },
@@ -331,7 +331,11 @@ const [
   }))
 ]);
 
-const { data: currentSeries } = await useBaseItem(getUserLibraryApi, 'getItem')(() => ({
+const currentSeriesMethod = computed(() =>
+  item.value.SeriesId ? 'getItem' : undefined
+);
+
+const { data: currentSeries } = await useBaseItem(getUserLibraryApi, currentSeriesMethod)(() => ({
   itemId: item.value.SeriesId ?? ''
 }));
 

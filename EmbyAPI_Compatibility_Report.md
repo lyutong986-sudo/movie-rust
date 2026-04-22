@@ -330,3 +330,36 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - GitHub Actions 工作流 `.github/workflows/docker-image.yml` 已补充前置校验阶段：
   先跑后端 `cargo check`，再跑前端 `pnpm` 安装与构建，最后才执行 Docker 镜像构建/推送。
 - 当前已在本地确认 `cargo check --manifest-path backend/Cargo.toml` 可通过；但由于本地终端缺少可直接使用的 Node/pnpm 运行环境，本轮无法在本机复现前端和 Docker 阶段，只能保证工作流与仓库结构已对齐。
+
+## 2026-04-22 前端适配补充（三）
+
+- `frontend/packages/frontend/src/pages/item/[itemId].vue`
+  已修复错误的路由类型声明：从 `/genre/[itemId]` 改为 `/item/[itemId]`，避免详情页参数推断与真实页面路由不一致。
+- `frontend/packages/frontend/src/pages/item/[itemId].vue`
+  已避免在普通电影/视频详情页没有 `SeriesId` 时继续发起“当前剧集”请求，减少页面挂起风险。
+- `frontend/packages/frontend/src/components/Buttons/FilterButton.vue`
+  已让筛选弹层在首次进入页面时立即加载筛选项，不再依赖后续 prop 变化才触发。
+- `frontend/packages/frontend/src/components/Buttons/FilterButton.vue`
+  已针对媒体库 `CollectionType` 映射更合理的 `includeItemTypes`，避免把库根节点误当成 `CollectionFolder` 去请求筛选器，导致筛选结果偏空。
+
+## 2026-04-22 前端适配补充（四）
+- 本轮按“修 frontend 时结合 backend 和 EmbySDK，若冲突以 EmbySDK 为准”的规则，把人物搜索链路从“前端迁就当前后端”改回“项目按 EmbySDK 语义工作”。
+- `模板项目/EmbySDK/SampleCode/RestApi/TypeScript/api.ts`
+  已复核 EmbySDK 对 `/Persons` 的实际定义：明确支持 `SearchTerm`，`NameStartsWith` 只是并行存在的补充过滤条件。
+- `backend/src/routes/persons.rs`
+  已为 `/Persons` 增加 `SearchTerm/searchTerm` 查询参数解析，并继续兼容 `NameStartsWith/nameStartsWith`。
+- `backend/src/repository.rs`
+  已把人物查询调整为优先使用 EmbySDK 语义：传入 `SearchTerm` 时执行包含匹配；只有在未传入 `SearchTerm` 时才回退到 `NameStartsWith` 的前缀匹配；同时对空字符串做裁剪，避免无效查询污染结果。
+- `frontend/packages/frontend/src/pages/search.vue`
+  已把人物搜索参数从上一轮的临时兼容写法 `nameStartsWith` 切回 EmbySDK 标准 `searchTerm`，确保 frontend、backend 和本地播放器的调用语义一致。
+
+## 2026-04-22 前端适配补充（五）
+- 登录入口不再要求用户手动“添加服务器”。部署在 `https://test.emby.yun:4443` 这类单后端场景时，frontend 现在会默认把当前站点对应的后端作为服务器使用。
+- `frontend/packages/frontend/src/utils/external-config.ts`
+  已新增默认服务器解析逻辑：优先读取 `config.json` 的 `defaultServerURLs`；若为空，则自动回退到浏览器当前站点 `window.location.origin`。
+- `frontend/packages/frontend/src/plugins/remote/index.ts`
+  已把默认服务器初始化改为使用运行时解析后的默认服务器列表，而不是只依赖静态 `config.json`。
+- `frontend/packages/frontend/src/plugins/router/middlewares/login.ts`
+  已把登录守卫改为基于运行时默认服务器列表判断流程，避免在 `defaultServerURLs` 为空时把用户重定向到 `#/server/add`；并在禁用服务器选择时直接停留登录页，不再回落到“添加服务器”流程。
+- `frontend/packages/frontend/public/config.json`
+  已将 `allowServerSelection` 设为 `false`，关闭手动选择/添加服务器入口，使单后端部署默认走当前 backend。

@@ -11,7 +11,7 @@ import { isNil, sealed } from '@jellyfin-vue/shared/validation';
 import RemotePluginAuthInstance from './auth.ts';
 import RemotePluginSDKInstance from './sdk/index.ts';
 import RemotePluginSocketInstance from './socket.ts';
-import { jsonConfig } from '#/utils/external-config.ts';
+import { getDefaultServerURLs } from '#/utils/external-config.ts';
 
 @sealed
 class RemotePlugin {
@@ -38,7 +38,7 @@ export function createPlugin(): {
         = remote;
 
       const auth = remote.auth;
-      const defaultServers = jsonConfig.defaultServerURLs;
+      const defaultServers = getDefaultServerURLs();
       /**
        * We reverse the list so the first server is the last to be connected,
        * and thus is the chosen one by default

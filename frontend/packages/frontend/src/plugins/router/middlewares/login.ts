@@ -7,7 +7,7 @@ import { until } from '@vueuse/core';
 import { isNil } from '@jellyfin-vue/shared/validation';
 import i18next from 'i18next';
 import { remote } from '#/plugins/remote/index.ts';
-import { jsonConfig } from '#/utils/external-config.ts';
+import { getDefaultServerURLs, jsonConfig } from '#/utils/external-config.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
 
 const serverAddUrl = '/server/add';
@@ -22,11 +22,17 @@ const serverPages = new Set<keyof RouteNamedMap>([serverAddUrl, serverSelectUrl,
  * in the loginGuard
  */
 async function _getBestServerPage(): Promise<Nullish<keyof RouteNamedMap>> {
-  if (jsonConfig.defaultServerURLs.length && isNil(remote.auth.currentServer.value)) {
+  const defaultServerURLs = getDefaultServerURLs();
+
+  if (defaultServerURLs.length && isNil(remote.auth.currentServer.value)) {
     await until(remote.auth.currentServer).toBeTruthy({ flush: 'pre' });
   }
 
   if (!remote.auth.addedServers.value) {
+    if (!jsonConfig.allowServerSelection) {
+      return serverLoginUrl;
+    }
+
     return serverAddUrl;
   } else if (isNil(remote.auth.currentServer.value)) {
     return serverSelectUrl;
