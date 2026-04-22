@@ -38,6 +38,7 @@ pub fn router() -> Router<AppState> {
         .route("/Devices/CameraUploads", get(camera_uploads))
         .route("/Channels", get(channels))
         .route("/ScheduledTasks", get(scheduled_tasks))
+        .route("/ScheduledTasks/{id}", get(scheduled_task))
         .route("/ScheduledTasks/{id}/Triggers", post(update_task_triggers))
         .route("/ScheduledTasks/Running/{id}", post(start_task).delete(stop_task))
         .route("/ScheduledTasks/Running/{id}/Delete", post(stop_task))
@@ -266,62 +267,69 @@ async fn channels(_session: AuthSession) -> Json<Value> {
     }))
 }
 
-async fn scheduled_tasks(_session: AuthSession) -> Json<Vec<Value>> {
-    Json(vec![
-        json!({
-            "Id": "scan-library",
-            "Name": "Scan Media Library",
-            "Description": "Scans the media library for changes.",
-            "Category": "Library",
-            "Key": "ScanMediaLibrary",
-            "State": "Idle",
-            "IsHidden": false,
-            "CurrentProgressPercentage": 0,
-            "LastExecutionResult": {
-                "Status": "Completed"
-            }
-        }),
-        json!({
-            "Id": "refresh-guide",
-            "Name": "Refresh Guide",
-            "Description": "Refreshes live tv guide data.",
-            "Category": "LiveTV",
-            "Key": "RefreshGuide",
-            "State": "Idle",
-            "IsHidden": false,
-            "CurrentProgressPercentage": 0,
-            "LastExecutionResult": {
-                "Status": "Completed"
-            }
-        }),
-        json!({
-            "Id": "refresh-metadata",
-            "Name": "Refresh Metadata",
-            "Description": "Refreshes metadata and images.",
-            "Category": "Library",
-            "Key": "RefreshMetadata",
-            "State": "Idle",
-            "IsHidden": false,
-            "CurrentProgressPercentage": 0,
-            "LastExecutionResult": {
-                "Status": "Completed"
-            }
-        }),
-    ])
+async fn scheduled_tasks(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    Ok(Json(load_scheduled_tasks(&state).await?))
+}
+
+async fn scheduled_task(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let task = load_scheduled_tasks(&state)
+        .await?
+        .into_iter()
+        .find(|task| task.get("Id").and_then(Value::as_str) == Some(id.as_str()))
+        .ok_or_else(|| AppError::NotFound(format!("计划任务不存在: {id}")))?;
+    Ok(Json(task))
 }
 
 async fn start_task(
     _session: AuthSession,
-    Path(_id): Path<String>,
-) -> StatusCode {
-    StatusCode::NO_CONTENT
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let mut states = load_task_state_map(&state).await?;
+    states.insert(
+        id.clone(),
+        json!({
+            "State": "Running",
+            "CurrentProgressPercentage": 0.0,
+            "LastExecutionResult": {
+                "Status": "Running",
+                "StartTimeUtc": Value::Null,
+                "EndTimeUtc": Value::Null
+            }
+        }),
+    );
+    save_task_state_map(&state, &states).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn stop_task(
     _session: AuthSession,
-    Path(_id): Path<String>,
-) -> StatusCode {
-    StatusCode::NO_CONTENT
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let mut states = load_task_state_map(&state).await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    states.insert(
+        id.clone(),
+        json!({
+            "State": "Idle",
+            "CurrentProgressPercentage": 0.0,
+            "LastExecutionResult": {
+                "Status": "Cancelled",
+                "StartTimeUtc": now,
+                "EndTimeUtc": chrono::Utc::now().to_rfc3339()
+            }
+        }),
+    );
+    save_task_state_map(&state, &states).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn update_task_triggers(
@@ -330,12 +338,10 @@ async fn update_task_triggers(
     Path(id): Path<String>,
     Json(payload): Json<Value>,
 ) -> Result<StatusCode, AppError> {
-    repository::update_named_system_configuration(
-        &state.pool,
-        &format!("scheduled_task_triggers_{id}"),
-        &payload,
-    )
-    .await?;
+    let mut triggers = load_task_trigger_map(&state).await?;
+    let list = payload.as_array().cloned().unwrap_or_default();
+    triggers.insert(id, Value::Array(list));
+    save_task_trigger_map(&state, &triggers).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -425,4 +431,165 @@ fn is_path_writeable(path: &FsPath) -> bool {
         Err(_) => return false,
     };
     !metadata.permissions().readonly()
+}
+
+async fn load_scheduled_tasks(state: &AppState) -> Result<Vec<Value>, AppError> {
+    let states = load_task_state_map(state).await?;
+    let triggers = load_task_trigger_map(state).await?;
+    let mut tasks = default_scheduled_tasks();
+
+    for task in &mut tasks {
+        let task_id = task
+            .get("Id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        if let Some(trigger_list) = triggers.get(&task_id).and_then(Value::as_array) {
+            task["Triggers"] = Value::Array(trigger_list.clone());
+        }
+
+        if let Some(state_value) = states.get(&task_id).and_then(Value::as_object) {
+            if let Some(state_name) = state_value.get("State").cloned() {
+                task["State"] = state_name;
+            }
+            if let Some(progress) = state_value.get("CurrentProgressPercentage").cloned() {
+                task["CurrentProgressPercentage"] = progress;
+            }
+            if let Some(last_result) = state_value.get("LastExecutionResult").cloned() {
+                task["LastExecutionResult"] = last_result;
+            }
+        }
+    }
+
+    Ok(tasks)
+}
+
+async fn load_task_trigger_map(state: &AppState) -> Result<BTreeMap<String, Value>, AppError> {
+    let value = repository::named_system_configuration(&state.pool, "scheduled_task_triggers")
+        .await?
+        .unwrap_or_else(|| json!({}));
+    Ok(value
+        .as_object()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+async fn save_task_trigger_map(
+    state: &AppState,
+    triggers: &BTreeMap<String, Value>,
+) -> Result<(), AppError> {
+    repository::update_named_system_configuration(
+        &state.pool,
+        "scheduled_task_triggers",
+        &json!(triggers),
+    )
+    .await
+}
+
+async fn load_task_state_map(state: &AppState) -> Result<BTreeMap<String, Value>, AppError> {
+    let value = repository::named_system_configuration(&state.pool, "scheduled_task_states")
+        .await?
+        .unwrap_or_else(|| json!({}));
+    Ok(value
+        .as_object()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+async fn save_task_state_map(
+    state: &AppState,
+    states: &BTreeMap<String, Value>,
+) -> Result<(), AppError> {
+    repository::update_named_system_configuration(
+        &state.pool,
+        "scheduled_task_states",
+        &json!(states),
+    )
+    .await
+}
+
+fn default_scheduled_tasks() -> Vec<Value> {
+    vec![
+        json!({
+            "Id": "scan-library",
+            "Name": "Scan Media Library",
+            "Description": "Scans the media library for new, changed or removed files.",
+            "Category": "Library",
+            "Key": "ScanMediaLibrary",
+            "State": "Idle",
+            "IsHidden": false,
+            "IsEnabled": true,
+            "CurrentProgressPercentage": 0.0,
+            "Triggers": [
+                {
+                    "Type": "IntervalTrigger",
+                    "IntervalTicks": 2160000000000_i64,
+                    "MaxRuntimeTicks": Value::Null
+                }
+            ],
+            "LastExecutionResult": {
+                "Status": "Completed",
+                "StartTimeUtc": "2026-04-22T00:00:00Z",
+                "EndTimeUtc": "2026-04-22T00:05:00Z"
+            }
+        }),
+        json!({
+            "Id": "refresh-guide",
+            "Name": "Refresh Guide",
+            "Description": "Refreshes live tv guide and channel metadata.",
+            "Category": "LiveTV",
+            "Key": "RefreshGuide",
+            "State": "Idle",
+            "IsHidden": false,
+            "IsEnabled": true,
+            "CurrentProgressPercentage": 0.0,
+            "Triggers": [
+                {
+                    "Type": "DailyTrigger",
+                    "TimeOfDayTicks": 144000000000_i64,
+                    "MaxRuntimeTicks": Value::Null
+                }
+            ],
+            "LastExecutionResult": {
+                "Status": "Completed",
+                "StartTimeUtc": "2026-04-22T01:00:00Z",
+                "EndTimeUtc": "2026-04-22T01:01:00Z"
+            }
+        }),
+        json!({
+            "Id": "refresh-metadata",
+            "Name": "Refresh Metadata",
+            "Description": "Refreshes library metadata, images and remote ids.",
+            "Category": "Library",
+            "Key": "RefreshMetadata",
+            "State": "Idle",
+            "IsHidden": false,
+            "IsEnabled": true,
+            "CurrentProgressPercentage": 0.0,
+            "Triggers": [
+                {
+                    "Type": "WeeklyTrigger",
+                    "DayOfWeek": "Sunday",
+                    "TimeOfDayTicks": 180000000000_i64,
+                    "MaxRuntimeTicks": 72000000000_i64
+                }
+            ],
+            "LastExecutionResult": {
+                "Status": "Completed",
+                "StartTimeUtc": "2026-04-21T02:00:00Z",
+                "EndTimeUtc": "2026-04-21T02:08:00Z"
+            }
+        }),
+    ]
 }

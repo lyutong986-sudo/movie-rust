@@ -666,3 +666,36 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 ### 仍待继续
 - 这次已去掉运行时补字段机制，但如果某个已部署数据库历史上写入过错误的 `sqlx` checksum，仍可能需要一次性手工修复 `_sqlx_migrations` 记录后再启动；当前仓库层面的迁移编号冲突已经修正。
 - HTTP request trace 目前仍按 `INFO` 输出访问日志；如果后续还嫌噪声大，可以再单独把 `tower_http` 请求跟踪收敛到更低级别。
+## 2026-04-23 WebDashboard 适配进展（十七）
+### 本轮完成
+- 将 [backend/src/bin/fix_migration.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/bin/fix_migration.rs:1) 从写死旧版本号的临时脚本升级为通用迁移修复工具：
+  - 自动读取本地 `./migrations` 并计算当前 checksum。
+  - 自动清理 `_sqlx_migrations` 中 `success = false` 的 dirty 记录。
+  - 自动修正数据库里“已应用但 checksum 与本地迁移不一致”的版本记录，覆盖当前这类 `migration 12 was previously applied but has been modified` 的历史库场景。
+  - 保留 `update_updated_at_column` 函数补齐逻辑，避免旧库缺触发器时继续卡迁移。
+  - 支持通过环境变量 `MIGRATION_FIX_DRY_RUN=1` 先做只读预演。
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml --bin fix_migration` 通过。
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+### 仍待继续
+- 当前已具备仓库级修复工具，但尚未在你提供的真实数据库上实跑，所以真实库里若还存在“本地已不存在的迁移版本”记录，仍需要下一步结合实际 `_sqlx_migrations` 内容继续清理。
+## 2026-04-23 WebDashboard 适配进展（十八）
+### 本轮完成
+- 继续围绕 WebDashboard 插件页、插件目录页、计划任务页补全后端接口，避免前端再拿到纯空壳响应：
+  - [backend/src/routes/integrations.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/routes/integrations.rs:1) 为 `GET /Plugins`、`DELETE /Plugins/{id}`、`GET /Packages`、`GET /Packages/{name}`、`GET /Packages/Updates`、`POST /Packages/Installed/{name}` 补了可直接被 Emby WebDashboard 消费的 Emby 风格数据结构。
+  - 插件目录现在提供一组内置可安装包，包含 `name`、`guid`、`category`、`targetSystem`、`type`、`versions`、`shortDescription`、`overview`、`owner` 等字段，兼容 `plugincatalogpage.js` 与 `addpluginpage.js` 的读取方式。
+  - 已安装插件列表与安装/卸载动作改为持久化到数据库命名配置 `installed_plugins`，刷新页面后不会重新变回空列表。
+- [backend/src/routes/dashboard.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/routes/dashboard.rs:1) 补齐了 `GET /web/ConfigurationPages` 与 `GET /web/ConfigurationPage?Name=...`：
+  - 会根据已安装插件动态生成 `PluginConfiguration` 页面描述。
+  - 配置页内容不再返回 404 文本，而是返回可渲染的 HTML 片段，避免插件设置入口直接失败。
+- [backend/src/routes/management.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/routes/management.rs:1) 将计划任务从静态空壳推进为可读可写的轻量实体：
+  - 新增 `GET /ScheduledTasks/{id}`，兼容 `scheduledtaskpage.js` 读取单个任务详情与触发器。
+  - `GET /ScheduledTasks` 现在返回带 `Triggers`、`LastExecutionResult`、`IsEnabled`、`CurrentProgressPercentage` 的任务对象。
+  - `POST/DELETE /ScheduledTasks/Running/{id}` 会把任务运行状态持久化到 `scheduled_task_states`。
+  - `POST /ScheduledTasks/{id}/Triggers` 改为持久化整组触发器到 `scheduled_task_triggers`，前端新增/删除触发器后刷新仍能看到结果。
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+- `cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。
+### 仍待继续
+- 当前插件目录与插件配置页已经能驱动 WebDashboard 页面，但仍属于本地兼容目录，后续还可以继续接入更真实的插件源、版本升级策略与插件专属配置表单。
+- 计划任务目前是轻量持久化状态机，下一步仍需继续对接真实库扫描、元数据刷新、任务进度推送和 WebSocket 广播，进一步贴近 Emby 原生行为。
