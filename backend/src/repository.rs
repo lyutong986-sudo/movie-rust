@@ -5604,10 +5604,12 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
     let container = effective_container_from_target(item, strm_target.as_deref());
     let is_remote = strm_target.is_some();
     let size = media_source_size(item, is_remote);
+    let item_emby_id = uuid_to_emby_guid(&item.id);
+    let media_source_id = format!("mediasource_{item_emby_id}");
 
     MediaSourceDto {
         chapters: Vec::new(),
-        id: format!("mediasource_{}", uuid_to_emby_guid(&item.id)),
+        id: media_source_id.clone(),
         path: strm_target.clone().unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),
@@ -5623,7 +5625,13 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         supports_direct_play: true,
         supports_direct_stream: true,
         supports_transcoding: true,
-        direct_stream_url: None,
+        direct_stream_url: Some(format!(
+            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
+            item_emby_id,
+            container,
+            media_source_id,
+            media_source_id
+        )),
         formats: Vec::new(),
         size,
         e_tag: Some(item.date_modified.timestamp().to_string()),
@@ -5649,7 +5657,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         transcoding_container: None,
         analyze_duration_ms: None,
         read_at_native_framerate: Some(false),
-        item_id: Some(uuid_to_emby_guid(&item.id)),
+        item_id: Some(item_emby_id),
         server_id: None,
         media_streams: Vec::new(),
     }
@@ -5663,7 +5671,6 @@ async fn media_source_for_item_with_type(
 ) -> Result<MediaSourceDto, AppError> {
     let mut source = get_media_source_with_streams(pool, item, server_id).await?;
     source.source_type = source_type.to_string();
-    source.direct_stream_url = None;
     source.server_id = None;
     Ok(source)
 }

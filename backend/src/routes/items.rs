@@ -1381,6 +1381,10 @@ struct HideFromResumeQuery {
     hide: Option<bool>,
 }
 
+fn should_hide_from_resume(query: &HideFromResumeQuery) -> bool {
+    query.hide != Some(false)
+}
+
 async fn hide_from_resume(
     session: AuthSession,
     State(state): State<AppState>,
@@ -1391,7 +1395,7 @@ async fn hide_from_resume(
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
     ensure_media_item_exists(&state, item_id).await?;
-    if query.hide != Some(true) {
+    if !should_hide_from_resume(&query) {
         return Ok(Json(
             repository::get_user_item_data_dto(&state.pool, user_id, item_id).await?,
         ));
@@ -1760,6 +1764,7 @@ async fn playback_info(
             info.start_time_ticks,
             effective_max_bitrate,
             &transcoding_container,
+            &transcoding_sub_protocol,
         );
 
         if let Some(selected_source) = media_sources.get_mut(selected_media_source_index) {
@@ -1987,20 +1992,37 @@ fn selected_subtitle_stream<'a>(
     })
 }
 
-fn preferred_transcoding_container(info: &PlaybackInfoDto) -> String {
-    if info
-        .device_profile
-        .as_ref()
-        .is_some_and(|profile| profile.direct_play_protocols.iter().any(|value| value.eq_ignore_ascii_case("hls")))
-    {
-        "ts".to_string()
-    } else {
-        "ts".to_string()
-    }
+fn preferred_transcoding_profile(info: &PlaybackInfoDto) -> Option<&crate::models::TranscodingProfile> {
+    info.device_profile.as_ref()?.transcoding_profiles.iter().find(|profile| {
+        profile
+            .r#type
+            .as_deref()
+            .is_none_or(|value| value.eq_ignore_ascii_case("Video"))
+    })
 }
 
-fn preferred_transcoding_sub_protocol(_info: &PlaybackInfoDto, _container: &str) -> String {
-    "hls".to_string()
+fn preferred_transcoding_container(info: &PlaybackInfoDto) -> String {
+    preferred_transcoding_profile(info)
+        .and_then(|profile| profile.container.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("ts")
+        .to_string()
+}
+
+fn preferred_transcoding_sub_protocol(info: &PlaybackInfoDto, container: &str) -> String {
+    preferred_transcoding_profile(info)
+        .and_then(|profile| profile.protocol.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            if container.eq_ignore_ascii_case("ts") {
+                "hls"
+            } else {
+                "http"
+            }
+        })
+        .to_string()
 }
 
 fn build_transcoding_url(
@@ -2013,6 +2035,7 @@ fn build_transcoding_url(
     start_time_ticks: Option<i64>,
     max_streaming_bitrate: Option<i64>,
     transcoding_container: &str,
+    transcoding_sub_protocol: &str,
 ) -> String {
     let mut params = vec![
         format!("MediaSourceId={media_source_id}"),
@@ -2036,7 +2059,14 @@ fn build_transcoding_url(
         params.push(format!("MaxStreamingBitrate={value}"));
     }
 
-    format!("/Videos/{item_emby_id}/master.m3u8?{}", params.join("&"))
+    if transcoding_sub_protocol.eq_ignore_ascii_case("hls") {
+        format!("/Videos/{item_emby_id}/master.m3u8?{}", params.join("&"))
+    } else {
+        format!(
+            "/Videos/{item_emby_id}/stream.{transcoding_container}?{}",
+            params.join("&")
+        )
+    }
 }
 
 fn parse_include_types(value: Option<&str>) -> Vec<String> {
@@ -2226,6 +2256,55 @@ mod tests {
             options.include_types,
             vec!["Series".to_string(), "Movie".to_string()]
         );
+    }
+
+    #[test]
+    fn hide_from_resume_defaults_to_hiding_like_emby_clients() {
+        let default_query: HideFromResumeQuery =
+            serde_json::from_value(json!({})).expect("valid empty query");
+        assert!(should_hide_from_resume(&default_query));
+
+        let explicit_false: HideFromResumeQuery =
+            serde_json::from_value(json!({ "Hide": false })).expect("valid hide=false query");
+        assert!(!should_hide_from_resume(&explicit_false));
+    }
+
+    #[test]
+    fn playback_info_uses_client_transcoding_profile() {
+        let info: PlaybackInfoDto = serde_json::from_value(json!({
+            "DeviceProfile": {
+                "TranscodingProfiles": [
+                    {
+                        "Type": "Video",
+                        "Container": "mp4",
+                        "Protocol": "http",
+                        "VideoCodec": "h264",
+                        "AudioCodec": "aac"
+                    }
+                ]
+            }
+        }))
+        .expect("valid playback info");
+
+        assert_eq!(preferred_transcoding_container(&info), "mp4");
+        assert_eq!(preferred_transcoding_sub_protocol(&info, "mp4"), "http");
+
+        let url = build_transcoding_url(
+            "ITEMID",
+            "mediasource_ITEMID",
+            "PLAYSESSION",
+            "TOKEN",
+            Some(1),
+            Some(2),
+            Some(123),
+            Some(4_000_000),
+            "mp4",
+            "http",
+        );
+
+        assert!(url.starts_with("/Videos/ITEMID/stream.mp4?"));
+        assert!(url.contains("MediaSourceId=mediasource_ITEMID"));
+        assert!(url.contains("PlaySessionId=PLAYSESSION"));
     }
 }
 

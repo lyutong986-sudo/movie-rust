@@ -23,6 +23,12 @@
 - 未给 `SyncStatus` 写默认值，因为项目尚未实现真实同步任务模型；没有真实同步状态时继续不返回该字段，避免伪造数据。
 - 对照本地播放器模板 `fetchNextUp` 和 Emby 的 `Shows/NextUp` 语义，修复 NextUp 查询：现在按真实剧集归属分组，每部剧只返回当前下一集，而不是把同一部剧所有未播放分集都返回给播放器。
 - `Shows/NextUp` 的 `SeriesId`/`ParentId` 作用域继续支持剧、季、媒体库三种场景，返回项仍由真实 `media_items`、`user_item_data` 和 DTO 组装。
+- 对照本地播放器模板 `hideFromResume` 的实际请求，修复 `POST /Users/{userId}/Items/{itemId}/HideFromResume`：播放器不携带 `hide=true` 时，现在默认执行隐藏并清空真实播放进度；只有显式 `hide=false` 才保持原状态。
+- 为 `HideFromResume` 默认隐藏语义补充单元测试，避免后续重构再次把本地播放器的无参数 POST 变成无操作。
+- 对照本地播放器 `PlaybackInfoResult` 对 `MediaSources` 的依赖，修复未探测出 `media_streams` 时的 fallback 媒体源：`media_source_for_item` 现在也会返回真实 `DirectStreamUrl`，避免客户端拿到 MediaSource 但没有可播放 URL。
+- 对照桌面页和旧版 TV 播放器对 `MediaSource.DirectStreamUrl/TranscodingUrl` 的优先读取逻辑，修复已探测媒体源被清空 `DirectStreamUrl` 的问题；`PlaybackInfo` 现在对正常探测媒体和 fallback 媒体都会返回真实 Emby 风格直链，详情页仍通过 `sanitize_media_sources_for_item_detail` 去掉播放 URL。
+- 对照本地播放器 Exo 模式 POST 的 `DeviceProfile.TranscodingProfiles`，修复 `PlaybackInfo` 转码 URL 生成：现在优先使用客户端提交的 `Protocol` 和 `Container`，例如 `Protocol=http, Container=mp4` 时返回 `/Videos/{id}/stream.mp4`，`hls/ts` 时继续返回 `/Videos/{id}/master.m3u8`。
+- 为 `PlaybackInfo` 转码 profile 选择补充单元测试，避免后续又退回固定 `ts+hls`。
 
 ## 本地播放器实际依赖主链路
 
@@ -67,10 +73,3 @@
 - Sessions 远控已经持久化命令队列，但还不是 Emby 原生 WebSocket 实时推送模型。
 - Auth Keys 已有兼容路径，但 API Key 权限、过期策略、审计策略还需继续细化。
 - 音乐、直播、频道、BoxSet、Artist、MusicAlbum 等非电影电视剧域仍是部分兼容。
-
-## 下一步建议
-
-1. 继续审计本地播放器模板中 `PlaybackInfo` 后续处理逻辑，确认 `MediaSource` 字段是否还缺会导致播放器空指针的字段。
-2. 对照 EmbySDK 的 `BaseItemDto`，优先补本地播放器详情页实际读取的长尾字段。
-3. 继续把 RemoteImages providers 和候选图列表接到真实 TMDB 数据源。
-4. 补充针对 `UserData`、`HideFromResume`、`FavoriteItems`、`PlaybackInfo` 的路由级回归测试。
