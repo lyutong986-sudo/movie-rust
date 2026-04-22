@@ -297,3 +297,26 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 ```
 
 当前仍存在一批既有 Rust warning，主要是未使用 import、未使用字段、未使用辅助函数和部分未来扩展模型；它们不阻塞构建，但建议后续在功能稳定后统一清理。
+## 2026-04-22 前端适配补充
+
+- 已开始按“前端适配当前 backend”路线推进，而不是继续假设后端完全等同官方 Jellyfin 服务发现行为。
+- `frontend/packages/frontend/src/plugins/remote/auth.ts`
+  已移除连接服务器时对 Jellyfin SDK discovery/version 结果的强依赖，改为优先探测当前后端真实可用的 `/System/Info/Public`。
+- 登录前拉取服务器资料时，`Branding/Configuration` 和 `Users/Public` 现在按可选能力处理；即使 branding 未开放匿名访问，也不会阻塞添加服务器和进入登录页。
+- 前端内部 `ServerInfo` 已改为显式字段模型，稳定保存 `Id`、`ServerName`、`Version`、`StartupWizardCompleted`、`PublicAddress` 等后续页面真正依赖的值。
+- `frontend/packages/frontend/src/components/Wizard/WizardMetadata.vue`
+  已修复 `PreferredMetadataLanguage` 与 `MetadataCountryCode` 前后映射写反的问题。
+- 首次向导元数据页已增加后端兼容兜底：若当前后端尚未提供 `Localization/Countries`，前端会用已有配置值构造最小国家选项，避免流程中断。
+- 本轮尚未在当前终端补跑前端类型检查；原因是当前环境里 `pnpm`/`npm`/`corepack` 不在 PATH，且可见 Node 入口不可直接执行。后续需要在具备前端包管理器的环境补跑：
+
+```text
+pnpm --filter @jellyfin-vue/frontend check:types
+```
+
+## 2026-04-22 前端适配补充（二）
+
+- `frontend/packages/frontend/src/plugins/router/middlewares/validate.ts`
+  已把路由 `itemId` 校验从“仅接受 32 位 MD5”改为同时接受 Emby/Jellyfin 常见 UUID 形式，避免前端自己拦截库页、详情页、剧集页跳转。
+- `frontend/packages/frontend/src/pages/search.vue`
+  已将人物搜索参数从 `searchTerm` 调整为当前后端 `Persons` 路由实际兼容的 `nameStartsWith`，修复搜索页人物结果为空的问题。
+- 这一轮优先修复的是“前端自身校验/参数名导致的兼容问题”；后续仍需继续对照首页、库页、剧集页、播放页逐条核对 SDK 调用与后端真实响应。

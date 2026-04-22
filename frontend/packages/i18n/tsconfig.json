@@ -1,0 +1,24 @@
+{
+  "extends": "@jellyfin-vue/configs/typescript",
+  "compilerOptions": {
+    "lib": [
+      "ESNext",
+      "DOM"
+    ],
+    "types": [
+      "vite/client",
+      "@types/node"
+    ]
+  },
+  "exclude": [
+    "dist",
+    "node_modules",
+    "coverage"
+  ],
+  "include": [
+    "**/*.d.ts",
+    "**/*.ts",
+    "src/*.ts",
+    "**/*.json"
+  ],
+}

@@ -1,0 +1,17 @@
+{
+  "extends": "./src/typescript.json",
+  "compilerOptions": {
+    "lib": ["ESNext"]
+  },
+  "exclude": [
+    "dist",
+    "node_modules",
+    "coverage"
+  ],
+  "include": [
+    "**/*.ts",
+    "**/*.vue",
+    "**/*d.ts",
+    "**/*.json"
+  ]
+}

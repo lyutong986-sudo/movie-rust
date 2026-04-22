@@ -1,0 +1,29 @@
+[package]
+name = "jellyfin-vue-tauri"
+version = "0.0.0"
+description = "Jellyfin Tauri client"
+authors = [
+  "jellyfin-vue Contributors (https://github.com/jellyfin/jellyfin-vue/graphs/contributors)"
+]
+license = "GPL-3.0-only"
+repository = "https://github.com/jellyfin/jellyfin-vue"
+default-run = "jellyfin-vue-tauri"
+build = "src/build.rs"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+tauri-build = { version = "=2.5.6", features = [] }
+
+[dependencies]
+tauri = { version = "=2.10.3", features = [] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+strip = true
+lto = true
+opt-level = 3

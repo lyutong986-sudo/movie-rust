@@ -1,20 +1,31 @@
 {
-  "name": "movie-rust-frontend",
-  "version": "0.1.0",
+  "name": "jellyfin-vue",
+  "version": "0.3.1",
   "private": true,
+  "homepage": "https://jellyfin.org/",
+  "bugs": {
+    "url": "https://github.com/jellyfin/jellyfin-vue/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jellyfin/jellyfin-vue/"
+  },
+  "license": "GPL-3.0-only",
+  "author": "jellyfin-vue Contributors (https://github.com/jellyfin/jellyfin-vue/graphs/contributors)",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 5173",
-    "build": "vue-tsc -b && vite build",
-    "preview": "vite preview --host 127.0.0.1 --port 4173"
+    "analyze:cycles": "pnpm -r --if-present --no-bail analyze:cycles",
+    "check:types": "pnpm -r --if-present --no-bail check:types",
+    "lint": "pnpm -r --if-present --no-bail lint",
+    "lint:fix": "pnpm -r --if-present --no-bail lint:fix",
+    "test": "pnpm -r --if-present --no-bail test"
   },
-  "dependencies": {
-    "@vitejs/plugin-vue": "^6.0.3",
-    "typescript": "^5.9.3",
-    "vite": "^7.1.12",
-    "vue": "^3.5.22",
-    "vue-router": "^4.5.1",
-    "vue-tsc": "^3.1.1"
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=24.11.0 <25.0.0",
+    "pnpm": "10.33.0"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "pnpm": "10.33.0"
+  }
 }

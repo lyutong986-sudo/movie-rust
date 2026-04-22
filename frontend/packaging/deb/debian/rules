@@ -1,0 +1,26 @@
+#! /usr/bin/make -f
+export DH_VERBOSE=1
+
+%:
+	dh $@
+
+# disable "make check"
+override_dh_auto_test:
+
+# disable stripping debugging symbols
+override_dh_clistrip:
+
+override_dh_auto_build:
+	cp -ra root/{package.json,pnpm-workspace.yaml,pnpm-lock.yaml,packages} $(CURDIR)/
+	corepack pnpm i --frozen-lockfile
+	cd packages/frontend && corepack pnpm build
+	mv $(CURDIR)/packages/frontend/dist $(CURDIR)/dist
+	rm -rf $(CURDIR)/packages $(CURDIR)/node_modules $(CURDIR)/package.json $(CURDIR)/pnpm-lock.yaml $(CURDIR)/pnpm-workspace.yaml
+
+override_dh_auto_clean:
+	test -d $(CURDIR)/packages && rm -rf '$(CURDIR)/packages' || true
+	test -d $(CURDIR)/dist && rm -rf '$(CURDIR)/dist' || true
+	test -d $(CURDIR)/node_modules && rm -rf '$(CURDIR)/node_modules' || true
+	test -d $(CURDIR)/package.json && rm -rf '$(CURDIR)/package.json' || true
+	test -d $(CURDIR)/pnpm-lock.yaml && rm -rf '$(CURDIR)/pnpm-lock.yaml' || true
+	test -d $(CURDIR)/pnpm-workspace.yaml && rm -rf '$(CURDIR)/pnpm-workspace.yaml' || true
