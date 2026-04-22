@@ -9,7 +9,17 @@ pub struct Config {
     pub port: u16,
     pub server_name: String,
     pub server_id: Uuid,
+    pub ui_culture: String,
+    pub metadata_country_code: String,
+    pub preferred_metadata_language: String,
+    pub enable_remote_access: bool,
+    pub enable_automatic_port_mapping: bool,
+    pub public_url: Option<String>,
+    pub branding_login_disclaimer: String,
+    pub branding_custom_css: String,
+    pub branding_splashscreen_enabled: bool,
     pub static_dir: PathBuf,
+    pub log_dir: PathBuf,
     pub tmdb_api_key: Option<String>,
     pub api_key: Option<String>,
     pub ffmpeg_path: String,
@@ -41,9 +51,35 @@ impl Config {
                 .unwrap_or(8096),
             server_name,
             server_id,
+            ui_culture: env::var("APP_UI_CULTURE").unwrap_or_else(|_| "zh-CN".to_string()),
+            metadata_country_code: env::var("APP_METADATA_COUNTRY_CODE")
+                .unwrap_or_else(|_| "CN".to_string()),
+            preferred_metadata_language: env::var("APP_PREFERRED_METADATA_LANGUAGE")
+                .unwrap_or_else(|_| "zh".to_string()),
+            enable_remote_access: env::var("APP_ENABLE_REMOTE_ACCESS")
+                .ok()
+                .map(|value| value.eq_ignore_ascii_case("true"))
+                .unwrap_or(true),
+            enable_automatic_port_mapping: env::var("APP_ENABLE_AUTOMATIC_PORT_MAPPING")
+                .ok()
+                .map(|value| value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            public_url: env::var("APP_PUBLIC_URL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            branding_login_disclaimer: env::var("APP_LOGIN_DISCLAIMER").unwrap_or_default(),
+            branding_custom_css: env::var("APP_BRANDING_CSS").unwrap_or_default(),
+            branding_splashscreen_enabled: env::var("APP_SPLASHSCREEN_ENABLED")
+                .ok()
+                .map(|value| value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
             static_dir: env::var("APP_STATIC_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("frontend/dist")),
+            log_dir: env::var("LOG_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("logs")),
             tmdb_api_key: env::var("TMDB_API_KEY").ok(),
             api_key: env::var("EMBY_API_KEY").ok(),
             ffmpeg_path: env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".to_string()),

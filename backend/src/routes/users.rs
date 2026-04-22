@@ -173,6 +173,7 @@ async fn authenticate(
         device_name,
         client,
         application_version,
+        None,
     )
     .await?;
 

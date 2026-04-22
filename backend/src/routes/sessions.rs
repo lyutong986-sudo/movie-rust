@@ -11,6 +11,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -34,10 +35,10 @@ pub fn router() -> Router<AppState> {
         .route("/Sessions/{id}/System/{command}", post(no_content_for_session_command))
         .route("/Sessions/{id}/Users/{user_id}", post(no_content_for_session_user).delete(no_content_for_session_user))
         .route("/Sessions/{id}/Users/{user_id}/Delete", post(no_content_for_session_user))
-        .route("/Sessions/{id}/Viewing", post(no_content_for_session))
-        .route("/Sessions/Capabilities", post(no_content))
-        .route("/Sessions/Capabilities/Full", post(no_content))
-        .route("/Sessions/Logout", post(no_content))
+        .route("/Sessions/{id}/Viewing", post(update_session_viewing))
+        .route("/Sessions/Capabilities", post(update_capabilities))
+        .route("/Sessions/Capabilities/Full", post(update_capabilities))
+        .route("/Sessions/Logout", post(logout_session))
         .route("/Sessions/Playing", post(playback_started))
         .route("/Sessions/Playing/Progress", post(playback_progress))
         .route("/Sessions/Playing/Stopped", post(playback_stopped))
@@ -75,6 +76,8 @@ struct PagingQuery {
 struct CreateAuthKeyQuery {
     #[serde(default, alias = "app")]
     app: Option<String>,
+    #[serde(default, alias = "expiresInDays")]
+    expires_in_days: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +119,25 @@ async fn list_sessions(
             dto.now_playing_item = Some(runtime.now_playing_item);
             dto.play_state = Some(runtime.play_state);
         }
+        if let Some(summary) =
+            repository::get_session_state_summary(&state.pool, &session.access_token).await?
+        {
+            merge_session_play_state(&mut dto, summary);
+        }
+        if let Some(capabilities) =
+            repository::get_session_capabilities(&state.pool, &session.access_token).await?
+        {
+            apply_session_capabilities(&mut dto, &capabilities);
+        }
+        if let Some(viewing_item) = session_viewing_item(
+            &state,
+            &session.access_token,
+            session.user_id,
+        )
+        .await?
+        {
+            dto.now_viewing_item = Some(viewing_item);
+        }
         items.push(dto);
     }
     Ok(Json(items))
@@ -130,7 +152,7 @@ async fn list_auth_keys(
         return Err(AppError::Unauthorized);
     }
 
-    let all_sessions = repository::list_sessions(&state.pool).await?;
+    let all_sessions = repository::list_all_sessions(&state.pool).await?;
     let start_index = query.start_index.unwrap_or(0).max(0) as usize;
     let limit = query.limit.unwrap_or(100).clamp(1, 500) as usize;
     let total_record_count = all_sessions.len() as i64;
@@ -150,7 +172,7 @@ async fn list_auth_keys(
                 "DeviceName": session.device_name,
                 "DateLastActivity": session.last_activity_at,
                 "ExpirationDate": session.expires_at,
-                "IsActive": true
+                "IsActive": session.expires_at.is_none_or(|expires_at| expires_at > Utc::now())
             })
         })
         .collect();
@@ -171,6 +193,10 @@ async fn create_auth_key(
         return Err(AppError::Unauthorized);
     }
     let app = query.app.unwrap_or_else(|| "Api Key".to_string());
+    let expires_at = query
+        .expires_in_days
+        .filter(|days| *days > 0)
+        .map(|days| Utc::now() + Duration::days(days));
     let created = repository::create_session(
         &state.pool,
         session.user_id,
@@ -178,6 +204,7 @@ async fn create_auth_key(
         Some(app.clone()),
         Some(app),
         None,
+        expires_at,
     )
     .await?;
     Ok(Json(json!({
@@ -191,7 +218,7 @@ async fn create_auth_key(
         "DeviceName": created.device_name,
         "DateLastActivity": created.last_activity_at,
         "ExpirationDate": created.expires_at,
-        "IsActive": true
+        "IsActive": created.expires_at.is_none_or(|value| value > Utc::now())
     })))
 }
 
@@ -207,13 +234,36 @@ async fn delete_auth_key(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn auth_providers(_session: AuthSession) -> Json<Vec<Value>> {
-    Json(vec![json!({
-        "Name": "Default",
-        "Id": "Default",
-        "Type": "Password",
-        "IsEnabled": true
-    })])
+async fn auth_providers(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    let users = repository::list_users(&state.pool, false).await?;
+    let mut provider_ids = std::collections::BTreeSet::new();
+    for user in users {
+        let policy = repository::user_to_dto(&user, state.config.server_id).policy;
+        let auth_id = policy.authentication_provider_id.trim();
+        let reset_id = policy.password_reset_provider_id.trim();
+        provider_ids.insert(if auth_id.is_empty() { "Default".to_string() } else { auth_id.to_string() });
+        provider_ids.insert(if reset_id.is_empty() { "Default".to_string() } else { reset_id.to_string() });
+    }
+
+    if provider_ids.is_empty() {
+        provider_ids.insert("Default".to_string());
+    }
+
+    let items = provider_ids
+        .into_iter()
+        .map(|provider_id| {
+            json!({
+                "Name": provider_id,
+                "Id": provider_id,
+                "Type": "Password",
+                "IsEnabled": true
+            })
+        })
+        .collect();
+    Ok(Json(items))
 }
 
 async fn play_queue(
@@ -268,8 +318,22 @@ async fn session_commands(
     Ok(Json(result))
 }
 
-async fn no_content(_session: AuthSession) -> StatusCode {
-    StatusCode::NO_CONTENT
+async fn update_capabilities(
+    session: AuthSession,
+    State(state): State<AppState>,
+    body: Option<Json<Value>>,
+) -> Result<StatusCode, AppError> {
+    let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
+    repository::set_session_capabilities(&state.pool, &session.access_token, payload).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn logout_session(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<StatusCode, AppError> {
+    repository::delete_session(&state.pool, &session.access_token).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn no_content_for_session(
@@ -278,13 +342,34 @@ async fn no_content_for_session(
     Path(id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
+    let command_name = payload
+        .get("Name")
+        .or_else(|| payload.get("Command"))
+        .or_else(|| payload.get("name"))
+        .or_else(|| payload.get("command"))
+        .and_then(Value::as_str)
+        .unwrap_or("Command")
+        .to_string();
     repository::record_session_command(
         &state.pool,
         &id,
-        "Command",
-        body.map(|Json(value)| value).unwrap_or_else(|| json!({})),
+        &command_name,
+        payload.clone(),
     )
     .await?;
+    repository::apply_session_command_state(&state.pool, &id, &command_name, &payload).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_session_viewing(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<Value>>,
+) -> Result<StatusCode, AppError> {
+    let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
+    repository::set_session_viewing(&state.pool, &id, payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -295,7 +380,8 @@ async fn message_for_session(
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
     let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
-    repository::record_session_command(&state.pool, &id, "DisplayMessage", payload).await?;
+    repository::record_session_command(&state.pool, &id, "DisplayMessage", payload.clone()).await?;
+    repository::apply_session_command_state(&state.pool, &id, "DisplayMessage", &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -305,13 +391,15 @@ async fn no_content_for_session_command(
     Path((id, command)): Path<(String, String)>,
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
     repository::record_session_command(
         &state.pool,
         &id,
         &command,
-        body.map(|Json(value)| value).unwrap_or_else(|| json!({})),
+        payload.clone(),
     )
     .await?;
+    repository::apply_session_command_state(&state.pool, &id, &command, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -320,13 +408,15 @@ async fn no_content_for_session_user(
     State(state): State<AppState>,
     Path((id, user_id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
+    let payload = json!({ "UserId": user_id });
     repository::record_session_command(
         &state.pool,
         &id,
         "SetAdditionalUser",
-        json!({ "UserId": user_id }),
+        payload.clone(),
     )
     .await?;
+    repository::apply_session_command_state(&state.pool, &id, "SetAdditionalUser", &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -472,4 +562,96 @@ async fn record_legacy_for_user(
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn apply_session_capabilities(dto: &mut SessionInfoDto, capabilities: &Value) {
+    if let Some(supports_remote_control) = capabilities
+        .get("SupportsRemoteControl")
+        .and_then(Value::as_bool)
+    {
+        dto.supports_remote_control = supports_remote_control;
+    }
+
+    if let Some(remote_end_point) = capabilities
+        .get("RemoteEndPoint")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        dto.remote_end_point = Some(remote_end_point);
+    }
+
+    if let Some(playable_media_types) = value_string_vec(
+        capabilities
+            .get("PlayableMediaTypes")
+            .or_else(|| capabilities.get("SupportedMediaTypes")),
+    ) {
+        dto.playable_media_types = playable_media_types;
+    }
+
+    if let Some(supported_commands) = value_string_vec(
+        capabilities
+            .get("SupportedCommands")
+            .or_else(|| capabilities.get("SupportedRemoteCommands")),
+    ) {
+        dto.supported_commands = supported_commands;
+    }
+}
+
+fn value_string_vec(value: Option<&Value>) -> Option<Vec<String>> {
+    let values = value?
+        .as_array()?
+        .iter()
+        .filter_map(|entry| entry.as_str().map(str::trim))
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    Some(values)
+}
+
+fn merge_session_play_state(dto: &mut SessionInfoDto, summary: Value) {
+    match dto.play_state.as_mut() {
+        Some(Value::Object(play_state)) => {
+            if let Some(summary_object) = summary.as_object() {
+                for (key, value) in summary_object {
+                    play_state.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        _ => {
+            dto.play_state = Some(summary);
+        }
+    }
+}
+
+async fn session_viewing_item(
+    state: &AppState,
+    session_id: &str,
+    user_id: Uuid,
+) -> Result<Option<BaseItemDto>, AppError> {
+    let Some(viewing) = repository::get_session_viewing(&state.pool, session_id).await? else {
+        return Ok(None);
+    };
+
+    let item_id = viewing
+        .get("ItemId")
+        .or_else(|| viewing.get("itemId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .map(crate::models::emby_id_to_uuid)
+        .transpose()
+        .map_err(|_| AppError::BadRequest("会话 Viewing 的 ItemId 非法".to_string()))?;
+
+    let Some(item_id) = item_id else {
+        return Ok(None);
+    };
+
+    let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
+        return Ok(None);
+    };
+
+    Ok(Some(
+        repository::media_item_to_dto(&state.pool, &item, Some(user_id), state.config.server_id)
+            .await?,
+    ))
 }

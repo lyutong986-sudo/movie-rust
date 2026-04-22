@@ -14,7 +14,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Startup/User", get(first_user).post(create_first_user))
         .route("/Startup/FirstUser", get(first_user))
-        .route("/Startup/RemoteAccess", axum::routing::post(remote_access))
+        .route(
+            "/Startup/RemoteAccess",
+            get(get_remote_access).post(remote_access),
+        )
         .route("/Startup/Complete", axum::routing::post(complete))
 }
 
@@ -57,6 +60,14 @@ async fn remote_access(
 ) -> Result<StatusCode, AppError> {
     repository::update_remote_access(&state.pool, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_remote_access(
+    State(state): State<AppState>,
+) -> Result<Json<StartupRemoteAccessRequest>, AppError> {
+    Ok(Json(
+        repository::startup_remote_access(&state.pool, &state.config).await?,
+    ))
 }
 
 async fn complete(State(state): State<AppState>) -> Result<StatusCode, AppError> {

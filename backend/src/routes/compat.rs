@@ -1,4 +1,10 @@
-use crate::{auth::AuthSession, error::AppError, repository, state::AppState};
+﻿use crate::{
+    auth::AuthSession,
+    error::AppError,
+    models::UserConfigurationDto,
+    repository,
+    state::AppState,
+};
 use axum::{
     extract::{Path, Query, State},
     routing::{get, post},
@@ -18,8 +24,9 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Localization/Options", get(localization_options))
         .route("/Localization/Cultures", get(localization_cultures))
-        .route("/UserSettings/{user_id}", get(user_settings))
-        .route("/Users/{user_id}/Settings", get(user_settings))
+        .route("/UserSettings/{user_id}", get(user_settings).post(update_user_settings))
+        .route("/UserSettings/{user_id}/Partial", post(update_user_settings_partial))
+        .route("/Users/{user_id}/Settings", get(user_settings).post(update_user_settings))
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,7 +56,18 @@ async fn display_preferences(
     {
         return Ok(Json(saved));
     }
-    Ok(Json(display_preferences_value(display_preferences_id, user_id, &client)))
+    let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+    let mut value = display_preferences_value(
+        display_preferences_id,
+        user_id,
+        &client,
+        &startup.ui_culture,
+    );
+    if let Some(template) = repository::get_display_preferences_template(&state.pool, &client).await?
+    {
+        merge_json(&mut value, template);
+    }
+    Ok(Json(value))
 }
 
 async fn user_display_preferences(
@@ -58,9 +76,7 @@ async fn user_display_preferences(
     Path((user_id, display_preferences_id)): Path<(Uuid, String)>,
     Query(query): Query<DisplayPreferencesQuery>,
 ) -> Result<Json<Value>, AppError> {
-    if session.user_id != user_id && !session.is_admin {
-        return Err(AppError::Forbidden);
-    }
+    ensure_settings_access(&session, user_id)?;
     let client = normalized_display_preferences_client(query.client.as_deref());
     if let Some(saved) = repository::get_display_preferences(
         &state.pool,
@@ -72,7 +88,18 @@ async fn user_display_preferences(
     {
         return Ok(Json(saved));
     }
-    Ok(Json(display_preferences_value(display_preferences_id, user_id, &client)))
+    let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+    let mut value = display_preferences_value(
+        display_preferences_id,
+        user_id,
+        &client,
+        &startup.ui_culture,
+    );
+    if let Some(template) = repository::get_display_preferences_template(&state.pool, &client).await?
+    {
+        merge_json(&mut value, template);
+    }
+    Ok(Json(value))
 }
 
 async fn update_display_preferences(
@@ -83,7 +110,15 @@ async fn update_display_preferences(
     Json(mut payload): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
     let user_id = query.user_id.unwrap_or(session.user_id);
-    update_display_preferences_for_user(&state, &session, user_id, display_preferences_id, query.client.as_deref(), &mut payload).await
+    update_display_preferences_for_user(
+        &state,
+        &session,
+        user_id,
+        display_preferences_id,
+        query.client.as_deref(),
+        &mut payload,
+    )
+    .await
 }
 
 async fn update_user_display_preferences(
@@ -93,7 +128,15 @@ async fn update_user_display_preferences(
     Query(query): Query<DisplayPreferencesQuery>,
     Json(mut payload): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
-    update_display_preferences_for_user(&state, &session, user_id, display_preferences_id, query.client.as_deref(), &mut payload).await
+    update_display_preferences_for_user(
+        &state,
+        &session,
+        user_id,
+        display_preferences_id,
+        query.client.as_deref(),
+        &mut payload,
+    )
+    .await
 }
 
 async fn update_display_preferences_for_user(
@@ -104,14 +147,18 @@ async fn update_display_preferences_for_user(
     client: Option<&str>,
     payload: &mut Value,
 ) -> Result<Json<Value>, AppError> {
-    if session.user_id != user_id && !session.is_admin {
-        return Err(AppError::Forbidden);
-    }
+    ensure_settings_access(session, user_id)?;
     let client = normalized_display_preferences_client(client);
     if let Some(object) = payload.as_object_mut() {
-        object.entry("Id".to_string()).or_insert_with(|| json!(display_preferences_id.clone()));
-        object.entry("UserId".to_string()).or_insert_with(|| json!(user_id.to_string().to_uppercase()));
-        object.entry("Client".to_string()).or_insert_with(|| json!(client.clone()));
+        object
+            .entry("Id".to_string())
+            .or_insert_with(|| json!(display_preferences_id.clone()));
+        object
+            .entry("UserId".to_string())
+            .or_insert_with(|| json!(user_id.to_string().to_uppercase()));
+        object
+            .entry("Client".to_string())
+            .or_insert_with(|| json!(client.clone()));
     }
     let saved = repository::upsert_display_preferences(
         &state.pool,
@@ -132,55 +179,178 @@ fn normalized_display_preferences_client(client: Option<&str>) -> String {
         .to_string()
 }
 
-fn display_preferences_value(id: String, user_id: Uuid, client: &str) -> Value {
+fn display_preferences_value(id: String, user_id: Uuid, client: &str, ui_culture: &str) -> Value {
+    let lower_client = client.to_ascii_lowercase();
+    let (view_type, primary_image_width, primary_image_height) =
+        if lower_client.contains("androidtv") || lower_client.contains("tv") {
+            ("Thumb", 320, 180)
+        } else {
+            ("Poster", 166, 250)
+        };
+
     json!({
         "Id": id,
         "UserId": user_id.to_string().to_uppercase(),
         "Client": client,
-        "ViewType": "Poster",
+        "ViewType": view_type,
         "SortBy": "SortName",
+        "SortOrder": "Ascending",
         "IndexBy": "SortName",
         "RememberIndexing": false,
-        "PrimaryImageHeight": 250,
-        "PrimaryImageWidth": 166,
+        "RememberSorting": false,
+        "PrimaryImageHeight": primary_image_height,
+        "PrimaryImageWidth": primary_image_width,
         "ScrollDirection": "Horizontal",
         "ShowBackdrop": true,
         "ShowSidebar": true,
-        "CustomPrefs": {}
+        "ShowLocalTrailers": true,
+        "ShowMissingEpisodes": false,
+        "CustomPrefs": {
+            "landing-libraries": "views",
+            "skip-details": "false",
+            "ui-culture": ui_culture
+        }
     })
 }
 
-async fn localization_options(_session: AuthSession) -> Json<Value> {
-    Json(json!([
-        { "Name": "中文（简体）", "Value": "zh-CN" },
-        { "Name": "English", "Value": "en-US" }
-    ]))
+async fn localization_options(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+    let mut ordered = vec![startup.ui_culture.clone(), "zh-CN".to_string(), "en-US".to_string()];
+    ordered.dedup();
+    let mut options = Vec::new();
+    for culture in ordered {
+        if options.iter().any(|entry: &Value| entry["Value"] == culture) {
+            continue;
+        }
+        options.push(json!({
+            "Name": culture_display_name(&culture),
+            "Value": culture
+        }));
+    }
+    Ok(Json(json!(options)))
 }
-
-async fn localization_cultures(_session: AuthSession) -> Json<Value> {
-    Json(json!([
-        { "DisplayName": "中文（简体）", "Name": "zh-CN", "ThreeLetterISOLanguageName": "zho", "TwoLetterISOLanguageName": "zh" },
-        { "DisplayName": "English", "Name": "en-US", "ThreeLetterISOLanguageName": "eng", "TwoLetterISOLanguageName": "en" }
-    ]))
+async fn localization_cultures(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+    let mut ordered = vec![startup.ui_culture.clone(), "zh-CN".to_string(), "en-US".to_string()];
+    ordered.dedup();
+    let cultures = ordered
+        .into_iter()
+        .map(|culture| {
+            let language = culture_language_code(&culture, &startup.preferred_metadata_language);
+            json!({
+                "DisplayName": culture_display_name(&culture),
+                "Name": culture,
+                "ThreeLetterISOLanguageName": to_three_letter_language(&language),
+                "TwoLetterISOLanguageName": to_two_letter_language(&language)
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!(cultures)))
 }
-
 async fn user_settings(
     session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
-    if session.user_id != user_id && !session.is_admin {
-        return Err(AppError::Forbidden);
-    }
+    ensure_settings_access(&session, user_id)?;
 
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
     let dto = repository::user_to_dto(&user, state.config.server_id);
+    let startup = repository::startup_configuration(&state.pool, &state.config).await?;
 
     Ok(Json(json!({
         "UserId": dto.id,
         "Configuration": dto.configuration,
-        "Policy": dto.policy
+        "Policy": dto.policy,
+        "PreferredMetadataLanguage": startup.preferred_metadata_language,
+        "PreferredMetadataCountryCode": startup.metadata_country_code
     })))
+}
+
+async fn update_user_settings(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Json(configuration): Json<UserConfigurationDto>,
+) -> Result<Json<Value>, AppError> {
+    ensure_settings_access(&session, user_id)?;
+    repository::update_user_configuration(&state.pool, user_id, &configuration).await?;
+    Ok(Json(json!(configuration)))
+}
+
+async fn update_user_settings_partial(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, AppError> {
+    ensure_settings_access(&session, user_id)?;
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+    let dto = repository::user_to_dto(&user, state.config.server_id);
+    let mut current = serde_json::to_value(dto.configuration)?;
+    merge_json(&mut current, payload);
+    let next = serde_json::from_value::<UserConfigurationDto>(current.clone())
+        .map_err(|error| AppError::BadRequest(format!("无效的 UserSettings 请求: {error}")))?;
+    repository::update_user_configuration(&state.pool, user_id, &next).await?;
+    Ok(Json(current))
+}
+
+fn ensure_settings_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppError> {
+    if session.user_id != user_id && !session.is_admin {
+        Err(AppError::Forbidden)
+    } else {
+        Ok(())
+    }
+}
+
+fn merge_json(target: &mut Value, patch: Value) {
+    match (target, patch) {
+        (Value::Object(target_map), Value::Object(patch_map)) => {
+            for (key, value) in patch_map {
+                match target_map.get_mut(&key) {
+                    Some(existing) => merge_json(existing, value),
+                    None => {
+                        target_map.insert(key, value);
+                    }
+                }
+            }
+        }
+        (slot, value) => *slot = value,
+    }
+}
+fn culture_display_name(culture: &str) -> String {
+    match culture.to_ascii_lowercase().as_str() {
+        "zh-cn" => "中文（简体）".to_string(),
+        "zh-tw" => "中文（繁体）".to_string(),
+        "en-us" => "English".to_string(),
+        _ => culture.to_string(),
+    }
+}
+fn culture_language_code(culture: &str, fallback: &str) -> String {
+    culture
+        .split(['-', '_'])
+        .next()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback)
+        .to_ascii_lowercase()
+}
+fn to_two_letter_language(language: &str) -> String {
+    language.chars().take(2).collect::<String>().to_ascii_lowercase()
+}
+fn to_three_letter_language(language: &str) -> String {
+    match language.to_ascii_lowercase().as_str() {
+        "zh" => "zho".to_string(),
+        "en" => "eng".to_string(),
+        other => other.to_string(),
+    }
 }

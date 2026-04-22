@@ -14,6 +14,7 @@ pub struct DbUser {
     pub is_hidden: bool,
     pub is_disabled: bool,
     pub policy: Value,
+    pub configuration: Value,
     pub primary_image_path: Option<String>,
     pub backdrop_image_path: Option<String>,
     pub logo_image_path: Option<String>,
@@ -479,18 +480,51 @@ impl Default for UserPolicyDto {
             enable_all_devices: true,
             blocked_media_folders: Vec::new(),
             blocked_channels: Vec::new(),
-            authentication_provider_id: "".to_string(),
-            password_reset_provider_id: "".to_string(),
+            authentication_provider_id: "Default".to_string(),
+            password_reset_provider_id: "Default".to_string(),
             sync_play_access: "CreateAndJoinGroups".to_string(),
         }
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "PascalCase")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase", default)]
 pub struct UserConfigurationDto {
     pub play_default_audio_track: bool,
+    pub play_default_subtitle_track: bool,
     pub subtitle_mode: String,
+    pub audio_language_preference: String,
+    pub subtitle_language_preference: String,
+    pub display_missing_episodes: bool,
+    pub grouped_folders: Vec<String>,
+    pub latest_items_excludes: Vec<String>,
+    pub my_media_excludes: Vec<String>,
+    pub ordered_views: Vec<String>,
+    pub hide_played_in_latest: bool,
+    pub remember_audio_selections: bool,
+    pub remember_subtitle_selections: bool,
+    pub enable_local_password: bool,
+}
+
+impl Default for UserConfigurationDto {
+    fn default() -> Self {
+        Self {
+            play_default_audio_track: true,
+            play_default_subtitle_track: false,
+            subtitle_mode: "Default".to_string(),
+            audio_language_preference: String::new(),
+            subtitle_language_preference: String::new(),
+            display_missing_episodes: false,
+            grouped_folders: Vec::new(),
+            latest_items_excludes: Vec::new(),
+            my_media_excludes: Vec::new(),
+            ordered_views: Vec::new(),
+            hide_played_in_latest: false,
+            remember_audio_selections: true,
+            remember_subtitle_selections: true,
+            enable_local_password: true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -612,7 +646,7 @@ pub struct EndpointInfo {
     pub is_in_network: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct BrandingConfiguration {
     pub login_disclaimer: String,

@@ -97,14 +97,14 @@ pub fn router() -> Router<AppState> {
         .route("/Items/{item_id}", get(item_by_id))
         .route("/Items/{item_id}/Refresh", post(refresh_item_metadata))
         .route("/Items/{item_id}/Chapters", get(item_chapters))
-        .route("/Items/{item_id}/IntroTimestamps", get(no_intro_timestamps))
-        .route("/Videos/{item_id}/IntroTimestamps", get(no_intro_timestamps))
-        .route("/Episodes/{item_id}/IntroTimestamps", get(no_intro_timestamps))
+        .route("/Items/{item_id}/IntroTimestamps", get(intro_timestamps))
+        .route("/Videos/{item_id}/IntroTimestamps", get(intro_timestamps))
+        .route("/Episodes/{item_id}/IntroTimestamps", get(intro_timestamps))
         .route("/Users/{user_id}/Items/{item_id}", get(user_item_by_id))
         .route("/Users/{user_id}/Items/{item_id}/Similar", get(get_user_similar_items))
-        .route("/Users/{user_id}/Items/{item_id}/Intros", get(empty_item_query_result))
-        .route("/Users/{user_id}/Items/{item_id}/LocalTrailers", get(empty_item_list))
-        .route("/Users/{user_id}/Items/{item_id}/SpecialFeatures", get(empty_item_list))
+        .route("/Users/{user_id}/Items/{item_id}/Intros", get(item_intros))
+        .route("/Users/{user_id}/Items/{item_id}/LocalTrailers", get(local_trailers))
+        .route("/Users/{user_id}/Items/{item_id}/SpecialFeatures", get(special_features))
         .route("/Users/{user_id}/Items/{item_id}/HideFromResume", post(hide_from_resume))
         .route("/Videos/{item_id}/AdditionalParts", get(additional_parts))
         .route("/Items/{item_id}/Similar", get(get_similar_items))
@@ -1217,17 +1217,6 @@ async fn item_chapters(
     }))
 }
 
-async fn no_intro_timestamps(
-    _session: AuthSession,
-    State(state): State<AppState>,
-    Path(item_id_str): Path<String>,
-) -> Result<StatusCode, AppError> {
-    let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
-    ensure_media_item_exists(&state, item_id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 fn ensure_user_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppError> {
     if session.user_id == user_id || session.is_admin {
         Ok(())
@@ -1256,32 +1245,134 @@ async fn user_item_by_id(
     item_dto(&state, user_id, item_id).await
 }
 
-async fn empty_item_query_result(
+async fn item_intros(
     session: AuthSession,
     State(state): State<AppState>,
     Path((user_id, item_id_str)): Path<(Uuid, String)>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    ensure_user_access(&session, user_id)?;
-    let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
-    ensure_media_item_exists(&state, item_id).await?;
+    let items = related_child_items(
+        &session,
+        &state,
+        user_id,
+        &item_id_str,
+        &["Intro"],
+    )
+    .await?;
     Ok(Json(QueryResult {
-        items: Vec::new(),
-        total_record_count: 0,
+        total_record_count: items.len() as i64,
+        items,
         start_index: Some(0),
     }))
 }
 
-async fn empty_item_list(
+async fn local_trailers(
     session: AuthSession,
     State(state): State<AppState>,
     Path((user_id, item_id_str)): Path<(Uuid, String)>,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
-    ensure_user_access(&session, user_id)?;
+    let items = related_child_items(
+        &session,
+        &state,
+        user_id,
+        &item_id_str,
+        &["Trailer"],
+    )
+    .await?;
+    Ok(Json(items))
+}
+
+async fn special_features(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id_str)): Path<(Uuid, String)>,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let items = related_child_items(
+        &session,
+        &state,
+        user_id,
+        &item_id_str,
+        &["SpecialFeature", "Extra"],
+    )
+    .await?;
+    Ok(Json(items))
+}
+
+async fn intro_timestamps(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Value>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
     ensure_media_item_exists(&state, item_id).await?;
-    Ok(Json(Vec::new()))
+    let chapters = repository::get_media_chapters(&state.pool, item_id).await?;
+    let intro_start = marker_ticks(&chapters, "IntroStart");
+    let intro_end = marker_ticks(&chapters, "IntroEnd");
+    let credits_start = marker_ticks(&chapters, "CreditsStart");
+
+    Ok(Json(json!({
+        "Valid": intro_start.is_some() || intro_end.is_some() || credits_start.is_some(),
+        "IntroStart": intro_start,
+        "IntroEnd": intro_end,
+        "CreditsStart": credits_start
+    })))
+}
+
+async fn related_child_items(
+    session: &AuthSession,
+    state: &AppState,
+    user_id: Uuid,
+    item_id_str: &str,
+    include_types: &[&str],
+) -> Result<Vec<BaseItemDto>, AppError> {
+    ensure_user_access(session, user_id)?;
+    let item_id = emby_id_to_uuid(item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    ensure_media_item_exists(state, item_id).await?;
+
+    let result = repository::list_media_items(
+        &state.pool,
+        ItemListOptions {
+            library_id: None,
+            parent_id: Some(item_id),
+            item_ids: vec![],
+            include_types: include_types.iter().map(|value| (*value).to_string()).collect(),
+            genres: vec![],
+            user_id: Some(user_id),
+            recursive: false,
+            search_term: None,
+            sort_by: Some("SortName".to_string()),
+            sort_order: Some("Ascending".to_string()),
+            filters: None,
+            fields: None,
+            start_index: 0,
+            limit: 200,
+            ..ItemListOptions::default()
+        },
+    )
+    .await?;
+
+    let mut items = Vec::with_capacity(result.items.len());
+    for item in result.items {
+        items.push(
+            repository::media_item_to_dto(&state.pool, &item, Some(user_id), state.config.server_id)
+                .await?,
+        );
+    }
+
+    Ok(items)
+}
+
+fn marker_ticks(chapters: &[crate::models::DbMediaChapter], marker_type: &str) -> Option<i64> {
+    chapters
+        .iter()
+        .find(|chapter| {
+            chapter
+                .marker_type
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case(marker_type))
+        })
+        .map(|chapter| chapter.start_position_ticks)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2138,3 +2229,4 @@ mod tests {
         );
     }
 }
+

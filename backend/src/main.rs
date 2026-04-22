@@ -24,11 +24,18 @@ use tower_http::{
     trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
+use tracing_appender::rolling;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
+
+    let bootstrap_config = config::Config::from_env()?;
+    std::fs::create_dir_all(&bootstrap_config.log_dir)
+        .with_context(|| format!("创建日志目录失败: {}", bootstrap_config.log_dir.display()))?;
+    let file_appender = rolling::daily(&bootstrap_config.log_dir, "server.log");
+    let (file_writer, _log_guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::registry()
         .with(
@@ -36,9 +43,14 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| "movie_rust_backend=debug,tower_http=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(file_writer),
+        )
         .init();
 
-    let config = config::Config::from_env()?;
+    let config = bootstrap_config;
     let static_dir = config.static_dir.clone();
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)

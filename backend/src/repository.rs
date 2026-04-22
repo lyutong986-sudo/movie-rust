@@ -10,6 +10,7 @@ use crate::{
         NameIdDto, NameLongIdDto, PersonDto,
         QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
         UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
+        BrandingConfiguration,
     },
     naming, security,
 };
@@ -20,6 +21,7 @@ use sqlx::{FromRow, Postgres, QueryBuilder, Row};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 use uuid::Uuid;
 
@@ -129,11 +131,127 @@ pub async fn update_startup_configuration(
     set_system_setting(pool, "startup_configuration", json!(configuration)).await
 }
 
+pub async fn branding_configuration(
+    pool: &sqlx::PgPool,
+    config: &Config,
+) -> Result<BrandingConfiguration, AppError> {
+    if let Some(value) = get_system_setting(pool, "branding_configuration").await? {
+        if let Ok(configuration) = serde_json::from_value::<BrandingConfiguration>(value) {
+            return Ok(configuration);
+        }
+    }
+
+    Ok(BrandingConfiguration {
+        login_disclaimer: config.branding_login_disclaimer.clone(),
+        custom_css: config.branding_custom_css.clone(),
+        splashscreen_enabled: config.branding_splashscreen_enabled,
+    })
+}
+
+pub async fn branding_css(pool: &sqlx::PgPool, config: &Config) -> Result<String, AppError> {
+    let configuration = branding_configuration(pool, config).await?;
+    Ok(configuration.custom_css)
+}
+
+pub async fn get_session_capabilities(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+) -> Result<Option<Value>, AppError> {
+    get_system_setting(pool, &format!("session_capabilities:{session_id}")).await
+}
+
+pub async fn set_session_capabilities(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+    value: Value,
+) -> Result<(), AppError> {
+    set_system_setting(pool, &format!("session_capabilities:{session_id}"), value).await
+}
+
+pub async fn delete_session_capabilities(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM system_settings WHERE key = $1")
+        .bind(format!("session_capabilities:{session_id}"))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_session_viewing(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+) -> Result<Option<Value>, AppError> {
+    get_system_setting(pool, &format!("session_viewing:{session_id}")).await
+}
+
+pub async fn set_session_viewing(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+    value: Value,
+) -> Result<(), AppError> {
+    set_system_setting(pool, &format!("session_viewing:{session_id}"), value).await
+}
+
+pub async fn delete_session_viewing(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM system_settings WHERE key = $1")
+        .bind(format!("session_viewing:{session_id}"))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_session_state_summary(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+) -> Result<Option<Value>, AppError> {
+    get_system_setting(pool, &format!("session_state:{session_id}")).await
+}
+
+pub async fn set_session_state_summary(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+    value: Value,
+) -> Result<(), AppError> {
+    set_system_setting(pool, &format!("session_state:{session_id}"), value).await
+}
+
+pub async fn delete_session_state_summary(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM system_settings WHERE key = $1")
+        .bind(format!("session_state:{session_id}"))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn update_remote_access(
     pool: &sqlx::PgPool,
     configuration: &StartupRemoteAccessRequest,
 ) -> Result<(), AppError> {
     set_system_setting(pool, "startup_remote_access", json!(configuration)).await
+}
+
+pub async fn startup_remote_access(
+    pool: &sqlx::PgPool,
+    config: &Config,
+) -> Result<StartupRemoteAccessRequest, AppError> {
+    if let Some(value) = get_system_setting(pool, "startup_remote_access").await? {
+        if let Ok(configuration) = serde_json::from_value::<StartupRemoteAccessRequest>(value) {
+            return Ok(configuration);
+        }
+    }
+
+    Ok(StartupRemoteAccessRequest {
+        enable_remote_access: config.enable_remote_access,
+        enable_automatic_port_mapping: Some(config.enable_automatic_port_mapping),
+    })
 }
 
 pub async fn create_initial_admin(
@@ -158,13 +276,18 @@ pub async fn create_initial_admin(
 
     sqlx::query(
         r#"
-        INSERT INTO users (id, name, password_hash, is_admin, date_modified)
-        VALUES ($1, $2, $3, true, now())
+        INSERT INTO users (id, name, password_hash, is_admin, policy, configuration, date_modified)
+        VALUES ($1, $2, $3, true, $4, $5, now())
         "#,
     )
     .bind(id)
     .bind(name)
     .bind(password_hash)
+    .bind(serde_json::to_value(UserPolicyDto {
+        is_administrator: true,
+        ..UserPolicyDto::default()
+    })?)
+    .bind(serde_json::to_value(UserConfigurationDto::default())?)
     .execute(pool)
     .await?;
 
@@ -176,9 +299,9 @@ pub async fn create_initial_admin(
 fn default_startup_configuration(config: &Config) -> StartupConfiguration {
     StartupConfiguration {
         server_name: config.server_name.clone(),
-        ui_culture: "zh-CN".to_string(),
-        metadata_country_code: "CN".to_string(),
-        preferred_metadata_language: "zh".to_string(),
+        ui_culture: config.ui_culture.clone(),
+        metadata_country_code: config.metadata_country_code.clone(),
+        preferred_metadata_language: config.preferred_metadata_language.clone(),
     }
 }
 
@@ -853,7 +976,7 @@ pub async fn get_user_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Option<
     Ok(sqlx::query_as::<_, DbUser>(
         r#"
         SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
-               primary_image_path, backdrop_image_path, logo_image_path, date_modified
+               configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified
         FROM users
         WHERE lower(name) = lower($1)
         "#,
@@ -867,7 +990,7 @@ pub async fn get_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbUs
     Ok(sqlx::query_as::<_, DbUser>(
         r#"
         SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
-               primary_image_path, backdrop_image_path, logo_image_path, date_modified
+               configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified
         FROM users
         WHERE id = $1
         "#,
@@ -890,17 +1013,19 @@ pub async fn create_user(pool: &sqlx::PgPool, name: &str) -> Result<DbUser, AppE
     let id = Uuid::new_v4();
     let password_hash = security::hash_password("")?;
     let policy = serde_json::to_value(UserPolicyDto::default())?;
+    let configuration = serde_json::to_value(UserConfigurationDto::default())?;
 
     sqlx::query(
         r#"
-        INSERT INTO users (id, name, password_hash, is_admin, is_hidden, is_disabled, policy, date_modified)
-        VALUES ($1, $2, $3, false, false, false, $4, now())
+        INSERT INTO users (id, name, password_hash, is_admin, is_hidden, is_disabled, policy, configuration, date_modified)
+        VALUES ($1, $2, $3, false, false, false, $4, $5, now())
         "#,
     )
     .bind(id)
     .bind(name)
     .bind(password_hash)
     .bind(policy)
+    .bind(configuration)
     .execute(pool)
     .await?;
 
@@ -976,12 +1101,33 @@ pub async fn update_user_policy(pool: &sqlx::PgPool, user_id: Uuid, policy: &Use
     Ok(())
 }
 
+pub async fn update_user_configuration(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    configuration: &UserConfigurationDto,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET configuration = $1,
+            date_modified = now()
+        WHERE id = $2
+        "#,
+    )
+    .bind(serde_json::to_value(configuration)?)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<DbUser>, AppError> {
     let users = if public_only {
         sqlx::query_as::<_, DbUser>(
             r#"
             SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
-                   primary_image_path, backdrop_image_path, logo_image_path, date_modified
+                   configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified
             FROM users
             WHERE is_hidden = false AND is_disabled = false
             ORDER BY name
@@ -993,7 +1139,7 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
         sqlx::query_as::<_, DbUser>(
             r#"
             SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
-                   primary_image_path, backdrop_image_path, logo_image_path, date_modified
+                   configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified
             FROM users
             ORDER BY name
             "#,
@@ -1053,13 +1199,14 @@ pub async fn create_session(
     device_name: Option<String>,
     client: Option<String>,
     application_version: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
 ) -> Result<AuthSessionRow, AppError> {
     let token = Uuid::new_v4().simple().to_string();
 
     sqlx::query(
         r#"
-        INSERT INTO sessions (access_token, user_id, device_id, device_name, client, application_version)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO sessions (access_token, user_id, device_id, device_name, client, application_version, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(&token)
@@ -1068,6 +1215,7 @@ pub async fn create_session(
     .bind(device_name)
     .bind(client)
     .bind(application_version)
+    .bind(expires_at)
     .execute(pool)
     .await?;
 
@@ -1095,7 +1243,9 @@ pub async fn get_session(
             s.expires_at
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
-        WHERE s.access_token = $1 AND u.is_disabled = false
+        WHERE s.access_token = $1
+          AND u.is_disabled = false
+          AND (s.expires_at IS NULL OR s.expires_at > now())
         "#,
     )
     .bind(token)
@@ -1128,6 +1278,30 @@ pub async fn list_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, A
             s.expires_at
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
+        WHERE s.expires_at IS NULL OR s.expires_at > now()
+        ORDER BY s.last_activity_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn list_all_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, AppError> {
+    Ok(sqlx::query_as::<_, AuthSessionRow>(
+        r#"
+        SELECT
+            s.access_token,
+            s.user_id,
+            u.name AS user_name,
+            u.is_admin,
+            s.device_id,
+            s.device_name,
+            s.client,
+            s.application_version,
+            s.last_activity_at,
+            s.expires_at
+        FROM sessions s
+        INNER JOIN users u ON u.id = s.user_id
         ORDER BY s.last_activity_at DESC
         "#,
     )
@@ -1140,6 +1314,9 @@ pub async fn delete_session(pool: &sqlx::PgPool, access_token: &str) -> Result<(
         .bind(access_token)
         .execute(pool)
         .await?;
+    delete_session_capabilities(pool, access_token).await?;
+    delete_session_viewing(pool, access_token).await?;
+    delete_session_state_summary(pool, access_token).await?;
     Ok(())
 }
 
@@ -1165,8 +1342,38 @@ pub async fn update_media_item_image_path(
     Ok(())
 }
 
-pub async fn list_server_logs(_pool: &sqlx::PgPool) -> Result<Vec<LogFileDto>, AppError> {
-    Ok(Vec::new())
+pub async fn list_server_logs(log_dir: &Path) -> Result<Vec<LogFileDto>, AppError> {
+    let mut items = Vec::new();
+    if !log_dir.exists() {
+        return Ok(items);
+    }
+
+    let entries = std::fs::read_dir(log_dir)
+        .map_err(|error| AppError::Internal(format!("读取日志目录失败: {error}")))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| AppError::Internal(format!("读取日志文件失败: {error}")))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| AppError::Internal(format!("读取日志文件元数据失败: {error}")))?;
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let date_modified: DateTime<Utc> = modified.into();
+        items.push(LogFileDto {
+            name: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            date_modified,
+        });
+    }
+
+    items.sort_by(|left, right| right.date_modified.cmp(&left.date_modified));
+    Ok(items)
 }
 
 pub async fn list_activity_logs(
@@ -3740,6 +3947,210 @@ pub async fn record_session_command(
     Ok(())
 }
 
+pub async fn apply_session_command_state(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+    command: &str,
+    payload: &Value,
+) -> Result<(), AppError> {
+    let normalized = command.trim().to_ascii_lowercase();
+    let mut summary = get_session_state_summary(pool, session_id)
+        .await?
+        .unwrap_or_else(|| json!({}));
+    let summary_object = summary.as_object_mut();
+    match normalized.as_str() {
+        "pause" => {
+            sqlx::query(
+                r#"
+                UPDATE session_play_queue
+                SET is_paused = true,
+                    play_state = 'Paused',
+                    updated_at = now()
+                WHERE session_id = $1
+                "#,
+            )
+            .bind(session_id)
+            .execute(pool)
+            .await?;
+            if let Some(object) = summary_object {
+                object.insert("IsPaused".to_string(), json!(true));
+                object.insert("State".to_string(), json!("Paused"));
+            }
+        }
+        "unpause" | "play" => {
+            sqlx::query(
+                r#"
+                UPDATE session_play_queue
+                SET is_paused = false,
+                    play_state = 'Playing',
+                    updated_at = now()
+                WHERE session_id = $1
+                "#,
+            )
+            .bind(session_id)
+            .execute(pool)
+            .await?;
+            if let Some(object) = summary_object {
+                object.insert("IsPaused".to_string(), json!(false));
+                object.insert("State".to_string(), json!("Playing"));
+            }
+        }
+        "stop" => {
+            sqlx::query("DELETE FROM session_play_queue WHERE session_id = $1")
+                .bind(session_id)
+                .execute(pool)
+                .await?;
+            if let Some(object) = summary_object {
+                object.insert("State".to_string(), json!("Stopped"));
+                object.insert("PositionTicks".to_string(), json!(0));
+            }
+        }
+        "seek" => {
+            let position_ticks = payload
+                .get("SeekPositionTicks")
+                .or_else(|| payload.get("PositionTicks"))
+                .or_else(|| payload.get("seekPositionTicks"))
+                .or_else(|| payload.get("positionTicks"))
+                .and_then(Value::as_i64);
+            if let Some(position_ticks) = position_ticks {
+                sqlx::query(
+                    r#"
+                    UPDATE session_play_queue
+                    SET position_ticks = $2,
+                        updated_at = now()
+                    WHERE session_id = $1
+                    "#,
+                )
+                .bind(session_id)
+                .bind(position_ticks)
+                .execute(pool)
+                .await?;
+                if let Some(object) = summary_object {
+                    object.insert("PositionTicks".to_string(), json!(position_ticks));
+                }
+            }
+        }
+        "playpause" | "togglepause" => {
+            sqlx::query(
+                r#"
+                UPDATE session_play_queue
+                SET is_paused = NOT COALESCE(is_paused, false),
+                    play_state = CASE
+                        WHEN COALESCE(is_paused, false) THEN 'Playing'
+                        ELSE 'Paused'
+                    END,
+                    updated_at = now()
+                WHERE session_id = $1
+                "#,
+            )
+            .bind(session_id)
+            .execute(pool)
+            .await?;
+            if let Some(object) = summary_object {
+                let next_is_paused = object
+                    .get("IsPaused")
+                    .and_then(Value::as_bool)
+                    .map(|value| !value)
+                    .unwrap_or(true);
+                object.insert("IsPaused".to_string(), json!(next_is_paused));
+                object.insert(
+                    "State".to_string(),
+                    json!(if next_is_paused { "Paused" } else { "Playing" }),
+                );
+            }
+        }
+        "setaudiostreamindex" => {
+            if let Some(index) = payload
+                .get("Index")
+                .or_else(|| payload.get("AudioStreamIndex"))
+                .or_else(|| payload.get("index"))
+                .or_else(|| payload.get("audioStreamIndex"))
+                .and_then(Value::as_i64)
+            {
+                if let Some(object) = summary_object {
+                    object.insert("AudioStreamIndex".to_string(), json!(index));
+                }
+            }
+        }
+        "setsubtitlestreamindex" => {
+            if let Some(index) = payload
+                .get("Index")
+                .or_else(|| payload.get("SubtitleStreamIndex"))
+                .or_else(|| payload.get("index"))
+                .or_else(|| payload.get("subtitleStreamIndex"))
+                .and_then(Value::as_i64)
+            {
+                if let Some(object) = summary_object {
+                    object.insert("SubtitleStreamIndex".to_string(), json!(index));
+                }
+            }
+        }
+        "setvolume" => {
+            if let Some(level) = payload
+                .get("Volume")
+                .or_else(|| payload.get("VolumeLevel"))
+                .or_else(|| payload.get("volume"))
+                .or_else(|| payload.get("volumeLevel"))
+                .and_then(Value::as_i64)
+            {
+                if let Some(object) = summary_object {
+                    object.insert("VolumeLevel".to_string(), json!(level.clamp(0, 100)));
+                    object.insert("IsMuted".to_string(), json!(level <= 0));
+                }
+            }
+        }
+        "displaymessage" => {
+            if let Some(object) = summary_object {
+                if let Some(header) = payload
+                    .get("Header")
+                    .or_else(|| payload.get("header"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    object.insert("LastMessageHeader".to_string(), json!(header));
+                }
+                if let Some(text) = payload
+                    .get("Text")
+                    .or_else(|| payload.get("text"))
+                    .or_else(|| payload.get("Message"))
+                    .or_else(|| payload.get("message"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    object.insert("LastMessageText".to_string(), json!(text));
+                }
+                object.insert("LastMessageDate".to_string(), json!(Utc::now()));
+            }
+        }
+        "setadditionaluser" => {
+            if let Some(user_id) = payload
+                .get("UserId")
+                .or_else(|| payload.get("userId"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if let Some(object) = summary_object {
+                    let mut users = object
+                        .get("AdditionalUsers")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    if users.iter().all(|entry| entry.as_str() != Some(user_id)) {
+                        users.push(json!(user_id));
+                    }
+                    object.insert("AdditionalUsers".to_string(), Value::Array(users));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    set_session_state_summary(pool, session_id, summary).await?;
+
+    Ok(())
+}
+
 pub async fn list_session_commands(
     pool: &sqlx::PgPool,
     session_id: &str,
@@ -3867,6 +4278,17 @@ pub async fn get_display_preferences(
     .bind(client)
     .fetch_optional(pool)
     .await?)
+}
+
+pub async fn get_display_preferences_template(
+    pool: &sqlx::PgPool,
+    client: &str,
+) -> Result<Option<Value>, AppError> {
+    get_system_setting(
+        pool,
+        &format!("display_preferences_defaults:{}", client.trim().to_ascii_lowercase()),
+    )
+    .await
 }
 
 pub async fn upsert_display_preferences(
@@ -4081,6 +4503,12 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
     policy.is_administrator = user.is_admin;
     policy.is_hidden = user.is_hidden;
     policy.is_disabled = user.is_disabled;
+
+    let configuration = if !user.configuration.is_null() {
+        serde_json::from_value::<UserConfigurationDto>(user.configuration.clone()).unwrap_or_default()
+    } else {
+        UserConfigurationDto::default()
+    };
     
     UserDto {
         name: user.name.clone(),
@@ -4090,10 +4518,7 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
         has_configured_password: true,
         has_configured_easy_password: false,
         policy,
-        configuration: UserConfigurationDto {
-            play_default_audio_track: true,
-            subtitle_mode: "Default".to_string(),
-        },
+        configuration,
     }
 }
 
@@ -4118,7 +4543,7 @@ pub fn session_to_dto(session: &AuthSessionRow) -> SessionInfoDto {
             .application_version
             .clone()
             .unwrap_or_else(|| "0.1.0".to_string()),
-        is_active: true,
+        is_active: session.expires_at.is_none_or(|value| value > Utc::now()),
         last_activity_date: session.last_activity_at,
         remote_end_point: None,
         supports_remote_control: true,
