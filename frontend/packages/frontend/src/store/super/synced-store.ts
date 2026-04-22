@@ -151,6 +151,6 @@ export abstract class SyncedStore<
       watchDeep(synced_object, this._updateState);
     });
 
-    watch(remote.auth.currentUser, this._triggerSync);
+    watch(remote.auth.currentUser, this._triggerSync, { immediate: true });
   }
 }

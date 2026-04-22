@@ -22,11 +22,29 @@ export interface ClientSettingsState {
 @sealed
 class ClientSettingsStore extends SyncedStore<ClientSettingsState, KeysOfUnion<ClientSettingsState>> {
   private readonly _navigatorLanguage = useNavigatorLanguage();
+  private readonly _resolveSupportedLocale = (locale?: string): string | undefined => {
+    if (!locale) {
+      return undefined;
+    }
+
+    const normalized = locale.trim().toLowerCase();
+    const exact = languages.find(language => language.toLowerCase() === normalized);
+
+    if (exact) {
+      return exact;
+    }
+
+    const baseLanguage = normalized.split('-')[0];
+    const baseMatch = languages.find(language => language.toLowerCase() === baseLanguage);
+
+    if (baseMatch) {
+      return baseMatch;
+    }
+
+    return languages.find(language => language.toLowerCase().startsWith(`${baseLanguage}-`));
+  };
   private readonly _BROWSER_LANGUAGE = computed(() =>
-    /**
-     * Removes the culture info from the language string, so 'es-ES' is recognised as 'es'
-     */
-    this._navigatorLanguage.language.value?.split('-')[0]
+    this._resolveSupportedLocale(this._navigatorLanguage.language.value)
   );
 
   /**
@@ -45,7 +63,9 @@ class ClientSettingsStore extends SyncedStore<ClientSettingsState, KeysOfUnion<C
    * == METHODS ==
    */
   private readonly _updateLocale = (): void => {
-    const targetLocale = isNil(this.locale.value) ? this._BROWSER_LANGUAGE.value : this.locale.value;
+    const targetLocale = isNil(this.locale.value)
+      ? this._BROWSER_LANGUAGE.value
+      : this._resolveSupportedLocale(this.locale.value);
 
     if (targetLocale) {
       vuetify.locale.current.value = targetLocale;

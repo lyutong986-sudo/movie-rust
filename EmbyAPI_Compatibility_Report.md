@@ -777,3 +777,8 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - 同次实测还抓到首页 `GET /Shows/NextUp` 返回 `{"ErrorCode":"DatabaseError","ErrorMessage":"数据库错误: no column found for name: critic_rating"}`。原因是 `backend/src/repository.rs` 中 `get_next_up_episodes(...)` 与 `get_upcoming_episodes(...)` 的 SELECT 列表遗漏了 `critic_rating`，而映射目标 `DbMediaItem` 已要求该字段存在。
 - 现已为上述两个查询补回 `critic_rating` 列，保持 `DbMediaItem` 映射与 EmbySDK 相关首页链路一致，避免 NextUp/Upcoming 因字段缺失直接 500。
 - 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；库页前端修补为代码级修复，本轮未重新跑前端完整构建。
+## 2026-04-22 前端语言持久化刷新回退修补（五十二）
+- 使用 Chrome DevTools MCP 在 `https://test.emby.yun:4443/#/settings` 复测时确认：把界面切到 `中文（中国）` 后，前端会成功 `POST /DisplayPreferences/clientSettings?...`，而且刷新后 `GET /DisplayPreferences/clientSettings?...` 返回体里仍能看到 `CustomPrefs.locale = "zh-CN"`；但页面最终又回到英文，说明问题不在后端存储，而在前端启动阶段没有把已保存的 locale 正确重新应用到 i18n。
+- 根因有两处：其一，`SyncedStore` 只在 `remote.auth.currentUser` 变化时触发远端同步，但监听不是 `immediate`，刷新首屏时常出现用户状态已经就绪、却没有立刻拉回 `clientSettings` 的情况；其二，`ClientSettingsStore` 之前把浏览器语言直接裁成基础语言（例如 `zh-CN -> zh`），在项目语言包只有 `zh-CN` 没有裸 `zh` 时会错误回退到英文。
+- 现已将 `frontend/packages/frontend/src/store/super/synced-store.ts` 的用户同步监听改为 `immediate: true`，确保刷新首屏就会主动拉回 `DisplayPreferences`；同时在 `frontend/packages/frontend/src/store/settings/client.ts` 中加入受支持语言解析逻辑，优先精确匹配 locale，其次匹配基础语言，最后再回退到同语种的区域变体（例如浏览器 `zh-CN`/`zh-TW` 均能正确命中现有中文语言包）。
+- 这样一来，无论是用户显式保存的 `CustomPrefs.locale`，还是“自动”模式下来自浏览器的区域语言，刷新页面后都能重新驱动 `i18next.changeLanguage(...)` 与 Vuetify locale，不再无故掉回英文。
