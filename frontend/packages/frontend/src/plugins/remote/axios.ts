@@ -13,6 +13,7 @@ import { useSnackbar } from '#/composables/use-snackbar.ts';
 class RemotePluginAxios {
   public readonly instance = axios.create();
   private readonly _defaults = this.instance.defaults;
+  private _logoutPromise: Promise<void> | undefined;
 
   public resetDefaults(): void {
     this.instance.defaults = this._defaults;
@@ -23,18 +24,33 @@ class RemotePluginAxios {
    * as the session probably has been revoked remotely.
    */
   public logoutInterceptor = async (error: AxiosError): Promise<void> => {
+    const isUnauthorized = error.response?.status === 401;
+    const hasCurrentUser = Boolean(auth.currentUser.value);
+    const requestUrl = error.config?.url ?? '';
+
     if (
-      error.response?.status === 401
-      && auth.currentUser.value
-      && !error.config?.url?.includes('/Sessions/Logout')
-      && !error.config?.url?.includes('/Users/Me')
+      isUnauthorized
+      && hasCurrentUser
+      && !requestUrl.includes('/Sessions/Logout')
     ) {
-      try {
-        await auth.refreshCurrentUserInfo();
-      } catch {
-        await auth.logoutCurrentUser(true);
-        useSnackbar(i18next.t('kickedOut'), 'error');
+      if (!this._logoutPromise) {
+        this._logoutPromise = (async () => {
+          try {
+            if (requestUrl.includes('/Users/Me')) {
+              throw error;
+            }
+
+            await auth.refreshCurrentUserInfo();
+          } catch {
+            await auth.logoutCurrentUser(true);
+            useSnackbar(i18next.t('kickedOut'), 'error');
+          } finally {
+            this._logoutPromise = undefined;
+          }
+        })();
       }
+
+      await this._logoutPromise;
     }
 
     /**

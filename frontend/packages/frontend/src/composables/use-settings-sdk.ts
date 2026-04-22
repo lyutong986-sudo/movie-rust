@@ -162,6 +162,7 @@ export type SettingsVirtualFolderInfo = {
   Name: string;
   CollectionType: string;
   ItemId: string;
+  PrimaryImageItemId?: string;
   Locations: string[];
   LibraryOptions?: SettingsLibraryOptions;
 };

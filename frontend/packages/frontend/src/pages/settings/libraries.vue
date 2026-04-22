@@ -29,161 +29,242 @@
           {{ errorMessage }}
         </VAlert>
 
-        <VRow class="uno-mb-2">
-          <VCol
-            cols="12"
-            md="4">
-            <VCard variant="tonal">
-              <VCardTitle>{{ t('libraries') }}</VCardTitle>
-              <VCardText>{{ libraries.length }}</VCardText>
-            </VCard>
-          </VCol>
-          <VCol
-            cols="12"
-            md="8">
-            <VCard variant="tonal">
-              <VCardTitle>{{ t('selectableMediaFolders') }}</VCardTitle>
-              <VCardText>{{ selectableFolders.length }}</VCardText>
-            </VCard>
-          </VCol>
-        </VRow>
-
-        <VExpansionPanels v-if="libraries.length">
-          <VExpansionPanel
+        <div class="library-card-grid">
+          <article
             v-for="library in libraries"
-            :key="library.ItemId">
-            <VExpansionPanelTitle>
-              <div class="uno-flex uno-w-full uno-items-center uno-justify-between uno-gap-4">
-                <div class="uno-min-w-0">
-                  <div class="uno-font-medium">
-                    {{ library.Name }}
-                  </div>
-                  <div class="uno-text-sm text-medium-emphasis">
-                    {{ formatLocations(library.LibraryOptions.PathInfos) || t('noPathsConfigured') }}
-                  </div>
-                </div>
-                <VChip
-                  size="small"
-                  variant="outlined">
-                  {{ library.CollectionType || 'mixed' }}
-                </VChip>
-              </div>
-            </VExpansionPanelTitle>
-            <VExpansionPanelText>
-              <VRow>
-                <VCol
-                  cols="12"
-                  md="6">
-                  <VTextField
-                    v-model="library._draftName"
-                    :label="t('libraryName')"
-                    density="comfortable"
-                    variant="outlined" />
-                </VCol>
-                <VCol
-                  cols="12"
-                  md="6">
-                  <VSelect
-                    :model-value="library.CollectionType || 'mixed'"
-                    :label="t('contentType')"
-                    density="comfortable"
-                    variant="outlined"
-                    :items="collectionTypes"
-                    item-title="title"
-                    item-value="value"
-                    readonly />
-                </VCol>
-              </VRow>
-
-              <LibraryOptionsFields
-                v-model="library.LibraryOptions"
-                :collection-type="library.CollectionType" />
-              <LibraryTypeOptionsFields
-                v-model="library.LibraryOptions"
-                :advanced-visible="true" />
-
-              <div class="uno-mt-4">
-                <div class="uno-mb-2 uno-text-sm uno-font-medium">
-                  {{ t('paths') }}
-                </div>
-                <VList
-                  density="comfortable"
-                  class="uno-border uno-rounded">
+            :key="library.ItemId"
+            class="library-card">
+            <button
+              type="button"
+              class="library-card-visual"
+              @click="openEditDialog(library)">
+              <img
+                v-if="libraryPrimaryImageUrl(library)"
+                :src="libraryPrimaryImageUrl(library)"
+                :alt="library.Name"
+                class="library-card-image">
+              <JIcon
+                v-else
+                class="library-card-icon"
+                :class="libraryIconClass(library.CollectionType)" />
+            </button>
+            <div class="library-card-footer">
+              <VMenu>
+                <template #activator="{ props }">
+                  <VBtn
+                    v-bind="props"
+                    icon
+                    size="small"
+                    variant="text"
+                    class="library-card-menu"
+                    @click.stop>
+                    <JIcon class="i-mdi:dots-vertical" />
+                  </VBtn>
+                </template>
+                <VList density="compact">
                   <VListItem
-                    v-for="pathInfo in library.LibraryOptions.PathInfos"
-                    :key="`${library.ItemId}-${pathInfo.Path}`"
-                    :title="pathInfo.Path"
-                    :subtitle="pathInfo.NetworkPath || undefined">
-                    <template #append>
-                      <VBtn
-                        variant="text"
-                        color="error"
-                        @click="removeLibraryPath(library, pathInfo.Path)">
-                        {{ t('remove') }}
-                      </VBtn>
+                    :title="t('edit')"
+                    @click="openEditDialog(library)">
+                    <template #prepend>
+                      <JIcon class="i-mdi:folder-open" />
                     </template>
                   </VListItem>
-                  <VListItem v-if="!library.LibraryOptions.PathInfos.length">
-                    <VListItemTitle>{{ t('noPaths') }}</VListItemTitle>
+                  <VListItem
+                    :title="t('editMetadata')"
+                    @click="editLibraryImages(library)">
+                    <template #prepend>
+                      <JIcon class="i-mdi:image" />
+                    </template>
+                  </VListItem>
+                  <VListItem
+                    :title="t('contentType')"
+                    @click="showChangeTypeNotice(library)">
+                    <template #prepend>
+                      <JIcon class="i-mdi:movie-cog" />
+                    </template>
+                  </VListItem>
+                  <VListItem
+                    :title="t('remove')"
+                    @click="confirmRemoveLibrary(library)">
+                    <template #prepend>
+                      <JIcon class="i-mdi:delete" />
+                    </template>
                   </VListItem>
                 </VList>
-                <VRow class="uno-mt-3">
-                  <VCol
-                    cols="12"
-                    md="5">
-                    <VTextField
-                      v-model="library._newPath"
-                      :label="t('folderPath')"
-                      density="comfortable"
-                      variant="outlined"
-                      hide-details />
-                  </VCol>
-                  <VCol
-                    cols="12"
-                    md="5">
-                    <VTextField
-                      v-model="library._newNetworkPath"
-                      :label="t('networkPath')"
-                      density="comfortable"
-                      variant="outlined"
-                      hide-details />
-                  </VCol>
-                  <VCol
-                    cols="12"
-                    md="2">
-                    <VBtn
-                      block
-                      variant="outlined"
-                      @click="addLibraryPath(library)">
-                      {{ t('add') }}
-                    </VBtn>
-                  </VCol>
-                </VRow>
+              </VMenu>
+              <button
+                type="button"
+                class="library-card-text library-card-name"
+                @click="openEditDialog(library)">
+                {{ library.Name }}
+              </button>
+              <div class="library-card-text">
+                {{ collectionTypeLabel(library.CollectionType) }}
               </div>
-
-              <div class="uno-mt-4 uno-flex uno-flex-wrap uno-gap-2">
-                <VBtn
-                  color="primary"
-                  variant="elevated"
-                  @click="saveLibrary(library)">
-                  {{ t('save') }}
-                </VBtn>
-                <VBtn
-                  color="error"
-                  variant="text"
-                  @click="removeLibrary(library)">
-                  {{ t('remove') }}
-                </VBtn>
+              <div
+                class="library-card-text"
+                :class="{ 'library-card-warning': !libraryPathCount(library) }">
+                {{ libraryLocationSummary(library) }}
               </div>
-            </VExpansionPanelText>
-          </VExpansionPanel>
-        </VExpansionPanels>
+            </div>
+          </article>
 
-        <VCard v-else>
-          <VCardTitle>{{ t('libraries') }}</VCardTitle>
-          <VCardText>{{ t('noLibrariesYet') }}</VCardText>
-        </VCard>
+          <button
+            type="button"
+            class="library-card library-card-add"
+            @click="openCreateDialog">
+            <div class="library-card-visual">
+              <JIcon class="i-mdi:plus-circle library-card-add-icon" />
+            </div>
+            <div class="library-card-footer">
+              <div class="library-card-text library-card-name">
+                {{ t('add') }} {{ t('libraries') }}
+              </div>
+              <div class="library-card-text">&nbsp;</div>
+              <div class="library-card-text">&nbsp;</div>
+            </div>
+          </button>
+        </div>
+
+        <div
+          v-if="!libraries.length"
+          class="uno-mt-4 text-medium-emphasis">
+          {{ t('noLibrariesYet') }}
+        </div>
       </VCol>
+
+      <VDialog
+        v-model="editDialog"
+        max-width="920">
+        <VCard v-if="selectedLibrary">
+          <VCardTitle class="uno-flex uno-items-center uno-justify-between uno-gap-4">
+            <span>{{ selectedLibrary.Name }}</span>
+            <VSwitch
+              v-model="editAdvanced"
+              color="primary"
+              hide-details
+              inset
+              :label="t('showAdvancedSettings')" />
+          </VCardTitle>
+          <VCardText>
+            <VRow>
+              <VCol
+                cols="12"
+                md="6">
+                <VTextField
+                  v-model="selectedLibrary._draftName"
+                  :label="t('libraryName')"
+                  density="comfortable"
+                  variant="outlined" />
+              </VCol>
+              <VCol
+                cols="12"
+                md="6">
+                <VSelect
+                  :model-value="selectedLibrary.CollectionType || 'mixed'"
+                  :label="t('contentType')"
+                  density="comfortable"
+                  variant="outlined"
+                  :items="collectionTypes"
+                  item-title="title"
+                  item-value="value"
+                  readonly />
+              </VCol>
+            </VRow>
+
+            <div class="uno-mt-4">
+              <div class="uno-mb-2 uno-text-sm uno-font-medium">
+                {{ t('paths') }}
+              </div>
+              <VList
+                density="comfortable"
+                class="uno-border uno-rounded">
+                <VListItem
+                  v-for="pathInfo in selectedLibrary.LibraryOptions.PathInfos"
+                  :key="`${selectedLibrary.ItemId}-${pathInfo.Path}`"
+                  :title="pathInfo.Path"
+                  :subtitle="pathInfo.NetworkPath || undefined">
+                  <template #prepend>
+                    <JIcon class="i-mdi:folder" />
+                  </template>
+                  <template #append>
+                    <VBtn
+                      icon
+                      variant="text"
+                      color="error"
+                      @click="removeLibraryPath(selectedLibrary, pathInfo.Path)">
+                      <JIcon class="i-mdi:remove-circle" />
+                    </VBtn>
+                  </template>
+                </VListItem>
+                <VListItem v-if="!selectedLibrary.LibraryOptions.PathInfos.length">
+                  <VListItemTitle>{{ t('noPaths') }}</VListItemTitle>
+                </VListItem>
+              </VList>
+              <VRow class="uno-mt-3">
+                <VCol
+                  cols="12"
+                  md="5">
+                  <VTextField
+                    v-model="selectedLibrary._newPath"
+                    :label="t('folderPath')"
+                    density="comfortable"
+                    variant="outlined"
+                    hide-details />
+                </VCol>
+                <VCol
+                  cols="12"
+                  md="5">
+                  <VTextField
+                    v-model="selectedLibrary._newNetworkPath"
+                    :label="t('networkPath')"
+                    density="comfortable"
+                    variant="outlined"
+                    hide-details />
+                </VCol>
+                <VCol
+                  cols="12"
+                  md="2">
+                  <VBtn
+                    block
+                    variant="outlined"
+                    @click="addLibraryPath(selectedLibrary)">
+                    {{ t('add') }}
+                  </VBtn>
+                </VCol>
+              </VRow>
+            </div>
+
+            <LibraryOptionsFields
+              v-model="selectedLibrary.LibraryOptions"
+              :collection-type="selectedLibrary.CollectionType"
+              :advanced-visible="editAdvanced" />
+            <LibraryTypeOptionsFields
+              v-model="selectedLibrary.LibraryOptions"
+              :advanced-visible="editAdvanced" />
+          </VCardText>
+          <VCardActions>
+            <VBtn
+              color="error"
+              variant="text"
+              @click="confirmRemoveLibrary(selectedLibrary)">
+              {{ t('remove') }}
+            </VBtn>
+            <VSpacer />
+            <VBtn
+              variant="text"
+              @click="closeEditDialog">
+              {{ t('cancel') }}
+            </VBtn>
+            <VBtn
+              color="primary"
+              variant="elevated"
+              @click="saveSelectedLibrary">
+              {{ t('save') }}
+            </VBtn>
+          </VCardActions>
+        </VCard>
+      </VDialog>
 
       <VDialog
         v-model="createDialog"
@@ -400,6 +481,7 @@ import {
   VTextField
 } from 'vuetify/components';
 import { useTranslation } from 'i18next-vue';
+import { ImageType } from '@jellyfin/sdk/lib/generated-client';
 import type {
   SettingsCountryInfo,
   SettingsCultureInfo,
@@ -415,6 +497,8 @@ import type {
 } from '#/composables/use-settings-sdk.ts';
 import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
+import { useConfirmDialog } from '#/composables/use-confirm-dialog.ts';
+import { getItemImageUrl } from '#/utils/images.ts';
 
 type MediaPathInfoDto = SettingsMediaPathInfo;
 type EditableLibraryOptionsFields = Required<Pick<SettingsLibraryOptions,
@@ -477,6 +561,7 @@ type EditableLibraryOptionsFields = Required<Pick<SettingsLibraryOptions,
 type LibraryOptionsDto = SettingsLibraryOptions & EditableLibraryOptionsFields;
 
 interface VirtualFolderInfoDto extends Omit<SettingsVirtualFolderInfo, 'LibraryOptions'> {
+  PrimaryImageItemId?: string;
   LibraryOptions: LibraryOptionsDto;
   _draftName: string;
   _newPath: string;
@@ -497,6 +582,9 @@ const errorMessage = ref('');
 const createDialog = ref(false);
 const createAdvanced = ref(false);
 const createPathDialog = ref(false);
+const editDialog = ref(false);
+const editAdvanced = ref(true);
+const selectedLibrary = ref<VirtualFolderInfoDto>();
 const lastAutoName = ref('');
 const collectionTypes = computed(() => [
   { title: t('movies'), value: 'movies' },
@@ -1281,6 +1369,111 @@ function chooseSuggestedCreatePath(pathInfo: MediaPathInfoDto): void {
   createPathDialog.value = false;
 }
 
+function openEditDialog(library: VirtualFolderInfoDto): void {
+  selectedLibrary.value = library;
+  editAdvanced.value = false;
+  editDialog.value = true;
+}
+
+function closeEditDialog(): void {
+  editDialog.value = false;
+  selectedLibrary.value = undefined;
+}
+
+function syncSelectedLibrary(itemId?: string): void {
+  if (!itemId || selectedLibrary.value?.ItemId !== itemId) {
+    return;
+  }
+
+  selectedLibrary.value = libraries.value.find(library => library.ItemId === itemId);
+}
+
+function collectionTypeLabel(collectionType?: string): string {
+  return collectionTypes.value.find(item => item.value === (collectionType || 'mixed'))?.title ?? t('mixedContent');
+}
+
+function libraryPathCount(library: VirtualFolderInfoDto): number {
+  return library.LibraryOptions.PathInfos.length || library.Locations.length;
+}
+
+function libraryLocationSummary(library: VirtualFolderInfoDto): string {
+  const paths = library.LibraryOptions.PathInfos.map(pathInfo => pathInfo.Path).filter(Boolean);
+
+  if (!paths.length) {
+    return t('noPathsConfigured');
+  }
+
+  if (paths.length === 1) {
+    return paths[0];
+  }
+
+  return `${paths.length} ${t('paths')}`;
+}
+
+function libraryIconClass(collectionType?: string): string {
+  const icons: Record<string, string> = {
+    movies: 'i-mdi:movie-open',
+    music: 'i-mdi:music-box-multiple',
+    photos: 'i-mdi:image-multiple',
+    livetv: 'i-mdi:television-classic',
+    tvshows: 'i-mdi:television-classic',
+    games: 'i-mdi:gamepad-variant',
+    trailers: 'i-mdi:movie-open',
+    homevideos: 'i-mdi:video-vintage',
+    musicvideos: 'i-mdi:video',
+    books: 'i-mdi:book-open-page-variant',
+    channels: 'i-mdi:folder',
+    playlists: 'i-mdi:playlist-play',
+    mixed: 'i-mdi:folder'
+  };
+
+  return icons[collectionType || 'mixed'] ?? 'i-mdi:folder';
+}
+
+function libraryPrimaryImageUrl(library: VirtualFolderInfoDto): string | undefined {
+  return library.PrimaryImageItemId
+    ? getItemImageUrl(library.PrimaryImageItemId, ImageType.Primary, {
+        maxWidth: 600,
+        quality: 90
+      })
+    : undefined;
+}
+
+function showChangeTypeNotice(library: VirtualFolderInfoDto): void {
+  useSnackbar(`${library.Name}: ${t('contentType')}`, 'info');
+}
+
+function editLibraryImages(library: VirtualFolderInfoDto): void {
+  if (!library.ItemId) {
+    return;
+  }
+
+  window.location.hash = `#/metadata?itemId=${encodeURIComponent(library.ItemId)}`;
+}
+
+async function confirmRemoveLibrary(library: VirtualFolderInfoDto): Promise<void> {
+  await useConfirmDialog(
+    async () => {
+      await removeLibrary(library);
+    },
+    {
+      title: t('deleteConfirm'),
+      text: `${t('remove')} ${library.Name}?`,
+      confirmText: t('delete'),
+      confirmColor: 'error'
+    }
+  );
+}
+
+async function saveSelectedLibrary(): Promise<void> {
+  if (!selectedLibrary.value) {
+    return;
+  }
+
+  await saveLibrary(selectedLibrary.value);
+  closeEditDialog();
+}
+
 function resetCreateForm(): void {
   createForm.value = {
     name: '',
@@ -1409,26 +1602,6 @@ watch(() => createForm.value.collectionType, async (value) => {
   }
 });
 
-function formatLocations(pathInfos: MediaPathInfoDto[]): string {
-  return pathInfos.map(pathInfo => pathInfo.Path).filter(Boolean).join(' | ');
-}
-
-function parsePathInfos(text: string): MediaPathInfoDto[] {
-  return text
-    .split(/\r?\n/g)
-    .map(line => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [path, networkPath] = line.split('|').map(value => value.trim());
-
-      return {
-        Path: path ?? '',
-        NetworkPath: networkPath || null
-      };
-    })
-    .filter(pathInfo => pathInfo.Path);
-}
-
 async function loadLibraries(): Promise<void> {
   loading.value = true;
   errorMessage.value = '';
@@ -1494,6 +1667,7 @@ async function saveLibrary(library: VirtualFolderInfoDto): Promise<void> {
 
     useSnackbar(t('librarySaved', { name: library.Name }), 'success');
     await loadLibraries();
+    syncSelectedLibrary(library.ItemId);
   } catch (error) {
     console.error(error);
     useSnackbar(t('failedToSaveLibrary'), 'error');
@@ -1523,6 +1697,7 @@ async function addLibraryPath(library: VirtualFolderInfoDto): Promise<void> {
     library._newNetworkPath = '';
     useSnackbar(t('pathAdded'), 'success');
     await loadLibraries();
+    syncSelectedLibrary(library.ItemId);
   } catch (error) {
     console.error(error);
     useSnackbar(t('failedToAddPath'), 'error');
@@ -1538,6 +1713,7 @@ async function removeLibraryPath(library: VirtualFolderInfoDto, path: string): P
     });
     useSnackbar(t('pathRemoved'), 'success');
     await loadLibraries();
+    syncSelectedLibrary(library.ItemId);
   } catch (error) {
     console.error(error);
     useSnackbar(t('failedToRemovePath'), 'error');
@@ -1552,6 +1728,9 @@ async function removeLibrary(library: VirtualFolderInfoDto): Promise<void> {
     });
     useSnackbar(t('libraryRemoved', { name: library.Name }), 'success');
     await loadLibraries();
+    if (selectedLibrary.value?.ItemId === library.ItemId) {
+      closeEditDialog();
+    }
   } catch (error) {
     console.error(error);
     useSnackbar(t('failedToRemoveLibrary'), 'error');
@@ -1592,3 +1771,100 @@ async function createLibrary(): Promise<void> {
 
 await loadLibraries();
 </script>
+
+<style scoped>
+.library-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.library-card {
+  display: block;
+  min-width: 0;
+  color: inherit;
+  text-align: start;
+  background: transparent;
+  border: 0;
+}
+
+.library-card-visual {
+  position: relative;
+  display: flex;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: rgb(var(--v-theme-on-surface));
+  cursor: pointer;
+  background: rgba(var(--v-theme-surface-variant), 0.72);
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  border-radius: 6px;
+}
+
+.library-card-visual:hover {
+  background: rgba(var(--v-theme-surface-variant), 0.92);
+}
+
+.library-card-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.library-card-icon {
+  width: 4.8rem;
+  height: 4.8rem;
+  color: rgba(var(--v-theme-on-surface), 0.66);
+}
+
+.library-card-footer {
+  position: relative;
+  min-height: 4.6rem;
+  padding-top: 0.55rem;
+  padding-inline-end: 2.6rem;
+}
+
+.library-card-menu {
+  position: absolute;
+  top: 0.15rem;
+  right: 0;
+}
+
+.library-card-text {
+  display: block;
+  width: 100%;
+  min-height: 1.35rem;
+  overflow: hidden;
+  font-size: 0.875rem;
+  line-height: 1.35rem;
+  color: rgba(var(--v-theme-on-surface), 0.72);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+}
+
+.library-card-name {
+  padding: 0;
+  font-weight: 500;
+  color: rgb(var(--v-theme-on-surface));
+  cursor: pointer;
+}
+
+.library-card-warning {
+  color: rgb(var(--v-theme-error));
+}
+
+.library-card-add {
+  cursor: pointer;
+}
+
+.library-card-add-icon {
+  width: 4.8rem;
+  height: 4.8rem;
+  color: rgba(var(--v-theme-on-surface), 0.54);
+}
+</style>

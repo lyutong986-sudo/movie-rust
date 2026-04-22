@@ -26,6 +26,7 @@
 import { getItemsApi } from '@jellyfin/sdk/lib/utils/api/items-api';
 import { getLibraryApi } from '@jellyfin/sdk/lib/utils/api/library-api';
 import { ref } from 'vue';
+import { useRoute } from 'vue-router';
 import { remote } from '#/plugins/remote/index.ts';
 
 interface ITreeNode {
@@ -50,7 +51,8 @@ const initialItems = (
 });
 
 const items = ref<ITreeNode[]>(initialItems);
-const itemId = ref<string>();
+const route = useRoute('/metadata');
+const itemId = ref(typeof route.query.itemId === 'string' ? route.query.itemId : undefined);
 
 /**
  * Fetch child items for the given tree node

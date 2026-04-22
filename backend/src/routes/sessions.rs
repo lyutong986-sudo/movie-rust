@@ -736,10 +736,18 @@ async fn playback_progress(
 }
 
 async fn playback_stopped(
-    session: AuthSession,
+    session: OptionalAuthSession,
     State(state): State<AppState>,
     Json(report): Json<PlaybackReport>,
 ) -> Result<StatusCode, AppError> {
+    let Some(session) = session.0 else {
+        tracing::debug!(
+            "Ignoring playback stopped report for missing or expired session; play_session_id={:?}",
+            report.session_id
+        );
+        return Ok(StatusCode::NO_CONTENT);
+    };
+
     record_report(&state, &session, "Stopped", report).await
 }
 

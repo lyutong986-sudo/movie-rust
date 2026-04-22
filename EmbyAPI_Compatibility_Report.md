@@ -956,3 +956,18 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - `frontend/packages/frontend/src/main.ts` 会在 Vue 挂载前把 Vuetify 的当前语言同步到 i18next 已解析出的语言，并同步 `<html lang>`，避免 Vuetify 组件和页面翻译在首屏出现英文闪烁。
 - `frontend/packages/frontend/src/store/settings/client.ts` 继续保留设置页语言切换能力，但语言码匹配改为复用 i18n 包导出的 `resolveSupportedLanguage()`，切换语言时也会更新 `<html lang>`；由于 detector 会缓存 `changeLanguage()` 的结果，用户在浏览器里的语言选择会被标准 `i18nextLng`/cookie 机制记住。
 - 验证情况：`corepack pnpm --filter @jellyfin-vue/frontend build` 已通过；`corepack pnpm --filter @jellyfin-vue/i18n check:types` 当前被既有 `packages/configs/src/lint/rules/typescript-vue.ts` 中 `sonarjs.configs` 可能为 `undefined` 的类型错误阻塞，与本轮多语言改动无关。
+
+## 2026-04-23 settings/libraries 媒体库列表 Emby 模板还原（七十三）
+
+- 本轮对照 `模板项目/Emby模板/MediaBrowser.WebDashboard/dashboard-ui/library.html` 与 `scripts/medialibrarypage.js`，确认 Emby 原版媒体库列表不是统计卡或展开面板，而是 `divVirtualFolders` 中的 `backdropCard scalableCard` 网格：每个库显示封面或按 `CollectionType` 映射的图标，底部显示名称、内容类型、路径或路径数量，并在右上角菜单提供管理文件夹、编辑图片、改内容类型、删除和重命名等入口。
+- `frontend/packages/frontend/src/pages/settings/libraries.vue` 已把列表层从“统计卡 + VExpansionPanels”改成 Emby 风格的媒体库卡片网格，并补上加号卡片作为添加媒体库入口；已有的添加库流程、路径管理、库选项、高级选项没有降级，而是移动到点击卡片后的编辑弹窗中继续真实调用 `/Library/VirtualFolders/*` 与 `/Libraries/AvailableOptions`。
+- 列表卡片现在按 `movies/music/photos/tvshows/homevideos/musicvideos/books/mixed` 映射图标；如果后端以后返回 `PrimaryImageItemId`，前端会通过标准图片接口展示主图，否则回退到类型图标。`SettingsVirtualFolderInfo` 类型同步补充了 `PrimaryImageItemId`，用于对齐 Emby 模板字段。
+- 右上角菜单补齐 Emby 模板的列表操作入口：管理/编辑会打开库编辑弹窗，删除会走全局确认弹窗后调用真实删除接口，编辑图片会跳转到 metadata 页面并携带 `itemId`；`frontend/packages/frontend/src/pages/metadata.vue` 同步支持从 `?itemId=` 初始化当前编辑对象。
+- 验证情况：`corepack pnpm --filter @jellyfin-vue/frontend build` 已通过；构建自动更新 `frontend/packages/frontend/types/global/components.d.ts`，移除了当前页面不再使用的 `VExpansionPanelTitle` 全局组件声明。
+## 2026-04-23 失效会话 401 重试与播放停止幂等修复（七十四）
+
+- 针对日志中同一旧 token 反复请求 `/Users/Me` 与 `/Sessions/Playing/Stopped` 并返回 401 的问题，本轮同时修复前端登录态清理与后端播放停止收尾语义。
+- `frontend/packages/frontend/src/plugins/remote/axios.ts` 的 401 拦截器不再把 `/Users/Me` 排除在清理逻辑之外；当当前用户存在而 `/Users/Me` 返回 401 时，会直接执行本地登出并清掉已失效 token，避免继续拿旧 token 重复请求。拦截器还增加了并发登出保护，多个 401 同时到达时只执行一次清理。
+- `frontend/packages/frontend/src/plugins/remote/auth.ts` 启动阶段刷新当前用户信息时，如果发现本地持久化 token 已经失效，也会自动清理登录态；这样数据库重建、服务端清会话或用户被后台登出后，浏览器不会长时间保留脏 token。
+- `backend/src/routes/sessions.rs` 将 `/Sessions/Playing/Stopped` 改为 `OptionalAuthSession`：播放停止属于客户端收尾事件，若 token 对应会话已不存在，后端直接幂等返回 204，不再记录 401 噪音，也减少播放器因停止上报失败而重复补报的概率。开始播放和进度上报仍然要求有效会话。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`corepack pnpm --filter @jellyfin-vue/frontend build` 通过。后端仍只有项目既有 warning。

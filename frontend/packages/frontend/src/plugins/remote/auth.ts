@@ -265,6 +265,18 @@ class RemotePluginAuth extends BaseState<AuthState> {
     }
   };
 
+  private readonly _refreshCurrentUserInfoOrLogout = async (): Promise<void> => {
+    try {
+      await this.refreshCurrentUserInfo();
+    } catch (error) {
+      if (isAxiosError(error) && error.response?.status === 401) {
+        await this.logoutCurrentUser(true);
+      } else {
+        console.error(error);
+      }
+    }
+  };
+
   private readonly _refreshServers = async (): Promise<void> => {
     for (const server of this._state.value.servers) {
       try {
@@ -381,7 +393,7 @@ class RemotePluginAuth extends BaseState<AuthState> {
       persistenceType: 'localStorage'
     });
 
-    void this.refreshCurrentUserInfo();
+    void this._refreshCurrentUserInfoOrLogout();
     void this._refreshServers();
   }
 }
