@@ -235,6 +235,12 @@ async fn get_episodes(
         {
             parent_id = Some(season.id);
             recursive = false;
+        } else {
+            return Ok(Json(QueryResult {
+                items: Vec::new(),
+                total_record_count: 0,
+                start_index: Some(query.start_index.unwrap_or(0).max(0)),
+            }));
         }
     }
 
@@ -340,7 +346,7 @@ fn parse_list(value: Option<&str>) -> Vec<String> {
 fn parse_i32_list(value: Option<&str>) -> Vec<i32> {
     value
         .unwrap_or_default()
-        .split(',')
+        .split([',', '|'])
         .map(str::trim)
         .filter_map(|value| value.parse::<i32>().ok())
         .collect()

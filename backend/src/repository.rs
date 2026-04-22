@@ -18,7 +18,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use sqlx::{FromRow, Postgres, QueryBuilder, Row};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -1651,6 +1651,7 @@ pub struct ItemListOptions {
     pub fields: Option<String>,
     pub start_index: i64,
     pub limit: i64,
+    pub group_items_into_collections: bool,
 }
 
 impl Default for ItemListOptions {
@@ -1697,6 +1698,7 @@ impl Default for ItemListOptions {
             fields: None,
             start_index: 0,
             limit: 100,
+            group_items_into_collections: true,
         }
     }
 }
@@ -2026,8 +2028,12 @@ pub async fn list_media_items(
         .build_query_as::<MediaItemRow>()
         .fetch_all(pool)
         .await?;
-    let total_record_count = rows.first().map(|row| row.total_count).unwrap_or(0);
-    let items = rows.into_iter().map(DbMediaItem::from).collect();
+    let items = if options.group_items_into_collections {
+        deduplicate_media_items(rows.into_iter().map(DbMediaItem::from).collect())
+    } else {
+        rows.into_iter().map(DbMediaItem::from).collect()
+    };
+    let total_record_count = items.len() as i64;
 
     Ok(QueryResult {
         items,
@@ -3078,6 +3084,21 @@ pub async fn record_playback_event(
     Ok(())
 }
 
+fn deduplicate_media_items(items: Vec<DbMediaItem>) -> Vec<DbMediaItem> {
+    let mut seen = BTreeSet::new();
+    let mut unique = Vec::with_capacity(items.len());
+
+    for item in items {
+        let providers = provider_ids_for_item(&item);
+        let key = item_identity_key(&item, &providers).unwrap_or_else(|| format!("item:{}", item.id));
+        if seen.insert(key) {
+            unique.push(item);
+        }
+    }
+
+    unique
+}
+
 pub async fn session_play_queue(
     pool: &sqlx::PgPool,
     session_id: Option<&str>,
@@ -3683,12 +3704,8 @@ pub async fn media_item_to_dto(
           .find(|stream| stream.stream_type.eq_ignore_ascii_case("Video"));
       let width = item.width.or_else(|| video_stream.and_then(|stream| stream.width));
       let height = item.height.or_else(|| video_stream.and_then(|stream| stream.height));
-      let primary_image_aspect_ratio = match (width, height) {
-          (Some(width), Some(height)) if width > 0 && height > 0 => {
-              Some(width as f64 / height as f64)
-          }
-          _ => None,
-      };
+      let primary_image_aspect_ratio =
+          infer_primary_image_aspect_ratio(item, width, height);
       let item_detail_media_sources = sanitize_media_sources_for_item_detail(media_sources);
     let child_count = if is_folder {
         Some(count_item_children(pool, item.id).await?)
@@ -4304,7 +4321,7 @@ async fn version_group_items_for_item(
     pool: &sqlx::PgPool,
     item: &DbMediaItem,
 ) -> Result<Vec<DbMediaItem>, AppError> {
-    if !matches!(item.item_type.as_str(), "Movie" | "Series") {
+    if !matches!(item.item_type.as_str(), "Movie" | "Series" | "Episode") {
         return Ok(vec![item.clone()]);
     }
 
@@ -4322,47 +4339,102 @@ async fn version_group_items_for_item(
     let tmdb_path_token = tmdb.as_ref().map(|value| format!("%{{tmdbid={value}}}%"));
     let imdb_path_token = imdb.as_ref().map(|value| format!("%{{imdbid={value}}}%"));
 
-    if tmdb.is_none() && imdb.is_none() {
-        return Ok(vec![item.clone()]);
-    }
+    let mut grouped_items = if item.item_type == "Episode" {
+        sqlx::query_as::<_, DbMediaItem>(
+            r#"
+            SELECT
+                id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
+                overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
+                premiere_date, status, end_date, air_days, air_time, series_name, season_name,
+                index_number, index_number_end, parent_index_number, provider_ids, genres,
+                studios, tags, production_locations,
+                width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+                logo_path, thumb_path, remote_trailers,
+                date_created, date_modified
+            FROM media_items
+            WHERE item_type = 'Episode'
+              AND media_type = $1
+              AND parent_index_number = $2
+              AND index_number = $3
+              AND COALESCE(index_number_end, -1) = COALESCE($4, -1)
+              AND (
+                  (
+                      $5::text IS NOT NULL AND (
+                          provider_ids->>'Tmdb' = $5 OR provider_ids->>'TMDb' = $5 OR provider_ids->>'tmdb' = $5
+                          OR path ILIKE $7
+                      )
+                  )
+                  OR
+                  (
+                      $6::text IS NOT NULL AND (
+                          provider_ids->>'Imdb' = $6 OR provider_ids->>'IMDb' = $6 OR provider_ids->>'imdb' = $6
+                          OR path ILIKE $8
+                      )
+                  )
+                  OR
+                  (
+                      ($5::text IS NULL AND $6::text IS NULL)
+                      AND lower(COALESCE(series_name, '')) = lower(COALESCE($9, ''))
+                  )
+              )
+            ORDER BY date_created ASC
+            LIMIT 20
+            "#,
+        )
+        .bind(&item.media_type)
+        .bind(item.parent_index_number)
+        .bind(item.index_number)
+        .bind(item.index_number_end)
+        .bind(tmdb.as_deref())
+        .bind(imdb.as_deref())
+        .bind(tmdb_path_token.as_deref())
+        .bind(imdb_path_token.as_deref())
+        .bind(item.series_name.as_deref())
+        .fetch_all(pool)
+        .await?
+    } else {
+        if tmdb.is_none() && imdb.is_none() {
+            return Ok(vec![item.clone()]);
+        }
 
-    let mut grouped_items = sqlx::query_as::<_, DbMediaItem>(
-        r#"
-        SELECT
-            id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
-            overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
-            premiere_date, status, end_date, air_days, air_time, series_name, season_name,
-            index_number, index_number_end, parent_index_number, provider_ids, genres,
-            studios, tags, production_locations,
-            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
-            logo_path, thumb_path, remote_trailers,
-            date_created, date_modified
-        FROM media_items
-        WHERE item_type = $1
-          AND media_type = $2
-          AND (
-              ($3::text IS NOT NULL AND (
-                  provider_ids->>'Tmdb' = $3 OR provider_ids->>'TMDb' = $3 OR provider_ids->>'tmdb' = $3
-                  OR path ILIKE $5
-              ))
-              OR
-              ($4::text IS NOT NULL AND (
-                  provider_ids->>'Imdb' = $4 OR provider_ids->>'IMDb' = $4 OR provider_ids->>'imdb' = $4
-                  OR path ILIKE $6
-              ))
-          )
-        ORDER BY date_created ASC
-        LIMIT 20
-        "#,
-    )
-    .bind(&item.item_type)
-    .bind(&item.media_type)
-    .bind(tmdb.as_deref())
-    .bind(imdb.as_deref())
-    .bind(tmdb_path_token.as_deref())
-    .bind(imdb_path_token.as_deref())
-    .fetch_all(pool)
-    .await?;
+        sqlx::query_as::<_, DbMediaItem>(
+            r#"
+            SELECT
+                id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
+                overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
+                premiere_date, status, end_date, air_days, air_time, series_name, season_name,
+                index_number, index_number_end, parent_index_number, provider_ids, genres,
+                studios, tags, production_locations,
+                width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+                logo_path, thumb_path, remote_trailers,
+                date_created, date_modified
+            FROM media_items
+            WHERE item_type = $1
+              AND media_type = $2
+              AND (
+                  ($3::text IS NOT NULL AND (
+                      provider_ids->>'Tmdb' = $3 OR provider_ids->>'TMDb' = $3 OR provider_ids->>'tmdb' = $3
+                      OR path ILIKE $5
+                  ))
+                  OR
+                  ($4::text IS NOT NULL AND (
+                      provider_ids->>'Imdb' = $4 OR provider_ids->>'IMDb' = $4 OR provider_ids->>'imdb' = $4
+                      OR path ILIKE $6
+                  ))
+              )
+            ORDER BY date_created ASC
+            LIMIT 20
+            "#,
+        )
+        .bind(&item.item_type)
+        .bind(&item.media_type)
+        .bind(tmdb.as_deref())
+        .bind(imdb.as_deref())
+        .bind(tmdb_path_token.as_deref())
+        .bind(imdb_path_token.as_deref())
+        .fetch_all(pool)
+        .await?
+    };
 
     if !grouped_items.iter().any(|candidate| candidate.id == item.id) {
         grouped_items.push(item.clone());
@@ -4680,6 +4752,33 @@ fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
         .collect()
 }
 
+fn infer_primary_image_aspect_ratio(
+    item: &DbMediaItem,
+    width: Option<i32>,
+    height: Option<i32>,
+) -> Option<f64> {
+    match item.item_type.as_str() {
+        "Movie" | "Series" | "Season" | "BoxSet" | "CollectionFolder" => {
+            if item.image_primary_path.is_some() {
+                Some(2.0 / 3.0)
+            } else {
+                None
+            }
+        }
+        "Episode" => {
+            if item.image_primary_path.is_some() || item.thumb_path.is_some() {
+                Some(16.0 / 9.0)
+            } else {
+                None
+            }
+        }
+        _ => match (width, height) {
+            (Some(width), Some(height)) if width > 0 && height > 0 => Some(width as f64 / height as f64),
+            _ => None,
+        },
+    }
+}
+
 fn video_display_title(item: &DbMediaItem) -> Option<String> {
     match (item.width, item.height, item.video_codec.as_deref()) {
         (Some(width), Some(height), Some(codec)) => Some(format!("{width}x{height} {codec}")),
@@ -4889,7 +4988,7 @@ fn provider_value<'a>(providers: &'a BTreeMap<String, String>, keys: &[&str]) ->
 
 fn item_identity_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> Option<String> {
     let scope = item_identity_scope(item);
-    provider_value(providers, &["Tmdb", "TMDb", "tmdb"])
+    let base = provider_value(providers, &["Tmdb", "TMDb", "tmdb"])
         .map(|value| format!("{scope}:tmdb:{value}"))
         .or_else(|| {
             provider_value(providers, &["Imdb", "IMDb", "imdb"])
@@ -4898,26 +4997,59 @@ fn item_identity_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -
         .or_else(|| {
             provider_value(providers, &["Tvdb", "TVDb", "tvdb"])
                 .map(|value| format!("{scope}:tvdb:{value}"))
-        })
+        });
+
+    match item.item_type.as_str() {
+        "Season" => base.map(|value| {
+            format!("{value}:season:{}", item.index_number.unwrap_or_default())
+        }),
+        "Episode" => base.map(|value| {
+            format!(
+                "{value}:season:{}:episode:{}:{}",
+                item.parent_index_number.unwrap_or_default(),
+                item.index_number.unwrap_or_default(),
+                item.index_number_end.unwrap_or_default()
+            )
+        }),
+        _ => base,
+    }
 }
 
 fn presentation_unique_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> String {
-    let scope = item_identity_scope(item);
-    let source = provider_value(providers, &["Tmdb", "TMDb", "tmdb"])
-        .map(|value| format!("{scope}:tmdb:{value}"))
-        .or_else(|| provider_value(providers, &["Imdb", "IMDb", "imdb"]).map(|value| format!("{scope}:imdb:{value}")))
-        .or_else(|| provider_value(providers, &["Tvdb", "TVDb", "tvdb"]).map(|value| format!("{scope}:tvdb:{value}")))
-        .unwrap_or_else(|| format!("item:{}", item.id));
+    let source = item_identity_key(item, providers).unwrap_or_else(|| match item.item_type.as_str() {
+        "Season" => format!(
+            "item:{}:season:{}",
+            item.id,
+            item.index_number.unwrap_or_default()
+        ),
+        "Episode" => format!(
+            "item:{}:season:{}:episode:{}:{}",
+            item.id,
+            item.parent_index_number.unwrap_or_default(),
+            item.index_number.unwrap_or_default(),
+            item.index_number_end.unwrap_or_default()
+        ),
+        _ => format!("item:{}", item.id),
+    });
     format!("{}_", uuid_to_emby_guid(&Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes())))
 }
 
 fn display_preferences_id(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> String {
-    let scope = item_identity_scope(item);
-    let source = provider_value(providers, &["Tmdb", "TMDb", "tmdb"])
-        .map(|value| format!("{scope}:tmdb:{value}"))
-        .or_else(|| provider_value(providers, &["Imdb", "IMDb", "imdb"]).map(|value| format!("{scope}:imdb:{value}")))
-        .or_else(|| provider_value(providers, &["Tvdb", "TVDb", "tvdb"]).map(|value| format!("{scope}:tvdb:{value}")))
-        .unwrap_or_else(|| format!("item:{}", item.id));
+    let source = item_identity_key(item, providers).unwrap_or_else(|| match item.item_type.as_str() {
+        "Season" => format!(
+            "item:{}:season:{}",
+            item.id,
+            item.index_number.unwrap_or_default()
+        ),
+        "Episode" => format!(
+            "item:{}:season:{}:episode:{}:{}",
+            item.id,
+            item.parent_index_number.unwrap_or_default(),
+            item.index_number.unwrap_or_default(),
+            item.index_number_end.unwrap_or_default()
+        ),
+        _ => format!("item:{}", item.id),
+    });
     uuid_to_emby_guid(&Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes()))
 }
 

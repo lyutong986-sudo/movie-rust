@@ -296,10 +296,11 @@ fn parse_numbered_episode(raw_name: &str, parent_name: Option<&str>) -> Option<N
             .get(matched.end()..)
             .unwrap_or_default()
             .trim_matches(|value: char| value.is_whitespace() || matches!(value, '.' | '_' | '-'));
+        let suffix = strip_continuation_episode_tokens(suffix);
         let title = if suffix.is_empty() {
             format!("Episode {episode_number}")
         } else {
-            clean_title(suffix)
+            clean_title(&suffix)
         };
 
         return Some(NumberedEpisode {
@@ -462,7 +463,20 @@ fn sxe_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
         Regex::new(
-            r"(?ix)^(?P<series>.*?)[ ._\-\[]*s(?P<season>\d{1,4})[ ._\-]*e(?P<episode>\d{1,3})(?:[ ._\-]*e?(?P<ending>\d{1,3}))?",
+            r"(?ix)
+            ^
+            (?P<series>.*?)
+            [ ._\-\[]*
+            s(?P<season>\d{1,4})
+            [ ._\-]*
+            e(?P<episode>\d{1,3})
+            (?:
+                [ ._\-]*
+                (?:e|x|-|to)?
+                [ ._\-]*
+                (?P<ending>\d{1,3})
+            )?
+            ",
         )
         .expect("valid SxE regex")
     })
@@ -472,10 +486,36 @@ fn nx_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
         Regex::new(
-            r"(?ix)^(?P<series>.*?)[ ._\-\[]*(?P<season>\d{1,4})x(?P<episode>\d{1,3})(?:[ ._\-]*(?P<ending>\d{1,3}))?",
+            r"(?ix)
+            ^
+            (?P<series>.*?)
+            [ ._\-\[]*
+            (?P<season>\d{1,4})x(?P<episode>\d{1,3})
+            (?:
+                [ ._\-]*
+                (?:x|-|to)?
+                [ ._\-]*
+                (?P<ending>\d{1,3})
+            )?
+            ",
         )
         .expect("valid Nx regex")
     })
+}
+
+fn continuation_episode_token_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"(?ix)^(?:[ ._\-]*(?:s\d{1,4})?[ ._\-]*(?:e|x|-|to)?[ ._\-]*\d{1,3})+")
+            .expect("valid continuation episode token regex")
+    })
+}
+
+fn strip_continuation_episode_tokens(value: &str) -> String {
+    let stripped = continuation_episode_token_regex().replace(value, "");
+    stripped.into_owned().trim_matches(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '.' | '_' | '-')
+    }).to_string()
 }
 
 fn date_episode_regex() -> &'static Regex {
@@ -530,5 +570,58 @@ mod tests {
         assert_eq!(parsed.season_number, Some(2));
         assert_eq!(parsed.episode_number, Some(3));
         assert_eq!(parsed.title, "The Test");
+    }
+
+    #[test]
+    fn parses_multi_episode_sxe_with_dash() {
+        let parsed = parse_media_path(Path::new("Show.Name.S01E02-E03.The.Test.mkv"));
+        assert_eq!(parsed.series_name.as_deref(), Some("Show Name"));
+        assert_eq!(parsed.season_number, Some(1));
+        assert_eq!(parsed.episode_number, Some(2));
+        assert_eq!(parsed.ending_episode_number, Some(3));
+    }
+
+    #[test]
+    fn parses_multi_episode_nx_with_x() {
+        let parsed = parse_media_path(Path::new("Show Name 01x02x03 episode name.mkv"));
+        assert_eq!(parsed.series_name.as_deref(), Some("Show Name"));
+        assert_eq!(parsed.season_number, Some(1));
+        assert_eq!(parsed.episode_number, Some(2));
+        assert_eq!(parsed.ending_episode_number, Some(3));
+    }
+
+    #[test]
+    fn parses_dated_style_syear_episode() {
+        let parsed = parse_media_path(Path::new("Running Man S2017E368.mkv"));
+        assert_eq!(parsed.series_name.as_deref(), Some("Running Man"));
+        assert_eq!(parsed.season_number, Some(2017));
+        assert_eq!(parsed.episode_number, Some(368));
+    }
+
+    #[test]
+    fn strips_extra_multi_episode_tokens_from_title() {
+        let parsed = parse_media_path(Path::new("Elementary - 02x03x04x15 - Ep Name.mp4"));
+        assert_eq!(parsed.series_name.as_deref(), Some("Elementary"));
+        assert_eq!(parsed.season_number, Some(2));
+        assert_eq!(parsed.episode_number, Some(3));
+        assert_eq!(parsed.title, "Ep Name");
+    }
+
+    #[test]
+    fn parses_multi_episode_sxe_compact() {
+        let parsed = parse_media_path(Path::new("Show.Name.S01E02E03.mkv"));
+        assert_eq!(parsed.series_name.as_deref(), Some("Show Name"));
+        assert_eq!(parsed.season_number, Some(1));
+        assert_eq!(parsed.episode_number, Some(2));
+        assert_eq!(parsed.ending_episode_number, Some(3));
+    }
+
+    #[test]
+    fn strips_dash_episode_suffix_tokens_from_title() {
+        let parsed = parse_media_path(Path::new("Elementary - 02x03-E15 - Ep Name.mp4"));
+        assert_eq!(parsed.series_name.as_deref(), Some("Elementary"));
+        assert_eq!(parsed.season_number, Some(2));
+        assert_eq!(parsed.episode_number, Some(3));
+        assert_eq!(parsed.title, "Ep Name");
     }
 }

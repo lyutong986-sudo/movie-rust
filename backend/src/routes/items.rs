@@ -30,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Root", get(root_item))
         .route("/Users/{user_id}/Items/Root", get(root_item_for_user))
         .route("/Items/Counts", get(item_counts))
+        .route("/Users/{user_id}/Items/Counts", get(user_item_counts))
         .route("/Items/Filters", get(item_filters))
         .route("/Items", get(items))
         .route("/Users/{user_id}/Items", get(user_items))
@@ -150,6 +151,15 @@ async fn item_counts(
     Ok(Json(repository::item_counts(&state.pool).await?))
 }
 
+async fn user_item_counts(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<ItemCountsDto>, AppError> {
+    ensure_user_access(&session, user_id)?;
+    Ok(Json(repository::item_counts(&state.pool).await?))
+}
+
 async fn items(
     session: AuthSession,
     State(state): State<AppState>,
@@ -261,7 +271,8 @@ async fn list_items_for_user(
     query: ItemsQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let mut query = query;
-    if query.parent_id == Some(user_id) {
+    let parent_is_user_root = query.parent_id == Some(user_id);
+    if parent_is_user_root {
         query.parent_id = None;
     }
     let mut requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
@@ -295,12 +306,16 @@ async fn list_items_for_user(
         ));
     }
 
-    let recursive = query.recursive.unwrap_or_else(|| {
-        query
-            .search_term
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-    });
+    let recursive = if parent_is_user_root {
+        true
+    } else {
+        query.recursive.unwrap_or_else(|| {
+            query
+                .search_term
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+    };
 
     if let Some(parent_id) = query.parent_id {
         if let Some(library) = repository::get_library(&state.pool, parent_id).await? {
@@ -371,7 +386,8 @@ async fn item_filters_for_query(
     user_id: Uuid,
     mut query: ItemsQuery,
 ) -> Result<Json<Value>, AppError> {
-    if query.parent_id == Some(user_id) {
+    let parent_is_user_root = query.parent_id == Some(user_id);
+    if parent_is_user_root {
         query.parent_id = None;
     }
     let mut requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
@@ -380,7 +396,11 @@ async fn item_filters_for_query(
     requested_item_ids.dedup();
 
     let include_types = parse_include_types(query.include_item_types.as_deref());
-    let recursive = query.recursive.unwrap_or(true);
+    let recursive = if parent_is_user_root {
+        true
+    } else {
+        query.recursive.unwrap_or(true)
+    };
     query.start_index = Some(0);
     query.limit = Some(10_000);
 
@@ -543,6 +563,7 @@ fn item_list_options_from_query(
         fields: query.fields.clone(),
         start_index: query.start_index.unwrap_or(0),
         limit: query.limit.unwrap_or(100),
+        group_items_into_collections: query.group_items_into_collections.unwrap_or(true),
         ..ItemListOptions::default()
     }
 }
@@ -1420,7 +1441,7 @@ fn parse_filter_list(value: Option<&str>) -> Vec<String> {
 fn parse_i32_list(value: Option<&str>) -> Vec<i32> {
     value
         .unwrap_or_default()
-        .split(',')
+        .split([',', '|'])
         .map(str::trim)
         .filter_map(|value| value.parse::<i32>().ok())
         .collect()
@@ -1429,7 +1450,7 @@ fn parse_i32_list(value: Option<&str>) -> Vec<i32> {
 fn parse_emby_uuid_list(value: Option<&str>) -> Vec<Uuid> {
     value
         .unwrap_or_default()
-        .split(',')
+        .split([',', '|'])
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .filter_map(|value| emby_id_to_uuid(value).ok())
@@ -1472,13 +1493,21 @@ async fn user_resume_items(
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     query.user_id = Some(user_id);
+    let parent_is_user_root = query.parent_id == Some(user_id);
+    if parent_is_user_root {
+        query.parent_id = None;
+    }
 
     let mut requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
     requested_item_ids.extend(parse_emby_uuid_list(query.ids.as_deref()));
     requested_item_ids.sort_unstable();
     requested_item_ids.dedup();
 
-    let recursive = query.recursive.unwrap_or(true);
+    let recursive = if parent_is_user_root {
+        true
+    } else {
+        query.recursive.unwrap_or(true)
+    };
     let mut options = item_list_options_from_query(
         &query,
         user_id,

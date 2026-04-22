@@ -1174,7 +1174,7 @@ pub struct ItemsQuery {
     pub exclude_item_types: Option<String>,
     #[serde(default, alias = "MediaTypes", alias = "mediaTypes")]
     pub media_types: Option<String>,
-    #[serde(default, alias = "GenreIds", alias = "genreIds")]
+    #[serde(default, alias = "Genres", alias = "genres", alias = "GenreIds", alias = "genreIds")]
     pub genres: Option<String>,
     #[serde(default, alias = "OfficialRatings", alias = "officialRatings")]
     pub official_ratings: Option<String>,
@@ -1218,7 +1218,7 @@ pub struct ItemsQuery {
     pub fields: Option<String>,
     #[serde(default, alias = "StartIndex", alias = "startIndex")]
     pub start_index: Option<i64>,
-    #[serde(default, alias = "Limit")]
+    #[serde(default, alias = "Limit", alias = "limit")]
     pub limit: Option<i64>,
     #[serde(default, alias = "ListItemIds", alias = "listItemIds")]
     pub list_item_ids: Option<String>,

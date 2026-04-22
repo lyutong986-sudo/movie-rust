@@ -254,7 +254,13 @@ async fn import_tv_file(
     let season_name = season_nfo
         .title
         .clone()
-        .unwrap_or_else(|| format!("Season {season_number}"));
+        .unwrap_or_else(|| {
+            if season_number == 0 {
+                "Specials".to_string()
+            } else {
+                format!("Season {season_number}")
+            }
+        });
 
     let series_poster = series_nfo
         .primary_image
@@ -1316,6 +1322,14 @@ fn series_name_for_file(file: &Path, parsed_series_name: Option<&str>) -> String
 
     let parent = file.parent();
     let parent_name = parent.and_then(Path::file_name).and_then(OsStr::to_str);
+    if let Some((embedded_series_name, _)) = parent_name.and_then(parse_series_season_folder) {
+        if let Some(series_name) = embedded_series_name
+            .map(|value| naming::clean_display_name(&value))
+            .filter(|value| !value.is_empty())
+        {
+            return series_name;
+        }
+    }
     if parent_name.is_some_and(looks_like_season_folder) {
         return parent
             .and_then(Path::parent)
@@ -1334,6 +1348,21 @@ fn series_name_for_file(file: &Path, parsed_series_name: Option<&str>) -> String
 
 fn series_virtual_path(library_root: &Path, file: &Path, series_name: &str) -> PathBuf {
     let parent = file.parent().unwrap_or(library_root);
+    if let Some((embedded_series_name, _)) = parent
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(parse_series_season_folder)
+    {
+        if let Some(series_name) = embedded_series_name
+            .map(|value| naming::clean_display_name(&value))
+            .filter(|value| !value.is_empty())
+        {
+            return parent
+                .parent()
+                .map(|base| base.join(&series_name))
+                .unwrap_or_else(|| library_root.join(&series_name));
+        }
+    }
     if parent
         .file_name()
         .and_then(OsStr::to_str)
@@ -1390,24 +1419,103 @@ fn looks_like_season_folder(value: &str) -> bool {
 }
 
 fn parse_season_number(value: &str) -> Option<i32> {
+    let normalized = value.trim();
+    if normalized.eq_ignore_ascii_case("specials") || normalized.eq_ignore_ascii_case("extras") {
+        return Some(0);
+    }
+    if let Some((_, season)) = parse_series_season_folder(value) {
+        return Some(season);
+    }
     season_folder_regex()
         .captures(value)
-        .and_then(|captures| captures.name("season"))
+        .and_then(|captures| captures.name("season").or_else(|| captures.name("season_alt")))
         .and_then(|value| value.as_str().parse().ok())
+}
+
+fn parse_series_season_folder(value: &str) -> Option<(Option<String>, i32)> {
+    let captures = series_season_folder_regex().captures(value)?;
+    let season = captures.name("season")?.as_str().parse().ok()?;
+    let series_name = captures
+        .name("series")
+        .map(|value| value.as_str().trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    Some((series_name, season))
 }
 
 fn season_folder_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
-        Regex::new(r"(?ix)^(?:season|s|第)?[ ._\-]*(?P<season>\d{1,4})(?:[ ._\-]*季)?$")
-            .expect("valid season folder regex")
+        Regex::new(
+            r"(?ix)
+            ^
+            (?:
+                (?:
+                    season|staffel|stagione|temporada|series|kausi|
+                    seizoen|sezon(?:a|ul)?|s|第
+                )
+                [ ._\-]*
+                \(?
+                (?P<season>\d{1,4})
+                \)?
+                (?:[ ._\-]*季)?
+                (?:\s*\(\d{4}\))?
+                |
+                (?P<season_alt>\d{1,4})
+                (?:st|nd|rd|th|\.)?
+                [ ._\-]*
+                (?:
+                    season|staffel|stagione|temporada|series|kausi|
+                    seizoen|sezon(?:a|ul)?|第
+                )?
+                (?:[ ._\-]*季)?
+                (?:\s*\(\d{4}\))?
+            )
+            $
+            ",
+        )
+        .expect("valid season folder regex")
+    })
+}
+
+fn series_season_folder_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?ix)
+            ^
+            (?P<series>.+?)
+            [ ._\-]*
+            (?:
+                season|staffel|stagione|temporada|series|kausi|
+                seizoen|sezon(?:a|ul)?|s|第
+            )
+            [ ._\-]*
+            \(?
+            (?P<season>\d{1,4})
+            \)?
+            (?:[ ._\-]*季)?
+            (?:\s*\(\d{4}\))?
+            $
+            ",
+        )
+        .expect("valid series season folder regex")
     })
 }
 
 fn simple_episode_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
-        Regex::new(r"(?ix)(?:^|[ ._\-])(?:e|ep|episode|第)?(?P<episode>\d{1,3})(?:[ ._\-]|集|$)")
-            .expect("valid episode number regex")
+        Regex::new(
+            r"(?ix)
+            (?:^|[ ._\-])
+            (?:e|ep|episode|第)?
+            [ ._\-]*
+            (?P<episode>\d{1,3})
+            (?:[ ._\-]*集)?
+            (?:[ ._\-]|$)
+            ",
+        )
+        .expect("valid episode number regex")
     })
 }
