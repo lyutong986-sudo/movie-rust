@@ -1675,15 +1675,11 @@ async fn playback_info(
         .max_streaming_bitrate
         .or_else(|| info.device_profile.as_ref().and_then(|profile| profile.max_streaming_bitrate));
 
-    let force_transcoding = media_sources
+    let transcode_reasons = media_sources
         .get(selected_media_source_index)
-        .is_some_and(|source| {
-            should_force_transcoding(
-                &info,
-                source,
-                effective_max_bitrate,
-            )
-        });
+        .map(|source| transcoding_reasons(&info, source, effective_max_bitrate))
+        .unwrap_or_default();
+    let force_transcoding = !transcode_reasons.is_empty();
 
     for media_source in &mut media_sources {
         if let Some(url) = media_source.direct_stream_url.as_mut() {
@@ -1777,7 +1773,15 @@ async fn playback_info(
 
         let transcoding_info = media_sources
             .get(selected_media_source_index)
-            .map(|source| build_transcoding_info(source, &transcoding_container, effective_max_bitrate));
+            .map(|source| {
+                build_transcoding_info(
+                    source,
+                    &info,
+                    &transcoding_container,
+                    &transcoding_sub_protocol,
+                    transcode_reasons.clone(),
+                )
+            });
 
         return Ok(Json(PlaybackInfoResponse {
             media_sources,
@@ -1796,8 +1800,10 @@ async fn playback_info(
 
 fn build_transcoding_info(
     source: &crate::models::MediaSourceDto,
+    info: &PlaybackInfoDto,
     container: &str,
-    max_streaming_bitrate: Option<i64>,
+    sub_protocol: &str,
+    reasons: Vec<String>,
 ) -> TranscodingInfoDto {
     let video_stream = source
         .media_streams
@@ -1808,33 +1814,27 @@ fn build_transcoding_info(
         .iter()
         .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"));
     let source_bitrate = source.bitrate;
-    let mut reasons = Vec::new();
-    if let (Some(source_bitrate), Some(max_bitrate)) = (source_bitrate, max_streaming_bitrate) {
-        if i64::from(source_bitrate) > max_bitrate {
-            reasons.push("ContainerBitrateExceedsLimit".to_string());
-        }
-    }
-    if !source.supports_direct_play {
-        reasons.push("DirectPlayError".to_string());
-    }
-    if !source.supports_direct_stream {
-        reasons.push("DirectStreamError".to_string());
-    }
-    if reasons.is_empty() {
-        reasons.push("ContainerNotSupported".to_string());
-    }
+    let video_bitrate = video_stream.and_then(|stream| stream.bit_rate).or(source_bitrate);
+    let audio_bitrate = audio_stream.and_then(|stream| stream.bit_rate);
+    let start_ticks = info.start_time_ticks.filter(|value| *value > 0);
 
     TranscodingInfoDto {
         audio_codec: audio_stream.and_then(|stream| stream.codec.clone()),
         video_codec: video_stream.and_then(|stream| stream.codec.clone()),
+        sub_protocol: Some(sub_protocol.to_string()),
         container: Some(container.to_string()),
         is_video_direct: false,
         is_audio_direct: false,
         bitrate: source_bitrate,
+        audio_bitrate,
+        video_bitrate,
         framerate: video_stream.and_then(|stream| stream.real_frame_rate.or(stream.average_frame_rate)),
-        completion_percentage: None,
+        completion_percentage: Some(0.0),
+        transcoding_position_ticks: start_ticks,
+        transcoding_start_position_ticks: start_ticks,
         width: video_stream.and_then(|stream| stream.width),
         height: video_stream.and_then(|stream| stream.height),
+        audio_channels: audio_stream.and_then(|stream| stream.channels),
         hardware_acceleration_type: None,
         transcode_reasons: reasons,
     }
@@ -2041,8 +2041,15 @@ fn profile_property_value(
             .map(|value| ProfileValue::Number(f64::from(value))),
         "videobitdepth" | "bitdepth" => stream.and_then(|stream| stream.bit_depth).map(|value| ProfileValue::Number(f64::from(value))),
         "videolevel" | "level" => stream.and_then(|stream| stream.level).map(|value| ProfileValue::Number(f64::from(value))),
+        "videorefframes" | "refframes" => stream.and_then(|stream| stream.ref_frames).map(|value| ProfileValue::Number(f64::from(value))),
         "videoprofile" | "profile" => stream.and_then(|stream| stream.profile.clone()).map(ProfileValue::Text),
         "videorange" => stream.and_then(|stream| stream.video_range.clone()).map(ProfileValue::Text),
+        "videorangetype" | "extendedvideotype" => stream.and_then(|stream| stream.extended_video_type.clone()).map(ProfileValue::Text),
+        "extendedvideosubtype" | "videoprofilesubtype" => stream.and_then(|stream| stream.extended_video_sub_type.clone()).map(ProfileValue::Text),
+        "videocolorspace" | "colorspace" => stream.and_then(|stream| stream.color_space.clone()).map(ProfileValue::Text),
+        "videocolortransfer" | "colortransfer" => stream.and_then(|stream| stream.color_transfer.clone()).map(ProfileValue::Text),
+        "videocolorprimaries" | "colorprimaries" => stream.and_then(|stream| stream.color_primaries.clone()).map(ProfileValue::Text),
+        "pixelformat" => stream.and_then(|stream| stream.pixel_format.clone()).map(ProfileValue::Text),
         "videocodec" | "codec" => stream.and_then(|stream| stream.codec.clone()).map(ProfileValue::Text),
         "audiocodec" => source
             .and_then(|source| {
@@ -2053,6 +2060,15 @@ fn profile_property_value(
                     .and_then(|stream| stream.codec.clone())
             })
             .map(ProfileValue::Text),
+        "audiobitrate" => source
+            .and_then(|source| {
+                source
+                    .media_streams
+                    .iter()
+                    .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"))
+                    .and_then(|stream| stream.bit_rate)
+            })
+            .map(|value| ProfileValue::Number(f64::from(value))),
         "audiochannels" => source
             .and_then(|source| {
                 source
@@ -2062,7 +2078,36 @@ fn profile_property_value(
                     .and_then(|stream| stream.channels)
             })
             .map(|value| ProfileValue::Number(f64::from(value))),
+        "audiosamplerate" => source
+            .and_then(|source| {
+                source
+                    .media_streams
+                    .iter()
+                    .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"))
+                    .and_then(|stream| stream.sample_rate)
+            })
+            .map(|value| ProfileValue::Number(f64::from(value))),
+        "audiobitdepth" => source
+            .and_then(|source| {
+                source
+                    .media_streams
+                    .iter()
+                    .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"))
+                    .and_then(|stream| stream.bit_depth)
+            })
+            .map(|value| ProfileValue::Number(f64::from(value))),
+        "subtitlecodec" => source
+            .and_then(|source| {
+                source
+                    .media_streams
+                    .iter()
+                    .find(|stream| stream.stream_type.eq_ignore_ascii_case("Subtitle"))
+                    .and_then(|stream| stream.codec.clone())
+            })
+            .map(ProfileValue::Text),
         "isinterlaced" => stream.and_then(|stream| stream.is_interlaced).map(ProfileValue::Bool),
+        "isanamorphic" => stream.and_then(|stream| stream.is_anamorphic).map(ProfileValue::Bool),
+        "isavc" => stream.and_then(|stream| stream.is_avc).map(ProfileValue::Bool),
         _ => None,
     }
 }
@@ -2128,78 +2173,89 @@ fn csv_option_contains(csv: Option<&str>, value: &str) -> bool {
     })
 }
 
-fn should_force_transcoding(
+fn transcoding_reasons(
     info: &PlaybackInfoDto,
     media_source: &crate::models::MediaSourceDto,
     effective_max_bitrate: Option<i64>,
-) -> bool {
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+
     if matches!(info.enable_transcoding, Some(false)) {
-        return false;
+        return reasons;
     }
 
-    if matches!(info.enable_direct_play, Some(false)) || matches!(info.enable_direct_stream, Some(false)) {
-        return true;
+    if matches!(info.enable_direct_play, Some(false)) {
+        reasons.push("DirectPlayError".to_string());
+    }
+    if matches!(info.enable_direct_stream, Some(false)) {
+        reasons.push("DirectStreamError".to_string());
     }
 
     if let Some(profile) = &info.device_profile {
         if !profile.direct_play_profiles.is_empty()
             && !device_profile_supports_direct_play(profile, media_source)
         {
-            return true;
+            push_reason(&mut reasons, "ContainerNotSupported");
         }
+    }
 
-        if let Some(max_audio_channels) = info.max_audio_channels {
-            if media_source.media_streams.iter().any(|stream| {
-                stream.stream_type.eq_ignore_ascii_case("Audio")
-                    && stream.channels.is_some_and(|channels| channels > max_audio_channels)
-            }) {
-                return true;
-            }
+    if let Some(max_audio_channels) = info.max_audio_channels {
+        if media_source.media_streams.iter().any(|stream| {
+            stream.stream_type.eq_ignore_ascii_case("Audio")
+                && stream.channels.is_some_and(|channels| channels > max_audio_channels)
+        }) {
+            push_reason(&mut reasons, "AudioChannelsNotSupported");
         }
+    }
 
-        if matches!(info.allow_video_stream_copy, Some(false))
-            && media_source
-                .media_streams
-                .iter()
-                .any(|stream| stream.stream_type.eq_ignore_ascii_case("Video"))
-        {
-            return true;
-        }
+    if matches!(info.allow_video_stream_copy, Some(false))
+        && media_source
+            .media_streams
+            .iter()
+            .any(|stream| stream.stream_type.eq_ignore_ascii_case("Video"))
+    {
+        push_reason(&mut reasons, "VideoCodecNotSupported");
+    }
 
-        if matches!(info.allow_audio_stream_copy, Some(false))
-            && media_source
-                .media_streams
-                .iter()
-                .any(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"))
-        {
-            return true;
-        }
+    if matches!(info.allow_audio_stream_copy, Some(false))
+        && media_source
+            .media_streams
+            .iter()
+            .any(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"))
+    {
+        push_reason(&mut reasons, "AudioCodecNotSupported");
+    }
 
-        if matches!(info.allow_interlaced_video_stream_copy, Some(false))
-            && media_source.media_streams.iter().any(|stream| {
-                stream.stream_type.eq_ignore_ascii_case("Video")
-                    && stream.is_interlaced.unwrap_or(false)
-            })
-        {
-            return true;
-        }
+    if matches!(info.allow_interlaced_video_stream_copy, Some(false))
+        && media_source.media_streams.iter().any(|stream| {
+            stream.stream_type.eq_ignore_ascii_case("Video")
+                && stream.is_interlaced.unwrap_or(false)
+        })
+    {
+        push_reason(&mut reasons, "InterlacedVideoNotSupported");
     }
 
     if matches!(info.always_burn_in_subtitle_when_transcoding, Some(true))
         && selected_subtitle_stream(media_source, info.subtitle_stream_index).is_some()
     {
-        return true;
+        push_reason(&mut reasons, "SubtitleCodecNotSupported");
     }
 
     if let (Some(max_bitrate), Some(media_bitrate)) =
         (effective_max_bitrate, media_source.bitrate.map(i64::from))
     {
         if media_bitrate > max_bitrate && matches!(info.enable_transcoding, Some(true) | None) {
-            return true;
+            push_reason(&mut reasons, "ContainerBitrateExceedsLimit");
         }
     }
 
-    false
+    reasons
+}
+
+fn push_reason(reasons: &mut Vec<String>, reason: &str) {
+    if !reasons.iter().any(|existing| existing == reason) {
+        reasons.push(reason.to_string());
+    }
 }
 
 fn selected_subtitle_stream<'a>(
@@ -2644,6 +2700,187 @@ mod tests {
             "IsRequired": true
         });
         assert!(!profile_condition_matches(&failing_condition, Some(&stream), None));
+    }
+
+    #[test]
+    fn transcoding_info_reports_real_reasons_and_sdk_fields() {
+        let video_stream = crate::models::MediaStreamDto {
+            index: 0,
+            stream_type: "Video".to_string(),
+            codec: Some("hevc".to_string()),
+            codec_tag: None,
+            language: None,
+            display_title: None,
+            is_default: true,
+            is_forced: false,
+            width: Some(3840),
+            height: Some(2160),
+            bit_rate: Some(80_000_000),
+            channels: None,
+            sample_rate: None,
+            is_external: false,
+            delivery_method: None,
+            delivery_url: None,
+            is_chunked_response: None,
+            supports_external_stream: false,
+            path: None,
+            aspect_ratio: Some("16:9".to_string()),
+            attachment_size: None,
+            average_frame_rate: Some(24.0),
+            bit_depth: Some(10),
+            color_primaries: Some("bt2020".to_string()),
+            color_space: Some("bt2020nc".to_string()),
+            color_transfer: Some("smpte2084".to_string()),
+            display_language: None,
+            extended_video_sub_type: Some("DoviProfile76".to_string()),
+            extended_video_sub_type_description: Some("Profile 7.6".to_string()),
+            extended_video_type: Some("DolbyVision".to_string()),
+            is_anamorphic: Some(false),
+            is_avc: Some(false),
+            is_external_url: None,
+            is_hearing_impaired: Some(false),
+            is_interlaced: Some(false),
+            is_text_subtitle_stream: Some(false),
+            level: Some(153),
+            pixel_format: Some("yuv420p10le".to_string()),
+            profile: Some("Main 10".to_string()),
+            protocol: Some("File".to_string()),
+            real_frame_rate: Some(24.0),
+            ref_frames: Some(1),
+            rotation: None,
+            stream_start_time_ticks: None,
+            time_base: None,
+            title: None,
+            comment: None,
+            video_range: Some("HDR10".to_string()),
+            channel_layout: None,
+            item_id: None,
+            server_id: None,
+            mime_type: None,
+            subtitle_location_type: None,
+        };
+        let audio_stream = crate::models::MediaStreamDto {
+            index: 1,
+            stream_type: "Audio".to_string(),
+            codec: Some("truehd".to_string()),
+            codec_tag: None,
+            language: Some("eng".to_string()),
+            display_title: None,
+            is_default: true,
+            is_forced: false,
+            width: None,
+            height: None,
+            bit_rate: Some(4_000_000),
+            channels: Some(8),
+            sample_rate: Some(48_000),
+            is_external: false,
+            delivery_method: None,
+            delivery_url: None,
+            is_chunked_response: None,
+            supports_external_stream: false,
+            path: None,
+            aspect_ratio: None,
+            attachment_size: None,
+            average_frame_rate: None,
+            bit_depth: Some(24),
+            color_primaries: None,
+            color_space: None,
+            color_transfer: None,
+            display_language: Some("English".to_string()),
+            extended_video_sub_type: None,
+            extended_video_sub_type_description: None,
+            extended_video_type: None,
+            is_anamorphic: None,
+            is_avc: None,
+            is_external_url: None,
+            is_hearing_impaired: Some(false),
+            is_interlaced: Some(false),
+            is_text_subtitle_stream: Some(false),
+            level: None,
+            pixel_format: None,
+            profile: None,
+            protocol: Some("File".to_string()),
+            real_frame_rate: None,
+            ref_frames: None,
+            rotation: None,
+            stream_start_time_ticks: None,
+            time_base: None,
+            title: None,
+            comment: None,
+            video_range: None,
+            channel_layout: Some("7.1".to_string()),
+            item_id: None,
+            server_id: None,
+            mime_type: None,
+            subtitle_location_type: None,
+        };
+        let source = crate::models::MediaSourceDto {
+            chapters: Vec::new(),
+            id: "mediasource_item".to_string(),
+            path: "http://example.test/movie.mkv".to_string(),
+            protocol: "Http".to_string(),
+            source_type: "Default".to_string(),
+            container: "mkv".to_string(),
+            name: "movie".to_string(),
+            sort_name: None,
+            is_remote: true,
+            encoder_path: None,
+            encoder_protocol: None,
+            probe_path: None,
+            probe_protocol: None,
+            has_mixed_protocols: Some(false),
+            supports_direct_play: true,
+            supports_direct_stream: true,
+            supports_transcoding: true,
+            direct_stream_url: None,
+            formats: Vec::new(),
+            size: Some(90_000_000_000),
+            e_tag: None,
+            bitrate: Some(84_000_000),
+            default_audio_stream_index: Some(1),
+            default_subtitle_stream_index: None,
+            run_time_ticks: Some(60_000_000_000),
+            container_start_time_ticks: None,
+            is_infinite_stream: Some(false),
+            requires_opening: Some(false),
+            open_token: None,
+            requires_closing: Some(false),
+            live_stream_id: None,
+            buffer_ms: None,
+            requires_looping: Some(false),
+            supports_probing: Some(true),
+            video_3d_format: None,
+            timestamp: None,
+            required_http_headers: std::collections::BTreeMap::new(),
+            add_api_key_to_direct_stream_url: Some(false),
+            transcoding_url: None,
+            transcoding_sub_protocol: None,
+            transcoding_container: None,
+            analyze_duration_ms: None,
+            read_at_native_framerate: Some(false),
+            item_id: Some("item".to_string()),
+            server_id: None,
+            media_streams: vec![video_stream, audio_stream],
+        };
+
+        let info: PlaybackInfoDto = serde_json::from_value(json!({
+            "EnableTranscoding": true,
+            "MaxStreamingBitrate": 10_000_000,
+            "MaxAudioChannels": 6,
+            "StartTimeTicks": 12345
+        }))
+        .expect("valid playback info");
+
+        let reasons = transcoding_reasons(&info, &source, Some(10_000_000));
+        assert!(reasons.contains(&"ContainerBitrateExceedsLimit".to_string()));
+        assert!(reasons.contains(&"AudioChannelsNotSupported".to_string()));
+
+        let transcoding = build_transcoding_info(&source, &info, "ts", "hls", reasons);
+        assert_eq!(transcoding.sub_protocol.as_deref(), Some("hls"));
+        assert_eq!(transcoding.video_bitrate, Some(80_000_000));
+        assert_eq!(transcoding.audio_bitrate, Some(4_000_000));
+        assert_eq!(transcoding.audio_channels, Some(8));
+        assert_eq!(transcoding.transcoding_start_position_ticks, Some(12345));
     }
 }
 

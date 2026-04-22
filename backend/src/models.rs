@@ -1121,19 +1121,31 @@ pub struct TranscodingInfoDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_codec: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
     pub is_video_direct: bool,
     pub is_audio_direct: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_bitrate: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_bitrate: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub framerate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_percentage: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_position_ticks: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_start_position_ticks: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_channels: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hardware_acceleration_type: Option<String>,
     pub transcode_reasons: Vec<String>,
