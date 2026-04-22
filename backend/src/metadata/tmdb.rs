@@ -10,7 +10,8 @@ use super::{
         ExternalMovieMetadata, ExternalPerson, ExternalPersonSearchResult, ExternalSeriesMetadata,
     },
     provider::{
-        ExternalEpisodeCatalogItem, ExternalItemPerson, ExternalPersonCredit, MetadataProvider,
+        ExternalEpisodeCatalogItem, ExternalItemPerson, ExternalPersonCredit, ExternalRemoteImage,
+        MetadataProvider,
     },
 };
 
@@ -574,6 +575,51 @@ impl MetadataProvider for TmdbProvider {
 
         Ok(items)
     }
+
+    async fn get_remote_images(
+        &self,
+        media_type: &str,
+        provider_id: &str,
+    ) -> Result<Vec<ExternalRemoteImage>, AppError> {
+        let mut images = Vec::new();
+        if media_type.eq_ignore_ascii_case("series")
+            || media_type.eq_ignore_ascii_case("tv")
+            || media_type.eq_ignore_ascii_case("season")
+            || media_type.eq_ignore_ascii_case("episode")
+        {
+            let details = self.get_tv_details_internal(provider_id).await?;
+            push_tmdb_remote_image(&mut images, details.poster_path, "Primary", &self.config.image_base_url);
+            push_tmdb_remote_image(&mut images, details.backdrop_path, "Backdrop", &self.config.image_base_url);
+        } else {
+            let details = self.get_movie_details_internal(provider_id).await?;
+            push_tmdb_remote_image(&mut images, details.poster_path, "Primary", &self.config.image_base_url);
+            push_tmdb_remote_image(&mut images, details.backdrop_path, "Backdrop", &self.config.image_base_url);
+        }
+
+        Ok(images)
+    }
+}
+
+fn push_tmdb_remote_image(
+    images: &mut Vec<ExternalRemoteImage>,
+    path: Option<String>,
+    image_type: &str,
+    image_base_url: &str,
+) {
+    let Some(path) = path.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    images.push(ExternalRemoteImage {
+        provider_name: "TheMovieDb".to_string(),
+        url: format!("{image_base_url}/original{path}"),
+        thumbnail_url: Some(format!("{image_base_url}/w500{path}")),
+        image_type: image_type.to_string(),
+        language: None,
+        width: None,
+        height: None,
+        community_rating: None,
+        vote_count: None,
+    });
 }
 
 fn parse_tmdb_date(value: Option<&str>) -> Option<chrono::NaiveDate> {
@@ -743,6 +789,8 @@ struct TmdbTvDetails {
     status: Option<String>,
     homepage: Option<String>,
     vote_average: Option<f64>,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
     #[serde(default)]
     genres: Vec<TmdbNamedItem>,
     #[serde(default)]

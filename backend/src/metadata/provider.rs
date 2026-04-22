@@ -37,6 +37,14 @@ pub trait MetadataProvider: Send + Sync {
         &self,
         provider_id: &str,
     ) -> Result<Vec<ExternalEpisodeCatalogItem>, AppError>;
+
+    async fn get_remote_images(
+        &self,
+        _media_type: &str,
+        _provider_id: &str,
+    ) -> Result<Vec<ExternalRemoteImage>, AppError> {
+        Ok(Vec::new())
+    }
 }
 
 /// 外部人物作品信息
@@ -86,6 +94,19 @@ pub struct ExternalEpisodeCatalogItem {
     pub overview: Option<String>,
     pub premiere_date: Option<NaiveDate>,
     pub image_path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalRemoteImage {
+    pub provider_name: String,
+    pub url: String,
+    pub thumbnail_url: Option<String>,
+    pub image_type: String,
+    pub language: Option<String>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub community_rating: Option<f64>,
+    pub vote_count: Option<i32>,
 }
 
 /// 元数据提供者管理器

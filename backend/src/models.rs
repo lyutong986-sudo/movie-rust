@@ -828,6 +828,8 @@ pub struct BaseItemDto {
     pub completion_percentage: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_fields: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]

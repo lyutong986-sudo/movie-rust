@@ -3144,6 +3144,7 @@ pub async fn get_boxsets_for_item_ids(
             primary_image_aspect_ratio: None,
             completion_percentage: None,
             tags: item.tags.clone(),
+            extra_fields: BTreeMap::new(),
         });
     }
 
@@ -4229,6 +4230,7 @@ pub async fn library_to_item_dto(
         primary_image_aspect_ratio: None,
         completion_percentage: None,
         tags: Vec::new(),
+        extra_fields: BTreeMap::new(),
     })
 }
 
@@ -4339,6 +4341,7 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         primary_image_aspect_ratio: None,
         completion_percentage: None,
         tags: Vec::new(),
+        extra_fields: BTreeMap::new(),
     }
 }
 
@@ -4436,6 +4439,7 @@ pub async fn media_item_to_dto(
     let (series_id, season_id) = resolve_series_and_season_ids(pool, item).await?;
     let genre_items = genre_items_from_names(&item.genres);
     let people = get_item_people(pool, item.id).await?;
+    let extra_fields = emby_extra_fields(item, &people, is_folder);
     let provider_ids = provider_ids_for_item(item);
     let primary_image_tag = item
         .image_primary_path
@@ -4611,6 +4615,7 @@ pub async fn media_item_to_dto(
           primary_image_aspect_ratio,
           completion_percentage,
           tags: item.tags.clone(),
+          extra_fields,
       })
 }
 
@@ -4627,6 +4632,60 @@ fn sanitize_media_sources_for_item_detail(media_sources: Vec<MediaSourceDto>) ->
             source
         })
         .collect()
+}
+
+fn emby_extra_fields(item: &DbMediaItem, people: &[PersonDto], is_folder: bool) -> BTreeMap<String, Value> {
+    let mut fields = BTreeMap::new();
+
+    if let Some(index) = item.index_number {
+        fields.insert("SortIndexNumber".to_string(), json!(index));
+    }
+    if let Some(index) = item.parent_index_number {
+        fields.insert("SortParentIndexNumber".to_string(), json!(index));
+    }
+    if let Some(rating) = item.official_rating.as_ref().filter(|value| !value.trim().is_empty()) {
+        fields.insert("CustomRating".to_string(), json!(rating));
+    }
+    if let Some(video_3d_format) = item.tags.iter().find_map(|tag| {
+        let normalized = tag.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "3d" | "sbs" | "hsbs" => Some("HalfSideBySide"),
+            "tab" | "htab" => Some("HalfTopAndBottom"),
+            _ => None,
+        }
+    }) {
+        fields.insert("Video3DFormat".to_string(), json!(video_3d_format));
+    }
+
+    let artists = people
+        .iter()
+        .filter(|person| {
+            person
+                .person_type
+                .as_deref()
+                .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "artist" | "albumartist" | "musicartist" | "composer"))
+        })
+        .collect::<Vec<_>>();
+    if !artists.is_empty() {
+        fields.insert(
+            "Artists".to_string(),
+            json!(artists.iter().map(|person| person.name.clone()).collect::<Vec<_>>()),
+        );
+        fields.insert(
+            "ArtistItems".to_string(),
+            json!(artists
+                .iter()
+                .map(|person| json!({ "Name": person.name, "Id": person.id }))
+                .collect::<Vec<_>>()),
+        );
+    }
+
+    if !is_folder {
+        fields.insert("CanMakePublic".to_string(), json!(false));
+        fields.insert("CanManageAccess".to_string(), json!(false));
+    }
+
+    fields
 }
 
 async fn resolve_series_and_season_ids(
@@ -4841,6 +4900,7 @@ where
         primary_image_aspect_ratio: None,
         completion_percentage: None,
         tags: Vec::new(),
+        extra_fields: BTreeMap::new(),
     })
 }
 

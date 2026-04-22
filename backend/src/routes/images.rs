@@ -1,6 +1,7 @@
 use crate::{
     auth::{AuthSession, OptionalAuthSession},
     error::AppError,
+    metadata::provider::ExternalRemoteImage,
     models::{emby_id_to_uuid, ImageInfoDto},
     repository,
     state::AppState,
@@ -164,16 +165,29 @@ async fn list_item_remote_images(
     _session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
+    Query(query): Query<RemoteImagesQuery>,
 ) -> Result<Json<Value>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
-    repository::get_media_item(&state.pool, item_id)
+    let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let images = remote_images_for_item(&state, &item, query.image_type.as_deref()).await?;
+    let total_record_count = images.len();
+    let start = query.start_index.unwrap_or(0).max(0) as usize;
+    let limit = query.limit.unwrap_or(100).clamp(1, 500) as usize;
+    let items = images
+        .into_iter()
+        .skip(start)
+        .take(limit)
+        .map(remote_image_to_json)
+        .collect::<Vec<_>>();
+
     Ok(Json(json!({
-        "Images": [],
-        "TotalRecordCount": 0,
-        "Providers": []
+        "Images": items,
+        "TotalRecordCount": total_record_count,
+        "StartIndex": start,
+        "Providers": remote_image_provider_names(&state, &item)
     })))
 }
 
@@ -184,10 +198,21 @@ async fn list_item_remote_image_providers(
 ) -> Result<Json<Vec<String>>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
-    repository::get_media_item(&state.pool, item_id)
+    let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-    Ok(Json(Vec::new()))
+    Ok(Json(remote_image_provider_names(&state, &item)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteImagesQuery {
+    #[serde(default, rename = "Type", alias = "type")]
+    image_type: Option<String>,
+    #[serde(default, alias = "StartIndex", alias = "startIndex")]
+    start_index: Option<i32>,
+    #[serde(default, alias = "Limit", alias = "limit")]
+    limit: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,6 +275,106 @@ async fn download_item_remote_image(
         bytes,
     )
     .await
+}
+
+async fn remote_images_for_item(
+    state: &AppState,
+    item: &crate::models::DbMediaItem,
+    image_type: Option<&str>,
+) -> Result<Vec<ExternalRemoteImage>, AppError> {
+    let mut images = Vec::new();
+    push_existing_remote_image(&mut images, item.image_primary_path.as_deref(), "Primary");
+    push_existing_remote_image(&mut images, item.backdrop_path.as_deref(), "Backdrop");
+    push_existing_remote_image(&mut images, item.logo_path.as_deref(), "Logo");
+    push_existing_remote_image(&mut images, item.thumb_path.as_deref(), "Thumb");
+
+    if let (Some(manager), Some(tmdb_id)) = (state.metadata_manager.as_ref(), tmdb_id_for_item(item)) {
+        if let Some(provider) = manager.get_provider("tmdb") {
+            let mut provider_images = provider
+                .get_remote_images(&item.item_type, &tmdb_id)
+                .await
+                .unwrap_or_default();
+            images.append(&mut provider_images);
+        }
+    }
+
+    if let Some(image_type) = image_type.filter(|value| !value.trim().is_empty()) {
+        let normalized = normalized_item_image_type(image_type);
+        images.retain(|image| image.image_type.eq_ignore_ascii_case(&normalized));
+    }
+
+    images.sort_by(|left, right| {
+        left.image_type
+            .cmp(&right.image_type)
+            .then_with(|| left.provider_name.cmp(&right.provider_name))
+            .then_with(|| left.url.cmp(&right.url))
+    });
+    images.dedup_by(|left, right| left.url == right.url && left.image_type == right.image_type);
+    Ok(images)
+}
+
+fn push_existing_remote_image(images: &mut Vec<ExternalRemoteImage>, url: Option<&str>, image_type: &str) {
+    let Some(url) = url.filter(|value| {
+        let value = value.trim();
+        value.starts_with("http://") || value.starts_with("https://")
+    }) else {
+        return;
+    };
+    images.push(ExternalRemoteImage {
+        provider_name: "LocalMetadata".to_string(),
+        url: url.to_string(),
+        thumbnail_url: Some(url.to_string()),
+        image_type: image_type.to_string(),
+        language: None,
+        width: None,
+        height: None,
+        community_rating: None,
+        vote_count: None,
+    });
+}
+
+fn remote_image_to_json(image: ExternalRemoteImage) -> Value {
+    json!({
+        "ProviderName": image.provider_name,
+        "Url": image.url,
+        "ThumbnailUrl": image.thumbnail_url,
+        "Type": image.image_type,
+        "Language": image.language,
+        "Width": image.width,
+        "Height": image.height,
+        "CommunityRating": image.community_rating,
+        "VoteCount": image.vote_count,
+        "RatingType": "Score"
+    })
+}
+
+fn remote_image_provider_names(state: &AppState, item: &crate::models::DbMediaItem) -> Vec<String> {
+    let mut providers = Vec::new();
+    if item
+        .image_primary_path
+        .as_deref()
+        .or(item.backdrop_path.as_deref())
+        .or(item.logo_path.as_deref())
+        .or(item.thumb_path.as_deref())
+        .is_some_and(|value| value.starts_with("http://") || value.starts_with("https://"))
+    {
+        providers.push("LocalMetadata".to_string());
+    }
+    if state.metadata_manager.as_ref().and_then(|manager| manager.get_provider("tmdb")).is_some()
+        && tmdb_id_for_item(item).is_some()
+    {
+        providers.push("TheMovieDb".to_string());
+    }
+    providers
+}
+
+fn tmdb_id_for_item(item: &crate::models::DbMediaItem) -> Option<String> {
+    item.provider_ids.as_object().and_then(|providers| {
+        ["Tmdb", "TMDb", "tmdb", "TheMovieDb"]
+            .iter()
+            .find_map(|key| providers.get(*key).and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+    })
 }
 
 async fn get_item_image(
