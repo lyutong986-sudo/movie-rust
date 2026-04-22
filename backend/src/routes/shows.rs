@@ -36,11 +36,11 @@ async fn get_next_up(
         user_id,
         scope_id,
         state.config.server_id,
-        query.start_index.unwrap_or(0).max(0),
-        query.limit.unwrap_or(100).clamp(1, 200),
+        0,
+        10_000,
     )
     .await?;
-    Ok(Json(result))
+    Ok(Json(apply_items_query_to_show_result(result.items, &query)))
 }
 
 async fn get_upcoming(
@@ -56,11 +56,11 @@ async fn get_upcoming(
         user_id,
         scope_id,
         state.config.server_id,
-        query.start_index.unwrap_or(0).max(0),
-        query.limit.unwrap_or(100).clamp(1, 200),
+        0,
+        10_000,
     )
     .await?;
-    Ok(Json(result))
+    Ok(Json(apply_items_query_to_show_result(result.items, &query)))
 }
 
 async fn get_missing(
@@ -76,11 +76,11 @@ async fn get_missing(
         user_id,
         scope_id,
         state.config.server_id,
-        query.start_index.unwrap_or(0).max(0),
-        query.limit.unwrap_or(100).clamp(1, 200),
+        0,
+        10_000,
     )
     .await?;
-    Ok(Json(result))
+    Ok(Json(apply_items_query_to_show_result(result.items, &query)))
 }
 
 async fn get_seasons(
@@ -363,6 +363,154 @@ fn parse_i32_list(value: Option<&str>) -> Vec<i32> {
         .map(str::trim)
         .filter_map(|value| value.parse::<i32>().ok())
         .collect()
+}
+
+fn apply_items_query_to_show_result(
+    mut items: Vec<BaseItemDto>,
+    query: &ItemsQuery,
+) -> QueryResult<BaseItemDto> {
+    let media_types = parse_list(query.media_types.as_deref());
+    let video_types = parse_list(query.video_types.as_deref());
+    let image_types = parse_list(query.image_types.as_deref());
+    let genres = parse_list(query.genres.as_deref());
+    let official_ratings = parse_list(query.official_ratings.as_deref());
+    let tags = parse_list(query.tags.as_deref());
+    let years = parse_i32_list(query.years.as_deref());
+    let containers = parse_list(query.containers.as_deref());
+    let search_term = query.search_term.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_ascii_lowercase);
+
+    items.retain(|item| {
+        if !media_types.is_empty()
+            && !item
+                .media_type
+                .as_deref()
+                .is_some_and(|value| contains_ignore_case(&media_types, value))
+        {
+            return false;
+        }
+        if !video_types.is_empty()
+            && !video_types.iter().any(|value| {
+                value.eq_ignore_ascii_case("Video")
+                    || value.eq_ignore_ascii_case("VideoFile")
+                    || value.eq_ignore_ascii_case("Episode")
+            })
+        {
+            return false;
+        }
+        if !image_types.is_empty() && !matches_image_filter(item, &image_types) {
+            return false;
+        }
+        if !genres.is_empty() && !item.genres.iter().any(|value| contains_ignore_case(&genres, value)) {
+            return false;
+        }
+        if !official_ratings.is_empty()
+            && !item
+                .official_rating
+                .as_deref()
+                .is_some_and(|value| contains_ignore_case(&official_ratings, value))
+        {
+            return false;
+        }
+        if !tags.is_empty() && !item.tags.iter().any(|value| contains_ignore_case(&tags, value)) {
+            return false;
+        }
+        if !years.is_empty() && !item.production_year.is_some_and(|year| years.contains(&year)) {
+            return false;
+        }
+        if !containers.is_empty()
+            && !item
+                .container
+                .as_deref()
+                .is_some_and(|value| contains_ignore_case(&containers, value))
+        {
+            return false;
+        }
+        if let Some(is_played) = query.is_played {
+            if item.user_data.played != is_played {
+                return false;
+            }
+        }
+        if let Some(is_favorite) = query.is_favorite {
+            if item.user_data.is_favorite != is_favorite {
+                return false;
+            }
+        }
+        if let Some(is_hd) = query.is_hd {
+            let is_item_hd = item.width.unwrap_or_default() >= 1280 || item.height.unwrap_or_default() >= 720;
+            if is_item_hd != is_hd {
+                return false;
+            }
+        }
+        if let Some(has_subtitles) = query.has_subtitles {
+            let item_has_subtitles = item
+                .media_streams
+                .iter()
+                .any(|stream| stream.stream_type.eq_ignore_ascii_case("Subtitle"));
+            if item_has_subtitles != has_subtitles {
+                return false;
+            }
+        }
+        if let Some(min_date) = query.min_premiere_date.or(query.min_start_date) {
+            if !item.premiere_date.as_ref().is_some_and(|date| *date >= min_date) {
+                return false;
+            }
+        }
+        if let Some(max_date) = query.max_premiere_date.or(query.max_start_date) {
+            if !item.premiere_date.as_ref().is_some_and(|date| *date <= max_date) {
+                return false;
+            }
+        }
+        if let Some(min_date) = query.min_date_last_saved {
+            if !item.date_modified.as_ref().is_some_and(|date| *date >= min_date) {
+                return false;
+            }
+        }
+        if let Some(max_date) = query.max_date_last_saved {
+            if !item.date_modified.as_ref().is_some_and(|date| *date <= max_date) {
+                return false;
+            }
+        }
+        if let Some(search_term) = &search_term {
+            let haystack = [
+                item.name.as_str(),
+                item.original_title.as_deref().unwrap_or_default(),
+                item.series_name.as_deref().unwrap_or_default(),
+                item.season_name.as_deref().unwrap_or_default(),
+                item.overview.as_deref().unwrap_or_default(),
+            ]
+            .join(" ")
+            .to_ascii_lowercase();
+            if !haystack.contains(search_term) {
+                return false;
+            }
+        }
+        true
+    });
+
+    apply_episode_sort(&mut items, query.sort_by.as_deref(), query.sort_order.as_deref());
+    let total_record_count = items.len() as i64;
+    let start_index = query.start_index.unwrap_or(0).max(0) as usize;
+    let limit = query.limit.unwrap_or(100).clamp(1, 200) as usize;
+    let items = items.into_iter().skip(start_index).take(limit).collect::<Vec<_>>();
+
+    QueryResult {
+        items,
+        total_record_count,
+        start_index: Some(start_index as i64),
+    }
+}
+
+fn contains_ignore_case(values: &[String], candidate: &str) -> bool {
+    values.iter().any(|value| value.eq_ignore_ascii_case(candidate))
+}
+
+fn matches_image_filter(item: &BaseItemDto, image_types: &[String]) -> bool {
+    image_types.iter().any(|image_type| {
+        item.image_tags
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case(image_type))
+            || (image_type.eq_ignore_ascii_case("Backdrop") && !item.backdrop_image_tags.is_empty())
+    })
 }
 
 fn apply_start_item(mut items: Vec<BaseItemDto>, start_item_id: Option<&str>) -> Vec<BaseItemDto> {

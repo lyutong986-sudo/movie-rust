@@ -2049,11 +2049,11 @@ pub struct DeviceProfile {
     #[serde(default)]
     pub transcoding_profiles: Vec<TranscodingProfile>,
     #[serde(default)]
-    pub container_profiles: Vec<String>,
+    pub container_profiles: Vec<Value>,
     #[serde(default)]
-    pub codec_profiles: Vec<String>,
+    pub codec_profiles: Vec<Value>,
     #[serde(default)]
-    pub response_profiles: Vec<String>,
+    pub response_profiles: Vec<Value>,
     #[serde(default)]
-    pub subtitle_profiles: Vec<String>,
+    pub subtitle_profiles: Vec<Value>,
 }

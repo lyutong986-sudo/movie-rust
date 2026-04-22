@@ -2306,5 +2306,46 @@ mod tests {
         assert!(url.contains("MediaSourceId=mediasource_ITEMID"));
         assert!(url.contains("PlaySessionId=PLAYSESSION"));
     }
+
+    #[test]
+    fn playback_info_accepts_emby_sdk_profile_object_arrays() {
+        let info: PlaybackInfoDto = serde_json::from_value(json!({
+            "DeviceProfile": {
+                "DirectPlayProfiles": [
+                    { "Type": "Video", "Container": "mkv,mp4", "VideoCodec": "h264,hevc" }
+                ],
+                "ContainerProfiles": [
+                    {
+                        "Type": "Video",
+                        "Conditions": [
+                            { "Condition": "LessThanEqual", "Property": "Width", "Value": "3840" }
+                        ]
+                    }
+                ],
+                "CodecProfiles": [
+                    {
+                        "Type": "Video",
+                        "Codec": "hevc",
+                        "Conditions": [
+                            { "Condition": "LessThanEqual", "Property": "VideoBitDepth", "Value": "10" }
+                        ]
+                    }
+                ],
+                "ResponseProfiles": [
+                    { "Type": "Video", "Container": "mkv", "MimeType": "video/x-matroska" }
+                ],
+                "SubtitleProfiles": [
+                    { "Format": "srt", "Method": "External" }
+                ]
+            }
+        }))
+        .expect("EmbySDK DeviceProfile object arrays should deserialize");
+
+        let profile = info.device_profile.expect("device profile");
+        assert_eq!(profile.container_profiles.len(), 1);
+        assert_eq!(profile.codec_profiles.len(), 1);
+        assert_eq!(profile.response_profiles.len(), 1);
+        assert_eq!(profile.subtitle_profiles.len(), 1);
+    }
 }
 

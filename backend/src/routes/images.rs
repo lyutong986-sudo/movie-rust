@@ -178,6 +178,7 @@ async fn list_item_remote_images(
         query.image_type.as_deref(),
         query.provider_name.as_deref(),
         query.include_all_languages.unwrap_or(false),
+        query.language.as_deref(),
     )
     .await?;
     let total_record_count = images.len();
@@ -220,6 +221,8 @@ struct RemoteImagesQuery {
     provider_name: Option<String>,
     #[serde(default, alias = "includeAllLanguages")]
     include_all_languages: Option<bool>,
+    #[serde(default, alias = "Language", alias = "language")]
+    language: Option<String>,
     #[serde(default, alias = "enableSeriesImages")]
     enable_series_images: Option<bool>,
     #[serde(default, alias = "StartIndex", alias = "startIndex")]
@@ -296,6 +299,7 @@ async fn remote_images_for_item(
     image_type: Option<&str>,
     provider_name: Option<&str>,
     include_all_languages: bool,
+    language: Option<&str>,
 ) -> Result<Vec<ExternalRemoteImage>, AppError> {
     let mut images = Vec::new();
     push_existing_remote_image(&mut images, item.image_primary_path.as_deref(), "Primary");
@@ -320,12 +324,26 @@ async fn remote_images_for_item(
     if let Some(provider_name) = provider_name.filter(|value| !value.trim().is_empty()) {
         images.retain(|image| image.provider_name.eq_ignore_ascii_case(provider_name));
     }
-    if !include_all_languages {
+    if let Some(language) = language
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalized_language_filter)
+    {
         images.retain(|image| {
             image
                 .language
                 .as_deref()
-                .is_none_or(|language| language.eq_ignore_ascii_case("zh") || language.eq_ignore_ascii_case("en"))
+                .is_none_or(|image_language| normalized_language_filter(image_language) == language)
+        });
+    } else if !include_all_languages {
+        images.retain(|image| {
+            image
+                .language
+                .as_deref()
+                .is_none_or(|language| {
+                    let language = normalized_language_filter(language);
+                    language == "zh" || language == "en"
+                })
         });
     }
 
@@ -343,6 +361,15 @@ async fn remote_images_for_item(
     });
     images.dedup_by(|left, right| left.url == right.url && left.image_type == right.image_type);
     Ok(images)
+}
+
+fn normalized_language_filter(language: &str) -> String {
+    language
+        .split(['-', '_'])
+        .next()
+        .unwrap_or(language)
+        .trim()
+        .to_ascii_lowercase()
 }
 
 fn push_existing_remote_image(images: &mut Vec<ExternalRemoteImage>, url: Option<&str>, image_type: &str) {
