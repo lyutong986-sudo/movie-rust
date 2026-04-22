@@ -31,6 +31,11 @@ export type SettingsDeviceDetails = DevicesDeviceInfo & {
   ReportedDeviceId?: string;
 };
 
+export type SettingsChannelInfo = {
+  Id?: string;
+  Name?: string;
+};
+
 export type SettingsSessionInfo = {
   Id: string;
   UserName?: string;
@@ -297,6 +302,11 @@ export function useSettingsSdk() {
     deleteDevice: (payload: { id: string }) => Promise<unknown>;
   };
 
+  const channelsApi = {
+    getChannels: async (): Promise<SettingsChannelInfo[]> =>
+      ((await sdkAxios().get<{ Items?: SettingsChannelInfo[] }>('/Channels')).data.Items ?? [])
+  };
+
   const apiKeysApi = {
     getKeys: async (): Promise<AuthenticationInfo[]> =>
       ((await (remote.sdk.newUserApi(getApiKeyApi) as {
@@ -486,6 +496,7 @@ export function useSettingsSdk() {
     logsApi,
     devicesApi,
     apiKeysApi,
+    channelsApi,
     sessionsApi,
     librariesApi,
     localizationApi,

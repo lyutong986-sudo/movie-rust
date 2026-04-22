@@ -16,6 +16,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use serde_json::json;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -367,6 +368,18 @@ async fn library_available_options(
         .unwrap_or_default();
 
     let image_fetchers = metadata_fetchers.clone();
+    let subtitle_fetcher = LibraryOptionInfoDto {
+        name: "Open Subtitles".to_string(),
+        setup_url: Some("openSubtitles".to_string()),
+        default_enabled: true,
+        features: vec!["Subtitle".to_string()],
+    };
+    let lyrics_fetcher = LibraryOptionInfoDto {
+        name: "Embedded Lyrics".to_string(),
+        setup_url: None,
+        default_enabled: true,
+        features: vec!["Lyrics".to_string()],
+    };
     let requested_type = query
         .library_content_type
         .unwrap_or_default()
@@ -385,15 +398,15 @@ async fn library_available_options(
             metadata_fetchers: metadata_fetchers.clone(),
             image_fetchers: image_fetchers.clone(),
             supported_image_types: supported_image_types_for(content_type),
-            default_image_options: Vec::new(),
+            default_image_options: default_image_options_for(content_type),
         })
         .collect();
 
     Ok(Json(LibraryOptionsResultDto {
         metadata_savers: vec![nfo_enabled.clone()],
         metadata_readers: vec![nfo_enabled],
-        subtitle_fetchers: Vec::new(),
-        lyrics_fetchers: Vec::new(),
+        subtitle_fetchers: vec![subtitle_fetcher],
+        lyrics_fetchers: vec![lyrics_fetcher],
         type_options,
         default_library_options: crate::models::LibraryOptionsDto::default(),
     }))
@@ -414,6 +427,23 @@ fn supported_image_types_for(content_type: &str) -> Vec<String> {
             .map(str::to_string)
             .collect(),
     }
+}
+
+fn default_image_options_for(content_type: &str) -> Vec<serde_json::Value> {
+    supported_image_types_for(content_type)
+        .into_iter()
+        .map(|image_type| {
+            let limit = match image_type.as_str() {
+                "Primary" | "Backdrop" | "Logo" | "Thumb" => 1,
+                _ => 0,
+            };
+            json!({
+                "Type": image_type,
+                "Limit": limit,
+                "MinWidth": 0
+            })
+        })
+        .collect()
 }
 
 fn broadcast_library_refresh_started(state: &AppState, library_ids: &[String]) {

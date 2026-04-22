@@ -411,6 +411,7 @@ pub struct UserPolicyDto {
     pub enable_media_playback: bool,
     pub enable_content_deletion: bool,
     pub enable_content_downloading: bool,
+    pub enable_sync: bool,
     pub enable_sync_transcoding: bool,
     pub enable_media_conversion: bool,
     pub enable_collection_management: bool,
@@ -425,6 +426,12 @@ pub struct UserPolicyDto {
     pub enable_shared_device_control: bool,
     pub enable_public_sharing: bool,
     pub enable_user_preference_access: bool,
+    pub enable_subtitle_downloading: bool,
+    pub allow_camera_upload: bool,
+    pub allow_sharing_personal_items: bool,
+    pub auto_remote_quality: i32,
+    pub simultaneous_stream_limit: i32,
+    pub restricted_features: Vec<String>,
     pub max_parental_rating: Option<i32>,
     pub max_parental_sub_rating: Option<i32>,
     pub block_unrated_items: Vec<String>,
@@ -433,6 +440,7 @@ pub struct UserPolicyDto {
     pub remote_client_bitrate_limit: i32,
     pub blocked_tags: Vec<String>,
     pub allowed_tags: Vec<String>,
+    pub access_schedules: Vec<serde_json::Value>,
     #[serde(
         serialize_with = "serialize_uuid_vec_as_emby_guids",
         deserialize_with = "deserialize_uuid_vec_from_emby_guids"
@@ -451,6 +459,11 @@ pub struct UserPolicyDto {
         serialize_with = "serialize_uuid_vec_as_emby_guids",
         deserialize_with = "deserialize_uuid_vec_from_emby_guids"
     )]
+    pub enable_content_deletion_from_folders: Vec<Uuid>,
+    #[serde(
+        serialize_with = "serialize_uuid_vec_as_emby_guids",
+        deserialize_with = "deserialize_uuid_vec_from_emby_guids"
+    )]
     pub blocked_media_folders: Vec<Uuid>,
     #[serde(
         serialize_with = "serialize_uuid_vec_as_emby_guids",
@@ -460,6 +473,8 @@ pub struct UserPolicyDto {
     pub authentication_provider_id: String,
     pub password_reset_provider_id: String,
     pub sync_play_access: String,
+    #[serde(flatten)]
+    pub extra_fields: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for UserPolicyDto {
@@ -472,6 +487,7 @@ impl Default for UserPolicyDto {
             enable_media_playback: true,
             enable_content_deletion: false,
             enable_content_downloading: true,
+            enable_sync: false,
             enable_sync_transcoding: false,
             enable_media_conversion: false,
             enable_collection_management: false,
@@ -486,6 +502,12 @@ impl Default for UserPolicyDto {
             enable_shared_device_control: false,
             enable_public_sharing: true,
             enable_user_preference_access: true,
+            enable_subtitle_downloading: true,
+            allow_camera_upload: false,
+            allow_sharing_personal_items: false,
+            auto_remote_quality: 0,
+            simultaneous_stream_limit: 0,
+            restricted_features: Vec::new(),
             max_parental_rating: None,
             max_parental_sub_rating: None,
             block_unrated_items: Vec::new(),
@@ -494,17 +516,20 @@ impl Default for UserPolicyDto {
             remote_client_bitrate_limit: 0,
             blocked_tags: Vec::new(),
             allowed_tags: Vec::new(),
+            access_schedules: Vec::new(),
             enabled_folders: Vec::new(),
             enable_all_folders: true,
             enabled_channels: Vec::new(),
             enable_all_channels: true,
             enabled_devices: Vec::new(),
             enable_all_devices: true,
+            enable_content_deletion_from_folders: Vec::new(),
             blocked_media_folders: Vec::new(),
             blocked_channels: Vec::new(),
             authentication_provider_id: "Default".to_string(),
             password_reset_provider_id: "Default".to_string(),
             sync_play_access: "CreateAndJoinGroups".to_string(),
+            extra_fields: std::collections::BTreeMap::new(),
         }
     }
 }

@@ -815,3 +815,46 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - 同文件的 `LibraryTypeOptionsFields` 继续向 Emby `renderMetadataFetchers/renderImageFetchers/showImageOptionsForType` 靠拢：元数据抓取器和图片抓取器标题已改为 i18n 文案，图片抓取器在高级模式下会出现“抓取器设置”按钮，并弹出独立图片抓取选项对话框，可按 `SupportedImageTypes` 配置 Primary/Art/Backdrop/Screenshot 等图片类型的启用状态、背景图数量、截图数量及最小下载宽度。
 - `frontend/packages/i18n/strings/en.json` 与 `zh-CN.json` 已补充这轮新增的字幕下载、抓取器设置、图片抓取选项相关文案，避免新增 UI 回退成英文硬编码。
 - 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`npm.cmd exec vite build -- --configLoader runner` 通过。当前仍有一个已知差距：后端 `/Libraries/AvailableOptions` 里的 `SubtitleFetchers` / `LyricsFetchers` 目前还是按项目实际能力返回，未为了“像 Emby”伪造未实现抓取器，因此字幕下载区块只有在后端真实声明可用抓取器时才会显示。
+
+## 2026-04-23 插件源码审计、AvailableOptions 真实可选项与用户权限页补充（五十七）
+- 审计 `模板项目/插件` 后确认存在可复刻源码：`jellyfin-plugin-opensubtitles-master` 是 Jellyfin 的 OpenSubtitles 插件源码，包含 `OpenSubtitlesPlugin`、`OpenSubtitleDownloader`、`PluginConfiguration`、插件配置页面和测试；`StrmAssistant-main` 是 Emby 插件源码，包含 `Plugin.cs`、GenericEdit 选项、媒体库/字幕/章节/指纹/缩略图/播放会话监控/任务等模块。两者都不是可以直接编译进当前 Rust 后端的二进制插件，但提供了 OpenSubtitles 字幕提供器、插件配置、任务与媒体库事件联动的可复刻边界。
+- 基于上述源码审计，`backend/src/routes/admin.rs` 的 `/Libraries/AvailableOptions` 不再返回空的 `SubtitleFetchers` / `LyricsFetchers` / `DefaultImageOptions`：现在会声明 `Open Subtitles` 字幕抓取器、`Embedded Lyrics` 歌词抓取器，并按内容类型返回 `DefaultImageOptions`，让前端创建器的字幕下载区块和图片抓取设置有真实可选项来源。
+- `DefaultImageOptions` 目前按 `SupportedImageTypes` 生成 Emby 风格 `{ Type, Limit, MinWidth }`：Primary/Backdrop/Logo/Thumb 默认启用，其他图片类型默认关闭，和前端 `imageoptionseditor` 复刻弹窗的保存结构对齐。
+- 用户权限方面，对照 `Emby.Web.Mobile-master/src/useredit.html`、`scripts/useredit.js`、`userlibraryaccess.html`、`scripts/userlibraryaccess.js`、`scripts/userparentalcontrol.js` 后，先把当前项目的用户详情页从“少量字段”扩展到更接近 Emby 模板的 Profile/Access/Parental 三块：管理员、禁用、隐藏、偏好设置访问、远程访问、功能访问、播放/转码/remux、远程控制、同步、公开分享、码率限制、活动会话限制、登录锁定、全部频道、全部设备、设备白名单、允许标签、访问时间计划 JSON 都已放开。
+- 后端 `backend/src/models.rs` 的 `UserPolicyDto` 补齐 `EnableSync`、`AccessSchedules`，并增加 `#[serde(flatten)] extra_fields`。这样前端或 Emby 客户端提交更完整的 `UserPolicy` 时，当前 Rust 模型未显式识别的字段也会原样保留，避免权限页保存后把 EmbySDK 字段擦掉。
+- 前端 `frontend/packages/frontend/src/pages/settings/users/[id].vue` 继续使用 EmbySDK generated `getUserApi` 的 `getUserById`、`updateUser`、`updateUserPolicy`、`updateUserPassword`，没有改成手写 axios；新增 UI 文案已补到 `frontend/packages/i18n/strings/en.json` 与 `zh-CN.json`。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；前端 `npm.cmd exec vite build -- --configLoader runner` 初次在沙箱内读取 Vite 文件时遇到 `EPERM`，按权限规则提权后重跑通过。当前仍不是完整 1:1：频道列表和设备列表还没有像 Emby 模板那样从 `/Channels`、`/Devices?SupportsPersistentIdentifier=true` 渲染为复选列表，访问时间计划也先用 JSON 编辑保留字段；下一步应继续补这两个列表和专用时间计划弹窗。
+
+## 2026-04-23 用户权限访问范围与访问时间计划继续对齐 Emby Web（五十八）
+- 继续对照 `Emby.Web.Mobile-master/src/components/accessschedule/accessschedule.*`、`userlibraryaccess.*` 与 EmbySDK 字段语义，补齐上一节留下的用户访问范围 UI 缺口：`frontend/packages/frontend/src/pages/settings/users/[id].vue` 的访问页现在会真实读取设备列表与频道列表，不再只提供弱类型手输框。
+- 后端 `backend/src/routes/devices.rs` 新增 `GET /Channels`，按 Emby 常见 `QueryResult` 结构返回 `Items/TotalRecordCount/StartIndex`。当前项目尚未实现 Live TV 频道实体，因此先返回空集合而不是 404；这样用户权限页和 Emby 客户端探测频道访问范围时不会把后端判断为缺路由，后续接入频道库后可以直接填充同一结构。
+- 前端 `frontend/packages/frontend/src/composables/use-settings-sdk.ts` 新增 `channelsApi.getChannels()`，设备仍复用已有 `devicesApi.getDevices()`。用户权限页在关闭“允许访问全部频道/全部设备”后，会按 `/Channels` 与 `/Devices` 返回项渲染复选列表；如果当前没有设备列表，则保留手动录入设备 ID 的兜底，避免空数据阶段无法维护旧策略。
+- 访问时间计划不再使用 JSON 文本框，而是改成 Emby 风格的专用弹窗：按 `DayOfWeek`、`StartHour`、`EndHour` 编辑，支持 Sunday/Monday/.../Everyday/Weekday/Weekend，保存前校验开始时间必须早于结束时间，最终仍提交标准 `AccessSchedules: [{ DayOfWeek, StartHour, EndHour }]`。
+- `frontend/packages/i18n/strings/en.json` 与 `zh-CN.json` 已补齐访问计划、星期、编辑、时间校验等新增文案，避免权限页新增控件回退成英文硬编码或空 key。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`npm.cmd exec vite build -- --configLoader runner` 在 `frontend/packages/frontend` 下通过；`git diff --check` 通过，仅提示当前工作副本若被 Git 触碰会把部分 LF 文件替换为 CRLF。
+
+## 2026-04-23 用户权限 UserPolicy 常见 EmbySDK 字段显式建模（五十九）
+- 继续对照 `模板项目/EmbySDK/SampleCode/RestApi/TypeScript/api.ts` 的 `UserPolicy`，把此前只能靠 `extra_fields` 原样保留的一批常见权限字段升级为后端显式模型：`EnableSubtitleDownloading`、`AllowCameraUpload`、`AllowSharingPersonalItems`、`AutoRemoteQuality`、`SimultaneousStreamLimit`、`RestrictedFeatures`、`EnableContentDeletionFromFolders`。其中 `EnableContentDeletionFromFolders` 按 Emby GUID 数组序列化/反序列化，避免内部 UUID 泄漏到前端和本地播放器。
+- 后端 `backend/src/models.rs` 已为上述字段提供初始化默认值，不需要依赖数据库迁移或旧数据回填；新建用户会在默认 `UserPolicyDto` 中自带这些字段，旧用户提交策略时也能稳定反序列化并继续保留未知扩展字段。
+- 前端 `frontend/packages/frontend/src/pages/settings/users/[id].vue` 的 Profile/Access 页进一步放开真实可编辑项：字幕下载、合集管理、字幕管理、歌词管理、媒体转换、相机上传、个人项目分享、受限功能、自动远程质量、同时播放流限制，以及“允许删除内容的媒体库”复选列表。
+- “允许删除内容的媒体库”复用当前 `getLibraryApi().getMediaFolders()` 返回的媒体库列表，保存时提交标准 `EnableContentDeletionFromFolders`；这和 EmbySDK 中总开关 `EnableContentDeletion` + 按库白名单字段的语义保持一致。
+- `frontend/packages/i18n/strings/en.json` 与 `zh-CN.json` 已补齐本轮新增权限项文案，避免用户权限页扩展字段在中文界面回退成英文 key。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`npm.cmd exec vite build -- --configLoader runner` 在 `frontend/packages/frontend` 下通过；`git diff --check` 通过，仅有 LF/CRLF 工作副本提示。
+
+## 2026-04-23 UserPolicy 运行时权限链路落地（六十）
+- 继续审计上一轮已经在用户权限页放开的 `UserPolicy` 字段，发现部分字段此前只是能保存和回读，运行时播放/下载/删除/字幕管理入口仍主要只校验 token。为避免“UI 禁用了但后端仍能调用”，本轮把核心权限判断接入实际路由。
+- `backend/src/auth.rs` 新增统一策略读取与校验 helper：会从当前 session 读取用户 `UserPolicyDto`，禁用用户会在 token 使用阶段被拒绝；当 `EnableAllDevices=false` 时，会按 session 上报的 `DeviceId` 校验 `EnabledDevices`，让设备白名单不只停留在设置页。
+- 同一组 helper 补齐媒体库范围判断：当 `EnableAllFolders=false` 时，播放、下载、字幕下载/管理、内容删除都需要命中 `EnabledFolders`；`backend/src/repository.rs` 新增 `get_media_item_library_id()` 用于从媒体项目反查所属媒体库。
+- 播放链路现在会检查 `EnableMediaPlayback`：`POST/GET /Items/{id}/PlaybackInfo`、视频 stream、HLS 字幕播放列表等会在生成播放信息或返回媒体流前校验用户是否允许播放且有目标媒体库访问权。
+- 下载链路现在会检查 `EnableContentDownloading`：`/Items/{id}/File` 与 `/Items/{id}/Download` 在返回原文件前校验下载权限和媒体库范围。
+- 删除链路现在会检查 `EnableContentDeletion` 与 `EnableContentDeletionFromFolders`：`DELETE/POST /Items/{id}/Delete`、`POST /Items/Delete` 会按用户策略判断是否允许删除；`GET /Items/{id}/DeleteInfo` 的 `CanDelete` 也改为基于当前用户策略动态返回，不再固定为 true。
+- 字幕链路现在区分下载与管理权限：远程字幕搜索/安装会检查 `EnableSubtitleDownloading`，字幕删除会检查 `EnableSubtitleManagement`，并同样受媒体库访问范围限制。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`npm.cmd exec vite build -- --configLoader runner` 在 `frontend/packages/frontend` 下通过；`git diff --check` 通过，仅有 LF/CRLF 工作副本提示。
+
+## 2026-04-23 UserPolicy 媒体库范围过滤继续落地到列表入口（六十一）
+- 继续修补上一轮运行时权限链路的列表侧缺口：此前播放/下载/删除已经会检查 `EnabledFolders`，但 `/UserViews`、`/Items`、Latest、Resume、筛选器和首页 section 等列表入口仍可能先返回无权限媒体库内容。本轮把媒体库范围过滤下沉到查询层。
+- `backend/src/repository.rs` 的 `ItemListOptions` 新增 `allowed_library_ids`，`list_media_items()` 会在 SQL 层追加 `library_id = ANY(...)` 过滤；如果用户没有任何允许媒体库，则直接生成空结果，保证分页和 `TotalRecordCount` 与权限过滤后的集合一致。
+- `backend/src/auth.rs` 新增 `policy_for_user()` 与 `allowed_library_ids_for_user()`，统一按目标用户策略解析 `EnableAllFolders/EnabledFolders`。这样管理员查看某个用户的列表时，也能按该用户权限生成视图，而不是泄漏管理员全量视图。
+- `backend/src/routes/items.rs` 已把上述过滤接入主要列表链路：`/UserViews`、`/Items`、`/Users/{userId}/Items`、`/Items/Latest`、`/Users/{userId}/Items/Latest`、`/UserItems/Resume`、`/Users/{userId}/Items/Resume`、虚拟 Artist/Studio/Tag 列表、筛选器统计和首页 section。
+- 顶层媒体库列表现在也会按 `EnabledFolders` 过滤；当用户没有某个媒体库权限时，该媒体库不会出现在媒体库入口、首页 section 或顶层 Items 结果里。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`git diff --check` 通过，仅有 LF/CRLF 工作副本提示。本轮未改前端页面代码。

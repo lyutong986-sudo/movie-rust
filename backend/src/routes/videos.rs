@@ -368,7 +368,8 @@ async fn stream_file(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    auth::require_content_download(&state, &session, item_id).await?;
     serve_media_item(&state, item_id, request, None).await
 }
 
@@ -407,7 +408,8 @@ async fn subtitles_playlist(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    auth::require_media_playback(&state, &session, item_id).await?;
 
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
@@ -621,8 +623,9 @@ async fn search_remote_subtitles(
     Query(query): Query<SubtitleActionQuery>,
     request: Request<Body>,
 ) -> Result<Json<Vec<Value>>, AppError> {
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     let item_id = parse_video_item_id(&path.item_id)?;
+    auth::require_subtitle_download(&state, &session, item_id).await?;
     ensure_video_item_exists(&state, item_id).await?;
     let _language = path.subtitle_key;
     let _media_source_id = query.media_source_id;
@@ -636,8 +639,9 @@ async fn download_remote_subtitle(
     Query(query): Query<SubtitleActionQuery>,
     request: Request<Body>,
 ) -> Result<StatusCode, AppError> {
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     let item_id = parse_video_item_id(&path.item_id)?;
+    auth::require_subtitle_download(&state, &session, item_id).await?;
     ensure_video_item_exists(&state, item_id).await?;
     let _subtitle_id = path.subtitle_key;
     let _media_source_id = query.media_source_id;
@@ -660,8 +664,9 @@ async fn delete_subtitle(
     Query(query): Query<SubtitleActionQuery>,
     request: Request<Body>,
 ) -> Result<StatusCode, AppError> {
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     let item_id = parse_video_item_id(&path.item_id)?;
+    auth::require_subtitle_management(&state, &session, item_id).await?;
     ensure_video_item_exists(&state, item_id).await?;
     let _index = path.index;
     let _media_source_id = query.media_source_id;
@@ -933,7 +938,8 @@ async fn stream_video_request(
         .or(path_media_source_id.as_deref());
     let item_id = resolve_stream_item_id(requested_item_id, effective_media_source_id)?;
 
-    auth::require_auth(state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(state, request.headers(), request.uri().query()).await?;
+    auth::require_media_playback(state, &session, item_id).await?;
 
     tracing::debug!(
         requested_item_id = %requested_item_id,

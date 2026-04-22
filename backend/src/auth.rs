@@ -1,10 +1,10 @@
-use crate::{error::AppError, models::AuthSessionRow, repository, state::AppState};
+use crate::{error::AppError, models::{AuthSessionRow, UserPolicyDto}, repository, state::AppState};
 use axum::{
     extract::FromRequestParts,
     http::{header::AUTHORIZATION, request::Parts, HeaderMap},
 };
-use chrono::Utc;
 use url::form_urlencoded;
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct AuthSession {
@@ -83,11 +83,112 @@ pub async fn require_auth(
         }
     }
     
+    ensure_session_policy_allows(&state, &session).await?;
     Ok(session.into())
 }
 
 pub fn require_admin(session: &AuthSession) -> Result<(), AppError> {
     if session.is_admin {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+pub async fn user_policy(state: &AppState, session: &AuthSession) -> Result<UserPolicyDto, AppError> {
+    if session.is_admin && session.user_id == state.config.server_id {
+        return Ok(UserPolicyDto {
+            is_administrator: true,
+            ..UserPolicyDto::default()
+        });
+    }
+
+    let user = repository::get_user_by_id(&state.pool, session.user_id)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    let policy = repository::user_to_dto(&user, state.config.server_id).policy;
+
+    if policy.is_disabled {
+        return Err(AppError::Forbidden);
+    }
+
+    Ok(policy)
+}
+
+pub async fn policy_for_user(state: &AppState, user_id: Uuid) -> Result<UserPolicyDto, AppError> {
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    Ok(repository::user_to_dto(&user, state.config.server_id).policy)
+}
+
+pub async fn allowed_library_ids_for_user(state: &AppState, user_id: Uuid) -> Result<Option<Vec<Uuid>>, AppError> {
+    let policy = policy_for_user(state, user_id).await?;
+    if policy.is_administrator || policy.enable_all_folders {
+        Ok(None)
+    } else {
+        Ok(Some(policy.enabled_folders))
+    }
+}
+
+pub async fn require_media_playback(state: &AppState, session: &AuthSession, item_id: Uuid) -> Result<(), AppError> {
+    let policy = user_policy(state, session).await?;
+    if !policy.is_administrator && !policy.enable_media_playback {
+        return Err(AppError::Forbidden);
+    }
+    require_library_access(state, &policy, item_id).await
+}
+
+pub async fn require_content_download(state: &AppState, session: &AuthSession, item_id: Uuid) -> Result<(), AppError> {
+    let policy = user_policy(state, session).await?;
+    if !policy.is_administrator && !policy.enable_content_downloading {
+        return Err(AppError::Forbidden);
+    }
+    require_library_access(state, &policy, item_id).await
+}
+
+pub async fn require_content_deletion(state: &AppState, session: &AuthSession, item_id: Uuid) -> Result<(), AppError> {
+    let policy = user_policy(state, session).await?;
+    if !policy.is_administrator && !policy.enable_content_deletion {
+        return Err(AppError::Forbidden);
+    }
+    let Some(library_id) = repository::get_media_item_library_id(&state.pool, item_id).await? else {
+        return Err(AppError::NotFound("媒体项目不存在".to_string()));
+    };
+    if !policy.is_administrator
+        && !policy.enable_content_deletion_from_folders.is_empty()
+        && !policy.enable_content_deletion_from_folders.contains(&library_id)
+    {
+        return Err(AppError::Forbidden);
+    }
+    require_library_access_by_library_id(&policy, library_id)
+}
+
+pub async fn require_subtitle_download(state: &AppState, session: &AuthSession, item_id: Uuid) -> Result<(), AppError> {
+    let policy = user_policy(state, session).await?;
+    if !policy.is_administrator && !policy.enable_subtitle_downloading {
+        return Err(AppError::Forbidden);
+    }
+    require_library_access(state, &policy, item_id).await
+}
+
+pub async fn require_subtitle_management(state: &AppState, session: &AuthSession, item_id: Uuid) -> Result<(), AppError> {
+    let policy = user_policy(state, session).await?;
+    if !policy.is_administrator && !policy.enable_subtitle_management {
+        return Err(AppError::Forbidden);
+    }
+    require_library_access(state, &policy, item_id).await
+}
+
+async fn require_library_access(state: &AppState, policy: &UserPolicyDto, item_id: Uuid) -> Result<(), AppError> {
+    let Some(library_id) = repository::get_media_item_library_id(&state.pool, item_id).await? else {
+        return Err(AppError::NotFound("媒体项目不存在".to_string()));
+    };
+    require_library_access_by_library_id(policy, library_id)
+}
+
+fn require_library_access_by_library_id(policy: &UserPolicyDto, library_id: Uuid) -> Result<(), AppError> {
+    if policy.is_administrator || policy.enable_all_folders || policy.enabled_folders.contains(&library_id) {
         Ok(())
     } else {
         Err(AppError::Forbidden)
@@ -119,7 +220,10 @@ impl FromRequestParts<AppState> for OptionalAuthSession {
                     }
                     
                     match repository::get_session(&state.pool, &token).await {
-                        Ok(Some(session)) => Ok(OptionalAuthSession(Some(session.into()))),
+                        Ok(Some(session)) => {
+                            ensure_session_policy_allows(&state, &session).await?;
+                            Ok(OptionalAuthSession(Some(session.into())))
+                        }
                         Ok(None) => Ok(OptionalAuthSession(None)),
                         Err(e) => Err(e.into()),
                     }
@@ -128,6 +232,30 @@ impl FromRequestParts<AppState> for OptionalAuthSession {
             }
         }
     }
+}
+
+async fn ensure_session_policy_allows(state: &AppState, session: &AuthSessionRow) -> Result<(), AppError> {
+    let Some(user) = repository::get_user_by_id(&state.pool, session.user_id).await? else {
+        return Err(AppError::Unauthorized);
+    };
+    let policy = repository::user_to_dto(&user, state.config.server_id).policy;
+
+    if policy.is_disabled {
+        return Err(AppError::Forbidden);
+    }
+
+    if !policy.is_administrator && !policy.enable_all_devices {
+        let allowed = session
+            .device_id
+            .as_deref()
+            .map(|device_id| policy.enabled_devices.iter().any(|value| value == device_id))
+            .unwrap_or(false);
+        if !allowed {
+            return Err(AppError::Forbidden);
+        }
+    }
+
+    Ok(())
 }
 
 pub fn extract_token(headers: &HeaderMap, query: Option<&str>) -> Option<String> {

@@ -21,10 +21,20 @@ use std::collections::BTreeMap;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/Devices", get(get_devices).delete(delete_device_by_query))
+        .route("/Channels", get(get_channels))
         .route("/Devices/Info", get(get_device_info))
         .route("/Devices/Options", get(get_device_options).post(update_device_options))
         .route("/Devices/CameraUploads", get(camera_uploads).post(camera_upload))
         .route("/Devices/{id}", delete(delete_device_by_path))
+}
+
+async fn get_channels(session: AuthSession) -> Result<Json<QueryResult<Value>>, AppError> {
+    auth::require_admin(&session)?;
+    Ok(Json(QueryResult {
+        total_record_count: 0,
+        start_index: Some(0),
+        items: Vec::new(),
+    }))
 }
 
 #[derive(Debug, Deserialize)]

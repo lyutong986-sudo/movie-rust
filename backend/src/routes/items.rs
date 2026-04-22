@@ -1,5 +1,5 @@
 use crate::{
-    auth::AuthSession,
+    auth::{self, AuthSession},
     error::AppError,
     media_analyzer,
     metadata::person_service::PersonService,
@@ -149,11 +149,13 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn user_views(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
-    Path(_user_id): Path<String>,
+    Path(user_id): Path<String>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    libraries_as_query_result(&state).await
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
+    ensure_user_access(&session, user_id)?;
+    libraries_as_query_result_for_user(&state, user_id).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,23 +178,39 @@ async fn user_views_by_query(
         ensure_user_access(&session, user_id)?;
     }
 
-    libraries_as_query_result(&state).await
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    libraries_as_query_result_for_user(&state, user_id).await
 }
 
 async fn media_folders(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    libraries_as_query_result(&state).await
+    libraries_as_query_result_for_user(&state, session.user_id).await
 }
 
-async fn libraries_as_query_result(
+async fn libraries_as_query_result_for_user(
     state: &AppState,
+    user_id: Uuid,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let allowed = auth::allowed_library_ids_for_user(state, user_id).await?;
+    libraries_as_query_result_with_allowed(state, allowed.as_deref()).await
+}
+
+async fn libraries_as_query_result_with_allowed(
+    state: &AppState,
+    allowed_library_ids: Option<&[Uuid]>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let libraries = repository::list_libraries(&state.pool).await?;
     let mut items = Vec::with_capacity(libraries.len());
 
     for library in libraries {
+        if let Some(allowed_library_ids) = allowed_library_ids {
+            if !allowed_library_ids.contains(&library.id) {
+                continue;
+            }
+        }
         items.push(
             repository::library_to_item_dto(&state.pool, &library, state.config.server_id).await?,
         );
@@ -411,13 +429,14 @@ async fn items(
 }
 
 async fn user_items(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<String>,
     RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let mut query = parse_items_query(raw_query)?;
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
+    ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
     list_items_for_user(&state, user_id, query).await
 }
@@ -523,6 +542,7 @@ async fn virtual_folder_items(
         VirtualFilter::Studio(name) => options.studios = vec![name],
         VirtualFilter::Tag(name) => options.tags = vec![name],
     }
+    options.allowed_library_ids = auth::allowed_library_ids_for_user(state, user_id).await?;
 
     let result = repository::list_media_items(&state.pool, options).await?;
     let mut items = Vec::with_capacity(result.items.len());
@@ -542,9 +562,15 @@ async fn home_sections(
 ) -> Result<Json<Vec<ContentSectionDto>>, AppError> {
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, user_id).await?;
     let libraries = repository::list_libraries(&state.pool).await?;
     let mut sections = Vec::with_capacity(libraries.len());
     for library in libraries {
+        if let Some(allowed_library_ids) = allowed_library_ids.as_deref() {
+            if !allowed_library_ids.contains(&library.id) {
+                continue;
+            }
+        }
         let parent_item =
             repository::library_to_item_dto(&state.pool, &library, state.config.server_id).await?;
         sections.push(ContentSectionDto {
@@ -607,13 +633,14 @@ async fn user_section_items(
 }
 
 async fn latest_items(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<String>,
     RawQuery(raw_query): RawQuery,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
     let mut query = parse_items_query(raw_query)?;
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
+    ensure_user_access(&session, user_id)?;
     latest_items_for_user(&state, user_id, &mut query).await
 }
 
@@ -692,7 +719,7 @@ async fn list_items_for_user(
     let requested_include_types = parse_include_types(query.include_item_types.as_deref());
 
     if is_top_level_items_request(&query, &requested_item_ids, &requested_include_types) {
-        return libraries_as_query_result(state).await;
+        return libraries_as_query_result_for_user(state, user_id).await;
     }
 
     // Emby 客户端进入详情页时会用 ListItemIds + IncludeItemTypes=BoxSet 查询“该条目所在合集”。
@@ -735,36 +762,32 @@ async fn list_items_for_user(
                 include_types = vec!["Series".to_string()];
             }
             
-            let result = repository::list_media_items(
-                &state.pool,
-                item_list_options_from_query(
-                    &query,
-                    user_id,
-                    Some(library.id),
-                    None,
-                    requested_item_ids.clone(),
-                    include_types,
-                    recursive,
-                ),
-            )
-            .await?;
+            let mut options = item_list_options_from_query(
+                &query,
+                user_id,
+                Some(library.id),
+                None,
+                requested_item_ids.clone(),
+                include_types,
+                recursive,
+            );
+            options.allowed_library_ids = auth::allowed_library_ids_for_user(state, user_id).await?;
+            let result = repository::list_media_items(&state.pool, options).await?;
             return media_items_to_dto_result(state, user_id, result).await;
         }
     }
 
-    let result = repository::list_media_items(
-        &state.pool,
-        item_list_options_from_query(
-            &query,
-            user_id,
-            None,
-            query.parent_id,
-            requested_item_ids,
-            requested_include_types,
-            recursive,
-        ),
-    )
-    .await?;
+    let mut options = item_list_options_from_query(
+        &query,
+        user_id,
+        None,
+        query.parent_id,
+        requested_item_ids,
+        requested_include_types,
+        recursive,
+    );
+    options.allowed_library_ids = auth::allowed_library_ids_for_user(state, user_id).await?;
+    let result = repository::list_media_items(&state.pool, options).await?;
 
     media_items_to_dto_result(state, user_id, result).await
 }
@@ -831,19 +854,17 @@ async fn item_filters_for_query(
         (None, None, include_types)
     };
 
-    let result = repository::list_media_items(
-        &state.pool,
-        item_list_options_from_query(
-            &query,
-            user_id,
-            library_id,
-            parent_id,
-            requested_item_ids,
-            include_types,
-            recursive,
-        ),
-    )
-    .await?;
+    let mut options = item_list_options_from_query(
+        &query,
+        user_id,
+        library_id,
+        parent_id,
+        requested_item_ids,
+        include_types,
+        recursive,
+    );
+    options.allowed_library_ids = auth::allowed_library_ids_for_user(state, user_id).await?;
+    let result = repository::list_media_items(&state.pool, options).await?;
 
     let mut genres = BTreeSet::new();
     let mut tags = BTreeSet::new();
@@ -1639,12 +1660,13 @@ async fn update_item(
 }
 
 async fn delete_item(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    auth::require_content_deletion(&state, &session, item_id).await?;
     repository::delete_media_item(&state.pool, item_id).await?;
     crate::routes::websocket::broadcast_message(
         &state,
@@ -1659,13 +1681,14 @@ async fn delete_item(
 }
 
 async fn delete_items(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Query(query): Query<DeleteItemsQuery>,
 ) -> Result<StatusCode, AppError> {
     let item_ids = parse_emby_uuid_list(query.ids.as_deref());
     let mut removed = Vec::with_capacity(item_ids.len());
     for item_id in item_ids {
+        auth::require_content_deletion(&state, &session, item_id).await?;
         repository::delete_media_item(&state.pool, item_id).await?;
         removed.push(uuid_to_emby_guid(&item_id));
     }
@@ -1740,14 +1763,17 @@ async fn critic_reviews(
 }
 
 async fn delete_info(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let item_id = parse_emby_uuid_path(&item_id_str, "item id")?;
     ensure_media_item_exists(&state, item_id).await?;
+    let can_delete = auth::require_content_deletion(&state, &session, item_id)
+        .await
+        .is_ok();
     Ok(Json(json!({
-        "CanDelete": true,
+        "CanDelete": can_delete,
         "DeleteFromExternalProvider": false,
         "DeleteFromFileSystem": false
     })))
@@ -2380,6 +2406,7 @@ async fn playback_info(
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     // 根据请求方法处理
+    auth::require_media_playback(&state, &session, item_id).await?;
     let info = if request.method() == http::Method::POST {
         // POST请求：尝试从请求体解析JSON
         let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024) // 10MB限制
@@ -3258,13 +3285,14 @@ fn apply_requested_stream_selection(
 }
 
 async fn user_resume_items(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<String>,
     RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let mut query = parse_items_query(raw_query)?;
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
+    ensure_user_access(&session, user_id)?;
     resume_items_for_user(&state, user_id, &mut query).await
 }
 
@@ -3314,6 +3342,7 @@ async fn resume_items_for_user(
     options.sort_by = query.sort_by.clone().or_else(|| Some("DatePlayed".to_string()));
     options.sort_order = query.sort_order.clone().or_else(|| Some("Descending".to_string()));
     options.limit = query.limit.unwrap_or(50);
+    options.allowed_library_ids = auth::allowed_library_ids_for_user(state, user_id).await?;
 
     let result = repository::list_media_items(
         &state.pool,

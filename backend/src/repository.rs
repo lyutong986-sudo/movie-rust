@@ -1662,6 +1662,13 @@ pub async fn list_all_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow
     .await?)
 }
 
+pub async fn get_media_item_library_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<Uuid>, AppError> {
+    Ok(sqlx::query_scalar("SELECT library_id FROM media_items WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?)
+}
+
 pub fn session_access_token_to_public_id(access_token: &str) -> String {
     uuid_to_emby_guid(&Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
@@ -2308,6 +2315,7 @@ fn library_paths_from_options_or_path(options: &Value, fallback_path: &str) -> V
 pub struct ItemListOptions {
     pub user_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
+    pub allowed_library_ids: Option<Vec<Uuid>>,
     pub parent_id: Option<Uuid>,
     pub item_ids: Vec<Uuid>,
     pub include_types: Vec<String>,
@@ -2382,6 +2390,7 @@ impl Default for ItemListOptions {
         Self {
             user_id: None,
             library_id: None,
+            allowed_library_ids: None,
             parent_id: None,
             item_ids: Vec::new(),
             include_types: Vec::new(),
@@ -2475,6 +2484,14 @@ pub async fn list_media_items(
 
     if let Some(library_id) = options.library_id {
         builder.push(" AND library_id = ").push_bind(library_id);
+    }
+
+    if let Some(allowed_library_ids) = options.allowed_library_ids {
+        if allowed_library_ids.is_empty() {
+            builder.push(" AND false");
+        } else {
+            builder.push(" AND library_id = ANY(").push_bind(allowed_library_ids).push(")");
+        }
     }
 
     if let Some(parent_id) = options.parent_id {
