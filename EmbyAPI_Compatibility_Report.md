@@ -788,3 +788,34 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 ### 仍待继续
 - 仓库侧构建规则已经修正，但远端实例仍需基于新镜像重新部署，部署后再用 MCP 继续复测 `wizardstart` 与后续向导页。
 - 由于这类 `dist` 目录里还包含 `howlerjs`、`Swiper` 等前端依赖，修正 `.dockerignore` 后也能一并避免后续更多页面再出现同类静态资源 404。
+
+## 2026-04-23 WebDashboard 适配进展（二十四）
+### 本轮完成
+- 为历史数据库补上正式兼容迁移 [backend/migrations/0023_user_configuration_compat.sql](/C:/Users/11797/Desktop/movie-rust/backend/migrations/0023_user_configuration_compat.sql:1)，确保老库即使曾经错误记录过迁移状态，也会在后续正式启动时补齐 `users.configuration`：
+  - `ALTER TABLE users ADD COLUMN IF NOT EXISTS configuration JSONB DEFAULT '{}'::jsonb`
+  - 把历史空值回填为 `'{}'::jsonb`
+  - 重新声明默认值与列注释
+- 重写了本地运行用的 [docker-compose.yml](/C:/Users/11797/Desktop/movie-rust/docker-compose.yml:1)，切回本地构建镜像而不是远端旧镜像，并保留持久化目录：
+  - `postgres-data` 继续持久化 PostgreSQL 数据
+  - `logs` 继续持久化日志
+  - `movie-rust` 改为 `build: .` + `image: movie-rust-local:latest`
+  - 增加 `APP_PUBLIC_URL=http://localhost:10004`，让本地 `System/Info/Public` 返回可访问地址
+- 已按“删除容器、保留数据、重新编译运行”完成一次本地重建：
+  - 删除旧临时容器与 compose 容器
+  - `docker compose up --build -d`
+  - 当前本地服务已稳定运行在 `http://localhost:10004`
+### 本地验证
+- `docker compose ps` 显示：
+  - `movie-rust-postgres` healthy
+  - `movie-rust` 已启动并映射 `10004 -> 8096`
+- 数据库迁移已推进到 version `23`
+- `users` 表已确认存在 `configuration` 列
+- 初始化态接口已恢复正常：
+  - `GET /emby/Users/Public -> []`
+  - `GET /emby/System/Info/Public -> StartupWizardCompleted: false`
+  - `GET /emby/Startup/User` 返回空首用户对象
+- 前端关键静态资源已正常提供：
+  - `GET /web/bower_components/jquery/dist/jquery.slim.min.js -> 200`
+### 仍待继续
+- 本地镜像与数据库现在已经具备“首启初始化”条件，下一轮可以继续用浏览器/MCP 实测 `wizardstart -> wizarduser -> wizardlibrary` 实际页面行为。
+- 远端 `https://test.emby.yun:4443/` 若仍返回旧的 `jquery.slim.min.js 404`，说明线上还没有切到这一版镜像，需要单独部署更新。

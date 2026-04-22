@@ -9,7 +9,6 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      # 将数据库数据映射到本地目录
       - ./postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U movie -d movie_rust"]
@@ -18,28 +17,24 @@ services:
       retries: 20
 
   movie-rust:
-    image: yuanhu66/movie-rust:7a452b5e7ca30765c9e09f0a92614a3e86934dbf
-    # 如果不需要本地构建，可以注释掉 build 部分
-    # build:
-    #   context: ../..  # 如果 Dockerfile 在项目根目录
-    #   dockerfile: Dockerfile
+    image: movie-rust-local:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: movie-rust
     environment:
       DATABASE_URL: postgres://movie:movie@postgres:5432/movie_rust
       APP_HOST: 0.0.0.0
       APP_PORT: 8096
       APP_SERVER_NAME: Movie Rust
+      APP_PUBLIC_URL: http://localhost:10004
       DEBUG: network,jellyfin.api.*
       RUST_LOG: debug
     ports:
       - "10004:8096"
     volumes:
-      # 相对路径 media 目录会相对于 docker/movie-rust/
       - ./media:/media:ro
-      # 日志目录
       - ./logs:/config/log
-      # 或者使用绝对路径
-      # - /path/to/your/media:/media:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -49,5 +44,3 @@ services:
       options:
         max-size: "10m"
         max-file: "10"
-
-# 注意：移除了 volumes 部分，因为现在使用本地目录映射
