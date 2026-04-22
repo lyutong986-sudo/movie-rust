@@ -5,3 +5,4 @@ dist/
 *.log
 postgres-data/
 模板项目/
+log/

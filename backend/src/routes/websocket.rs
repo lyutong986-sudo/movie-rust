@@ -125,8 +125,9 @@ async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: 
                 },
                 Some(Err(error)) => {
                     let error = error.to_string();
-                    if error.contains("Connection reset without closing handshake")
-                        || error.contains("reset without closing handshake")
+                    let error_lower = error.to_lowercase();
+                    if error_lower.contains("connection reset without closing handshake")
+                        || error_lower.contains("reset without closing handshake")
                     {
                         tracing::debug!(session_id = %session_id, error = %error, "WebSocket closed without close frame");
                     } else {

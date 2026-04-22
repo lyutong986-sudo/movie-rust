@@ -17,12 +17,13 @@ use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
 use state::AppState;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::transcoder::Transcoder;
 use tower_http::{
     cors::CorsLayer,
     services::{ServeDir, ServeFile},
-    trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnResponse, TraceLayer},
+    trace::{DefaultMakeSpan, DefaultOnFailure, TraceLayer},
 };
 use tracing::Level;
 use tracing_appender::rolling;
@@ -88,7 +89,23 @@ async fn main() -> Result<()> {
 
     let http_trace = TraceLayer::new_for_http()
         .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
-        .on_response(DefaultOnResponse::new().level(Level::INFO))
+        .on_response(|response: &axum::response::Response, latency: std::time::Duration, _span: &tracing::Span| {
+            let status = response.status();
+            if status.is_client_error() {
+                // 客户端错误（4xx）记录为 DEBUG 级别，减少日志噪音
+                tracing::debug!(
+                    status = %status,
+                    latency = ?latency,
+                    "处理请求完成"
+                );
+            } else {
+                tracing::info!(
+                    status = %status,
+                    latency = ?latency,
+                    "处理请求完成"
+                );
+            }
+        })
         .on_failure(DefaultOnFailure::new().level(Level::ERROR));
 
     let app = routes::router(state.clone())
