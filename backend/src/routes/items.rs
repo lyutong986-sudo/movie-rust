@@ -236,10 +236,11 @@ async fn root_item_for_user(
 }
 
 async fn item_counts(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<ItemCountsDto>, AppError> {
-    Ok(Json(repository::item_counts(&state.pool).await?))
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, session.user_id).await?;
+    Ok(Json(repository::item_counts(&state.pool, allowed_library_ids).await?))
 }
 
 async fn item_prefixes(_session: AuthSession) -> Json<Vec<Value>> {
@@ -253,14 +254,16 @@ async fn user_item_counts(
 ) -> Result<Json<ItemCountsDto>, AppError> {
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
-    Ok(Json(repository::item_counts(&state.pool).await?))
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, user_id).await?;
+    Ok(Json(repository::item_counts(&state.pool, allowed_library_ids).await?))
 }
 
 async fn studios(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    let items = repository::aggregate_array_values(&state.pool, "studios")
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, session.user_id).await?;
+    let items = repository::aggregate_array_values(&state.pool, "studios", allowed_library_ids)
         .await?
         .into_iter()
         .map(|name| virtual_folder_item(&name, "Studio", state.config.server_id))
@@ -273,10 +276,11 @@ async fn studios(
 }
 
 async fn artists(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    let items = repository::aggregate_artists(&state.pool)
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, session.user_id).await?;
+    let items = repository::aggregate_artists(&state.pool, allowed_library_ids)
         .await?
         .into_iter()
         .map(|(id, name)| {
@@ -331,10 +335,11 @@ async fn studio_items(
 }
 
 async fn tags(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    let items = repository::aggregate_array_values(&state.pool, "tags")
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, session.user_id).await?;
+    let items = repository::aggregate_array_values(&state.pool, "tags", allowed_library_ids)
         .await?
         .into_iter()
         .map(|name| virtual_folder_item(&name, "Tag", state.config.server_id))
@@ -365,45 +370,62 @@ async fn tag_items(
 }
 
 async fn official_ratings(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(string_list_result(repository::aggregate_text_values(&state.pool, "official_rating").await?)))
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, session.user_id).await?;
+    Ok(Json(string_list_result(
+        repository::aggregate_text_values(&state.pool, "official_rating", allowed_library_ids)
+            .await?,
+    )))
 }
 
 async fn containers(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(string_list_result(repository::aggregate_text_values(&state.pool, "container").await?)))
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, session.user_id).await?;
+    Ok(Json(string_list_result(
+        repository::aggregate_text_values(&state.pool, "container", allowed_library_ids).await?,
+    )))
 }
 
 async fn audio_codecs(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(string_list_result(repository::aggregate_stream_codecs(&state.pool, "Audio").await?)))
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, session.user_id).await?;
+    Ok(Json(string_list_result(
+        repository::aggregate_stream_codecs(&state.pool, "Audio", allowed_library_ids).await?,
+    )))
 }
 
 async fn video_codecs(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(string_list_result(repository::aggregate_stream_codecs(&state.pool, "Video").await?)))
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, session.user_id).await?;
+    Ok(Json(string_list_result(
+        repository::aggregate_stream_codecs(&state.pool, "Video", allowed_library_ids).await?,
+    )))
 }
 
 async fn subtitle_codecs(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(string_list_result(repository::aggregate_stream_codecs(&state.pool, "Subtitle").await?)))
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, session.user_id).await?;
+    Ok(Json(string_list_result(
+        repository::aggregate_stream_codecs(&state.pool, "Subtitle", allowed_library_ids).await?,
+    )))
 }
 
 async fn years(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    let items = repository::aggregate_years(&state.pool)
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, session.user_id).await?;
+    let items = repository::aggregate_years(&state.pool, allowed_library_ids)
         .await?
         .into_iter()
         .map(|year| {

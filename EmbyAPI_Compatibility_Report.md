@@ -858,3 +858,27 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - `backend/src/routes/items.rs` 已把上述过滤接入主要列表链路：`/UserViews`、`/Items`、`/Users/{userId}/Items`、`/Items/Latest`、`/Users/{userId}/Items/Latest`、`/UserItems/Resume`、`/Users/{userId}/Items/Resume`、虚拟 Artist/Studio/Tag 列表、筛选器统计和首页 section。
 - 顶层媒体库列表现在也会按 `EnabledFolders` 过滤；当用户没有某个媒体库权限时，该媒体库不会出现在媒体库入口、首页 section 或顶层 Items 结果里。
 - 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`git diff --check` 通过，仅有 LF/CRLF 工作副本提示。本轮未改前端页面代码。
+
+## 2026-04-23 UserPolicy 媒体库范围过滤补齐虚拟聚合与剧集旁路（六十二）
+- 继续沿 EmbySDK 常用入口审计发现，`/Genres`、`/Genres/{name}/Items`、`/Persons`、`/Persons/{id}/Items`、`/Shows/NextUp`、`/Shows/Upcoming`、`/Shows/Missing`、`/Shows/{id}/Seasons`、`/Shows/{id}/Episodes`、`/Seasons/{id}/Episodes` 这类虚拟聚合和剧集专用接口此前会绕过上一轮主 `/Items` 查询过滤，导致受限用户仍可能从类型、演员或剧集页看到无权限媒体库内容。
+- `backend/src/routes/genres.rs` 不再在全局类型列表上走无用户上下文的 `repository::get_genres()` / `get_items_by_genre()` 快捷 SQL；现在统一走带 `user_id`、父级范围和 `allowed_library_ids` 的 `ItemListOptions`，并在过滤后再按 Emby `StartIndex/Limit/TotalRecordCount` 返回。
+- `backend/src/repository.rs` 的 `get_persons()` 与 `get_items_by_person()` 增加可选媒体库白名单参数；当用户策略关闭 `EnableAllFolders` 时，人员列表会通过 `person_roles -> media_items` 只聚合允许媒体库内实际出现的人物，人物条目下的 Items 也会按同一白名单过滤并携带用户数据。
+- `backend/src/routes/persons.rs` 新增 `UserId/userId` 查询参数处理，并遵循现有 Emby 用户访问规则：普通用户不能代查其他用户，管理员可以按目标用户策略生成对应结果。
+- `backend/src/repository.rs` 的 `get_next_up_episodes()`、`get_upcoming_episodes()`、`get_missing_episodes()` 增加媒体库白名单过滤；如果目标用户没有任何允许媒体库，会直接返回空 `QueryResult`，避免分页统计与内容集合不一致。
+- `backend/src/routes/shows.rs` 已把 `allowed_library_ids_for_user()` 接入 NextUp、Upcoming、Missing、Seasons、Episodes 以及按 Season 查询 Episodes 的所有路径，保证剧集专用页面和首页/继续观看一类视图遵循同一 `EnabledFolders` 权限。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；当前只改后端和兼容报告，未改前端页面代码。
+
+## 2026-04-23 UserPolicy 媒体库范围过滤补齐统计与筛选聚合（六十三）
+- 继续审计 EmbySDK 常用筛选入口发现，`/Items/Counts`、`/Users/{userId}/Items/Counts` 以及 `/Studios`、`/Artists`、`/Tags`、`/Years`、`/OfficialRatings`、`/Containers`、`/AudioCodecs`、`/VideoCodecs`、`/SubtitleCodecs` 这类统计/筛选下拉此前仍按全库聚合，会让受限用户在下拉框或计数上看到无权限媒体库里的痕迹。
+- `backend/src/repository.rs` 的 `item_counts()` 现在接受可选媒体库白名单，并在 SQL 层按 `library_id` 过滤；当用户没有允许媒体库时直接返回默认空计数，避免 `ItemCount` 与列表内容不一致。
+- `aggregate_text_values()`、`aggregate_array_values()`、`aggregate_years()`、`aggregate_stream_codecs()`、`aggregate_artists()` 均增加 `allowed_library_ids` 参数：文本、数组、年份、媒体流编码和音乐艺术家聚合都会限制在用户可访问媒体库内。
+- `backend/src/routes/items.rs` 已把当前 session 用户或目标 `userId` 的 `allowed_library_ids_for_user()` 接入上述统计和聚合路由。这样 Emby 客户端或前端设置筛选页拿到的筛选值不会再暴露无权限库的 Studio、Tag、年份、分级、容器和编码。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；本轮未改前端页面代码。
+
+## 2026-04-23 对照 Emby Web 模板补齐命名配置、媒体编码器路径与 LiveTV 探测端点（六十四）
+- 本轮按 `模板项目/Emby.Web.Mobile-master/src/dashboard` 与 `src/scripts` 里的真实 `ApiClient` 调用审计：Emby 模板设置页会频繁调用 `getNamedConfiguration()/updateNamedConfiguration()`（`encoding`、`livetv`、`devices`、`cinemamode`、`metadata`、`fanart`、`dlna`、`subtitles`、`channels`、`sync`、`notifications`、`autoorganize` 等），并会调用 `POST /System/MediaEncoder/Path`、`GET/POST /LiveTv/TunerHosts`、`GET/POST /LiveTv/ListingProviders`、`LiveTv/ChannelMappings` 等 LiveTV 管理/探测接口。此前当前项目对非 branding 的命名配置只返回 `{}` 且更新会被忽略，`System/MediaEncoder/Path` 与 LiveTV 管理端点则会 404。
+- `backend/src/repository.rs` 新增通用 `named_configuration_value()` / `update_named_configuration_value()`，通过初始化自带的 `system_settings` 存储 `named_configuration:{key}`，不依赖新数据库迁移。常见 Emby 模板配置键现在都有稳定默认结构，未知键也会以 `{}` 兜底并可持久化保存。
+- `backend/src/routes/system.rs` 的 `/System/Configuration/{key}` 现在除 `branding` 外也会读取/保存通用命名配置；同时新增 `GET/POST /System/MediaEncoder/Path`，兼容 Emby 模板向导和转码设置页提交的 `Path` / `PathType` 表单字段，并把结果回写到标准服务器配置中的 `EncoderAppPath`、`MediaEncoderPath`、`EncoderAppPathType`、`MediaEncoderPathType`。
+- 新增 `backend/src/routes/livetv.rs` 并注册到主路由，覆盖 EmbySDK/Emby Web 常见 LiveTV 管理探测面：`/LiveTv/Info`、`/LiveTv/Channels`、`/LiveTv/Programs`、`/LiveTv/Recordings`、`/LiveTv/Timers`、`/LiveTv/SeriesTimers`、`/LiveTv/TunerHosts`、`/LiveTv/TunerHosts/Types`、`/LiveTv/TunerHosts/Default/{Type}`、`/LiveTv/ListingProviders`、`/LiveTv/ListingProviders/Available`、`/LiveTv/ListingProviders/Default`、`/LiveTv/ListingProviders/Lineups`、`/LiveTv/ListingProviders/SchedulesDirect/Countries`、`/LiveTv/ChannelMappings`、`/LiveTv/ChannelMappingOptions`、`/LiveTv/Registration` 等。
+- 当前项目尚未实现真实电视调谐器和节目单后端，因此 LiveTV 路由先按 Emby 风格返回空 `QueryResult`、空数组或默认配置对象，而不是伪造可播放频道。这样前端/Emby 客户端能力探测不会被 404 卡住，同时功能仍明确表现为“未配置/不可用”。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts` 通过，确认新增 LiveTV 路由未与既有路由冲突。本轮未改前端页面代码。

@@ -1,5 +1,5 @@
 use crate::{
-    auth::AuthSession,
+    auth::{self, AuthSession},
     error::AppError,
     models::{emby_id_to_uuid, BaseItemDto, EpisodesQuery, ItemsQuery, QueryResult, SeasonsQuery},
     repository::{self, ItemListOptions},
@@ -33,10 +33,12 @@ async fn get_next_up(
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     let scope_id = query.series_id.or(query.parent_id);
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, user_id).await?;
     let result = repository::get_next_up_episodes(
         &state.pool,
         user_id,
         scope_id,
+        allowed_library_ids,
         state.config.server_id,
         0,
         10_000,
@@ -55,10 +57,12 @@ async fn get_upcoming(
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     let scope_id = query.series_id.or(query.parent_id);
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, user_id).await?;
     let result = repository::get_upcoming_episodes(
         &state.pool,
         user_id,
         scope_id,
+        allowed_library_ids,
         state.config.server_id,
         0,
         10_000,
@@ -77,10 +81,12 @@ async fn get_missing(
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     let scope_id = query.series_id.or(query.parent_id);
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, user_id).await?;
     let result = repository::get_missing_episodes(
         &state.pool,
         user_id,
         scope_id,
+        allowed_library_ids,
         state.config.server_id,
         0,
         10_000,
@@ -99,6 +105,7 @@ async fn get_seasons(
         .map_err(|_| AppError::BadRequest(format!("无效的系列ID格式: {}", series_id_str)))?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, user_id).await?;
 
     // 首先验证系列是否存在
     let series = repository::get_media_item(&state.pool, series_id)
@@ -110,25 +117,27 @@ async fn get_seasons(
     }
 
     // 获取该系列下的所有季
+    let mut season_options = ItemListOptions {
+        library_id: None,
+        parent_id: Some(series_id),
+        item_ids: vec![],
+        include_types: vec!["Season".to_string()],
+        genres: vec![],
+        user_id: Some(user_id),
+        recursive: false,
+        search_term: None,
+        sort_by: Some("SortName".to_string()),
+        sort_order: Some("Ascending".to_string()),
+        filters: None,
+        fields: None,
+        start_index: 0,
+        limit: 1000, // 假设季的数量不会太多
+        ..ItemListOptions::default()
+    };
+    season_options.allowed_library_ids = allowed_library_ids.clone();
     let seasons = repository::list_media_items(
         &state.pool,
-        ItemListOptions {
-            library_id: None,
-            parent_id: Some(series_id),
-            item_ids: vec![],
-            include_types: vec!["Season".to_string()],
-            genres: vec![],
-            user_id: Some(user_id),
-            recursive: false,
-            search_term: None,
-            sort_by: Some("SortName".to_string()),
-            sort_order: Some("Ascending".to_string()),
-            filters: None,
-            fields: None,
-            start_index: 0,
-            limit: 1000, // 假设季的数量不会太多
-            ..ItemListOptions::default()
-        },
+        season_options,
     )
     .await?;
 
@@ -138,6 +147,7 @@ async fn get_seasons(
                 &state.pool,
                 user_id,
                 Some(series_id),
+                allowed_library_ids.clone(),
                 state.config.server_id,
                 0,
                 10_000,
@@ -187,6 +197,7 @@ async fn get_episodes(
         .map_err(|_| AppError::BadRequest(format!("无效的系列ID格式: {}", series_id_str)))?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, user_id).await?;
 
     // 首先验证系列是否存在
     let series = repository::get_media_item(&state.pool, series_id)
@@ -212,25 +223,27 @@ async fn get_episodes(
         parent_id = Some(season_id);
         recursive = false;
     } else if let Some(season_number) = query.season {
+        let mut season_options = ItemListOptions {
+            library_id: None,
+            parent_id: Some(series_id),
+            item_ids: vec![],
+            include_types: vec!["Season".to_string()],
+            genres: vec![],
+            user_id: Some(user_id),
+            recursive: false,
+            search_term: None,
+            sort_by: None,
+            sort_order: None,
+            filters: None,
+            fields: None,
+            start_index: 0,
+            limit: 200,
+            ..ItemListOptions::default()
+        };
+        season_options.allowed_library_ids = allowed_library_ids.clone();
         let seasons = repository::list_media_items(
             &state.pool,
-            ItemListOptions {
-                library_id: None,
-                parent_id: Some(series_id),
-                item_ids: vec![],
-                include_types: vec!["Season".to_string()],
-                genres: vec![],
-                user_id: Some(user_id),
-                recursive: false,
-                search_term: None,
-                sort_by: None,
-                sort_order: None,
-                filters: None,
-                fields: None,
-                start_index: 0,
-                limit: 200,
-                ..ItemListOptions::default()
-            },
+            season_options,
         )
         .await?;
 
@@ -255,6 +268,7 @@ async fn get_episodes(
             &state.pool,
             user_id,
             parent_id,
+            allowed_library_ids.clone(),
             state.config.server_id,
             0,
             10_000,
@@ -267,49 +281,51 @@ async fn get_episodes(
         }
         items
     } else {
+        let mut episode_options = ItemListOptions {
+            library_id: None,
+            parent_id,
+            item_ids: vec![],
+            include_types: vec!["Episode".to_string()],
+            genres: parse_list(query.genres.as_deref()),
+            user_id: Some(user_id),
+            media_types: parse_list(query.media_types.as_deref()),
+            video_types: parse_list(query.video_types.as_deref()),
+            image_types: parse_list(query.image_types.as_deref()),
+            official_ratings: parse_list(query.official_ratings.as_deref()),
+            tags: parse_list(query.tags.as_deref()),
+            years: parse_i32_list(query.years.as_deref()),
+            containers: parse_list(query.containers.as_deref()),
+            audio_codecs: parse_list(query.audio_codecs.as_deref()),
+            video_codecs: parse_list(query.video_codecs.as_deref()),
+            subtitle_codecs: parse_list(query.subtitle_codecs.as_deref()),
+            is_played: query.is_played,
+            is_favorite: query.is_favorite,
+            is_hd: query.is_hd,
+            has_subtitles: query.has_subtitles,
+            has_trailer: query.has_trailer,
+            min_premiere_date: query.min_premiere_date,
+            max_premiere_date: query.max_premiere_date,
+            min_start_date: query.min_start_date,
+            max_start_date: query.max_start_date,
+            min_end_date: query.min_end_date,
+            max_end_date: query.max_end_date,
+            recursive,
+            search_term: query.search_term.clone(),
+            sort_by: query.sort_by.clone().or_else(|| Some("SortName".to_string())),
+            sort_order: query
+                .sort_order
+                .clone()
+                .or_else(|| Some("Ascending".to_string())),
+            filters: None,
+            fields: query.fields.clone(),
+            start_index: 0,
+            limit: 10_000,
+            ..ItemListOptions::default()
+        };
+        episode_options.allowed_library_ids = allowed_library_ids.clone();
         let episodes = repository::list_media_items(
             &state.pool,
-            ItemListOptions {
-                library_id: None,
-                parent_id,
-                item_ids: vec![],
-                include_types: vec!["Episode".to_string()],
-                genres: parse_list(query.genres.as_deref()),
-                user_id: Some(user_id),
-                media_types: parse_list(query.media_types.as_deref()),
-                video_types: parse_list(query.video_types.as_deref()),
-                image_types: parse_list(query.image_types.as_deref()),
-                official_ratings: parse_list(query.official_ratings.as_deref()),
-                tags: parse_list(query.tags.as_deref()),
-                years: parse_i32_list(query.years.as_deref()),
-                containers: parse_list(query.containers.as_deref()),
-                audio_codecs: parse_list(query.audio_codecs.as_deref()),
-                video_codecs: parse_list(query.video_codecs.as_deref()),
-                subtitle_codecs: parse_list(query.subtitle_codecs.as_deref()),
-                is_played: query.is_played,
-                is_favorite: query.is_favorite,
-                is_hd: query.is_hd,
-                has_subtitles: query.has_subtitles,
-                has_trailer: query.has_trailer,
-                min_premiere_date: query.min_premiere_date,
-                max_premiere_date: query.max_premiere_date,
-                min_start_date: query.min_start_date,
-                max_start_date: query.max_start_date,
-                min_end_date: query.min_end_date,
-                max_end_date: query.max_end_date,
-                recursive,
-                search_term: query.search_term.clone(),
-                sort_by: query.sort_by.clone().or_else(|| Some("SortName".to_string())),
-                sort_order: query
-                    .sort_order
-                    .clone()
-                    .or_else(|| Some("Ascending".to_string())),
-                filters: None,
-                fields: query.fields.clone(),
-                start_index: 0,
-                limit: 10_000,
-                ..ItemListOptions::default()
-            },
+            episode_options,
         )
         .await?;
 
@@ -645,6 +661,7 @@ async fn get_episodes_by_season(
         .map_err(|_| AppError::BadRequest(format!("无效的季节ID格式: {}", season_id_str)))?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
+    let allowed_library_ids = auth::allowed_library_ids_for_user(&state, user_id).await?;
 
     // 验证季是否存在
     let season = repository::get_media_item(&state.pool, season_id)
@@ -656,49 +673,51 @@ async fn get_episodes_by_season(
     }
 
     // 获取该季下的所有剧集
+    let mut episode_options = ItemListOptions {
+        library_id: None,
+        parent_id: Some(season_id),
+        item_ids: vec![],
+        include_types: vec!["Episode".to_string()],
+        genres: parse_list(query.genres.as_deref()),
+        user_id: Some(user_id),
+        media_types: parse_list(query.media_types.as_deref()),
+        video_types: parse_list(query.video_types.as_deref()),
+        image_types: parse_list(query.image_types.as_deref()),
+        official_ratings: parse_list(query.official_ratings.as_deref()),
+        tags: parse_list(query.tags.as_deref()),
+        years: parse_i32_list(query.years.as_deref()),
+        containers: parse_list(query.containers.as_deref()),
+        audio_codecs: parse_list(query.audio_codecs.as_deref()),
+        video_codecs: parse_list(query.video_codecs.as_deref()),
+        subtitle_codecs: parse_list(query.subtitle_codecs.as_deref()),
+        is_played: query.is_played,
+        is_favorite: query.is_favorite,
+        is_hd: query.is_hd,
+        has_subtitles: query.has_subtitles,
+        has_trailer: query.has_trailer,
+        min_premiere_date: query.min_premiere_date,
+        max_premiere_date: query.max_premiere_date,
+        min_start_date: query.min_start_date,
+        max_start_date: query.max_start_date,
+        min_end_date: query.min_end_date,
+        max_end_date: query.max_end_date,
+        recursive: false,
+        search_term: query.search_term.clone(),
+        sort_by: query.sort_by.clone().or_else(|| Some("SortName".to_string())),
+        sort_order: query
+            .sort_order
+            .clone()
+            .or_else(|| Some("Ascending".to_string())),
+        filters: None,
+        fields: query.fields.clone(),
+        start_index: query.start_index.unwrap_or(0),
+        limit: query.limit.unwrap_or(100),
+        ..ItemListOptions::default()
+    };
+    episode_options.allowed_library_ids = allowed_library_ids;
     let episodes = repository::list_media_items(
         &state.pool,
-        ItemListOptions {
-            library_id: None,
-            parent_id: Some(season_id),
-            item_ids: vec![],
-            include_types: vec!["Episode".to_string()],
-            genres: parse_list(query.genres.as_deref()),
-            user_id: Some(user_id),
-            media_types: parse_list(query.media_types.as_deref()),
-            video_types: parse_list(query.video_types.as_deref()),
-            image_types: parse_list(query.image_types.as_deref()),
-            official_ratings: parse_list(query.official_ratings.as_deref()),
-            tags: parse_list(query.tags.as_deref()),
-            years: parse_i32_list(query.years.as_deref()),
-            containers: parse_list(query.containers.as_deref()),
-            audio_codecs: parse_list(query.audio_codecs.as_deref()),
-            video_codecs: parse_list(query.video_codecs.as_deref()),
-            subtitle_codecs: parse_list(query.subtitle_codecs.as_deref()),
-            is_played: query.is_played,
-            is_favorite: query.is_favorite,
-            is_hd: query.is_hd,
-            has_subtitles: query.has_subtitles,
-            has_trailer: query.has_trailer,
-            min_premiere_date: query.min_premiere_date,
-            max_premiere_date: query.max_premiere_date,
-            min_start_date: query.min_start_date,
-            max_start_date: query.max_start_date,
-            min_end_date: query.min_end_date,
-            max_end_date: query.max_end_date,
-            recursive: false,
-            search_term: query.search_term.clone(),
-            sort_by: query.sort_by.clone().or_else(|| Some("SortName".to_string())),
-            sort_order: query
-                .sort_order
-                .clone()
-                .or_else(|| Some("Ascending".to_string())),
-            filters: None,
-            fields: query.fields.clone(),
-            start_index: query.start_index.unwrap_or(0),
-            limit: query.limit.unwrap_or(100),
-            ..ItemListOptions::default()
-        },
+        episode_options,
     )
     .await?;
 

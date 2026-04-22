@@ -56,12 +56,26 @@ pub async fn user_count(pool: &sqlx::PgPool) -> Result<i64, AppError> {
         .await?)
 }
 
-pub async fn item_counts(pool: &sqlx::PgPool) -> Result<ItemCountsDto, AppError> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT item_type, COUNT(*)::bigint FROM media_items GROUP BY item_type",
-    )
-    .fetch_all(pool)
-    .await?;
+pub async fn item_counts(
+    pool: &sqlx::PgPool,
+    allowed_library_ids: Option<Vec<Uuid>>,
+) -> Result<ItemCountsDto, AppError> {
+    if allowed_library_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Ok(ItemCountsDto::default());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "SELECT item_type, COUNT(*)::bigint FROM media_items WHERE 1 = 1",
+    );
+    if let Some(allowed_library_ids) = allowed_library_ids {
+        builder
+            .push(" AND library_id = ANY(")
+            .push_bind(allowed_library_ids)
+            .push(")");
+    }
+    builder.push(" GROUP BY item_type");
+
+    let rows: Vec<(String, i64)> = builder.build_query_as().fetch_all(pool).await?;
 
     let mut counts = ItemCountsDto::default();
     for (item_type, count) in rows {
@@ -302,6 +316,29 @@ pub async fn server_configuration_value(
     Ok(value)
 }
 
+pub async fn named_configuration_value(
+    pool: &sqlx::PgPool,
+    name: &str,
+) -> Result<Value, AppError> {
+    let key = normalize_named_configuration_key(name);
+    Ok(get_system_setting(pool, &format!("named_configuration:{key}"))
+        .await?
+        .filter(Value::is_object)
+        .unwrap_or_else(|| default_named_configuration(&key)))
+}
+
+pub async fn update_named_configuration_value(
+    pool: &sqlx::PgPool,
+    name: &str,
+    value: Value,
+) -> Result<(), AppError> {
+    if !value.is_object() {
+        return Err(AppError::BadRequest("NamedConfiguration must be a JSON object".to_string()));
+    }
+    let key = normalize_named_configuration_key(name);
+    set_system_setting(pool, &format!("named_configuration:{key}"), value).await
+}
+
 pub async fn update_server_configuration_value(
     pool: &sqlx::PgPool,
     config: &Config,
@@ -453,6 +490,70 @@ pub async fn update_server_configuration_value(
     );
 
     set_system_setting(pool, "server_configuration", Value::Object(normalized)).await
+}
+
+fn normalize_named_configuration_key(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
+}
+
+fn default_named_configuration(key: &str) -> Value {
+    match key {
+        "branding" => json!({}),
+        "encoding" => json!({
+            "TranscodingTempPath": "",
+            "EncodingThreadCount": 0,
+            "HardwareAccelerationType": "none",
+            "VaapiDevice": "",
+            "H264Preset": "veryfast",
+            "H264Crf": 23,
+            "EnableThrottling": true,
+            "DownMixAudioBoost": 2
+        }),
+        "livetv" => json!({
+            "TunerHosts": [],
+            "ListingProviders": [],
+            "EnableGuideProviderCache": true,
+            "GuideDays": 14,
+            "RecordingPath": "",
+            "MovieRecordingPath": "",
+            "SeriesRecordingPath": "",
+            "EnableRecordingSubfolders": true
+        }),
+        "devices" => json!({
+            "CameraUploadUpgraded": false,
+            "EnableCameraUpload": false,
+            "CameraUploadPath": "",
+            "EnableCameraUploadSubfolders": true
+        }),
+        "cinemamode" => json!({
+            "EnableIntrosParentalControl": true,
+            "EnableIntrosFromMoviesInLibrary": true,
+            "EnableIntrosFromUpcomingTrailers": false,
+            "TrailerLimit": 1
+        }),
+        "metadata" => json!({
+            "UseFileCreationTimeForDateAdded": false,
+            "EnableInternetProviders": true,
+            "SaveMetadataHidden": false
+        }),
+        "fanart" => json!({ "UserApiKey": "" }),
+        "dlna" => json!({
+            "EnableServer": false,
+            "EnablePlayTo": false,
+            "BlastAliveMessages": true
+        }),
+        "subtitles" => json!({
+            "DownloadLanguages": [],
+            "SkipIfEmbeddedSubtitlesPresent": false,
+            "SkipIfAudioTrackMatches": false,
+            "RequirePerfectMatch": false
+        }),
+        "channels" => json!({}),
+        "sync" => json!({ "EnableSync": false }),
+        "notifications" => json!({ "Options": [] }),
+        "autoorganize" => json!({ "IsEnabled": false, "TvOptions": {} }),
+        _ => json!({}),
+    }
 }
 
 pub async fn get_session_capabilities(
@@ -694,9 +795,13 @@ pub async fn get_persons(
     limit: Option<i32>,
     search_term: Option<String>,
     name_starts_with: Option<String>,
+    allowed_library_ids: Option<Vec<Uuid>>,
 ) -> Result<Vec<PersonDto>, AppError> {
     let start_index = start_index.unwrap_or(0);
     let limit = limit.unwrap_or(100).min(200); // 限制最大返回200条
+    if allowed_library_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Ok(Vec::new());
+    }
     
     let normalized_search_term = search_term.and_then(|term| {
         let trimmed = term.trim().to_string();
@@ -707,48 +812,48 @@ pub async fn get_persons(
         (!trimmed.is_empty()).then_some(trimmed)
     });
 
-    let query = if let Some(search_term) = normalized_search_term {
-        let search_pattern = format!("%{}%", search_term);
-        sqlx::query_as::<_, DbPerson>(
+    let mut builder = if allowed_library_ids.is_some() {
+        QueryBuilder::<Postgres>::new(
             r#"
-            SELECT *
-            FROM persons
-            WHERE name ILIKE $1
-            ORDER BY name
-            LIMIT $2 OFFSET $3
+            SELECT DISTINCT p.*
+            FROM persons p
+            INNER JOIN person_roles pr ON pr.person_id = p.id
+            INNER JOIN media_items mi ON mi.id = pr.media_item_id
+            WHERE 1 = 1
             "#,
         )
-        .bind(search_pattern)
-        .bind(limit as i64)
-        .bind(start_index as i64)
-    } else if let Some(name_prefix) = normalized_name_starts_with {
-        let name_pattern = format!("{}%", name_prefix);
-        sqlx::query_as::<_, DbPerson>(
-            r#"
-            SELECT *
-            FROM persons
-            WHERE name ILIKE $1
-            ORDER BY name
-            LIMIT $2 OFFSET $3
-            "#,
-        )
-        .bind(name_pattern)
-        .bind(limit as i64)
-        .bind(start_index as i64)
     } else {
-        sqlx::query_as::<_, DbPerson>(
+        QueryBuilder::<Postgres>::new(
             r#"
-            SELECT *
-            FROM persons
-            ORDER BY name
-            LIMIT $1 OFFSET $2
+            SELECT p.*
+            FROM persons p
+            WHERE 1 = 1
             "#,
         )
-        .bind(limit as i64)
-        .bind(start_index as i64)
     };
+
+    if let Some(search_term) = normalized_search_term {
+        builder
+            .push(" AND p.name ILIKE ")
+            .push_bind(format!("%{}%", search_term));
+    } else if let Some(name_prefix) = normalized_name_starts_with {
+        builder
+            .push(" AND p.name ILIKE ")
+            .push_bind(format!("{}%", name_prefix));
+    }
+    if let Some(allowed_library_ids) = allowed_library_ids {
+        builder
+            .push(" AND mi.library_id = ANY(")
+            .push_bind(allowed_library_ids)
+            .push(")");
+    }
+    builder
+        .push(" ORDER BY p.name LIMIT ")
+        .push_bind(limit as i64)
+        .push(" OFFSET ")
+        .push_bind(start_index as i64);
     
-    let persons = query.fetch_all(pool).await?;
+    let persons = builder.build_query_as::<DbPerson>().fetch_all(pool).await?;
     
     let person_dtos = persons
         .into_iter()
@@ -996,10 +1101,16 @@ pub async fn get_genre_image_path(
 pub async fn get_items_by_person(
     pool: &sqlx::PgPool,
     person_id_or_name: &str,
+    user_id: Option<Uuid>,
+    allowed_library_ids: Option<Vec<Uuid>>,
     server_id: Uuid,
     start_index: Option<i32>,
     limit: Option<i32>,
 ) -> Result<Vec<BaseItemDto>, AppError> {
+    if allowed_library_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+
     let person_id = if let Ok(uuid) = emby_id_to_uuid(person_id_or_name) {
         uuid
     } else {
@@ -1019,25 +1130,32 @@ pub async fn get_items_by_person(
         id
     };
 
-    let rows = sqlx::query_as::<_, DbMediaItem>(
+    let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT DISTINCT mi.*
         FROM person_roles pr
         INNER JOIN media_items mi ON mi.id = pr.media_item_id
-        WHERE pr.person_id = $1
-        ORDER BY mi.sort_name
-        OFFSET $2 LIMIT $3
+        WHERE pr.person_id =
         "#,
-    )
-    .bind(person_id)
-    .bind(start_index.unwrap_or(0).max(0) as i64)
-    .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
-    .fetch_all(pool)
-    .await?;
+    );
+    builder.push_bind(person_id);
+    if let Some(allowed_library_ids) = allowed_library_ids {
+        builder
+            .push(" AND mi.library_id = ANY(")
+            .push_bind(allowed_library_ids)
+            .push(")");
+    }
+    builder
+        .push(" ORDER BY mi.sort_name OFFSET ")
+        .push_bind(start_index.unwrap_or(0).max(0) as i64)
+        .push(" LIMIT ")
+        .push_bind(limit.unwrap_or(100).clamp(1, 200) as i64);
+
+    let rows = builder.build_query_as::<DbMediaItem>().fetch_all(pool).await?;
 
     let mut items = Vec::with_capacity(rows.len());
     for item in rows {
-        items.push(media_item_to_dto(pool, &item, None, server_id).await?);
+        items.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
     }
 
     Ok(items)
@@ -3139,120 +3257,171 @@ pub async fn media_stream_codecs_for_items(
 pub async fn aggregate_text_values(
     pool: &sqlx::PgPool,
     field: &str,
+    allowed_library_ids: Option<Vec<Uuid>>,
 ) -> Result<Vec<String>, AppError> {
-    let sql = match field {
-        "container" => {
-            r#"
-            SELECT DISTINCT container AS value
-            FROM media_items
-            WHERE container IS NOT NULL AND btrim(container) <> ''
-            ORDER BY container
-            "#
-        }
-        "official_rating" => {
-            r#"
-            SELECT DISTINCT official_rating AS value
-            FROM media_items
-            WHERE official_rating IS NOT NULL AND btrim(official_rating) <> ''
-            ORDER BY official_rating
-            "#
-        }
+    if allowed_library_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+
+    let column = match field {
+        "container" => "container",
+        "official_rating" => "official_rating",
         _ => return Ok(Vec::new()),
     };
 
-    Ok(sqlx::query_scalar::<_, String>(sql).fetch_all(pool).await?)
+    let mut builder = QueryBuilder::<Postgres>::new("SELECT DISTINCT ");
+    builder
+        .push(column)
+        .push(" AS value FROM media_items WHERE ")
+        .push(column)
+        .push(" IS NOT NULL AND btrim(")
+        .push(column)
+        .push(") <> ''");
+    if let Some(allowed_library_ids) = allowed_library_ids {
+        builder
+            .push(" AND library_id = ANY(")
+            .push_bind(allowed_library_ids)
+            .push(")");
+    }
+    builder.push(" ORDER BY ").push(column);
+
+    Ok(builder.build_query_scalar::<String>().fetch_all(pool).await?)
 }
 
 pub async fn aggregate_array_values(
     pool: &sqlx::PgPool,
     field: &str,
+    allowed_library_ids: Option<Vec<Uuid>>,
 ) -> Result<Vec<String>, AppError> {
-    let sql = match field {
-        "tags" => {
-            r#"
-            SELECT DISTINCT value
-            FROM media_items, unnest(tags) AS value
-            WHERE btrim(value) <> ''
-            ORDER BY value
-            "#
-        }
-        "studios" => {
-            r#"
-            SELECT DISTINCT value
-            FROM media_items, unnest(studios) AS value
-            WHERE btrim(value) <> ''
-            ORDER BY value
-            "#
-        }
-        "genres" => {
-            r#"
-            SELECT DISTINCT value
-            FROM media_items, unnest(genres) AS value
-            WHERE btrim(value) <> ''
-            ORDER BY value
-            "#
-        }
+    if allowed_library_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+
+    let column = match field {
+        "tags" => "tags",
+        "studios" => "studios",
+        "genres" => "genres",
         _ => return Ok(Vec::new()),
     };
 
-    Ok(sqlx::query_scalar::<_, String>(sql).fetch_all(pool).await?)
+    let mut builder = QueryBuilder::<Postgres>::new("SELECT DISTINCT value FROM media_items, unnest(");
+    builder
+        .push(column)
+        .push(") AS value WHERE btrim(value) <> ''");
+    if let Some(allowed_library_ids) = allowed_library_ids {
+        builder
+            .push(" AND library_id = ANY(")
+            .push_bind(allowed_library_ids)
+            .push(")");
+    }
+    builder.push(" ORDER BY value");
+
+    Ok(builder.build_query_scalar::<String>().fetch_all(pool).await?)
 }
 
-pub async fn aggregate_years(pool: &sqlx::PgPool) -> Result<Vec<i32>, AppError> {
-    Ok(sqlx::query_scalar::<_, i32>(
-        r#"
-        SELECT DISTINCT production_year
-        FROM media_items
-        WHERE production_year IS NOT NULL
-        ORDER BY production_year DESC
-        "#,
-    )
-    .fetch_all(pool)
-    .await?)
+pub async fn aggregate_years(
+    pool: &sqlx::PgPool,
+    allowed_library_ids: Option<Vec<Uuid>>,
+) -> Result<Vec<i32>, AppError> {
+    if allowed_library_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "SELECT DISTINCT production_year FROM media_items WHERE production_year IS NOT NULL",
+    );
+    if let Some(allowed_library_ids) = allowed_library_ids {
+        builder
+            .push(" AND library_id = ANY(")
+            .push_bind(allowed_library_ids)
+            .push(")");
+    }
+    builder.push(" ORDER BY production_year DESC");
+
+    Ok(builder.build_query_scalar::<i32>().fetch_all(pool).await?)
 }
 
 pub async fn aggregate_stream_codecs(
     pool: &sqlx::PgPool,
     stream_type: &str,
+    allowed_library_ids: Option<Vec<Uuid>>,
 ) -> Result<Vec<String>, AppError> {
-    Ok(sqlx::query_scalar::<_, String>(
+    if allowed_library_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT DISTINCT codec
-        FROM media_streams
-        WHERE stream_type = $1
+        FROM media_streams ms
+        INNER JOIN media_items mi ON mi.id = ms.media_item_id
+        WHERE ms.stream_type =
+        "#,
+    );
+    builder.push_bind(stream_type);
+    builder.push(
+        r#"
           AND codec IS NOT NULL
           AND btrim(codec) <> ''
-        ORDER BY codec
         "#,
-    )
-    .bind(stream_type)
-    .fetch_all(pool)
-    .await?)
+    );
+    if let Some(allowed_library_ids) = allowed_library_ids {
+        builder
+            .push(" AND mi.library_id = ANY(")
+            .push_bind(allowed_library_ids)
+            .push(")");
+    }
+    builder.push(" ORDER BY codec");
+
+    Ok(builder.build_query_scalar::<String>().fetch_all(pool).await?)
 }
 
-pub async fn aggregate_artists(pool: &sqlx::PgPool) -> Result<Vec<(Uuid, String)>, AppError> {
-    Ok(sqlx::query_as::<_, (Uuid, String)>(
+pub async fn aggregate_artists(
+    pool: &sqlx::PgPool,
+    allowed_library_ids: Option<Vec<Uuid>>,
+) -> Result<Vec<(Uuid, String)>, AppError> {
+    if allowed_library_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
         r#"
         SELECT DISTINCT p.id, p.name
         FROM persons p
         INNER JOIN person_roles pr ON pr.person_id = p.id
+        INNER JOIN media_items mi ON mi.id = pr.media_item_id
         WHERE lower(pr.role_type) = ANY(ARRAY['artist','albumartist','musicartist','composer'])
           AND btrim(p.name) <> ''
-        ORDER BY p.name
         "#,
-    )
-    .fetch_all(pool)
-    .await?)
+    );
+    if let Some(allowed_library_ids) = allowed_library_ids {
+        builder
+            .push(" AND mi.library_id = ANY(")
+            .push_bind(allowed_library_ids)
+            .push(")");
+    }
+    builder.push(" ORDER BY p.name");
+
+    Ok(builder.build_query_as::<(Uuid, String)>().fetch_all(pool).await?)
 }
 
 pub async fn get_next_up_episodes(
     pool: &sqlx::PgPool,
     user_id: Uuid,
     parent_id: Option<Uuid>,
+    allowed_library_ids: Option<Vec<Uuid>>,
     server_id: Uuid,
     start_index: i64,
     limit: i64,
 ) -> Result<QueryResult<BaseItemDto>, AppError> {
+    if allowed_library_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Ok(QueryResult {
+            items: Vec::new(),
+            total_record_count: 0,
+            start_index: Some(start_index.max(0)),
+        });
+    }
+
     let total_record_count: i64 = sqlx::query_scalar(
         r#"
         WITH ranked AS (
@@ -3278,12 +3447,18 @@ pub async fn get_next_up_episodes(
                   OR season.parent_id = $2
                   OR season.library_id = $2
               )
+              AND (
+                  $3::uuid[] IS NULL
+                  OR mi.library_id = ANY($3::uuid[])
+                  OR season.library_id = ANY($3::uuid[])
+              )
         )
         SELECT COUNT(*) FROM ranked WHERE next_rank = 1
         "#,
     )
     .bind(user_id)
     .bind(parent_id)
+    .bind(allowed_library_ids.clone())
     .fetch_one(pool)
     .await?;
 
@@ -3312,6 +3487,11 @@ pub async fn get_next_up_episodes(
                   OR season.parent_id = $2
                   OR season.library_id = $2
               )
+              AND (
+                  $3::uuid[] IS NULL
+                  OR mi.library_id = ANY($3::uuid[])
+                  OR season.library_id = ANY($3::uuid[])
+              )
         )
         SELECT
             id, parent_id, name, original_title, sort_name, item_type,
@@ -3329,11 +3509,12 @@ pub async fn get_next_up_episodes(
                  parent_index_number NULLS LAST,
                  index_number NULLS LAST,
                  sort_name
-        OFFSET $3 LIMIT $4
+        OFFSET $4 LIMIT $5
         "#,
     )
     .bind(user_id)
     .bind(parent_id)
+    .bind(allowed_library_ids)
     .bind(start_index.max(0))
     .bind(limit.clamp(1, 200))
     .fetch_all(pool)
@@ -3355,10 +3536,19 @@ pub async fn get_upcoming_episodes(
     pool: &sqlx::PgPool,
     user_id: Uuid,
     parent_id: Option<Uuid>,
+    allowed_library_ids: Option<Vec<Uuid>>,
     server_id: Uuid,
     start_index: i64,
     limit: i64,
 ) -> Result<QueryResult<BaseItemDto>, AppError> {
+    if allowed_library_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Ok(QueryResult {
+            items: Vec::new(),
+            total_record_count: 0,
+            start_index: Some(start_index.max(0)),
+        });
+    }
+
     let today = Utc::now().date_naive();
     let total_record_count: i64 = sqlx::query_scalar(
         r#"
@@ -3377,10 +3567,21 @@ pub async fn get_upcoming_episodes(
                     AND (season.parent_id = $2 OR season.library_id = $2)
               )
           )
+          AND (
+              $3::uuid[] IS NULL
+              OR mi.library_id = ANY($3::uuid[])
+              OR EXISTS (
+                  SELECT 1
+                  FROM media_items season_allowed
+                  WHERE season_allowed.id = mi.parent_id
+                    AND season_allowed.library_id = ANY($3::uuid[])
+              )
+          )
         "#,
     )
     .bind(today)
     .bind(parent_id)
+    .bind(allowed_library_ids.clone())
     .fetch_one(pool)
     .await?;
 
@@ -3410,16 +3611,27 @@ pub async fn get_upcoming_episodes(
                     AND (season.parent_id = $2 OR season.library_id = $2)
               )
           )
+          AND (
+              $3::uuid[] IS NULL
+              OR mi.library_id = ANY($3::uuid[])
+              OR EXISTS (
+                  SELECT 1
+                  FROM media_items season_allowed
+                  WHERE season_allowed.id = mi.parent_id
+                    AND season_allowed.library_id = ANY($3::uuid[])
+              )
+          )
         ORDER BY mi.premiere_date,
                  mi.series_name NULLS LAST,
                  mi.parent_index_number NULLS LAST,
                  mi.index_number NULLS LAST,
                  mi.sort_name
-        OFFSET $3 LIMIT $4
+        OFFSET $4 LIMIT $5
         "#,
     )
     .bind(today)
     .bind(parent_id)
+    .bind(allowed_library_ids)
     .bind(start_index.max(0))
     .bind(limit.clamp(1, 200))
     .fetch_all(pool)
@@ -3549,10 +3761,19 @@ pub async fn get_missing_episodes(
     pool: &sqlx::PgPool,
     user_id: Uuid,
     parent_id: Option<Uuid>,
+    allowed_library_ids: Option<Vec<Uuid>>,
     server_id: Uuid,
     start_index: i64,
     limit: i64,
 ) -> Result<QueryResult<BaseItemDto>, AppError> {
+    if allowed_library_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+        return Ok(QueryResult {
+            items: Vec::new(),
+            total_record_count: 0,
+            start_index: Some(start_index.max(0)),
+        });
+    }
+
     let total_record_count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)
@@ -3572,6 +3793,10 @@ pub async fn get_missing_episodes(
                     AND season_scope.index_number = sec.season_number
               )
           )
+          AND (
+              $2::uuid[] IS NULL
+              OR series.library_id = ANY($2::uuid[])
+          )
           AND NOT EXISTS (
               SELECT 1
               FROM media_items season
@@ -3586,6 +3811,7 @@ pub async fn get_missing_episodes(
         "#,
     )
     .bind(parent_id)
+    .bind(allowed_library_ids.clone())
     .fetch_one(pool)
     .await?;
 
@@ -3631,6 +3857,10 @@ pub async fn get_missing_episodes(
                     AND season_scope.index_number = sec.season_number
               )
           )
+          AND (
+              $2::uuid[] IS NULL
+              OR series.library_id = ANY($2::uuid[])
+          )
           AND NOT EXISTS (
               SELECT 1
               FROM media_items season
@@ -3647,10 +3877,11 @@ pub async fn get_missing_episodes(
             series.sort_name,
             sec.season_number,
             sec.episode_number
-        OFFSET $2 LIMIT $3
+        OFFSET $3 LIMIT $4
         "#,
     )
     .bind(parent_id)
+    .bind(allowed_library_ids)
     .bind(start_index.max(0))
     .bind(limit.clamp(1, 200))
     .fetch_all(pool)

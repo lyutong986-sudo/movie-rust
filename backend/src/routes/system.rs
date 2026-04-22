@@ -10,7 +10,7 @@ use crate::{
 };
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Form, Path, Query, State},
     http::{header::CONTENT_TYPE, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -40,6 +40,7 @@ pub fn router() -> Router<AppState> {
         .route("/branding/css.css", get(branding_css))
         .route("/System/Configuration", get(system_configuration).post(update_system_configuration).put(update_system_configuration))
         .route("/System/Configuration/{key}", get(named_configuration).post(update_named_configuration).put(update_named_configuration))
+        .route("/System/MediaEncoder/Path", get(media_encoder_path).post(update_media_encoder_path))
         .route("/System/Logs", get(server_logs))
         .route("/System/Logs/Query", get(server_logs_query))
         .route("/System/Logs/Log", get(server_log_content_by_query))
@@ -111,6 +112,15 @@ async fn system_info(
         startup_wizard_completed,
         can_self_restart: false,
     }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct MediaEncoderPathForm {
+    #[serde(default, alias = "path")]
+    path: String,
+    #[serde(default, alias = "PathType", alias = "pathType")]
+    path_type: Option<String>,
 }
 
 async fn release_notes(_session: AuthSession) -> impl IntoResponse {
@@ -348,7 +358,7 @@ async fn named_configuration(
         )));
     }
 
-    Ok(Json(json!({})))
+    Ok(Json(repository::named_configuration_value(&state.pool, &key).await?))
 }
 
 async fn update_named_configuration(
@@ -382,8 +392,53 @@ async fn update_named_configuration(
                 .unwrap_or(current.splashscreen_enabled),
         };
         repository::update_branding_configuration(&state.pool, &next).await?;
+    } else {
+        let payload = parse_named_configuration_body(&body)?;
+        repository::update_named_configuration_value(&state.pool, &key, payload).await?;
     }
 
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn media_encoder_path(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    let config = repository::server_configuration_value(&state.pool, &state.config).await?;
+    Ok(Json(json!({
+        "Path": config
+            .get("EncoderAppPath")
+            .or_else(|| config.get("MediaEncoderPath"))
+            .and_then(Value::as_str)
+            .unwrap_or(state.config.ffmpeg_path.as_str()),
+        "PathType": config
+            .get("EncoderAppPathType")
+            .or_else(|| config.get("MediaEncoderPathType"))
+            .and_then(Value::as_str)
+            .unwrap_or("System")
+    })))
+}
+
+async fn update_media_encoder_path(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Form(payload): Form<MediaEncoderPathForm>,
+) -> Result<StatusCode, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    let path = payload.path.trim();
+    if path.is_empty() {
+        return Err(crate::error::AppError::BadRequest("Media encoder path is required".to_string()));
+    }
+    let mut config = repository::server_configuration_value(&state.pool, &state.config).await?;
+    let object = config
+        .as_object_mut()
+        .ok_or_else(|| crate::error::AppError::Internal("server configuration is not an object".to_string()))?;
+    let path_type = payload.path_type.unwrap_or_else(|| "Custom".to_string());
+    object.insert("EncoderAppPath".to_string(), json!(path));
+    object.insert("MediaEncoderPath".to_string(), json!(path));
+    object.insert("EncoderAppPathType".to_string(), json!(path_type));
+    object.insert("MediaEncoderPathType".to_string(), json!(path_type));
+    repository::update_server_configuration_value(&state.pool, &state.config, config).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

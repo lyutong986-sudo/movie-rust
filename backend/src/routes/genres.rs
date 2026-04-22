@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 
 use crate::{
-    auth::AuthSession,
+    auth::{self, AuthSession},
     error::AppError,
     models::{emby_id_to_uuid, BaseItemDto, GenreDto, QueryResult},
     repository::{self, ItemListOptions},
@@ -55,21 +55,22 @@ pub async fn get_genres(
     let include_types = parse_list(query.include_item_types.as_deref());
     let recursive = query.recursive.unwrap_or(true);
 
-    let genres = if parent_id.is_none() && include_types.is_empty() && recursive {
-        repository::get_genres(&state.pool, query.start_index, query.limit).await?
-    } else {
-        genres_for_scope(&state, user_id, parent_id, include_types, recursive).await?
-    };
+    let genres = genres_for_scope(&state, user_id, parent_id, include_types, recursive).await?;
+    let total_record_count = genres.len() as i64;
+    let start_index = query.start_index.unwrap_or(0).max(0) as usize;
+    let limit = query.limit.unwrap_or(100).clamp(1, 200) as usize;
 
     let items: Vec<BaseItemDto> = genres
         .into_iter()
+        .skip(start_index)
+        .take(limit)
         .map(|genre| genre_to_base_item(genre, state.config.server_id))
         .collect();
 
     Ok(Json(QueryResult {
-        total_record_count: items.len() as i64,
+        total_record_count,
         items,
-        start_index: Some(query.start_index.unwrap_or(0).max(0) as i64),
+        start_index: Some(start_index as i64),
     }))
 }
 
@@ -109,28 +110,17 @@ pub async fn get_genre_items(
     let include_types = parse_list(query.include_item_types.as_deref());
     let recursive = query.recursive.unwrap_or(true);
 
-    let items = if parent_id.is_none() && include_types.is_empty() && recursive {
-        repository::get_items_by_genre(
-            &state.pool,
-            &genre_name,
-            state.config.server_id,
-            query.start_index,
-            query.limit,
-        )
-        .await?
-    } else {
-        genre_items_for_scope(
-            &state,
-            user_id,
-            &genre_name,
-            parent_id,
-            include_types,
-            recursive,
-            query.start_index,
-            query.limit,
-        )
-        .await?
-    };
+    let items = genre_items_for_scope(
+        &state,
+        user_id,
+        &genre_name,
+        parent_id,
+        include_types,
+        recursive,
+        query.start_index,
+        query.limit,
+    )
+    .await?;
     Ok(Json(items))
 }
 
@@ -204,18 +194,21 @@ async fn genres_for_scope(
         None => (None, None),
     };
 
+    let mut options = ItemListOptions {
+        user_id: Some(user_id),
+        library_id,
+        parent_id: scoped_parent_id,
+        include_types,
+        recursive,
+        start_index: 0,
+        limit: 10_000,
+        ..ItemListOptions::default()
+    };
+    options.allowed_library_ids = auth::allowed_library_ids_for_user(state, user_id).await?;
+
     let result = repository::list_media_items(
         &state.pool,
-        ItemListOptions {
-            user_id: Some(user_id),
-            library_id,
-            parent_id: scoped_parent_id,
-            include_types,
-            recursive,
-            start_index: 0,
-            limit: 10_000,
-            ..ItemListOptions::default()
-        },
+        options,
     )
     .await?;
 
@@ -260,21 +253,24 @@ async fn genre_items_for_scope(
         None => (None, None),
     };
 
+    let mut options = ItemListOptions {
+        user_id: Some(user_id),
+        library_id,
+        parent_id: scoped_parent_id,
+        include_types,
+        genres: vec![genre_name.to_string()],
+        recursive,
+        sort_by: Some("SortName".to_string()),
+        sort_order: Some("Ascending".to_string()),
+        start_index: start_index.unwrap_or(0).max(0) as i64,
+        limit: limit.unwrap_or(100).clamp(1, 200) as i64,
+        ..ItemListOptions::default()
+    };
+    options.allowed_library_ids = auth::allowed_library_ids_for_user(state, user_id).await?;
+
     let result = repository::list_media_items(
         &state.pool,
-        ItemListOptions {
-            user_id: Some(user_id),
-            library_id,
-            parent_id: scoped_parent_id,
-            include_types,
-            genres: vec![genre_name.to_string()],
-            recursive,
-            sort_by: Some("SortName".to_string()),
-            sort_order: Some("Ascending".to_string()),
-            start_index: start_index.unwrap_or(0).max(0) as i64,
-            limit: limit.unwrap_or(100).clamp(1, 200) as i64,
-            ..ItemListOptions::default()
-        },
+        options,
     )
     .await?;
 

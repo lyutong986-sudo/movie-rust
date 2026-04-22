@@ -7,6 +7,7 @@ pub mod devices;
 pub mod genres;
 pub mod images;
 pub mod items;
+pub mod livetv;
 pub mod metadata_routes;
 pub mod persons;
 pub mod sessions;
@@ -35,6 +36,7 @@ fn api_router() -> Router<AppState> {
         .merge(startup::router())
         .merge(users::router())
         .merge(items::router())
+        .merge(livetv::router())
         .merge(images::router())
         .merge(videos::router())
         .merge(shows::router())

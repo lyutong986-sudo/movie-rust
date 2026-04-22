@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthSession,
+    auth::{self, AuthSession},
     error::AppError,
     models::{emby_id_to_uuid, BaseItemDto, PersonDto, QueryResult},
     repository,
@@ -33,19 +33,32 @@ pub struct GetPersonsQuery {
     search_term: Option<String>,
     #[serde(default, alias = "NameStartsWith", alias = "nameStartsWith")]
     name_starts_with: Option<String>,
+    #[serde(
+        default,
+        alias = "UserId",
+        alias = "userId",
+        deserialize_with = "crate::models::deserialize_optional_uuid"
+    )]
+    user_id: Option<Uuid>,
 }
 
 pub async fn get_persons(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Query(query): Query<GetPersonsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    if session.user_id != user_id && !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+
     let persons = repository::get_persons(
         &state.pool,
         query.start_index,
         query.limit,
         query.search_term,
         query.name_starts_with,
+        auth::allowed_library_ids_for_user(&state, user_id).await?,
     )
     .await?;
     let items: Vec<BaseItemDto> = persons
@@ -76,15 +89,22 @@ pub async fn get_person(
 }
 
 pub async fn get_person_items(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(person_id): Path<String>,
     Query(query): Query<GetPersonsQuery>,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    if session.user_id != user_id && !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+
     let items =
         repository::get_items_by_person(
             &state.pool,
             &person_id,
+            Some(user_id),
+            auth::allowed_library_ids_for_user(&state, user_id).await?,
             state.config.server_id,
             query.start_index,
             query.limit,
