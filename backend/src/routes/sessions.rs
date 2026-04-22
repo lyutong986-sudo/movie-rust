@@ -274,9 +274,13 @@ async fn play_queue(
     State(state): State<AppState>,
     Query(query): Query<PlayQueueQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let session_id = match query.id.as_deref() {
+        Some(id) => Some(resolve_session_access_token(&state, id).await?),
+        None => None,
+    };
     let result = repository::session_play_queue(
         &state.pool,
-        query.id.as_deref(),
+        session_id.as_deref(),
         query.device_id.as_deref(),
         session.user_id,
         state.config.server_id,
@@ -291,9 +295,10 @@ async fn session_play_queue(
     Path(id): Path<String>,
     Query(query): Query<PlayQueueQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let session_id = resolve_session_access_token(&state, &id).await?;
     let result = repository::session_play_queue(
         &state.pool,
-        Some(&id),
+        Some(session_id.as_str()),
         query.device_id.as_deref(),
         session.user_id,
         state.config.server_id,
@@ -308,9 +313,10 @@ async fn session_commands(
     Path(id): Path<String>,
     Query(query): Query<SessionCommandQuery>,
 ) -> Result<Json<QueryResult<Value>>, AppError> {
+    let session_id = resolve_session_access_token(&state, &id).await?;
     let result = repository::list_session_commands(
         &state.pool,
-        &id,
+        &session_id,
         session.user_id,
         session.is_admin,
         query.start_index.unwrap_or(0),
@@ -345,6 +351,7 @@ async fn no_content_for_session(
     Path(id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    let session_id = resolve_session_access_token(&state, &id).await?;
     let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
     let command_name = payload
         .get("Name")
@@ -356,12 +363,12 @@ async fn no_content_for_session(
         .to_string();
     repository::record_session_command(
         &state.pool,
-        &id,
+        &session_id,
         &command_name,
         payload.clone(),
     )
     .await?;
-    repository::apply_session_command_state(&state.pool, &id, &command_name, &payload).await?;
+    repository::apply_session_command_state(&state.pool, &session_id, &command_name, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -371,8 +378,9 @@ async fn update_session_viewing(
     Path(id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    let session_id = resolve_session_access_token(&state, &id).await?;
     let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
-    repository::set_session_viewing(&state.pool, &id, payload).await?;
+    repository::set_session_viewing(&state.pool, &session_id, payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -382,9 +390,10 @@ async fn message_for_session(
     Path(id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    let session_id = resolve_session_access_token(&state, &id).await?;
     let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
-    repository::record_session_command(&state.pool, &id, "DisplayMessage", payload.clone()).await?;
-    repository::apply_session_command_state(&state.pool, &id, "DisplayMessage", &payload).await?;
+    repository::record_session_command(&state.pool, &session_id, "DisplayMessage", payload.clone()).await?;
+    repository::apply_session_command_state(&state.pool, &session_id, "DisplayMessage", &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -394,15 +403,16 @@ async fn no_content_for_session_command(
     Path((id, command)): Path<(String, String)>,
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    let session_id = resolve_session_access_token(&state, &id).await?;
     let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
     repository::record_session_command(
         &state.pool,
-        &id,
+        &session_id,
         &command,
         payload.clone(),
     )
     .await?;
-    repository::apply_session_command_state(&state.pool, &id, &command, &payload).await?;
+    repository::apply_session_command_state(&state.pool, &session_id, &command, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -411,15 +421,16 @@ async fn no_content_for_session_user(
     State(state): State<AppState>,
     Path((id, user_id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
+    let session_id = resolve_session_access_token(&state, &id).await?;
     let payload = json!({ "UserId": user_id });
     repository::record_session_command(
         &state.pool,
-        &id,
+        &session_id,
         "SetAdditionalUser",
         payload.clone(),
     )
     .await?;
-    repository::apply_session_command_state(&state.pool, &id, "SetAdditionalUser", &payload).await?;
+    repository::apply_session_command_state(&state.pool, &session_id, "SetAdditionalUser", &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -522,18 +533,17 @@ async fn record_report(
 ) -> Result<StatusCode, AppError> {
     let user_id = report.user_id.unwrap_or(session.user_id);
     let item_id = report.item_id;
-    let session_id = report
-        .session_id
-        .clone()
-        .unwrap_or_else(|| session.access_token.clone());
+    let session_id = normalize_playback_session_id(
+        &state.pool,
+        report.session_id.as_deref(),
+        &session.access_token,
+    )
+    .await?;
     repository::record_playback_event(
         &state.pool,
         user_id,
         item_id,
-        report
-            .session_id
-            .as_deref()
-            .or(Some(session.access_token.as_str())),
+        Some(session_id.as_str()),
         event_type,
         report.position_ticks,
         report.is_paused,
@@ -567,23 +577,25 @@ async fn record_legacy_for_user(
     } else {
         false
     };
+    let session_id = normalize_playback_session_id(
+        &state.pool,
+        query.play_session_id.as_deref(),
+        &session.access_token,
+    )
+    .await?;
 
     repository::record_playback_event(
         &state.pool,
         user_id,
         Some(item_id),
-        query
-            .play_session_id
-            .as_deref()
-            .filter(|value| value == &session.access_token)
-            .or(Some(session.access_token.as_str())),
+        Some(session_id.as_str()),
         event_type,
         query.position_ticks,
         query.is_paused,
         Some(played_to_completion),
     )
     .await?;
-    broadcast_playback_updates(state, user_id, Some(item_id), &session.access_token, event_type).await?;
+    broadcast_playback_updates(state, user_id, Some(item_id), &session_id, event_type).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -638,7 +650,7 @@ async fn broadcast_playback_updates(
         state,
         "PlaybackProgress",
         json!({
-            "SessionId": session_id,
+            "SessionId": repository::session_access_token_to_public_id(session_id),
             "UserId": uuid_to_emby_guid(&user_id),
             "ItemId": item_id.map(|item_id| uuid_to_emby_guid(&item_id)),
             "EventName": event_type
@@ -742,4 +754,29 @@ async fn session_viewing_item(
         repository::media_item_to_dto(&state.pool, &item, Some(user_id), state.config.server_id)
             .await?,
     ))
+}
+
+async fn resolve_session_access_token(
+    state: &AppState,
+    session_id: &str,
+) -> Result<String, AppError> {
+    repository::resolve_session_access_token(&state.pool, session_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("Session not found: {session_id}")))
+}
+
+async fn normalize_playback_session_id(
+    pool: &sqlx::PgPool,
+    reported_session_id: Option<&str>,
+    fallback_access_token: &str,
+) -> Result<String, AppError> {
+    let Some(reported_session_id) = reported_session_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(fallback_access_token.to_string());
+    };
+
+    Ok(
+        repository::resolve_session_access_token(pool, reported_session_id)
+            .await?
+            .unwrap_or_else(|| fallback_access_token.to_string()),
+    )
 }

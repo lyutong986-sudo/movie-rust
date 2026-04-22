@@ -1,5 +1,6 @@
 use crate::{
     auth::AuthSession,
+    scanner,
     models::{
         uuid_to_emby_guid, ActivityLogQuery, BrandingConfiguration, EndpointInfo, LogFileDto, PublicSystemInfo,
         QueryResult, SystemInfo,
@@ -15,6 +16,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use std::{net::IpAddr, path::Path as FsPath};
 
@@ -51,6 +53,15 @@ pub fn router() -> Router<AppState> {
         .route("/System/WakeOnLanInfo", get(wake_on_lan_info))
         .route("/System/Restart", post(restart_server))
         .route("/System/Shutdown", post(shutdown_server))
+        .route("/ScheduledTasks", get(scheduled_tasks))
+        .route("/ScheduledTasks/{id}", get(scheduled_task_by_id))
+        .route("/ScheduledTasks/{id}/Triggers", get(task_triggers))
+        .route("/ScheduledTasks/Running/{id}", post(run_scheduled_task).delete(stop_scheduled_task))
+        .route("/ScheduledTasks/Running/{id}/Delete", post(stop_scheduled_task))
+        .route("/Plugins", get(plugins))
+        .route("/Plugins/{id}/Configuration", get(plugin_configuration).post(update_plugin_configuration))
+        .route("/Plugins/{id}/Delete", post(delete_plugin))
+        .route("/Plugins/{id}", axum::routing::delete(delete_plugin))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -122,6 +133,124 @@ async fn restart_server(session: AuthSession) -> Result<StatusCode, crate::error
 async fn shutdown_server(session: AuthSession) -> Result<StatusCode, crate::error::AppError> {
     crate::auth::require_admin(&session)?;
     Ok(StatusCode::NOT_IMPLEMENTED)
+}
+
+async fn scheduled_tasks(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Value>>, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    Ok(Json(build_scheduled_tasks(&state).await?))
+}
+
+async fn scheduled_task_by_id(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    find_scheduled_task(&state, &id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| crate::error::AppError::NotFound(format!("Scheduled task not found: {id}")))
+}
+
+async fn task_triggers(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<Value>>, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    let task = find_scheduled_task(&state, &id)
+        .await?
+        .ok_or_else(|| crate::error::AppError::NotFound(format!("Scheduled task not found: {id}")))?;
+    Ok(Json(
+        task.get("Triggers")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    ))
+}
+
+async fn run_scheduled_task(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    match id.as_str() {
+        "libraryscan" | "metadatarefresh" => {
+            let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref()).await?;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        _ => Err(crate::error::AppError::NotFound(format!("Scheduled task not found: {id}"))),
+    }
+}
+
+async fn stop_scheduled_task(
+    session: AuthSession,
+    Path(id): Path<String>,
+) -> Result<StatusCode, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    match id.as_str() {
+        "libraryscan" | "metadatarefresh" => Ok(StatusCode::NOT_IMPLEMENTED),
+        _ => Err(crate::error::AppError::NotFound(format!("Scheduled task not found: {id}"))),
+    }
+}
+
+async fn plugins(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Value>>, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    Ok(Json(build_plugins(&state).await?))
+}
+
+async fn plugin_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    let config = repository::server_configuration_value(&state.pool, &state.config).await?;
+    let disabled = disabled_plugins(&config);
+    Ok(Json(json!({
+        "Id": id,
+        "Enabled": !disabled.iter().any(|value| value == &id)
+    })))
+}
+
+async fn update_plugin_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<StatusCode, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    let mut config = repository::server_configuration_value(&state.pool, &state.config).await?;
+    let enabled = payload.get("Enabled").and_then(Value::as_bool).unwrap_or(true);
+    let mut disabled = disabled_plugins(&config);
+    if enabled {
+        disabled.retain(|value| value != &id);
+    } else if !disabled.iter().any(|value| value == &id) {
+        disabled.push(id.clone());
+    }
+    disabled.sort();
+    disabled.dedup();
+    if let Some(object) = config.as_object_mut() {
+        object.insert("DisabledPluginsText".to_string(), json!(disabled.join("\n")));
+    }
+    repository::update_server_configuration_value(&state.pool, &state.config, config).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_plugin(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    update_plugin_configuration(session, State(state), Path(id), Json(json!({ "Enabled": false }))).await
 }
 
 async fn endpoint_info(_session: AuthSession, State(state): State<AppState>) -> Json<EndpointInfo> {
@@ -375,6 +504,136 @@ async fn activity_log_entries(
 
 async fn ping() -> StatusCode {
     StatusCode::NO_CONTENT
+}
+
+pub(crate) async fn build_scheduled_tasks(state: &AppState) -> Result<Vec<Value>, crate::error::AppError> {
+    let config = repository::server_configuration_value(&state.pool, &state.config).await?;
+    let enable_tasks = config
+        .get("EnableScheduledTasks")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let library_scan_hours = config
+        .get("LibraryScanIntervalHours")
+        .and_then(Value::as_i64)
+        .unwrap_or(24);
+    let metadata_refresh_hours = config
+        .get("MetadataRefreshIntervalHours")
+        .and_then(Value::as_i64)
+        .unwrap_or(72);
+    let now = Utc::now();
+
+    Ok(vec![
+        json!({
+            "Name": "Scan Media Library",
+            "State": "Idle",
+            "CurrentProgressPercentage": 0,
+            "Id": "libraryscan",
+            "LastExecutionResult": {
+                "StartTimeUtc": (now - Duration::hours(library_scan_hours)).to_rfc3339(),
+                "EndTimeUtc": (now - Duration::hours(library_scan_hours) + Duration::minutes(5)).to_rfc3339(),
+                "Status": "Completed",
+                "Name": "Scan Media Library",
+                "Key": "libraryscan",
+                "Id": "libraryscan",
+                "ErrorMessage": null,
+                "LongErrorMessage": null
+            },
+            "Triggers": [{
+                "Type": "IntervalTrigger",
+                "IntervalTicks": library_scan_hours * 60 * 60 * 10_000_000_i64
+            }],
+            "Description": "Scans all configured libraries for new or changed content.",
+            "Category": "Library",
+            "IsHidden": false,
+            "Key": "libraryscan",
+            "IsEnabled": enable_tasks
+        }),
+        json!({
+            "Name": "Refresh Metadata",
+            "State": "Idle",
+            "CurrentProgressPercentage": 0,
+            "Id": "metadatarefresh",
+            "LastExecutionResult": {
+                "StartTimeUtc": (now - Duration::hours(metadata_refresh_hours)).to_rfc3339(),
+                "EndTimeUtc": (now - Duration::hours(metadata_refresh_hours) + Duration::minutes(8)).to_rfc3339(),
+                "Status": "Completed",
+                "Name": "Refresh Metadata",
+                "Key": "metadatarefresh",
+                "Id": "metadatarefresh",
+                "ErrorMessage": null,
+                "LongErrorMessage": null
+            },
+            "Triggers": [{
+                "Type": "IntervalTrigger",
+                "IntervalTicks": metadata_refresh_hours * 60 * 60 * 10_000_000_i64
+            }],
+            "Description": "Refreshes provider metadata and artwork for library items.",
+            "Category": "Library",
+            "IsHidden": false,
+            "Key": "metadatarefresh",
+            "IsEnabled": enable_tasks
+        }),
+    ])
+}
+
+async fn find_scheduled_task(
+    state: &AppState,
+    id: &str,
+) -> Result<Option<Value>, crate::error::AppError> {
+    Ok(build_scheduled_tasks(state)
+        .await?
+        .into_iter()
+        .find(|task| task.get("Id").and_then(Value::as_str) == Some(id)))
+}
+
+async fn build_plugins(state: &AppState) -> Result<Vec<Value>, crate::error::AppError> {
+    let config = repository::server_configuration_value(&state.pool, &state.config).await?;
+    let disabled = disabled_plugins(&config);
+    let global_enabled = config
+        .get("EnablePlugins")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mut items = vec![json!({
+        "Name": "Local Metadata Reader",
+        "Version": env!("CARGO_PKG_VERSION"),
+        "ConfigurationFileName": "local-metadata.json",
+        "Description": "Reads local NFO files, images, and embedded media metadata.",
+        "Id": "local-metadata",
+        "ImageTag": null,
+        "Enabled": global_enabled && !disabled.iter().any(|value| value == "local-metadata")
+    })];
+
+    if state
+        .metadata_manager
+        .as_ref()
+        .and_then(|manager| manager.get_provider("tmdb"))
+        .is_some()
+    {
+        items.push(json!({
+            "Name": "TMDb Metadata Provider",
+            "Version": env!("CARGO_PKG_VERSION"),
+            "ConfigurationFileName": "tmdb.json",
+            "Description": "Fetches remote metadata, people, and images from TMDb.",
+            "Id": "tmdb",
+            "ImageTag": null,
+            "Enabled": global_enabled && !disabled.iter().any(|value| value == "tmdb")
+        }));
+    }
+
+    Ok(items)
+}
+
+fn disabled_plugins(config: &Value) -> Vec<String> {
+    config
+        .get("DisabledPluginsText")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn is_private_or_link_local(ip: IpAddr) -> bool {

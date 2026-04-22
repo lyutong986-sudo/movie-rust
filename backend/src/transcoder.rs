@@ -235,6 +235,12 @@ impl Transcoder {
         let sessions = self.sessions.read().await;
         sessions.get(&session_id).cloned()
     }
+
+    /// 列出当前转码会话
+    pub async fn list_sessions(&self) -> Vec<TranscodingSession> {
+        let sessions = self.sessions.read().await;
+        sessions.values().cloned().collect()
+    }
     
     /// 停止转码会话
     pub async fn stop_transcoding(&self, session_id: Uuid) -> Result<(), AppError> {

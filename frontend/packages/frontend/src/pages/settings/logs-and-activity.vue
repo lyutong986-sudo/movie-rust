@@ -3,84 +3,115 @@
     <template #title>
       {{ t('logsAndActivity') }}
     </template>
+
+    <template #actions>
+      <VBtn
+        variant="elevated"
+        :loading="refreshing"
+        @click="refreshData">
+        Refresh
+      </VBtn>
+    </template>
+
     <template #content>
       <VCol
         md="6"
         class="uno-pb-4 uno-pt-0">
-        <JTransition group>
-          <h2
-            key="logs-title"
-            class="text-h6 uno-mb-2">
-            {{ t('logs') }}
-          </h2>
-          <VList
-            v-if="logs.length"
-            key="log-list"
-            lines="two"
-            class="uno-mb-2">
-            <VListItem
+        <h2 class="text-h6 uno-mb-2">
+          {{ t('logs') }}
+        </h2>
+        <VTable v-if="logs.length">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Modified</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            <tr
               v-for="file in logs"
-              :key="file.Name ?? undefined"
-              :href="getLogFileLink(file.Name ?? '')"
-              :title="file.Name ?? undefined"
-              :subtitle="getFormattedLogDate(file.DateModified)"
-              target="_blank"
-              rel="noopener">
-              <template #prepend>
-                <VAvatar>
-                  <JIcon class="i-mdi:file" />
-                </VAvatar>
-              </template>
-              <template #append>
-                <JIcon class="*i-mdi:open-in-new" />
-              </template>
-            </VListItem>
-          </VList>
-          <VCard v-else>
-            <VCardTitle>
-              {{ t('noLogsFound') }}
-            </VCardTitle>
-          </VCard>
-        </JTransition>
+              :key="file.Name ?? undefined">
+              <td>{{ file.Name }}</td>
+              <td>{{ getFormattedLogDate(file.DateModified) }}</td>
+              <td class="uno-text-right">
+                <VBtn
+                  variant="tonal"
+                  size="small"
+                  class="uno-mr-2"
+                  @click="previewLog(file.Name ?? '')">
+                  Preview
+                </VBtn>
+                <VBtn
+                  variant="tonal"
+                  size="small"
+                  :href="getLogFileLink(file.Name ?? '')"
+                  target="_blank"
+                  rel="noopener">
+                  Open
+                </VBtn>
+              </td>
+            </tr>
+          </tbody>
+        </VTable>
+        <VCard v-else>
+          <VCardTitle>
+            {{ t('noLogsFound') }}
+          </VCardTitle>
+        </VCard>
       </VCol>
+
       <VCol
         md="6"
         class="uno-pb-4 uno-pt-0">
-        <JTransition group>
-          <h2
-            key="activity-title"
-            class="text-h6 uno-mb-2">
-            {{ t('activity') }}
-          </h2>
-          <VList
-            v-if="activityList.length"
-            key="activity-list"
-            lines="two"
-            class="uno-mb-2">
-            <VListItem
-              v-for="activity in activityList"
-              :key="activity.Id"
-              :title="activity.Name"
-              :subtitle="activity.ShortOverview ?? undefined">
-              <template #prepend>
-                <VAvatar :color="getColorFromSeverity(activity.Severity)">
-                  <JIcon :class="getIconFromActivityType(activity.Type)" />
-                </VAvatar>
-              </template>
-              <template #append>
-                <VListItemSubtitle class="text-capitalize-first-letter">
-                  {{ getFormattedActivityDate(activity.Date) }}
-                </VListItemSubtitle>
-              </template>
-            </VListItem>
-          </VList>
-          <VCard v-else>
-            <VCardTitle>
-              {{ t('noActivityFound') }}
-            </VCardTitle>
-          </VCard>
-        </JTransition>
+        <h2 class="text-h6 uno-mb-2">
+          {{ t('activity') }}
+        </h2>
+        <VList
+          v-if="activityList.length"
+          lines="two"
+          class="uno-mb-2">
+          <VListItem
+            v-for="activity in activityList"
+            :key="activity.Id"
+            :title="activity.Name"
+            :subtitle="activity.ShortOverview ?? undefined">
+            <template #prepend>
+              <VAvatar :color="getColorFromSeverity(activity.Severity)">
+                <JIcon :class="getIconFromActivityType(activity.Type)" />
+              </VAvatar>
+            </template>
+            <template #append>
+              <VListItemSubtitle class="text-capitalize-first-letter">
+                {{ getFormattedActivityDate(activity.Date) }}
+              </VListItemSubtitle>
+            </template>
+          </VListItem>
+        </VList>
+        <VCard v-else>
+          <VCardTitle>
+            {{ t('noActivityFound') }}
+          </VCardTitle>
+        </VCard>
       </VCol>
+
+      <VDialog
+        width="900"
+        :model-value="!!previewName"
+        @update:model-value="previewName = undefined">
+        <VCard>
+          <VCardTitle>{{ previewName }}</VCardTitle>
+          <VCardText>
+            <pre class="uno-max-h-120 uno-overflow-auto uno-whitespace-pre-wrap">{{ previewContent }}</pre>
+          </VCardText>
+          <VCardActions>
+            <VSpacer />
+            <VBtn @click="previewName = undefined">
+              Close
+            </VBtn>
+          </VCardActions>
+        </VCard>
+      </VDialog>
     </template>
   </SettingsPage>
 </template>
@@ -91,105 +122,111 @@ meta:
 </route>
 
 <script setup lang="ts">
-import {
-  LogLevel
+import type {
+  ActivityLogEntry,
+  LogFile,
+  QueryResultActivityLogEntry,
+  QueryResultString
 } from '@jellyfin/sdk/lib/generated-client';
-import { getActivityLogApi } from '@jellyfin/sdk/lib/utils/api/activity-log-api';
+import { LogLevel } from '@jellyfin/sdk/lib/generated-client';
 import { getSystemApi } from '@jellyfin/sdk/lib/utils/api/system-api';
 import { format, formatRelative, parseJSON } from 'date-fns';
+import { ref } from 'vue';
 import { useTranslation } from 'i18next-vue';
 import { useTheme } from 'vuetify';
+import RemotePluginAxiosInstance from '#/plugins/remote/axios.ts';
 import { remote } from '#/plugins/remote/index.ts';
 import { useDateFns } from '#/composables/use-datefns.ts';
-import { useApi } from '#/composables/apis.ts';
 
 const { t } = useTranslation();
 const theme = useTheme();
+const systemApi = remote.sdk.newUserApi(getSystemApi) as {
+  getSystemLogs: () => Promise<{ data: LogFile[] }>;
+  getSystemLogsByNameLines: (name: string) => Promise<{ data: QueryResultString }>;
+};
 
-/**
- * Return a UI colour given log severity
- */
+const refreshing = ref(false);
+const previewName = ref<string>();
+const previewContent = ref('');
+const logs = ref<LogFile[]>([]);
+const activityList = ref<ActivityLogEntry[]>([]);
+
 function getColorFromSeverity(severity: LogLevel | undefined): string {
   switch (severity) {
-    case LogLevel.Trace: {
+    case LogLevel.Trace:
       return theme.current.value.colors.success;
-    }
-    case LogLevel.Debug: {
+    case LogLevel.Debug:
       return theme.current.value.colors.accent;
-    }
-    case LogLevel.Information: {
+    case LogLevel.Information:
       return theme.current.value.colors.info;
-    }
-    case LogLevel.Warning: {
+    case LogLevel.Warning:
       return theme.current.value.colors.warning;
-    }
-    case LogLevel.Error: {
+    case LogLevel.Error:
       return theme.current.value.colors.error;
-    }
-    case LogLevel.Critical: {
+    case LogLevel.Critical:
       return theme.current.value.colors.secondary;
-    }
-    default: {
+    default:
       return theme.current.value.colors.primary;
-    }
   }
 }
 
-/**
- * Gets an icon given an activity type
- */
-function getIconFromActivityType(
-  type: string | undefined | null
-) {
+function getIconFromActivityType(type: string | undefined | null): string {
   switch (type) {
-    case 'SessionStarted': {
+    case 'SessionStarted':
       return 'i-mdi:login';
-    }
-    case 'SessionEnded': {
+    case 'SessionEnded':
       return 'i-mdi:logout';
-    }
-    case 'UserPasswordChanged': {
+    case 'UserPasswordChanged':
       return 'i-mdi:lock';
-    }
-    case 'VideoPlayback': {
+    case 'VideoPlayback':
       return 'i-mdi:play';
-    }
-    case 'VideoPlaybackStopped': {
-      return 'i-mdi-stop';
-    }
-    default: {
+    case 'VideoPlaybackStopped':
+      return 'i-mdi:stop';
+    default:
       return 'i-mdi:help';
-    }
   }
 }
 
-/**
- * Format activitydates
- */
 function getFormattedActivityDate(date: string | undefined): string | undefined {
   return date
     ? useDateFns(formatRelative, parseJSON(date), new Date())
     : undefined;
 }
 
-/**
- * Format log dates
- */
 function getFormattedLogDate(date: string | undefined): string | undefined {
   return date ? useDateFns(format, parseJSON(date), 'Ppp') : undefined;
 }
 
-/**
- * Creates a link to the given type of log file
- */
 function getLogFileLink(name: string): string | undefined {
   return remote.sdk.api?.basePath && remote.auth.currentUserToken.value
-    ? `${remote.sdk.api.basePath}/System/Logs/Log?name=${name}&api_key=${remote.auth.currentUserToken.value}`
+    ? `${remote.sdk.api.basePath}/System/Logs/${encodeURIComponent(name)}?api_key=${remote.auth.currentUserToken.value}`
     : undefined;
 }
 
-const [{ data: logs }, { data: activityList }] = await Promise.all([
-  useApi(getSystemApi, 'getServerLogs')(),
-  useApi(getActivityLogApi, 'getLogEntries')()
-]);
+async function refreshData(): Promise<void> {
+  refreshing.value = true;
+  try {
+    const [logsResponse, activityResponse] = await Promise.all([
+      systemApi.getSystemLogs(),
+      RemotePluginAxiosInstance.instance.get<QueryResultActivityLogEntry>('/System/ActivityLog/Entries')
+    ]);
+    logs.value = logsResponse.data ?? [];
+    activityList.value = activityResponse.data.Items ?? [];
+  } finally {
+    refreshing.value = false;
+  }
+}
+
+async function previewLog(name: string): Promise<void> {
+  previewName.value = name;
+  previewContent.value = 'Loading...';
+  try {
+    const response = await systemApi.getSystemLogsByNameLines(name);
+    previewContent.value = response.data.Items?.join('\n') ?? '';
+  } catch {
+    previewContent.value = 'Failed to load log preview.';
+  }
+}
+
+await refreshData();
 </script>

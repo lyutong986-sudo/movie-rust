@@ -43,6 +43,7 @@ import { useTranslation } from 'i18next-vue';
 import { isNil } from '@jellyfin-vue/shared/validation';
 import { CardShapes, fetchIndexPage, getShapeFromCollectionType } from '#/utils/items.ts';
 import { usePageTitle } from '#/composables/page-title.ts';
+import { homeSettings } from '#/store/settings/home.ts';
 
 interface HomeSection {
   title: string;
@@ -58,10 +59,11 @@ usePageTitle(() => t('home'));
 const { carousel, nextUp, views, resumeVideo, latestPerLibrary } = await fetchIndexPage();
 
 const latestMediaSections = computed(() => {
-  return views.value.map((userView) => {
+  return views.value.slice(0, Math.max(homeSettings.state.value.latestLimit, 0)).map((userView) => {
     if (
       userView.CollectionType
       && !excludeViewTypes.has(userView.CollectionType)
+      && homeSettings.state.value.showLatest
     ) {
       return {
         title: t('latestLibrary', { libraryName: userView.Name }),
@@ -106,7 +108,21 @@ const homeSections = computed<HomeSection[]>(() => {
      * Latest media
      */
     ...latestMediaSections.value
-  ];
+  ].filter(section => {
+    if (!homeSettings.state.value.sections.includes(section.type)) {
+      return false;
+    }
+    if (section.type === 'resumevideo') {
+      return homeSettings.state.value.showResume;
+    }
+    if (section.type === 'nextup') {
+      return homeSettings.state.value.showNextUp;
+    }
+    if (section.type === 'latestmedia') {
+      return homeSettings.state.value.showLatest;
+    }
+    return true;
+  });
 });
 
 /**

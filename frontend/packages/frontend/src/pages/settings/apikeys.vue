@@ -3,7 +3,14 @@
     <template #title>
       {{ t('apiKeys') }}
     </template>
+
     <template #actions>
+      <VBtn
+        variant="elevated"
+        :loading="loading"
+        @click="refreshApiKeys">
+        Refresh
+      </VBtn>
       <VBtn
         color="primary"
         variant="elevated"
@@ -20,40 +27,37 @@
         {{ t('revokeAll') }}
       </VBtn>
     </template>
+
     <template #content>
-      <VCol>
+      <VCol cols="12">
         <VTable>
           <thead>
             <tr>
-              <th
-                v-for="{ text, value } in headers"
-                :id="value"
-                :key="value">
-                {{ text }}
-              </th>
-              <th scope="col">
-                <!-- delete column -->
-              </th>
+              <th>Application</th>
+              <th>Token</th>
+              <th>Created</th>
+              <th>Status</th>
+              <th />
             </tr>
           </thead>
           <tbody>
             <tr
               v-for="apiKey in apiKeys"
-              :key="apiKey.AppName ?? undefined">
-              <td
-                v-for="{ value } in headers"
-                :key="value">
-                {{
-                  value !== 'DateCreated'
-                    ? apiKey[value]
-                    : useDateFns(
-                      formatRelative,
-                      parseJSON(apiKey[value] ?? 'unknown'),
-                      new Date()
-                    )
-                }}
+              :key="apiKey.AccessToken ?? undefined">
+              <td>
+                <div class="uno-font-medium">
+                  {{ apiKey.AppName }}
+                </div>
+                <div class="uno-text-sm uno-opacity-70">
+                  {{ apiKey.AppVersion ?? '-' }}
+                </div>
               </td>
               <td>
+                <code>{{ truncateToken(apiKey.AccessToken) }}</code>
+              </td>
+              <td>{{ formatCreated(apiKey.DateCreated) }}</td>
+              <td>{{ apiKey.IsActive === false ? 'Expired' : 'Active' }}</td>
+              <td class="uno-text-right">
                 <VBtn
                   color="error"
                   :loading="loading"
@@ -62,9 +66,17 @@
                 </VBtn>
               </td>
             </tr>
+            <tr v-if="!apiKeys.length">
+              <td
+                colspan="5"
+                class="uno-opacity-70">
+                No API keys created yet
+              </td>
+            </tr>
           </tbody>
         </VTable>
       </VCol>
+
       <AddApiKey
         :adding-new-key="addingNewKey"
         @close="addingNewKey = false"
@@ -74,6 +86,7 @@
             await refreshApiKeys();
           }
         " />
+
       <VDialog
         width="auto"
         :model-value="!isNil(confirmRevoke)"
@@ -110,7 +123,7 @@ meta:
 import type { AuthenticationInfo } from '@jellyfin/sdk/lib/generated-client';
 import { getApiKeyApi } from '@jellyfin/sdk/lib/utils/api/api-key-api';
 import { formatRelative, parseJSON } from 'date-fns';
-import { computed, ref } from 'vue';
+import { ref } from 'vue';
 import { useTranslation } from 'i18next-vue';
 import { isNil } from '@jellyfin-vue/shared/validation';
 import { remote } from '#/plugins/remote/index.ts';
@@ -121,21 +134,27 @@ const { t } = useTranslation();
 
 const apiKeys = ref<AuthenticationInfo[]>([]);
 const addingNewKey = ref(false);
-/** The key to confirm revocation (will be 'all' if revoking all keys) */
 const confirmRevoke = ref<string>();
 const loading = ref(false);
 
-const headers = computed(
-  (): { text: string; value: keyof AuthenticationInfo }[] => [
-    { text: t('appName'), value: 'AppName' },
-    { text: t('accessToken'), value: 'AccessToken' },
-    { text: t('dateCreated'), value: 'DateCreated' }
-  ]
-);
+function truncateToken(token?: string): string {
+  if (!token) {
+    return '-';
+  }
 
-/**
- * Confirms revocation and closes the confirmation modal
- */
+  if (token.length <= 16) {
+    return token;
+  }
+
+  return `${token.slice(0, 8)}...${token.slice(-6)}`;
+}
+
+function formatCreated(date?: string): string {
+  return date
+    ? useDateFns(formatRelative, parseJSON(date), new Date())
+    : '-';
+}
+
 async function confirmRevocation(): Promise<void> {
   if (!confirmRevoke.value) {
     return;
@@ -148,17 +167,10 @@ async function confirmRevocation(): Promise<void> {
   confirmRevoke.value = undefined;
 }
 
-/**
- * Revokes an api key
- */
 async function revokeApiKey(token: string): Promise<void> {
   loading.value = true;
-
   try {
-    await remote.sdk.newUserApi(getApiKeyApi).revokeKey({
-      key: token
-    });
-
+    await remote.sdk.newUserApi(getApiKeyApi).revokeKey({ key: token });
     useSnackbar(t('revokeSuccess'), 'success');
     await refreshApiKeys();
   } catch (error) {
@@ -169,21 +181,14 @@ async function revokeApiKey(token: string): Promise<void> {
   }
 }
 
-/**
- * Revokes all api keys
- */
 async function revokeAllApiKeys(): Promise<void> {
   loading.value = true;
-
   try {
     for (const key of apiKeys.value) {
       if (key.AccessToken) {
-        await remote.sdk.newUserApi(getApiKeyApi).revokeKey({
-          key: key.AccessToken
-        });
+        await remote.sdk.newUserApi(getApiKeyApi).revokeKey({ key: key.AccessToken });
       }
     }
-
     useSnackbar(t('revokeAllSuccess'), 'success');
     await refreshApiKeys();
   } catch (error) {
@@ -194,17 +199,16 @@ async function revokeAllApiKeys(): Promise<void> {
   }
 }
 
-/**
- * Refreshes the list of api keys
- */
 async function refreshApiKeys(): Promise<void> {
+  loading.value = true;
   try {
-    apiKeys.value
-      = (await remote.sdk.newUserApi(getApiKeyApi).getKeys()).data.Items ?? [];
+    apiKeys.value = (await remote.sdk.newUserApi(getApiKeyApi).getKeys()).data.Items ?? [];
   } catch (error) {
     apiKeys.value = [];
     console.error(error);
     useSnackbar(t('refreshKeysFailure'), 'error');
+  } finally {
+    loading.value = false;
   }
 }
 

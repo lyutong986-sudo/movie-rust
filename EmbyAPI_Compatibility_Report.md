@@ -626,3 +626,60 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - 后端 `server_configuration` 初始化自带新增模块默认值，不依赖数据库迁移；`repository::server_configuration_value(...)` 也会对旧库缺失字段做默认值回填。
 - 后端 `repository::update_server_configuration_value(...)` 改为保留当前配置对象里的未知字段，再覆盖核心字段，避免旧 server.vue 保存基础设置时把新补的转码、DLNA、Live TV、网络、插件、计划任务、通知等模块配置抹掉。
 - 本轮验证：`cargo check --manifest-path backend\Cargo.toml` 已通过；`rg` 确认 settings 首页已无 `link: undefined`。前端 Docker 构建因本机 Docker daemon 未启动失败；本机 `node --version` 也因 `Access is denied` 无法执行，因此前端本轮为代码级静态审计，未完成实际 typecheck/build。
+
+## 2026-04-22 frontend 设置页功能补深（三十四）
+
+- 继续把设置首页 `VItemGroup` 打开的新页面从“占位表单”补成可工作的管理页。重点落在三块：主页设置、计划任务、插件。
+- frontend 新增 `homeSettings` 同步存储（`frontend/packages/frontend/src/store/settings/home.ts`），主页设置页不再只写后端配置，而是通过 `DisplayPreferences` 风格的同步 store 保存 `showResume/showNextUp/showLatest/latestLimit/sections`；首页 `frontend/packages/frontend/src/pages/index.vue` 也已接入这些设置，继续观看、下一集、最新媒体和栏目顺序/显示现在会真实影响首页内容。
+- backend 新增 EmbySDK 风格计划任务 REST：`GET /ScheduledTasks`、`GET /ScheduledTasks/{id}`、`GET /ScheduledTasks/{id}/Triggers`、`POST /ScheduledTasks/Running/{id}`、`DELETE /ScheduledTasks/Running/{id}`、`POST /ScheduledTasks/Running/{id}/Delete`。当前提供 `libraryscan` 与 `metadatarefresh` 两个任务，运行入口会复用现有库扫描逻辑。
+- websocket 的 `ScheduledTasksInfoStart` 不再返回空数组，而是复用同一套任务 DTO 组装逻辑，返回和 REST 一致的任务列表。
+- backend 新增基础插件 REST：`GET /Plugins`、`GET/POST /Plugins/{id}/Configuration`、`POST /Plugins/{id}/Delete`、`DELETE /Plugins/{id}`。当前插件列表会按现有能力暴露 `Local Metadata Reader` 和已注册的 `TMDb Metadata Provider`，启用/禁用状态落到 `System/Configuration.DisabledPluginsText`。
+- frontend 的 `settings/scheduled-tasks.vue` 已改为真实读取 `/ScheduledTasks` 列表并支持“立即运行”；`settings/plugins.vue` 已改为真实读取 `/Plugins` 列表并支持启用/禁用。
+- 本轮验证：`cargo check --manifest-path backend\Cargo.toml` 已通过；前端仍因本机 `node`/`pnpm` 不可执行、Docker daemon 未启动而无法完成实际 typecheck/build，因此当前前端验证仍为代码级静态审计。
+## 2026-04-22 frontend 设置页功能补深（三十五）
+
+- 继续围绕设置首页 `VItemGroup` 已放开的入口补齐“运行态 + 配置”能力，这一轮重点处理 `networking / transcoding / dlna / live-tv / notifications`。
+- `backend/src/transcoder.rs` 新增当前转码会话枚举能力；`backend/src/routes/videos.rs` 按 Emby 风格补上 `GET /Videos/ActiveEncodings`，返回当前活跃转码列表，并让 `DELETE /Videos/ActiveEncodings?Id=...` 可以按会话 ID 停止指定转码，避免转码设置页只能写配置、看不到运行态。
+- `frontend/packages/frontend/src/pages/settings/networking.vue` 现在会同时读取 `/System/Info`、`/System/Endpoint`、`/System/Ext/ServerDomains`、`/System/WakeOnLanInfo`，展示服务器地址、网络可达性、域名列表和 Wake on LAN 信息，不再只是单纯写 `System/Configuration`。
+- `frontend/packages/frontend/src/pages/settings/transcoding.vue` 现在会读取 `/Videos/ActiveEncodings` 并展示活跃转码会话，支持直接调用 `DELETE /Videos/ActiveEncodings?Id=...` 停止单个转码任务；配置项仍通过 `System/Configuration` 自动保存。
+- `frontend/packages/frontend/src/pages/settings/dlna.vue`、`live-tv.vue`、`notifications.vue` 从原来的最小占位表单补成可读的管理页：除配置开关外，会展示当前启用状态、调谐器/节目单来源数量、通知目标数量等摘要，减少“页面能点开但一片空白”的感受。
+- 这一轮还顺手清掉了新页面里的乱码/残缺标签，统一成稳定的 UTF-8 文件内容，避免前端模板因为旧文本损坏导致编译失败。
+- 验证情况：`cargo check --manifest-path backend\\Cargo.toml` 已通过，只有项目既有 warning；当前环境依旧无法执行 `node`/`pnpm`，所以前端仍是代码级静态校对，未完成实际 typecheck/build。
+## 2026-04-22 frontend 设置页功能补深（三十六）
+
+- 继续围绕设置首页 `VItemGroup` 已放开的入口补齐实际可用能力，这一轮主要补深 `playback` 与 `media-players`。
+- `frontend/packages/frontend/src/pages/settings/playback.vue` 不再只是几项零散开关，现已整理成完整的播放设置页：统一展示默认播放速率、拉伸模式、自定义字幕开关、字号、底部偏移、描边与背景板，并增加右侧运行态摘要，直接显示当前播放状态、当前媒体项与活动 `PlaySessionId`。
+- `frontend/packages/frontend/src/pages/settings/media-players.vue` 从原来的只读表格补成可操作的会话管理页：会读取 Emby 风格 `/Sessions` 数据，展示设备、客户端、用户、播放状态、远程控制能力与支持命令摘要；同时接入后端已存在的 `POST /Sessions/{id}/Playing/{command}` 与 `POST /Sessions/{id}/Message`，支持对活跃播放器发送 `Pause`、`Stop` 和弹消息。
+- 这轮没有引入新的后端协议分歧，媒体播放器控制完全复用项目当前已有的 Session command 路由，仍保持 EmbySDK 的会话控制语义。
+- 验证情况：`cargo check --manifest-path backend\\Cargo.toml` 已通过，只有项目既有 warning；前端依旧受限于当前环境缺少可执行的 `node`/`pnpm`，所以这轮仍为代码级静态校对，未完成实际 typecheck/build。
+## 2026-04-22 frontend 设置页功能补深（三十七）
+
+- 继续围绕设置首页 `VItemGroup` 已放开的入口补齐管理能力，这一轮重点补深 `devices / apikeys / logs-and-activity`。
+- `backend/src/repository.rs` 新增设备自定义名称读写；`backend/src/routes/devices.rs` 现在会把 `/Devices`、`/Devices/Info`、`/Devices/Options` 统一接到这份持久化配置上，`POST /Devices/Options?Id=...` 不再是空实现，而是真的会保存 `CustomName`。这让设备详情页的“自定义名称”具备真实落库语义，而不是只在前端展示。
+- `frontend/packages/frontend/src/pages/settings/devices.vue` 已从基础删除页补成完整设备管理页：支持刷新设备列表、查看单个设备详情、读取并编辑 `CustomName`、保存设备选项，同时保留单个删除与批量删除。
+- `frontend/packages/frontend/src/pages/settings/apikeys.vue` 已从简单表格补成更完整的 API Key 管理页：增加刷新动作、应用名称/版本展示、创建时间与状态展示，并把 token 做摘要显示，避免长 token 把布局撑坏。
+- `frontend/packages/frontend/src/pages/settings/logs-and-activity.vue` 已补成真正可操作的日志页：支持刷新、在线预览日志内容、打开原始日志文件，同时继续展示活动日志列表；日志预览直接走 `/System/Logs/Log?name=...`，与 Emby 风格接口保持一致。
+- 验证情况：`cargo check --manifest-path backend\\Cargo.toml` 已通过，只有项目既有 warning；当前环境依旧无法执行前端 `node`/`pnpm` 工具链，因此这轮前端仍为代码级静态校对，未完成实际 typecheck/build。
+## 2026-04-22 frontend 设置页功能补深（三十八）
+
+- 继续围绕设置首页 `VItemGroup` 已放开的入口补齐页面完整度，这一轮主要补深 `server / account / subtitles` 三页，让它们从“基础表单”更接近完整的 Emby 风格设置页。
+- `frontend/packages/frontend/src/pages/settings/server.vue` 在原有 `System/Configuration` 与 `Branding/Configuration` 双向保存基础上，新增右侧服务器摘要面板，直接展示 `/System/Info` 返回的 `ServerName / Version / ProductName / OperatingSystem / LocalAddress / StartupWizardCompleted / CanSelfRestart`，同时把当前可写配置项摘要并排展示，减少管理员进入页面后只能看到输入框、看不到当前服务状态的问题。
+- `frontend/packages/frontend/src/pages/settings/account.vue` 在保留头像上传/删除与密码修改链路的同时，补了账户摘要面板，直接展示当前用户的 `Id / HasPassword / Policy / Configuration` 关键字段，例如管理员状态、隐藏/禁用状态、自动播放下一集、默认音频/字幕轨偏好等，和后端现有 `UserDto` / `UserConfigurationDto` 对齐。
+- `frontend/packages/frontend/src/pages/settings/subtitles.vue` 从单纯字幕样式表单补成“设置 + 当前状态”页：除字体、字号、位置、背景、描边外，新增当前字幕轨、可用字幕轨数量、外部可解析字幕轨数量的摘要显示，直接复用前端现有 `playbackManager` 与 `playerElement` 的运行态数据，不额外引入新的后端协议分歧。
+- 这一轮没有新增后端接口，属于对已打通设置入口的前端功能补深；当前环境仍无法执行 `node`/`pnpm`，因此验证方式依旧是代码级静态校对与现有接口语义核对，未完成实际 typecheck/build。
+
+## rg 模板对照审计补充（三十九）
+- 修复 Sessions 的公开 Id 与内部 ccess_token 混用：后端 SessionInfoDto.Id 改为稳定 Emby 风格公开会话 ID，新增公开会话 ID 到内部 ccess_token 的解析；/Sessions/{id}、/Sessions/{id}/Commands、/Sessions/{id}/Message、/Sessions/{id}/Playing/{command}、/Sessions/{id}/PlayQueue 与播放上报链路统一先解析公开会话 ID，再落到内部会话状态表。
+- 调整播放态 websocket 载荷中的 PlaybackProgress.SessionId 为公开会话 ID，避免前端与本地播放器继续接触 token 形态值。
+- 设置页日志功能改回 EmbySDK 标准日志读取路径：前端日志预览与打开从自定义 /System/Logs/Log?name=... 切回 /System/Logs/{Name}。
+- 设置页设备管理继续向 EmbySDK 标准靠拢：详情与选项保存改为优先使用 getDevicesInfo、getDevicesOptions、postDevicesOptions 这组 SDK 标准方法，而不是页面内手写 query 方式调用。
+- 验证：cargo check --manifest-path backend\\Cargo.toml 通过；前端当前环境仍无法跑 
+ode/pnpm，本轮前端为代码级静态校对。
+
+## rg 模板对照审计补充（四十）
+- 继续收尾 ccount / logs-and-activity / devices 三个设置页的前端类型适配，尽量改用 EmbySDK 导出类型，减少页面内自定义弱类型。
+- rontend/packages/frontend/src/pages/settings/account.vue 现在把用户头像删除、头像上传、密码修改统一收口到显式的 SDK typed facade，并显式传入 userId，不再依赖当前用户的隐式上下文调用。
+- rontend/packages/frontend/src/pages/settings/logs-and-activity.vue 移除本地 LogFile / ActivityLogEntry 弱类型，改用 EmbySDK 的 LogFile、ActivityLogEntry、QueryResultActivityLogEntry、QueryResultString；日志列表和日志行预览使用标准系统日志类型，活动日志列表也切到 SDK 返回体形状。
+- rontend/packages/frontend/src/pages/settings/devices.vue 移除页面内 DeviceOptions 弱类型与松散列表类型，改用 EmbySDK 的 DevicesDeviceInfo、DevicesDeviceOptions、QueryResultDevicesDeviceInfo；仅对后端额外补出的 ReportedDeviceId 做最小扩展。
+- 本轮未新增后端接口；由于当前环境仍无法执行 
+ode/pnpm，前端验证依旧为代码级静态校对。

@@ -249,7 +249,8 @@ async fn handle_client_message(
             Ok(true)
         }
         "ScheduledTasksInfoStart" => {
-            send_socket_message(socket, "ScheduledTasksInfo", json!([])).await?;
+            let items = crate::routes::system::build_scheduled_tasks(&state).await?;
+            send_socket_message(socket, "ScheduledTasksInfo", json!(items)).await?;
             Ok(true)
         }
         "ForceKeepAlive" => {

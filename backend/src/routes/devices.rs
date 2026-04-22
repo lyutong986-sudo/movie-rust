@@ -78,14 +78,17 @@ async fn get_devices(
             .get(device_id)
             .is_none_or(|current| session.last_activity_at > current.date_last_activity);
         if should_replace {
+            let custom_name = repository::get_device_custom_name(&state.pool, device_id).await?;
             devices.insert(
                 device_id.to_string(),
                 DeviceRow {
                     id: device_id.to_string(),
-                    name: session
-                        .device_name
-                        .clone()
-                        .unwrap_or_else(|| "Unknown device".to_string()),
+                    name: custom_name.unwrap_or_else(|| {
+                        session
+                            .device_name
+                            .clone()
+                            .unwrap_or_else(|| "Unknown device".to_string())
+                    }),
                     app_name: session
                         .client
                         .clone()
@@ -158,19 +161,25 @@ async fn get_device_options(
 ) -> Result<Json<Value>, AppError> {
     auth::require_admin(&session)?;
     let id = required_device_id(query.id.as_deref())?;
-    let device = latest_device_row(&state, id).await?;
+    let custom_name = repository::get_device_custom_name(&state.pool, id).await?;
     Ok(Json(json!({
-        "CustomName": device.name
+        "CustomName": custom_name.unwrap_or_default()
     })))
 }
 
 async fn update_device_options(
     session: AuthSession,
+    State(state): State<AppState>,
     Query(query): Query<DevicesQuery>,
-    Json(_payload): Json<Value>,
+    Json(payload): Json<Value>,
 ) -> Result<StatusCode, AppError> {
     auth::require_admin(&session)?;
-    let _id = required_device_id(query.id.as_deref())?;
+    let id = required_device_id(query.id.as_deref())?;
+    let custom_name = payload
+        .get("CustomName")
+        .or_else(|| payload.get("customName"))
+        .and_then(Value::as_str);
+    repository::set_device_custom_name(&state.pool, id, custom_name).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -226,6 +235,7 @@ fn required_device_id(id: Option<&str>) -> Result<&str, AppError> {
 }
 
 async fn latest_device_row(state: &AppState, device_id: &str) -> Result<DeviceRow, AppError> {
+    let custom_name = repository::get_device_custom_name(&state.pool, device_id).await?;
     repository::list_all_sessions(&state.pool)
         .await?
         .into_iter()
@@ -233,9 +243,11 @@ async fn latest_device_row(state: &AppState, device_id: &str) -> Result<DeviceRo
         .max_by_key(|session| session.last_activity_at)
         .map(|session| DeviceRow {
             id: device_id.to_string(),
-            name: session
-                .device_name
-                .unwrap_or_else(|| "Unknown device".to_string()),
+            name: custom_name.unwrap_or_else(|| {
+                session
+                    .device_name
+                    .unwrap_or_else(|| "Unknown device".to_string())
+            }),
             app_name: session
                 .client
                 .unwrap_or_else(|| "Movie Rust Client".to_string()),

@@ -3,69 +3,135 @@
     <template #title>
       {{ t('devices') }}
     </template>
+
     <template #actions>
+      <VBtn
+        variant="elevated"
+        :loading="refreshing"
+        @click="refreshDevices">
+        Refresh
+      </VBtn>
       <VBtn
         v-if="devices.length"
         color="error"
         variant="elevated"
         class="ml-a"
         :loading="loading"
-        @click="deleteAllDevices">
+        @click="confirmDelete = 'all'">
         {{ t('deleteAll') }}
       </VBtn>
-      <VBtn
-        variant="elevated"
-        href="https://jellyfin.org/docs/general/server/devices.html"
-        rel="noreferrer noopener"
-        target="_blank">
-        {{ t('help') }}
-      </VBtn>
     </template>
+
     <template #content>
-      <VCol>
+      <VCol cols="12">
         <VTable>
           <thead>
             <tr>
-              <th
-                v-for="{ text, value } in headers"
-                :id="value"
-                :key="value">
-                {{ text }}
-              </th>
-              <th scope="col">
-                <!--for delete button-->
-              </th>
+              <th>User</th>
+              <th>Device</th>
+              <th>Client</th>
+              <th>Last active</th>
+              <th />
             </tr>
           </thead>
           <tbody>
             <tr
               v-for="device in devices"
               :key="device.Id ?? undefined">
-              <td
-                v-for="{ value } in headers"
-                :key="value">
-                {{
-                  value !== 'DateLastActivity'
-                    ? device[value]
-                    : useDateFns(
-                      formatRelative,
-                      parseJSON(device[value] ?? 'unknown'),
-                      new Date()
-                    )
-                }}
-              </td>
+              <td>{{ device.LastUserName }}</td>
               <td>
+                <div class="uno-font-medium">
+                  {{ device.Name }}
+                </div>
+                <div class="uno-text-sm uno-opacity-70">
+                  {{ device.Id }}
+                </div>
+              </td>
+              <td>{{ device.AppName }} {{ device.AppVersion }}</td>
+              <td>{{ formatActivity(device.DateLastActivity) }}</td>
+              <td class="uno-text-right">
+                <VBtn
+                  variant="tonal"
+                  size="small"
+                  class="uno-mr-2"
+                  :disabled="loading"
+                  @click="openDetails(device)">
+                  Details
+                </VBtn>
                 <VBtn
                   color="error"
+                  size="small"
                   :disabled="loading"
                   @click="confirmDelete = device.Id ?? undefined">
                   {{ t('delete') }}
                 </VBtn>
               </td>
             </tr>
+            <tr v-if="!devices.length">
+              <td
+                colspan="5"
+                class="uno-opacity-70">
+                No remembered devices
+              </td>
+            </tr>
           </tbody>
         </VTable>
       </VCol>
+
+      <VDialog
+        width="720"
+        :model-value="!!selectedDevice"
+        @update:model-value="selectedDevice = undefined">
+        <VCard v-if="selectedDevice">
+          <VCardTitle>Device Details</VCardTitle>
+          <VCardText>
+            <VTextField
+              v-model="deviceOptions.CustomName"
+              label="Custom name" />
+            <VTable class="uno-mt-4">
+              <tbody>
+                <tr>
+                  <td>Device ID</td>
+                  <td>{{ deviceInfo.Id }}</td>
+                </tr>
+                <tr>
+                  <td>Reported device ID</td>
+                  <td>{{ deviceInfo.ReportedDeviceId ?? '-' }}</td>
+                </tr>
+                <tr>
+                  <td>Name</td>
+                  <td>{{ deviceInfo.Name }}</td>
+                </tr>
+                <tr>
+                  <td>Client</td>
+                  <td>{{ deviceInfo.AppName }} {{ deviceInfo.AppVersion }}</td>
+                </tr>
+                <tr>
+                  <td>Last user</td>
+                  <td>{{ deviceInfo.LastUserName }}</td>
+                </tr>
+                <tr>
+                  <td>Last active</td>
+                  <td>{{ formatActivity(deviceInfo.DateLastActivity) }}</td>
+                </tr>
+              </tbody>
+            </VTable>
+          </VCardText>
+          <VCardActions>
+            <VSpacer />
+            <VBtn @click="selectedDevice = undefined">
+              Cancel
+            </VBtn>
+            <VBtn
+              color="primary"
+              :loading="loading"
+              @click="saveDeviceOptions">
+              Save
+            </VBtn>
+          </VCardActions>
+        </VCard>
+      </VDialog>
+
       <VDialog
         width="auto"
         :model-value="!isNil(confirmDelete)"
@@ -99,93 +165,126 @@ meta:
 </route>
 
 <script setup lang="ts">
-import type { DeviceInfo } from '@jellyfin/sdk/lib/generated-client';
+import type {
+  DevicesDeviceInfo,
+  DevicesDeviceOptions,
+  QueryResultDevicesDeviceInfo
+} from '@jellyfin/sdk/lib/generated-client';
 import { getDevicesApi } from '@jellyfin/sdk/lib/utils/api/devices-api';
 import { formatRelative, parseJSON } from 'date-fns';
-import { computed, ref } from 'vue';
+import { ref } from 'vue';
 import { useTranslation } from 'i18next-vue';
 import { isNil } from '@jellyfin-vue/shared/validation';
 import { remote } from '#/plugins/remote/index.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
 import { useDateFns } from '#/composables/use-datefns.ts';
 
+type DeviceDetails = DevicesDeviceInfo & {
+  ReportedDeviceId?: string;
+};
+
 const { t } = useTranslation();
+const devicesApi = remote.sdk.newUserApi(getDevicesApi) as {
+  getDevices: () => Promise<{ data: QueryResultDevicesDeviceInfo }>;
+  getDevicesInfo: (id: string) => Promise<{ data: DeviceDetails }>;
+  getDevicesOptions: (id: string) => Promise<{ data: DevicesDeviceOptions }>;
+  postDevicesOptions: (body: DevicesDeviceOptions, id: string) => Promise<unknown>;
+  deleteDevice: (payload: { id: string }) => Promise<unknown>;
+};
 
-const devices = ref(
-  (await remote.sdk.newUserApi(getDevicesApi).getDevices()).data.Items ?? []
-);
-
+const devices = ref<DevicesDeviceInfo[]>([]);
+const selectedDevice = ref<DevicesDeviceInfo>();
+const deviceInfo = ref<Partial<DeviceDetails>>({});
+const deviceOptions = ref<DevicesDeviceOptions>({});
 const loading = ref(false);
-/** The device id to confirm being deleted (will be 'all' if all are being deleted) */
+const refreshing = ref(false);
 const confirmDelete = ref<string>();
 
-const headers = computed<{ text: string; value: keyof DeviceInfo }[]>(() => [
-  {
-    text: t('userName'),
-    value: 'LastUserName'
-  },
-  { text: t('deviceName'), value: 'Name' },
-  { text: t('appName'), value: 'AppName' },
-  { text: t('appVersion'), value: 'AppVersion' },
-  {
-    text: t('lastActive'),
-    value: 'DateLastActivity'
+async function refreshDevices(): Promise<void> {
+  refreshing.value = true;
+  try {
+    devices.value = (await devicesApi.getDevices()).data.Items ?? [];
+  } finally {
+    refreshing.value = false;
   }
-]);
+}
 
-/**
- * Deletes all remembered devices
- */
+function formatActivity(value?: string): string {
+  return value
+    ? useDateFns(formatRelative, parseJSON(value), new Date())
+    : '-';
+}
+
+async function openDetails(device: DevicesDeviceInfo): Promise<void> {
+  if (!device.Id) {
+    return;
+  }
+
+  loading.value = true;
+  try {
+    const [infoResponse, optionsResponse] = await Promise.all([
+      devicesApi.getDevicesInfo(device.Id),
+      devicesApi.getDevicesOptions(device.Id)
+    ]);
+    selectedDevice.value = device;
+    deviceInfo.value = infoResponse.data ?? {};
+    deviceOptions.value = optionsResponse.data ?? {};
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function saveDeviceOptions(): Promise<void> {
+  if (!selectedDevice.value?.Id) {
+    return;
+  }
+
+  loading.value = true;
+  try {
+    await devicesApi.postDevicesOptions(deviceOptions.value, selectedDevice.value.Id);
+    useSnackbar('Device options saved', 'success');
+    selectedDevice.value = undefined;
+    await refreshDevices();
+  } catch (error) {
+    console.error(error);
+    useSnackbar('Failed to save device options', 'error');
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function deleteDevice(deviceId: string): Promise<void> {
+  loading.value = true;
+  try {
+    await devicesApi.deleteDevice({ id: deviceId });
+    useSnackbar(t('deleteDeviceSuccess'), 'success');
+    await refreshDevices();
+  } catch (error) {
+    console.error(error);
+    useSnackbar(t('deleteDeviceError'), 'error');
+  } finally {
+    loading.value = false;
+  }
+}
+
 async function deleteAllDevices(): Promise<void> {
   loading.value = true;
-
   try {
     for (const device of devices.value) {
       if (device.Id && remote.sdk.deviceInfo.id !== device.Id) {
-        await remote.sdk
-          .newUserApi(getDevicesApi)
-          .deleteDevice({ id: device.Id });
+        await devicesApi.deleteDevice({ id: device.Id });
       }
     }
-
     useSnackbar(t('deleteAllDevicesSuccess'), 'success');
-
-    devices.value
-      = (await remote.sdk.newUserApi(getDevicesApi).getDevices()).data.Items
-        ?? [];
+    await refreshDevices();
   } catch (error) {
+    console.error(error);
     useSnackbar(t('deleteAllDevicesError'), 'error');
-    console.error(error);
   } finally {
     loading.value = false;
   }
 }
 
-/**
- * Deletes the selected device
- */
-async function deleteDevice(deviceId: string): Promise<void> {
-  loading.value = true;
-
-  try {
-    await remote.sdk.newUserApi(getDevicesApi).deleteDevice({ id: deviceId });
-
-    useSnackbar(t('deleteDeviceSuccess'), 'success');
-
-    devices.value
-      = (await remote.sdk.newUserApi(getDevicesApi).getDevices()).data.Items
-        ?? [];
-  } catch (error) {
-    useSnackbar(t('deleteDeviceError'), 'error');
-    console.error(error);
-  } finally {
-    loading.value = false;
-  }
-}
-
-/**
- * Confirms deleteion of a single device or all
- */
 async function confirmDeletion(): Promise<void> {
   if (!confirmDelete.value) {
     return;
@@ -197,4 +296,6 @@ async function confirmDeletion(): Promise<void> {
 
   confirmDelete.value = undefined;
 }
+
+await refreshDevices();
 </script>

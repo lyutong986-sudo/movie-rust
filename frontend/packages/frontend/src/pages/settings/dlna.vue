@@ -10,20 +10,45 @@
         class="uno-pb-4 uno-pt-0">
         <VCheckbox
           v-model="configuration.EnableDlnaServer"
-          label="启用 DLNA 服务器" />
+          label="Enable DLNA server" />
         <VCheckbox
           v-model="configuration.EnableDlnaPlayTo"
-          label="启用 DLNA Play To" />
+          label="Enable DLNA Play To" />
         <VCheckbox
           v-model="configuration.EnableBlastAliveMessages"
-          label="发送活动广播" />
+          label="Send alive broadcasts" />
         <VTextField
           v-model.number="configuration.BlastAliveMessageIntervalSeconds"
-          label="广播间隔秒数"
+          label="Alive broadcast interval (seconds)"
           type="number" />
         <VProgressLinear
           v-if="saving"
           indeterminate />
+      </VCol>
+
+      <VCol
+        md="6"
+        class="uno-pb-4 uno-pt-0">
+        <VTable>
+          <tbody>
+            <tr>
+              <td>DLNA server</td>
+              <td>{{ configuration.EnableDlnaServer ? 'Enabled' : 'Disabled' }}</td>
+            </tr>
+            <tr>
+              <td>Play To</td>
+              <td>{{ configuration.EnableDlnaPlayTo ? 'Enabled' : 'Disabled' }}</td>
+            </tr>
+            <tr>
+              <td>Alive broadcasts</td>
+              <td>{{ configuration.EnableBlastAliveMessages ? 'Enabled' : 'Disabled' }}</td>
+            </tr>
+            <tr>
+              <td>Broadcast interval</td>
+              <td>{{ configuration.BlastAliveMessageIntervalSeconds }} s</td>
+            </tr>
+          </tbody>
+        </VTable>
       </VCol>
     </template>
   </SettingsPage>

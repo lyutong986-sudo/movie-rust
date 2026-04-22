@@ -1,9 +1,10 @@
 use crate::{
     auth,
     error::AppError,
-    models::{emby_id_to_uuid, VideoStreamQuery},
+    models::{emby_id_to_uuid, uuid_to_emby_guid, VideoStreamQuery},
     naming, repository,
     state::AppState,
+    transcoder::TranscodingSessionState,
 };
 use axum::{
     body::Body,
@@ -23,10 +24,10 @@ use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/Videos/ActiveEncodings", delete(active_encodings))
-        .route("/videos/ActiveEncodings", delete(active_encodings))
-        .route("/Video/ActiveEncodings", delete(active_encodings))
-        .route("/video/ActiveEncodings", delete(active_encodings))
+        .route("/Videos/ActiveEncodings", get(list_active_encodings).delete(active_encodings))
+        .route("/videos/ActiveEncodings", get(list_active_encodings).delete(active_encodings))
+        .route("/Video/ActiveEncodings", get(list_active_encodings).delete(active_encodings))
+        .route("/video/ActiveEncodings", get(list_active_encodings).delete(active_encodings))
         .route("/Videos/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
         .route("/videos/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
         .route("/Video/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
@@ -128,6 +129,18 @@ async fn active_encodings(
     request: Request<Body>,
 ) -> Result<StatusCode, AppError> {
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let query = request.uri().query().unwrap_or_default();
+    let id = url::form_urlencoded::parse(query.as_bytes())
+        .find_map(|(key, value)| match key.as_ref() {
+            "Id" | "id" | "PlaySessionId" | "playSessionId" => Some(value.into_owned()),
+            _ => None,
+        });
+
+    if let Some(id) = id.filter(|value| !value.trim().is_empty()) {
+        let session_id = emby_id_to_uuid(&id)
+            .map_err(|_| AppError::BadRequest(format!("invalid active encoding id: {id}")))?;
+        state.transcoder.stop_transcoding(session_id).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -137,6 +150,51 @@ async fn active_encodings_delete(
 ) -> Result<StatusCode, AppError> {
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_active_encodings(
+    State(state): State<AppState>,
+    request: Request<Body>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let sessions = state.transcoder.list_sessions().await;
+    Ok(Json(
+        sessions
+            .into_iter()
+            .map(|session| {
+                let state_name = match session.state {
+                    TranscodingSessionState::Initializing => "Initializing",
+                    TranscodingSessionState::Transcoding => "Transcoding",
+                    TranscodingSessionState::Completed => "Completed",
+                    TranscodingSessionState::Failed(_) => "Failed",
+                    TranscodingSessionState::Cancelled => "Cancelled",
+                };
+                let error = match &session.state {
+                    TranscodingSessionState::Failed(message) => Some(message.clone()),
+                    _ => session.error.clone(),
+                };
+
+                serde_json::json!({
+                    "Id": uuid_to_emby_guid(&session.id),
+                    "PlaySessionId": uuid_to_emby_guid(&session.id),
+                    "ItemId": uuid_to_emby_guid(&session.media_item_id),
+                    "DeviceId": session.device_id,
+                    "UserId": uuid_to_emby_guid(&session.user_id),
+                    "State": state_name,
+                    "Progress": session.progress,
+                    "TranscodingPositionTicks": session.params.start_time_ticks,
+                    "Bitrate": session.params.video_bitrate.or(session.params.audio_bitrate),
+                    "Container": session.params.container.clone(),
+                    "AudioCodec": session.params.audio_codec.clone(),
+                    "VideoCodec": session.params.video_codec.clone(),
+                    "Protocol": session.protocol,
+                    "OutputPath": session.output_dir.to_string_lossy().to_string(),
+                    "PlaylistPath": session.playlist_path.to_string_lossy().to_string(),
+                    "Error": error
+                })
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

@@ -3,6 +3,7 @@
     <template #title>
       {{ t('account') }}
     </template>
+
     <template #content>
       <VCol
         cols="12"
@@ -64,6 +65,52 @@
           </VBtn>
         </div>
       </VCol>
+
+      <VCol
+        cols="12"
+        md="8"
+        lg="4">
+        <VTable>
+          <tbody>
+            <tr>
+              <td>User name</td>
+              <td>{{ remote.auth.currentUser.value?.Name }}</td>
+            </tr>
+            <tr>
+              <td>User ID</td>
+              <td>{{ remote.auth.currentUser.value?.Id }}</td>
+            </tr>
+            <tr>
+              <td>Administrator</td>
+              <td>{{ remote.auth.currentUser.value?.Policy?.IsAdministrator ? 'Yes' : 'No' }}</td>
+            </tr>
+            <tr>
+              <td>Disabled</td>
+              <td>{{ remote.auth.currentUser.value?.Policy?.IsDisabled ? 'Yes' : 'No' }}</td>
+            </tr>
+            <tr>
+              <td>Hidden</td>
+              <td>{{ remote.auth.currentUser.value?.Policy?.IsHidden ? 'Yes' : 'No' }}</td>
+            </tr>
+            <tr>
+              <td>Has password</td>
+              <td>{{ remote.auth.currentUser.value?.HasPassword ? 'Yes' : 'No' }}</td>
+            </tr>
+            <tr>
+              <td>Auto play next episode</td>
+              <td>{{ remote.auth.currentUser.value?.Configuration?.EnableNextEpisodeAutoPlay ? 'Enabled' : 'Disabled' }}</td>
+            </tr>
+            <tr>
+              <td>Play default audio track</td>
+              <td>{{ remote.auth.currentUser.value?.Configuration?.PlayDefaultAudioTrack ? 'Enabled' : 'Disabled' }}</td>
+            </tr>
+            <tr>
+              <td>Play default subtitle track</td>
+              <td>{{ remote.auth.currentUser.value?.Configuration?.PlayDefaultSubtitleTrack ? 'Enabled' : 'Disabled' }}</td>
+            </tr>
+          </tbody>
+        </VTable>
+      </VCol>
     </template>
   </SettingsPage>
 </template>
@@ -81,6 +128,13 @@ import { remote } from '#/plugins/remote/index.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
 
 const { t } = useTranslation();
+const imageApi = remote.sdk.newUserApi(getImageApi) as {
+  deleteUserImage: (payload: { userId: string }) => Promise<unknown>;
+  postUserImage: (payload: ImageApiPostUserImageRequest, config?: AxiosRequestConfig) => Promise<unknown>;
+};
+const userApi = remote.sdk.newUserApi(getUserApi) as {
+  updateUserPassword: (payload: UserApiUpdateUserPasswordRequest & { userId: string }) => Promise<unknown>;
+};
 
 const currentPassword = shallowRef('');
 const newPassword = shallowRef('');
@@ -92,15 +146,16 @@ const isDeleteImageLoading = shallowRef(false);
 
 const selectedUserPicture = ref<File | undefined>(undefined);
 
-/**
- * Delete user's profile image
- */
 async function deleteUserImage() {
+  if (!remote.auth.currentUserId.value) {
+    return;
+  }
+
   await useConfirmDialog(async () => {
     isDeleteImageLoading.value = true;
 
     try {
-      await remote.sdk.newUserApi(getImageApi).deleteUserImage();
+      await imageApi.deleteUserImage({ userId: remote.auth.currentUserId.value! });
     } catch {
       useSnackbar(t('failedToDeleteImage'), 'red');
     } finally {
@@ -115,13 +170,9 @@ async function deleteUserImage() {
   });
 }
 
-/**
- * Change user's profile image
- */
 async function changeUserImage() {
   if (!selectedUserPicture.value) {
     useSnackbar(t('failedToReadImage'), 'red');
-
     return;
   }
 
@@ -139,7 +190,7 @@ async function changeUserImage() {
   isChangeImageLoading.value = true;
 
   try {
-    await remote.sdk.newUserApi(getImageApi).postUserImage(payload, config);
+    await imageApi.postUserImage(payload, config);
   } catch {
     useSnackbar(t('failedToChangeImage'), 'red');
   } finally {
@@ -147,21 +198,21 @@ async function changeUserImage() {
   }
 
   selectedUserPicture.value = undefined;
-
   await remote.auth.refreshCurrentUserInfo();
 }
 
-/**
- * Change user's password
- */
 async function changePassword() {
   if (newPassword.value !== repeatNewPassword.value) {
     useSnackbar(t('newPasswordAndConfirmNewPasswordMustBeTheSame'), 'red');
-
     return;
   }
 
-  const payload: UserApiUpdateUserPasswordRequest = {
+  if (!remote.auth.currentUserId.value) {
+    return;
+  }
+
+  const payload: UserApiUpdateUserPasswordRequest & { userId: string } = {
+    userId: remote.auth.currentUserId.value,
     updateUserPassword: {
       CurrentPw: currentPassword.value,
       NewPw: newPassword.value
@@ -170,13 +221,14 @@ async function changePassword() {
 
   try {
     isChangePasswordLoading.value = true;
-    await remote.sdk.newUserApi(getUserApi).updateUserPassword(payload);
+    await userApi.updateUserPassword(payload);
 
     newPassword.value = '';
     currentPassword.value = '';
     repeatNewPassword.value = '';
 
     useSnackbar(t('passwordChangedSuccessfully'), 'green');
+    await remote.auth.refreshCurrentUserInfo();
   } catch {
     useSnackbar(t('passwordChangeFailed'), 'red');
   } finally {
@@ -190,5 +242,4 @@ watch(selectedUserPicture, async (newVal) => {
     await changeUserImage();
   }
 });
-
 </script>

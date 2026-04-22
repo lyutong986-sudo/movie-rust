@@ -1662,6 +1662,49 @@ pub async fn list_all_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow
     .await?)
 }
 
+pub fn session_access_token_to_public_id(access_token: &str) -> String {
+    uuid_to_emby_guid(&Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("movie-rust-session:{access_token}").as_bytes(),
+    ))
+}
+
+pub async fn resolve_session_access_token(
+    pool: &sqlx::PgPool,
+    session_identifier: &str,
+) -> Result<Option<String>, AppError> {
+    let session_identifier = session_identifier.trim();
+    if session_identifier.is_empty() {
+        return Ok(None);
+    }
+
+    let direct_match = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT access_token
+        FROM sessions
+        WHERE access_token = $1
+          AND (expires_at IS NULL OR expires_at > now())
+        LIMIT 1
+        "#,
+    )
+    .bind(session_identifier)
+    .fetch_optional(pool)
+    .await?;
+    if direct_match.is_some() {
+        return Ok(direct_match);
+    }
+
+    for session in list_sessions(pool).await? {
+        if session_access_token_to_public_id(&session.access_token)
+            .eq_ignore_ascii_case(session_identifier)
+        {
+            return Ok(Some(session.access_token));
+        }
+    }
+
+    Ok(None)
+}
+
 pub async fn delete_session(pool: &sqlx::PgPool, access_token: &str) -> Result<(), AppError> {
     sqlx::query("DELETE FROM sessions WHERE access_token = $1")
         .bind(access_token)
@@ -4429,6 +4472,43 @@ pub async fn record_session_command(
     Ok(())
 }
 
+pub async fn get_device_custom_name(
+    pool: &sqlx::PgPool,
+    device_id: &str,
+) -> Result<Option<String>, AppError> {
+    let key = format!("device_options:{}", device_id.trim());
+    let value = get_system_setting(pool, &key).await?;
+    Ok(value
+        .as_ref()
+        .and_then(|entry| entry.get("CustomName"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string))
+}
+
+pub async fn set_device_custom_name(
+    pool: &sqlx::PgPool,
+    device_id: &str,
+    custom_name: Option<&str>,
+) -> Result<(), AppError> {
+    let key = format!("device_options:{}", device_id.trim());
+    let next = custom_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match next {
+        Some(value) => set_system_setting(pool, &key, json!({ "CustomName": value })).await,
+        None => {
+            sqlx::query("DELETE FROM system_settings WHERE key = $1")
+                .bind(key)
+                .execute(pool)
+                .await?;
+            Ok(())
+        }
+    }
+}
+
 pub async fn apply_session_command_state(
     pool: &sqlx::PgPool,
     session_id: &str,
@@ -5045,7 +5125,7 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
 
 pub fn session_to_dto(session: &AuthSessionRow) -> SessionInfoDto {
     SessionInfoDto {
-        id: session.access_token.clone(),
+        id: session_access_token_to_public_id(&session.access_token),
         user_id: uuid_to_emby_guid(&session.user_id),
         user_name: session.user_name.clone(),
         client: session
