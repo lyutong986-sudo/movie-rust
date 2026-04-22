@@ -420,3 +420,13 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - 本轮 backend 已重新执行：
   `cargo check --manifest-path backend/Cargo.toml`
   结果通过，仍只有既有 warning。
+
+## 2026-04-22 前端适配补充（十）
+- 本轮继续核对 `Users/{UserId}/Views` 返回的 `CollectionFolder/UserView` 字段，重点补齐 frontend 导航抽屉、首页库卡片和库页会直接用到的图片信息。
+- `backend/src/repository.rs`
+  已为 `library_to_item_dto()` 增加库级封面/背景推导：优先从媒体库根目录复用现有扫描逻辑查找 `folder.*` 与 `backdrop/fanart/background/landscape.*`，并把结果映射到 Emby 风格的 `PrimaryImageTag / ImageTags.Primary / BackdropImageTags`。
+- 这次没有额外修改 frontend：
+  因为前端图片选择逻辑本来就按 EmbySDK 的 `ImageTags / BackdropImageTags / PrimaryImageTag` 工作，之前显示不出来的根因是 backend 给库 DTO 返回了空图片字段。
+- 本轮 backend 已重新执行：
+  `cargo check --manifest-path backend/Cargo.toml`
+  结果通过，仍只有既有 warning。

@@ -4657,6 +4657,27 @@ pub async fn library_to_item_dto(
     let movie_count = count_library_items_by_type(pool, library.id, "Movie").await?;
     let series_count = count_library_items_by_type(pool, library.id, "Series").await?;
     let locations = library_paths(library);
+    let primary_image_path = locations
+        .first()
+        .and_then(|path| naming::find_folder_image(Path::new(path)));
+    let backdrop_path = locations
+        .first()
+        .and_then(|path| naming::find_backdrop_image(Path::new(path)));
+    let primary_image_tag = primary_image_path
+        .as_ref()
+        .and_then(|path| image_tag_from_path(path.as_path()))
+        .or_else(|| Some(library.created_at.timestamp().to_string()));
+    let mut image_tags = BTreeMap::new();
+
+    if let Some(tag) = primary_image_tag.clone() {
+        image_tags.insert("Primary".to_string(), tag);
+    }
+
+    let backdrop_image_tags = backdrop_path
+        .as_ref()
+        .and_then(|path| image_tag_from_path(path.as_path()))
+        .map(|tag| vec![tag])
+        .unwrap_or_default();
 
     Ok(BaseItemDto {
         name: library.name.clone(),
@@ -4676,7 +4697,7 @@ pub async fn library_to_item_dto(
         is_folder: true,
         sort_name: Some(library.name.to_lowercase()),
         forced_sort_name: Some(library.name.to_lowercase()),
-        primary_image_tag: None,
+        primary_image_tag,
         collection_type: Some(library.collection_type.clone()),
         media_type: None,
         container: None,
@@ -4740,8 +4761,8 @@ pub async fn library_to_item_dto(
         index_number: None,
         index_number_end: None,
         parent_index_number: None,
-        image_tags: BTreeMap::new(),
-        backdrop_image_tags: Vec::new(),
+        image_tags,
+        backdrop_image_tags,
         parent_logo_item_id: None,
         parent_logo_image_tag: None,
         parent_backdrop_item_id: None,
@@ -4769,6 +4790,12 @@ pub async fn library_to_item_dto(
         tags: Vec::new(),
         extra_fields: BTreeMap::new(),
     })
+}
+
+fn image_tag_from_path(path: &Path) -> Option<String> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let duration = modified.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    Some(duration.as_secs().to_string())
 }
 
 pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
