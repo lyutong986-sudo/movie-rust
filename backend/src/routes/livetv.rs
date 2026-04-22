@@ -7,7 +7,7 @@ use crate::{
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -42,11 +42,23 @@ pub fn router() -> Router<AppState> {
                 .post(update_live_tv_series_timer)
                 .delete(delete_live_tv_series_timer),
         )
+        .route("/LiveTv/Tuners", get(live_tv_tuners))
+        .route("/LiveTv/Tuners/Discvover", get(discover_tuners))
+        .route("/LiveTv/Tuners/Discover", get(discover_tuners))
         .route("/LiveTv/Tuners/{id}/Reset", post(reset_tuner))
-        .route("/LiveTv/TunerHosts", post(add_tuner_host).delete(delete_tuner_host))
+        .route("/LiveTv/TunerHosts", get(tuner_hosts).post(add_tuner_host).delete(delete_tuner_host))
+        .route("/LiveTv/TunerHosts/Types", get(tuner_host_types))
+        .route("/LiveTv/ChannelMappingOptions", get(channel_mapping_options))
+        .route("/LiveTv/ChannelMappings", get(channel_mappings).post(update_channel_mappings))
         .route(
             "/LiveTv/ListingProviders",
-            post(add_listing_provider).delete(delete_listing_provider),
+            get(listing_providers).post(add_listing_provider).delete(delete_listing_provider),
+        )
+        .route("/LiveTv/ListingProviders/Default", get(default_listing_provider))
+        .route("/LiveTv/ListingProviders/Lineups", get(listing_provider_lineups))
+        .route(
+            "/LiveTv/ListingProviders/SchedulesDirect/Countries",
+            get(schedules_direct_countries),
         )
 }
 
@@ -226,10 +238,56 @@ async fn delete_live_tv_series_timer(
     StatusCode::NO_CONTENT
 }
 
+async fn live_tv_tuners(_session: AuthSession) -> Json<Value> {
+    empty_query_result()
+}
+
+async fn discover_tuners(_session: AuthSession) -> Json<Vec<Value>> {
+    Json(Vec::new())
+}
+
 async fn reset_tuner(
     _session: AuthSession,
     Path(_id): Path<String>,
 ) -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+async fn tuner_hosts(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    Ok(Json(livetv_config_array(&state, "TunerHosts").await?))
+}
+
+async fn tuner_host_types(_session: AuthSession) -> Json<Vec<Value>> {
+    Json(vec![
+        json!({
+            "Id": "m3u",
+            "Name": "M3U",
+            "SetupUrl": "livetvtuner.html?type=m3u"
+        }),
+        json!({
+            "Id": "hdhomerun",
+            "Name": "HDHomeRun",
+            "SetupUrl": "livetvtuner.html?type=hdhomerun"
+        }),
+    ])
+}
+
+async fn channel_mapping_options(_session: AuthSession) -> Json<Value> {
+    Json(json!({
+        "TunerChannels": [],
+        "ProviderChannels": [],
+        "Mappings": []
+    }))
+}
+
+async fn channel_mappings(_session: AuthSession) -> Json<Vec<Value>> {
+    Json(Vec::new())
+}
+
+async fn update_channel_mappings(_session: AuthSession) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
@@ -258,6 +316,39 @@ async fn add_listing_provider(
 ) -> Result<StatusCode, AppError> {
     update_livetv_array(&state, "ListingProviders", payload).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn listing_providers(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    Ok(Json(livetv_config_array(&state, "ListingProviders").await?))
+}
+
+async fn default_listing_provider(_session: AuthSession) -> Json<Value> {
+    Json(json!({
+        "Id": null,
+        "Type": "xmltv",
+        "Username": "",
+        "Password": "",
+        "ListingsId": "",
+        "ZipCode": "",
+        "Country": "",
+        "Path": "",
+        "EnabledTuners": [],
+        "EnableAllTuners": true
+    }))
+}
+
+async fn listing_provider_lineups(_session: AuthSession) -> Json<Vec<Value>> {
+    Json(Vec::new())
+}
+
+async fn schedules_direct_countries(_session: AuthSession) -> Json<Vec<Value>> {
+    Json(vec![
+        json!({"Name": "United States", "Value": "USA"}),
+        json!({"Name": "Canada", "Value": "CAN"}),
+    ])
 }
 
 async fn delete_listing_provider(
@@ -326,6 +417,22 @@ async fn remove_livetv_array_item(
     items.retain(|item| item.get("Id").and_then(Value::as_str) != Some(id));
 
     repository::update_named_system_configuration(&state.pool, "livetv", &current).await
+}
+
+async fn livetv_config_array(state: &AppState, key: &str) -> Result<Vec<Value>, AppError> {
+    let current = repository::named_system_configuration(&state.pool, "livetv")
+        .await?
+        .unwrap_or_else(|| {
+            json!({
+                "TunerHosts": [],
+                "ListingProviders": []
+            })
+        });
+    Ok(current
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
 }
 
 fn empty_query_result() -> Json<Value> {

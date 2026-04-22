@@ -10,11 +10,12 @@ use crate::{
 };
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Form, Path, State},
     http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
+use serde::Deserialize;
 use serde_json::Value;
 use url::form_urlencoded;
 use uuid::Uuid;
@@ -30,6 +31,8 @@ pub fn router() -> Router<AppState> {
         .route("/Users/AuthenticateByName", post(authenticate_by_name))
         .route("/Users/authenticatebyname", post(authenticate_by_name))
         .route("/users/authenticatebyname", post(authenticate_by_name))
+        .route("/Users/ForgotPassword", post(forgot_password))
+        .route("/Users/ForgotPassword/Pin", post(forgot_password_pin))
         .route("/Users/{user_id}/Authenticate", post(authenticate_by_id))
         .route("/Users/{user_id}/authenticate", post(authenticate_by_id))
         .route("/users/{user_id}/authenticate", post(authenticate_by_id))
@@ -59,6 +62,20 @@ pub fn router() -> Router<AppState> {
             "/Users/{user_id}/connect/link",
             post(update_user_connect_link).delete(delete_user_connect_link),
         )
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ForgotPasswordRequest {
+    #[serde(default)]
+    entered_username: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ForgotPasswordPinRequest {
+    #[serde(default)]
+    pin: Option<String>,
 }
 
 async fn public_users(State(state): State<AppState>) -> Result<Json<Vec<UserDto>>, AppError> {
@@ -123,6 +140,31 @@ async fn create_user(
     Ok(Json(
         repository::user_to_dto_with_context(&state.pool, &user, state.config.server_id).await?,
     ))
+}
+
+async fn forgot_password(
+    Form(payload): Form<ForgotPasswordRequest>,
+) -> Json<Value> {
+    let entered_username = payload
+        .entered_username
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "Action": "ContactAdmin",
+        "PinFile": "",
+        "EnteredUsername": entered_username
+    }))
+}
+
+async fn forgot_password_pin(
+    Form(payload): Form<ForgotPasswordPinRequest>,
+) -> Json<Value> {
+    Json(serde_json::json!({
+        "Success": false,
+        "UsersReset": [],
+        "Pin": payload.pin.unwrap_or_default()
+    }))
 }
 
 async fn delete_user(

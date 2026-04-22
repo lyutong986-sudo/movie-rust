@@ -38,10 +38,7 @@ async fn main() -> Result<()> {
     let (file_writer, _log_guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "movie_rust_backend=debug,tower_http=info".into()),
-        )
+        .with(log_filter())
         .with(tracing_subscriber::fmt::layer())
         .with(
             tracing_subscriber::fmt::layer()
@@ -101,7 +98,7 @@ async fn run_startup_schema_tasks(pool: &sqlx::PgPool) -> Result<()> {
         Err(error) => {
             let error_text = error.to_string();
             if error_text.contains("previously applied but has been modified") {
-                tracing::warn!(
+                tracing::debug!(
                     "检测到 sqlx 迁移校验失败（已应用迁移文件被修改），继续执行兼容性补齐 SQL：{}",
                     error_text
                 );
@@ -113,6 +110,26 @@ async fn run_startup_schema_tasks(pool: &sqlx::PgPool) -> Result<()> {
 
     ensure_schema_compatibility(pool).await?;
     Ok(())
+}
+
+fn log_filter() -> EnvFilter {
+    let base = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "movie_rust_backend=debug,tower_http=info,sqlx=warn".into());
+
+    [
+        "sqlx=warn",
+        "sqlx::query=warn",
+        "sqlx::postgres::notice=warn",
+        "sqlx::migrate=warn",
+    ]
+    .into_iter()
+    .fold(base, |filter, directive| {
+        filter.add_directive(
+            directive
+                .parse()
+                .expect("内置日志过滤规则必须有效"),
+        )
+    })
 }
 
 async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
@@ -188,6 +205,19 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_series_episode_catalog_series_date
             ON series_episode_catalog(series_id, premiere_date)
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS collection_items (
+            collection_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            item_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            display_order INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (collection_id, item_id)
+        )
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_collection_items_item
+            ON collection_items(item_id)
         "#,
     ];
 

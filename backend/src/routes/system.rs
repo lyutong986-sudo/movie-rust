@@ -89,9 +89,10 @@ async fn public_info(
 ) -> Result<Json<PublicSystemInfo>, crate::error::AppError> {
     let startup_wizard_completed = repository::startup_wizard_completed(&state.pool).await?;
     let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+    let local_address = local_server_address(&state);
 
     Ok(Json(PublicSystemInfo {
-        local_address: format!("http://{}:{}", state.config.host, state.config.port),
+        local_address,
         server_name: startup.server_name,
         version: env!("CARGO_PKG_VERSION").to_string(),
         product_name: "Movie Rust".to_string(),
@@ -141,9 +142,10 @@ async fn system_info(
         .as_ref()
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty());
+    let local_address = local_server_address(&state);
 
     Ok(Json(SystemInfo {
-        local_address: format!("http://{}:{}", state.config.host, state.config.port),
+        local_address,
         server_name: startup.server_name,
         version: env!("CARGO_PKG_VERSION").to_string(),
         product_name: "Movie Rust".to_string(),
@@ -194,9 +196,14 @@ async fn named_system_configuration(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, crate::error::AppError> {
-    let value = repository::named_system_configuration(&state.pool, &name)
-        .await?
-        .unwrap_or_else(|| default_named_configuration(&name));
+    let default_value = default_named_configuration(&name);
+    let value = match repository::named_system_configuration(&state.pool, &name).await? {
+        Some(mut value) => {
+            repository::merge_missing_json_fields(&mut value, &default_value);
+            value
+        }
+        None => default_value,
+    };
     Ok(Json(value))
 }
 
@@ -240,7 +247,7 @@ async fn server_domains(
 ) -> Result<Json<Value>, crate::error::AppError> {
     let startup = repository::startup_configuration(&state.pool, &state.config).await?;
     let remote_access = repository::startup_remote_access(&state.pool, &state.config).await?;
-    let local_address = format!("http://{}:{}", state.config.host, state.config.port);
+    let local_address = local_server_address(&state);
     let mut data = vec![json!({
         "name": startup.server_name,
         "url": local_address,
@@ -335,6 +342,23 @@ async fn server_log_content(
     Ok(([(CONTENT_TYPE, "text/plain; charset=utf-8")], content))
 }
 
+fn local_server_address(state: &AppState) -> String {
+    if let Some(public_url) = state.config.public_url.as_ref() {
+        let normalized = public_url.trim().trim_end_matches('/').to_string();
+        if !normalized.is_empty() {
+            return normalized;
+        }
+    }
+
+    let host = state.config.host.trim();
+    let client_host = match host {
+        "" | "0.0.0.0" | "::" | "[::]" => "localhost",
+        value => value,
+    };
+
+    format!("http://{}:{}", client_host, state.config.port)
+}
+
 async fn server_log_content_by_query(
     _session: AuthSession,
     State(state): State<AppState>,
@@ -422,9 +446,14 @@ async fn update_media_encoder_path(
     State(state): State<AppState>,
     Form(payload): Form<MediaEncoderPathRequest>,
 ) -> Result<StatusCode, crate::error::AppError> {
-    let mut encoding = repository::named_system_configuration(&state.pool, "encoding")
-        .await?
-        .unwrap_or_else(|| default_named_configuration("encoding"));
+    let default_encoding = default_named_configuration("encoding");
+    let mut encoding = match repository::named_system_configuration(&state.pool, "encoding").await? {
+        Some(mut value) => {
+            repository::merge_missing_json_fields(&mut value, &default_encoding);
+            value
+        }
+        None => default_encoding,
+    };
 
     if !matches!(
         payload.path_type.as_deref(),

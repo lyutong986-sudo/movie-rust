@@ -1,6 +1,7 @@
 use crate::{
+    auth,
     error::AppError,
-    models::{StartupConfiguration, StartupRemoteAccessRequest, UserDto},
+    models::{StartupConfiguration, StartupRemoteAccessRequest, UserConfigurationDto, UserPolicyDto},
     repository,
     state::AppState,
 };
@@ -32,7 +33,9 @@ pub fn router() -> Router<AppState> {
 
 async fn configuration(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<StartupConfiguration>, AppError> {
+    ensure_startup_access(&state, &headers).await?;
     Ok(Json(
         repository::startup_configuration(&state.pool, &state.config).await?,
     ))
@@ -40,20 +43,28 @@ async fn configuration(
 
 async fn update_configuration(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<StartupConfiguration>,
 ) -> Result<StatusCode, AppError> {
+    ensure_startup_access(&state, &headers).await?;
     repository::update_startup_configuration(&state.pool, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn first_user(State(state): State<AppState>) -> Result<Json<Option<UserDto>>, AppError> {
+async fn first_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    ensure_startup_access(&state, &headers).await?;
     let users = repository::list_users(&state.pool, false).await?;
     let user = match users.first() {
-        Some(user) => Some(
-            repository::user_to_dto_with_context(&state.pool, user, state.config.server_id)
-                .await?,
-        ),
-        None => None,
+        Some(user) => {
+            let dto =
+                repository::user_to_dto_with_context(&state.pool, user, state.config.server_id)
+                    .await?;
+            user_response_json(dto, None)
+        }
+        None => empty_startup_user_json(&state),
     };
     Ok(Json(user))
 }
@@ -71,6 +82,7 @@ async fn create_first_user(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, AppError> {
+    ensure_startup_access(&state, &headers).await?;
     let payload = parse_startup_user_request(&headers, &body)?;
     let name = payload
         .name
@@ -113,7 +125,68 @@ async fn create_first_user(
     };
 
     let dto = repository::user_to_dto_with_context(&state.pool, &user, state.config.server_id).await?;
-    Ok(Json(json!({
+    Ok(Json(user_response_json(dto, user_link_result)))
+}
+
+async fn remote_access(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<StartupRemoteAccessRequest>,
+) -> Result<StatusCode, AppError> {
+    ensure_startup_access(&state, &headers).await?;
+    repository::update_remote_access(&state.pool, &payload).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_remote_access(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<StartupRemoteAccessRequest>, AppError> {
+    ensure_startup_access(&state, &headers).await?;
+    Ok(Json(
+        repository::startup_remote_access(&state.pool, &state.config).await?,
+    ))
+}
+
+async fn complete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, AppError> {
+    ensure_startup_access(&state, &headers).await?;
+    repository::complete_startup_wizard(&state.pool).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn ensure_startup_access(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
+    if !repository::startup_wizard_completed(&state.pool).await? {
+        return Ok(());
+    }
+
+    let session = auth::require_auth(state, headers, None).await?;
+    auth::require_admin(&session)
+}
+
+fn empty_startup_user_json(state: &AppState) -> Value {
+    json!({
+        "Name": "",
+        "ServerId": crate::models::uuid_to_emby_guid(&state.config.server_id),
+        "Id": "",
+        "HasPassword": false,
+        "HasConfiguredPassword": false,
+        "HasConfiguredEasyPassword": false,
+        "ConnectUserName": null,
+        "ConnectUserId": null,
+        "ConnectLinkType": null,
+        "PrimaryImageTag": null,
+        "LastActivityDate": null,
+        "Policy": UserPolicyDto::default(),
+        "Configuration": UserConfigurationDto::default(),
+        "UserLinkResult": null
+    })
+}
+
+fn user_response_json(dto: crate::models::UserDto, user_link_result: Option<Value>) -> Value {
+    json!({
         "Name": dto.name,
         "ServerId": dto.server_id,
         "Id": dto.id,
@@ -128,28 +201,7 @@ async fn create_first_user(
         "Policy": dto.policy,
         "Configuration": dto.configuration,
         "UserLinkResult": user_link_result
-    })))
-}
-
-async fn remote_access(
-    State(state): State<AppState>,
-    Json(payload): Json<StartupRemoteAccessRequest>,
-) -> Result<StatusCode, AppError> {
-    repository::update_remote_access(&state.pool, &payload).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn get_remote_access(
-    State(state): State<AppState>,
-) -> Result<Json<StartupRemoteAccessRequest>, AppError> {
-    Ok(Json(
-        repository::startup_remote_access(&state.pool, &state.config).await?,
-    ))
-}
-
-async fn complete(State(state): State<AppState>) -> Result<StatusCode, AppError> {
-    repository::complete_startup_wizard(&state.pool).await?;
-    Ok(StatusCode::NO_CONTENT)
+    })
 }
 
 fn parse_startup_user_request(

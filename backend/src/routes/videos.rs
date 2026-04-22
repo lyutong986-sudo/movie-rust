@@ -30,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .route("/videos/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
         .route("/Video/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
         .route("/video/ActiveEncodings/Delete", get(active_encodings_delete).post(active_encodings_delete))
+        .route("/Videos/MergeVersions", post(merge_versions))
         .route("/Videos/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
         .route("/videos/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
         .route("/Video/{item_id}/master.m3u8", get(master_playlist).head(master_playlist))
@@ -108,6 +109,10 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/{_media_source_id}/stream.{container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
         .route("/Video/{item_id}/{_media_source_id}/stream.{container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
         .route("/video/{item_id}/{_media_source_id}/stream.{container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
+}
+
+async fn merge_versions() -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 async fn active_encodings(

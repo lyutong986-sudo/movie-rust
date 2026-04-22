@@ -31,6 +31,8 @@ pub fn router() -> Router<AppState> {
         .route("/Environment/NetworkDevices", get(network_devices))
         .route("/Environment/ValidatePath", post(validate_path))
         .route("/Devices", get(devices))
+        .route("/Devices/Info", get(device_info))
+        .route("/Devices/Options", get(device_options).post(update_device_options))
         .route("/Devices/{id}", delete(delete_device))
         .route("/Devices/{id}/Delete", post(delete_device))
         .route("/Devices/CameraUploads", get(camera_uploads))
@@ -65,6 +67,13 @@ struct ValidatePathRequest {
     path: String,
     #[serde(default)]
     validate_writeable: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DeviceQuery {
+    #[serde(default, alias = "id")]
+    id: Option<String>,
 }
 
 async fn default_directory_browser(
@@ -168,6 +177,63 @@ async fn devices(
         "TotalRecordCount": items.len(),
         "StartIndex": 0
     })))
+}
+
+async fn device_info(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<DeviceQuery>,
+) -> Result<Json<Value>, AppError> {
+    let requested_id = query.id.as_deref().unwrap_or_default();
+    let sessions = repository::list_all_sessions(&state.pool).await?;
+
+    if let Some(session) = sessions.iter().find(|session| {
+        session.device_id.as_deref() == Some(requested_id)
+            || session.access_token.as_str() == requested_id
+    }) {
+        return Ok(Json(json!({
+            "Id": session.device_id.clone().unwrap_or_else(|| session.access_token.clone()),
+            "Name": session.device_name.clone().unwrap_or_else(|| "Unknown Device".to_string()),
+            "AppName": session.client.clone().unwrap_or_else(|| "Movie Rust Client".to_string()),
+            "LastUserId": session.user_id.to_string(),
+            "LastUserName": session.user_name,
+            "DateLastActivity": session.last_activity_at,
+            "Capabilities": []
+        })));
+    }
+
+    Ok(Json(json!({
+        "Id": requested_id,
+        "Name": requested_id,
+        "AppName": "Unknown",
+        "Capabilities": []
+    })))
+}
+
+async fn device_options(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<DeviceQuery>,
+) -> Result<Json<Value>, AppError> {
+    let id = query.id.unwrap_or_default();
+    let value = repository::named_system_configuration(&state.pool, &format!("device_options_{id}"))
+        .await?
+        .unwrap_or_else(|| json!({
+            "CustomName": "",
+            "CameraUpload": false
+        }));
+    Ok(Json(value))
+}
+
+async fn update_device_options(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<DeviceQuery>,
+    Json(payload): Json<Value>,
+) -> Result<StatusCode, AppError> {
+    let id = query.id.unwrap_or_default();
+    repository::update_named_system_configuration(&state.pool, &format!("device_options_{id}"), &payload).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_device(

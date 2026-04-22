@@ -40,7 +40,6 @@ pub fn router(static_dir: PathBuf) -> Router<AppState> {
 
     Router::new()
         .route("/", get(root_redirect))
-        .route("/web", get(web_redirect))
         .route("/web/index.html", get(web_index_redirect))
         .route("/web/ConfigurationPages", get(configuration_pages))
         .route("/web/ConfigurationPage", get(configuration_page))
@@ -59,10 +58,6 @@ fn dashboard_dir(static_dir: &std::path::Path) -> PathBuf {
 }
 
 async fn root_redirect() -> Redirect {
-    Redirect::temporary("/web/index.html")
-}
-
-async fn web_redirect() -> Redirect {
     Redirect::temporary("/web/index.html")
 }
 

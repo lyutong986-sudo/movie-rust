@@ -24,6 +24,7 @@ pub fn router() -> Router<AppState> {
         .route("/Connect/Pending", get(connect_pending).delete(delete_connect_pending))
         .route("/Connect/Invite", post(connect_invite))
         .route("/News/Product", get(product_news))
+        .route("/Packages", get(packages))
         .route("/Packages/{id}/Reviews", get(package_reviews))
         .route("/Packages/Reviews/{id}", post(create_package_review))
         .route("/Packages/{name}", get(package_info))
@@ -140,6 +141,10 @@ async fn product_news(_session: AuthSession) -> Json<Value> {
         "Items": [],
         "TotalRecordCount": 0
     }))
+}
+
+async fn packages(_session: AuthSession) -> Json<Vec<Value>> {
+    Json(Vec::new())
 }
 
 async fn package_reviews(

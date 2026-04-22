@@ -137,10 +137,19 @@ pub async fn system_configuration(
     pool: &sqlx::PgPool,
     config: &Config,
 ) -> Result<Value, AppError> {
-    if let Some(value) = get_system_setting(pool, "system_configuration").await? {
+    let defaults = default_system_configuration(pool, config).await?;
+    if let Some(mut value) = get_system_setting(pool, "system_configuration").await? {
+        merge_missing_json_fields(&mut value, &defaults);
         return Ok(value);
     }
 
+    Ok(defaults)
+}
+
+async fn default_system_configuration(
+    pool: &sqlx::PgPool,
+    config: &Config,
+) -> Result<Value, AppError> {
     let startup = startup_configuration(pool, config).await?;
     let remote_access = startup_remote_access(pool, config).await?;
     let mut value = serde_json::Map::new();
@@ -209,6 +218,21 @@ pub async fn system_configuration(
     );
 
     Ok(Value::Object(value))
+}
+
+pub fn merge_missing_json_fields(target: &mut Value, defaults: &Value) {
+    let (Value::Object(target), Value::Object(defaults)) = (target, defaults) else {
+        return;
+    };
+
+    for (key, default_value) in defaults {
+        match target.get_mut(key) {
+            Some(existing) => merge_missing_json_fields(existing, default_value),
+            None => {
+                target.insert(key.clone(), default_value.clone());
+            }
+        }
+    }
 }
 
 pub async fn update_system_configuration(
@@ -3649,6 +3673,231 @@ pub async fn get_media_item(
     .bind(id)
     .fetch_optional(pool)
     .await?)
+}
+
+pub async fn list_collection_items(
+    pool: &sqlx::PgPool,
+    item_type: &str,
+) -> Result<Vec<DbMediaItem>, AppError> {
+    Ok(sqlx::query_as::<_, DbMediaItem>(
+        r#"
+        SELECT
+            id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
+            overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
+            premiere_date, status, end_date, air_days, air_time, series_name, season_name,
+            index_number, index_number_end, parent_index_number, provider_ids, genres,
+            studios, tags, production_locations,
+            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            logo_path, thumb_path, remote_trailers,
+            date_created, date_modified
+        FROM media_items
+        WHERE item_type = $1
+        ORDER BY sort_name, name
+        "#,
+    )
+    .bind(item_type)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn create_virtual_collection_item(
+    pool: &sqlx::PgPool,
+    name: &str,
+    item_type: &str,
+    media_type: &str,
+    path_prefix: &str,
+) -> Result<DbMediaItem, AppError> {
+    let library = ensure_virtual_collection_library(pool).await?;
+    let unique_path = format!("{}/{}", path_prefix.trim_end_matches('/'), Uuid::new_v4());
+    let empty = Vec::<String>::new();
+    let id = upsert_media_item(
+        pool,
+        UpsertMediaItem {
+            library_id: library.id,
+            parent_id: None,
+            name,
+            item_type,
+            media_type,
+            path: std::path::Path::new(&unique_path),
+            container: None,
+            original_title: None,
+            overview: None,
+            production_year: None,
+            official_rating: None,
+            community_rating: None,
+            critic_rating: None,
+            runtime_ticks: None,
+            premiere_date: None,
+            status: None,
+            end_date: None,
+            air_days: &empty,
+            air_time: None,
+            provider_ids: json!({}),
+            genres: &empty,
+            studios: &empty,
+            tags: &empty,
+            production_locations: &empty,
+            image_primary_path: None,
+            backdrop_path: None,
+            logo_path: None,
+            thumb_path: None,
+            remote_trailers: &empty,
+            series_name: None,
+            season_name: None,
+            index_number: None,
+            index_number_end: None,
+            parent_index_number: None,
+            width: None,
+            height: None,
+            video_codec: None,
+            audio_codec: None,
+        },
+    )
+    .await?;
+
+    get_media_item(pool, id)
+        .await?
+        .ok_or_else(|| AppError::Internal("创建虚拟集合项后无法读取".to_string()))
+}
+
+pub async fn add_items_to_collection(
+    pool: &sqlx::PgPool,
+    collection_id: Uuid,
+    item_ids: &[Uuid],
+) -> Result<(), AppError> {
+    ensure_collection_exists(pool, collection_id).await?;
+    for (index, item_id) in item_ids.iter().copied().enumerate() {
+        if get_media_item(pool, item_id).await?.is_none() {
+            continue;
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO collection_items (collection_id, item_id, display_order)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (collection_id, item_id)
+            DO UPDATE SET display_order = EXCLUDED.display_order
+            "#,
+        )
+        .bind(collection_id)
+        .bind(item_id)
+        .bind(index as i32)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+pub async fn rename_collection_item(
+    pool: &sqlx::PgPool,
+    collection_id: Uuid,
+    name: &str,
+) -> Result<DbMediaItem, AppError> {
+    ensure_collection_exists(pool, collection_id).await?;
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("Name cannot be empty".to_string()));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE media_items
+        SET name = $1, sort_name = lower($1), date_modified = now()
+        WHERE id = $2 AND item_type IN ('BoxSet', 'Playlist')
+        "#,
+    )
+    .bind(trimmed)
+    .bind(collection_id)
+    .execute(pool)
+    .await?;
+
+    get_media_item(pool, collection_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Collection or playlist not found".to_string()))
+}
+
+pub async fn delete_collection_item(
+    pool: &sqlx::PgPool,
+    collection_id: Uuid,
+) -> Result<(), AppError> {
+    ensure_collection_exists(pool, collection_id).await?;
+    sqlx::query("DELETE FROM collection_items WHERE collection_id = $1 OR item_id = $1")
+        .bind(collection_id)
+        .execute(pool)
+        .await?;
+    let result = sqlx::query("DELETE FROM media_items WHERE id = $1 AND item_type IN ('BoxSet', 'Playlist')")
+        .bind(collection_id)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Collection or playlist not found".to_string()));
+    }
+    Ok(())
+}
+
+pub async fn remove_items_from_collection(
+    pool: &sqlx::PgPool,
+    collection_id: Uuid,
+    item_ids: &[Uuid],
+) -> Result<(), AppError> {
+    ensure_collection_exists(pool, collection_id).await?;
+    if item_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query("DELETE FROM collection_items WHERE collection_id = $1 AND item_id = ANY($2)")
+        .bind(collection_id)
+        .bind(item_ids)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn collection_children(
+    pool: &sqlx::PgPool,
+    collection_id: Uuid,
+) -> Result<Vec<DbMediaItem>, AppError> {
+    Ok(sqlx::query_as::<_, DbMediaItem>(
+        r#"
+        SELECT
+            item.id, item.parent_id, item.name, item.original_title, item.sort_name, item.item_type, item.media_type,
+            item.path, item.container, item.overview, item.production_year, item.official_rating,
+            item.community_rating, item.critic_rating, item.runtime_ticks, item.premiere_date,
+            item.status, item.end_date, item.air_days, item.air_time, item.series_name, item.season_name,
+            item.index_number, item.index_number_end, item.parent_index_number, item.provider_ids,
+            item.genres, item.studios, item.tags, item.production_locations, item.width, item.height,
+            item.bit_rate, item.video_codec, item.audio_codec, item.image_primary_path, item.backdrop_path,
+            item.logo_path, item.thumb_path, item.remote_trailers, item.date_created, item.date_modified
+        FROM collection_items ci
+        INNER JOIN media_items item ON item.id = ci.item_id
+        WHERE ci.collection_id = $1
+        ORDER BY ci.display_order, item.sort_name, item.name
+        "#,
+    )
+    .bind(collection_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+async fn ensure_collection_exists(pool: &sqlx::PgPool, collection_id: Uuid) -> Result<(), AppError> {
+    match get_media_item(pool, collection_id).await? {
+        Some(item) if matches!(item.item_type.as_str(), "BoxSet" | "Playlist") => Ok(()),
+        Some(_) => Err(AppError::BadRequest("目标不是合集或播放列表".to_string())),
+        None => Err(AppError::NotFound("合集或播放列表不存在".to_string())),
+    }
+}
+
+async fn ensure_virtual_collection_library(pool: &sqlx::PgPool) -> Result<DbLibrary, AppError> {
+    if let Some(library) = get_library_by_name(pool, "Collections").await? {
+        return Ok(library);
+    }
+
+    create_library(
+        pool,
+        "Collections",
+        "mixed",
+        &[String::from("virtual://collections")],
+        LibraryOptionsDto::default(),
+    )
+    .await
 }
 
 pub async fn find_items_for_external_person_credit(

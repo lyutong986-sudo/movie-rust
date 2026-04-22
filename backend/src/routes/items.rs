@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Counts", get(item_counts))
         .route("/Users/{user_id}/Items/Counts", get(user_item_counts))
         .route("/Items/Filters", get(item_filters))
+        .route("/Items/Filters2", get(item_filters))
         .route("/Artists", get(artists))
         .route("/Artists/{name}", get(artist))
         .route("/Artists/{name}/Items", get(artist_items))

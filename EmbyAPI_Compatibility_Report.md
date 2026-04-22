@@ -468,3 +468,147 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 ### 仍待继续
 - 继续补 dashboard 首页的插件更新/应用更新链路细节，尤其是 `Packages/Updates` 不同分类对象的字段形状。
 - 继续核对活动日志、计划任务、插件安装和 Connect 相关消息流与 WebSocket 推送细节。
+
+## 2026-04-23 WebDashboard 适配进展（八）
+
+### 本轮完成
+- 修复 Startup 公开接口安全问题：启动向导未完成时仍允许初始化；一旦 `startup_wizard_completed=true`，`Startup/Configuration`、`Startup/User`、`Startup/RemoteAccess`、`Startup/Complete` 都要求有效管理员认证。
+- 修复首次启动向导空用户返回：`GET /Startup/User` 在无用户时返回包含 `Name`、`ConnectUserName`、`Policy`、`Configuration` 等字段的空用户对象，避免 WebDashboard `wizarduserpage.js` 直接访问 `user.Name` 时崩溃。
+- 修复旧系统配置升级兼容：`system_configuration` 会把数据库已有配置与当前默认配置做缺字段合并，避免旧部署缺少新增 WebDashboard 字段。
+- 修复命名配置升级兼容：`System/Configuration/{name}` 返回时会把已保存配置叠加到默认命名配置上，当前覆盖 `encoding`、`livetv` 等默认结构。
+- 修复 Docker 场景的系统地址：`System/Info` 和 `System/Info/Public` 优先使用 `APP_PUBLIC_URL`，否则把 `0.0.0.0` / `::` 转为 `localhost`，避免返回不可访问的 `http://0.0.0.0:8096`。
+
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+
+## 2026-04-23 WebDashboard 适配进展（九）
+
+### 本轮完成
+- 按 WebDashboard 实际 `ApiClient.getUrl(...)` 调用继续补齐一批页面探测接口，覆盖设备、DLNA、媒体库选项、同步、合集、播放列表、LiveTV 辅助配置与忘记密码流程。
+- 新增设备详情与设备选项接口：
+  - `GET /Devices/Info`
+  - `GET/POST /Devices/Options`
+  - 设备选项会按设备 ID 写入命名配置，兼容 `devices/device.js` 保存自定义设备名。
+- 新增 DLNA 配置接口：
+  - `GET /Dlna/ProfileInfos`
+  - `GET/POST /Dlna/Profiles`
+  - `GET/POST/DELETE /Dlna/Profiles/{id}`
+  - 自定义 profile 会写入命名配置，避免 DLNA profile 页面直接 404。
+- 新增媒体库与列表类接口：
+  - `GET /Libraries/AvailableOptions`
+  - `GET /Items/Filters2`
+  - `GET /Movies/Recommendations`
+  - `GET/POST /Collections`
+  - `POST /Collections/{id}/Items`
+  - `POST /Collections/{id}/Items/Delete`
+  - `GET/POST /Playlists`
+  - `POST /Playlists/{id}/Items`
+- 新增同步管理接口：
+  - `GET /Sync/Options`
+  - `GET/POST /Sync/Jobs`
+  - `GET/POST/DELETE /Sync/Jobs/{id}`
+  - `GET /Sync/JobItems`
+  - `DELETE /Sync/JobItems/{id}`
+  - `POST /Sync/JobItems/{id}/Enable`
+  - `POST /LiveStreams/Open`
+- 补齐 LiveTV 设置页辅助接口：
+  - `GET /LiveTv/Tuners`
+  - `GET /LiveTv/Tuners/Discvover` 与 `GET /LiveTv/Tuners/Discover`
+  - `GET /LiveTv/TunerHosts`
+  - `GET /LiveTv/TunerHosts/Types`
+  - `GET /LiveTv/ChannelMappingOptions`
+  - `GET/POST /LiveTv/ChannelMappings`
+  - `GET /LiveTv/ListingProviders`
+  - `GET /LiveTv/ListingProviders/Default`
+  - `GET /LiveTv/ListingProviders/Lineups`
+  - `GET /LiveTv/ListingProviders/SchedulesDirect/Countries`
+- 新增登录页忘记密码兼容流程：
+  - `POST /Users/ForgotPassword`
+  - `POST /Users/ForgotPassword/Pin`
+  - 当前按本地部署安全默认返回联系管理员，不开放匿名重置密码。
+- 新增 `POST /Videos/MergeVersions`，兼容版本合并按钮的提交动作。
+
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+- `cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过，新增路由没有和现有 Axum 路由冲突。
+
+### 仍待继续
+- `Collections` / `Playlists` 当前已兼容前端交互入口，后续还需要落到真实媒体项关系表，支持创建后可在库中长期展示。
+- `Sync` 当前完成 WebDashboard 表单/列表接口形状，后续需要接入真实离线同步任务队列。
+- 继续按前端实际调用补 `Dlna` profile 全量字段校验、LiveTV 频道映射持久化、播放列表/合集实体化。
+
+## 2026-04-23 WebDashboard 适配进展（十）
+
+### 本轮完成
+- 修复 Dashboard 静态路由启动失败：移除精确 `/web` 路由注册，避免与 `ServeDir` 的 `/web` 静态挂载冲突导致 Axum panic。
+- 保留 `/` 到 `/web/index.html`、`/web/index.html` 到 `/web/` 的跳转，`/web` 由静态服务接管。
+- 新增统一日志过滤函数，默认和 `RUST_LOG` 环境配置都会强制追加以下降噪规则：
+  - `sqlx=warn`
+  - `sqlx::query=warn`
+  - `sqlx::postgres::notice=warn`
+  - `sqlx::migrate=warn`
+- 将“已应用迁移文件被修改，继续执行兼容性补齐 SQL”的启动提示从 `WARN` 降为 `DEBUG`，避免每次启动刷屏。
+- 顺手移除本轮相关路由文件中几个 unused import，减少新引入的编译输出噪声。
+
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+- `cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过，确认 `/web` 路由冲突已消除。
+
+### 仍待继续
+- 项目仍有一批历史 Rust warning，本轮只清理了与最近新增接口相关的明显 unused import；后续可单独做一次 warning cleanup。
+
+## 2026-04-23 WebDashboard 适配进展（十一）
+
+### 本轮完成
+- 将 `Collections` / `Playlists` 从临时兼容响应推进为真实持久化功能。
+- 新增数据库迁移 `0021_collection_items.sql`，创建 `collection_items` 关系表保存合集/播放列表成员。
+- 启动兼容补齐 SQL 同步增加 `collection_items` 建表和索引，兼容已部署实例自动补表。
+- 新增 repository 能力：
+  - 创建虚拟合集/播放列表媒体项，写入 `media_items`。
+  - 自动创建/复用 `Collections` 虚拟媒体库，路径为 `virtual://collections`。
+  - 持久化添加/移除成员关系。
+  - 查询合集/播放列表列表与子项，并复用 `media_item_to_dto` 返回标准 `BaseItemDto`。
+- 扩展接口：
+  - `GET /Collections` 返回持久化 `BoxSet` 列表。
+  - `POST /Collections?Name=...&Ids=...` 创建合集并保存成员。
+  - `GET /Collections/{id}/Items` 返回合集成员。
+  - `POST /Collections/{id}/Items?Ids=...` 添加成员。
+  - `POST /Collections/{id}/Items/Delete?Ids=...` 移除成员。
+  - `GET /Playlists` 返回持久化 `Playlist` 列表。
+  - `POST /Playlists?Name=...&Ids=...` 创建播放列表并保存成员。
+  - `GET /Playlists/{id}/Items` 返回播放列表成员。
+  - `POST /Playlists/{id}/Items?Ids=...` 添加成员。
+
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+- `cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。
+
+### 仍待继续
+- 播放列表/合集还需要继续补排序、重命名、删除、图片刷新等更完整的 Emby 管理接口。
+- `Sync` 仍是下一块需要从接口形状推进到真实任务队列的功能。
+
+## 2026-04-23 WebDashboard 适配进展（十二）
+### 本轮完成
+- 继续把 `Collections` / `Playlists` 从基础成员关系推进到可管理实体：
+  - `GET /Collections/{id}` / `GET /Playlists/{id}` 返回单个合集或播放列表 `BaseItemDto`。
+  - `POST /Collections/{id}` / `POST /Playlists/{id}` 支持按 Emby WebDashboard 提交体重命名。
+  - `DELETE /Collections/{id}` / `DELETE /Playlists/{id}` 和 `POST /Collections/{id}/Delete` / `POST /Playlists/{id}/Delete` 支持删除虚拟合集/播放列表实体。
+  - `DELETE /Collections/{id}/Items?Ids=...` 和 `DELETE/POST /Playlists/{id}/Items/Delete?Ids=...` 支持成员移除。
+- 新增 repository 能力：
+  - `rename_collection_item` 更新 `media_items.name`、`sort_name`、`date_modified`。
+  - `delete_collection_item` 仅允许删除 `BoxSet` / `Playlist`，并同步清理 `collection_items` 关系，避免误删真实媒体。
+- 将 `Sync` 从纯空响应推进到可持久化的轻量任务队列：
+  - `GET /Sync/Jobs` 支持按 `UserId`、`TargetId` 过滤。
+  - `POST /Sync/Jobs` 保存任务到命名配置 `sync_jobs`，保留前端提交字段并规范化 `Id`、`Name`、`TargetId`、`UserId`、`RequestedItemIds`、`Status`、`Profile`、`Quality`。
+  - `GET/POST/DELETE /Sync/Jobs/{id}` 支持读取、更新和删除任务。
+  - `GET /Sync/JobItems` 根据保存任务返回子任务列表，可按 `JobId` 过滤。
+  - `DELETE /Sync/JobItems/{id}`、`POST /Sync/JobItems/{id}/Enable`、`POST /Sync/JobItems/{id}/Transferred` 会更新子任务状态。
+  - `GET /Sync/Items/Ready` 返回目标设备可传输子任务。
+  - `POST /Sync/Data` 返回当前 `SyncJobs` 与 `SyncJobItems`，兼容离线同步入口刷新。
+  - `DELETE /Sync/{targetId}/Items?ItemIds=...` 会按目标设备和媒体项取消对应子任务。
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+- `cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。
+### 仍待继续
+- `Sync` 当前是配置持久化任务队列，下一步需要接入真实离线文件准备/转码/传输状态，而不仅是 WebDashboard 管理状态。
+- 合集/播放列表还可继续补成员排序、移动、封面刷新、按用户权限过滤等 Emby 细节。
