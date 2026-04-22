@@ -292,17 +292,22 @@ pub async fn branding_configuration(
     pool: &sqlx::PgPool,
     config: &Config,
 ) -> Result<BrandingConfiguration, AppError> {
-    if let Some(value) = get_system_setting(pool, "branding_configuration").await? {
-        if let Ok(configuration) = serde_json::from_value::<BrandingConfiguration>(value) {
-            return Ok(configuration);
-        }
-    }
-
-    Ok(BrandingConfiguration {
+    let defaults = BrandingConfiguration {
         login_disclaimer: config.branding_login_disclaimer.clone(),
         custom_css: config.branding_custom_css.clone(),
         splashscreen_enabled: config.branding_splashscreen_enabled,
-    })
+    };
+
+    for key in ["branding_configuration", "branding"] {
+        if let Some(mut value) = get_system_setting(pool, key).await? {
+            merge_missing_json_fields(&mut value, &serde_json::to_value(&defaults)?);
+            if let Ok(configuration) = serde_json::from_value::<BrandingConfiguration>(value) {
+                return Ok(configuration);
+            }
+        }
+    }
+
+    Ok(defaults)
 }
 
 pub async fn branding_css(pool: &sqlx::PgPool, config: &Config) -> Result<String, AppError> {

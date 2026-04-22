@@ -196,8 +196,9 @@ async fn named_system_configuration(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, crate::error::AppError> {
-    let default_value = default_named_configuration(&name);
-    let value = match repository::named_system_configuration(&state.pool, &name).await? {
+    let normalized_name = normalize_named_configuration_key(&name);
+    let default_value = default_named_configuration(&normalized_name);
+    let value = match repository::named_system_configuration(&state.pool, &normalized_name).await? {
         Some(mut value) => {
             repository::merge_missing_json_fields(&mut value, &default_value);
             value
@@ -213,7 +214,8 @@ async fn update_named_system_configuration(
     Path(name): Path<String>,
     Json(payload): Json<Value>,
 ) -> Result<StatusCode, crate::error::AppError> {
-    repository::update_named_system_configuration(&state.pool, &name, &payload).await?;
+    let normalized_name = normalize_named_configuration_key(&name);
+    repository::update_named_system_configuration(&state.pool, &normalized_name, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -479,6 +481,11 @@ async fn update_media_encoder_path(
 
 fn default_named_configuration(name: &str) -> Value {
     match name.to_ascii_lowercase().as_str() {
+        "branding_configuration" => json!({
+            "LoginDisclaimer": "",
+            "CustomCss": "",
+            "SplashscreenEnabled": false
+        }),
         "encoding" => json!({
             "EnableHardwareEncoding": false,
             "HardwareAccelerationType": "",
@@ -501,7 +508,45 @@ fn default_named_configuration(name: &str) -> Value {
             "EnableRecordingSubfolders": true,
             "EnableOriginalAudioWithEncodedRecordings": true
         }),
+        "dlna" => json!({
+            "EnablePlayTo": false,
+            "EnableDebugLog": false,
+            "ClientDiscoveryIntervalSeconds": 60,
+            "EnableServer": true,
+            "BlastAliveMessages": false,
+            "BlastAliveMessageIntervalSeconds": 1800,
+            "DefaultUserId": ""
+        }),
+        "sync" => json!({
+            "TemporaryPath": "",
+            "UploadSpeedLimitBytes": 0,
+            "TranscodingCpuCoreLimit": 0,
+            "EnableFullSpeedTranscoding": false
+        }),
+        "notifications" => json!({
+            "Options": []
+        }),
+        "fanart" => json!({
+            "UserApiKey": ""
+        }),
+        "metadata" => json!({
+            "UseFileCreationTimeForDateAdded": false
+        }),
+        "xbmcmetadata" => json!({
+            "UserId": Value::Null,
+            "ReleaseDateFormat": "yyyy-MM-dd",
+            "SaveImagePathsInNfo": false,
+            "EnablePathSubstitution": false,
+            "EnableExtraThumbsDuplication": false
+        }),
         _ => json!({}),
+    }
+}
+
+fn normalize_named_configuration_key(name: &str) -> String {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "branding" => "branding_configuration".to_string(),
+        other => other.to_string(),
     }
 }
 

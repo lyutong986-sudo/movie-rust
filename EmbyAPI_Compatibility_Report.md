@@ -699,3 +699,41 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 ### 仍待继续
 - 当前插件目录与插件配置页已经能驱动 WebDashboard 页面，但仍属于本地兼容目录，后续还可以继续接入更真实的插件源、版本升级策略与插件专属配置表单。
 - 计划任务目前是轻量持久化状态机，下一步仍需继续对接真实库扫描、元数据刷新、任务进度推送和 WebSocket 广播，进一步贴近 Emby 原生行为。
+## 2026-04-23 WebDashboard 适配进展（十九）
+### 本轮完成
+- 使用浏览器实测 `https://test.emby.yun:4443/web/`，定位到首页不是 JS 崩溃，而是 Emby 前端在连接阶段主动拒绝当前服务端版本：
+  - 控制台明确出现 `minServerVersion requirement not met. Server version: 0.1.0`。
+  - 根因是 [backend/src/routes/system.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/routes/system.rs:1) 的 `GET /System/Info/Public` 与 `GET /System/Info` 直接返回了 Cargo 包版本 `0.1.0`，低于 Emby 前端 `connectionmanager.js` 内置的最小服务端版本 `3.2.33`。
+- 已修复系统信息版本兼容：
+  - `System/Info/Public` 与 `System/Info` 现在统一通过 `emby_compatible_server_version()` 返回 Emby 兼容版本号。
+  - 默认兼容版本设为 `4.8.10.0`，并支持通过环境变量 `EMBY_COMPAT_VERSION` 覆盖，方便后续按客户端行为继续微调。
+- 同时清理了匿名首页阶段的样式噪声：
+  - [backend/src/routes/system.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/routes/system.rs:1) 的 `GET /Branding/Css.css` 不再要求登录态，避免前端启动期额外报 `401`。
+### 验证
+- 使用 MCP 浏览器实测线上页面，确认当前线上根因是版本门槛拦截与匿名 Branding CSS `401`。
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+### 仍待继续
+- 本轮修复已经落到仓库代码，但远端 `https://test.emby.yun:4443/` 仍需重新部署新后端后，浏览器中的 `ServerUpdateNeeded` 弹窗才会真正消失。
+- 远端重新部署后，还需要继续用浏览器复测登录流程、首页路由和启动后的管理页接口，收下一轮真实前端报错。
+## 2026-04-23 WebDashboard 适配进展（二十）
+### 本轮完成
+- 修复命名配置链路里“前端能保存、后端又读不到”的关键别名问题：
+  - [backend/src/routes/system.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/routes/system.rs:1) 为 `/System/Configuration/{name}` 增加命名配置 key 归一化逻辑，当前先把前端常用的 `branding` 统一映射到真正用于品牌接口的 `branding_configuration`。
+  - 这样 `dashboardgeneral.js` 通过 `ApiClient.getNamedConfiguration("branding")` / `updateNamedConfiguration("branding", ...)` 保存的 `LoginDisclaimer`、`CustomCss`，现在会被 `/Branding/Configuration` 与 `/Branding/Css.css` 真实读取到。
+- 补齐多组 WebDashboard 设置页依赖的默认命名配置结构，避免初始返回 `{}` 导致前端访问 `config.Options`、`config.EnablePlayTo`、`config.ReleaseDateFormat` 等字段时为空或保存后字段丢失：
+  - `branding_configuration`
+  - `dlna`
+  - `sync`
+  - `notifications`
+  - `fanart`
+  - `metadata`
+  - `xbmcmetadata`
+- [backend/src/repository.rs](/C:/Users/11797/Desktop/movie-rust/backend/src/repository.rs:1) 的品牌配置读取也做了兼容：
+  - 优先读取 `branding_configuration`
+  - 同时向后兼容历史上可能已经写入的 `branding`
+  - 读取时会合并缺失默认字段，避免升级后旧值缺字段
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+- `cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。
+### 仍待继续
+- 这轮先解决了设置页“结构为空”和品牌配置读写分裂，后续仍要继续沿着 WebDashboard 实际页面，把 `DLNA Profiles`、`Notifications` 单项配置页、`App Services`、`Dashboard` 首页的剩余真实操作接口继续补全到 Emby 形状。
