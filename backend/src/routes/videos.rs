@@ -3,6 +3,7 @@ use crate::{
     error::AppError,
     models::{emby_id_to_uuid, uuid_to_emby_guid, VideoStreamQuery},
     naming, repository,
+    routes::livetv,
     state::AppState,
     transcoder::TranscodingSessionState,
 };
@@ -703,6 +704,19 @@ async fn hls_playlist_response(
     request: Request<Body>,
     is_master: bool,
 ) -> Result<Response, AppError> {
+    if livetv::is_live_tv_channel_id(item_id_str) {
+        let _session = auth::require_auth(state, request.headers(), request.uri().query()).await?;
+        let channel = livetv::find_live_tv_channel(state, item_id_str)
+            .await?
+            .ok_or_else(|| AppError::NotFound("直播频道不存在".to_string()))?;
+        tracing::info!(
+            item_id = %item_id_str,
+            stream_url = %livetv::live_tv_stream_url(&channel),
+            "代理 LiveTV 频道播放流"
+        );
+        return proxy_remote_stream(livetv::live_tv_stream_url(&channel), request).await;
+    }
+
     let requested_item_id = emby_id_to_uuid(item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
     auth::require_auth(state, request.headers(), request.uri().query()).await?;

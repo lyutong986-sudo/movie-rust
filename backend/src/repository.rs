@@ -657,6 +657,32 @@ pub async fn startup_remote_access(
     })
 }
 
+pub async fn get_json_setting(
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<Option<Value>, AppError> {
+    get_system_setting(pool, key).await
+}
+
+pub async fn set_json_setting(
+    pool: &sqlx::PgPool,
+    key: &str,
+    value: Value,
+) -> Result<(), AppError> {
+    set_system_setting(pool, key, value).await
+}
+
+pub async fn delete_json_setting(
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM system_settings WHERE key = $1")
+        .bind(key)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn create_initial_admin(
     pool: &sqlx::PgPool,
     name: &str,
@@ -4195,6 +4221,30 @@ pub async fn get_media_item(
         "#,
     )
     .bind(id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn get_media_item_by_path(
+    pool: &sqlx::PgPool,
+    path: &str,
+) -> Result<Option<DbMediaItem>, AppError> {
+    Ok(sqlx::query_as::<_, DbMediaItem>(
+        r#"
+        SELECT
+            id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
+            overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
+            premiere_date, status, end_date, air_days, air_time, series_name, season_name,
+            index_number, index_number_end, parent_index_number, provider_ids, genres,
+            studios, tags, taglines, production_locations,
+            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            logo_path, thumb_path, remote_trailers,
+            date_created, date_modified
+        FROM media_items
+        WHERE path = $1
+        "#,
+    )
+    .bind(path)
     .fetch_optional(pool)
     .await?)
 }

@@ -882,3 +882,70 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - 新增 `backend/src/routes/livetv.rs` 并注册到主路由，覆盖 EmbySDK/Emby Web 常见 LiveTV 管理探测面：`/LiveTv/Info`、`/LiveTv/Channels`、`/LiveTv/Programs`、`/LiveTv/Recordings`、`/LiveTv/Timers`、`/LiveTv/SeriesTimers`、`/LiveTv/TunerHosts`、`/LiveTv/TunerHosts/Types`、`/LiveTv/TunerHosts/Default/{Type}`、`/LiveTv/ListingProviders`、`/LiveTv/ListingProviders/Available`、`/LiveTv/ListingProviders/Default`、`/LiveTv/ListingProviders/Lineups`、`/LiveTv/ListingProviders/SchedulesDirect/Countries`、`/LiveTv/ChannelMappings`、`/LiveTv/ChannelMappingOptions`、`/LiveTv/Registration` 等。
 - 当前项目尚未实现真实电视调谐器和节目单后端，因此 LiveTV 路由先按 Emby 风格返回空 `QueryResult`、空数组或默认配置对象，而不是伪造可播放频道。这样前端/Emby 客户端能力探测不会被 404 卡住，同时功能仍明确表现为“未配置/不可用”。
 - 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts` 通过，确认新增 LiveTV 路由未与既有路由冲突。本轮未改前端页面代码。
+
+## 2026-04-23 LiveTV Guide、DLNA、通知、插件包、同步与 PIN 登录真实后端补齐（六十五）
+- 这一轮不再做“兼容壳”式 200/404 兜底，而是继续按 `Emby.Web.Mobile-master/src/bower_components/emby-apiclient/apiclient.js` 与相关设置页真实调用，把此前审计出来的 `LiveTv/GuideInfo`、DLNA、通知、插件包、同步、PIN 登录这些管理链路补成可持久化的后端能力。目标是让 EmbySDK 和本地播放器在进入这些页面或发起这些流程时，拿到的是可以保存、回读、继续推进状态的真实数据，而不是固定空对象。
+- `backend/src/repository.rs` 新增面向 JSON 配置的 `get_json_setting()`、`set_json_setting()`、`delete_json_setting()`，统一复用现有 `system_settings` 表存储这批新功能数据，避免为了配置型能力再拆一套新表；`backend/src/routes/system.rs` 里 `build_plugins()` 提升为 `pub(crate)`，供新路由复用当前插件包信息。
+- `backend/src/routes/livetv.rs` 新增 `GET /LiveTv/GuideInfo`，不再只返回壳对象，而是根据服务器配置、`named configuration(livetv)`、现有调谐器与节目单提供器配置推导节目信息窗口、每频道节目数量、抓取范围等 Guide 元数据。虽然当前项目仍未接入真实 EPG 抓取和频道节目实体，但 GuideInfo 已经会反映现有 LiveTV 配置状态，而不是一成不变的假值。
+- 新增 `backend/src/routes/features.rs`，集中承接此前缺失的 Emby 管理功能，并在 `backend/src/routes/mod.rs` 挂入主路由。DLNA 部分已实现 `GET /Dlna/ProfileInfos`、`/Dlna/Profiles`、`/Dlna/Profiles/Default` 以及 `/Dlna/Profiles/{id}` 的查询、新增、更新、删除；默认系统 Profile 与用户自定义 Profile 分开管理，用户修改会持久化保存，下次重启后仍可回读。
+- 通知部分已实现 `GET /Notifications/Types`、`/Notifications/Services`、`/Notifications/Services/Defaults` 和 `POST /Notifications/Services/Test`。通知服务不再是固定假列表，而是根据当前 `NotificationTargetsText`、通知命名配置和服务器插件能力生成服务项与默认配置，测试接口也会回显一次真实的服务测试请求内容，便于前端和 Emby 客户端走通配置流程。
+- 插件包部分已实现 `GET /Packages`、`/Packages/Installed`、`/Packages/Updates`。返回结果会结合当前服务端包信息和已启用插件构建，不再是单纯空数组；更新列表还会读取命名配置中的 package catalog 状态，后续可以在这个基础上继续接真实插件源，而不是推倒重来。
+- 同步部分已实现 `GET/POST /Sync/Data`、`GET/POST /Sync/OfflineActions`、`GET /Sync/Items/Ready`、`POST /Sync/JobItems/{jobId}/Transferred`、`DELETE /Sync/{targetId}/Items`。这些接口现在会真实记录同步目标、离线动作、已准备项目和传输状态，能支撑 Emby 风格的离线同步状态流转；虽然还没有把媒体文件实际打包下载这一步完整落地，但状态数据已经不是临时返回值。
+- `backend/src/routes/sessions.rs` 新增 `GET/POST /Auth/Pin` 与 `POST /Auth/Pin/Exchange`。PIN 会以真实记录保存在后端，支持创建、轮询状态、在已登录会话里确认 PIN 后交换访问令牌；也就是说，PIN 登录链路现在已经有完整的状态机，而不是只为了避免客户端报错返回一个固定结构。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。当前仍有几项后续深化空间：LiveTV 还缺真实频道/EPG 数据抓取与定时刷新；通知测试目前主要验证配置与负载，不会真的外发到第三方；插件包更新尚未接远端仓库；同步也还缺真实离线文件生成与回传下载链路。但这轮新增内容已经是可持久化、可回读、可推进状态的后端实现，不再只是模板兼容外壳。
+
+## 2026-04-23 LiveTV 频道与节目单改为真实 M3U/XMLTV 解析（六十六）
+- 延续上一节“GuideInfo 已经真实化”的方向，这一轮继续对照 `Emby.Web.Mobile-master/src/scripts/livetvtunerprovider-m3u.js`、`src/components/tvproviders/xmltv.js`、`src/bower_components/emby-webcomponents/guide/guide.js` 的实际调用，把 LiveTV 从“有配置接口但频道/节目单仍为空”推进到“能根据已配置源实时产出频道和节目数据”。
+- `backend/Cargo.toml` 新增 `quick-xml`，`backend/src/routes/livetv.rs` 不再把调谐器和节目单提供器只当成文本行处理，而是把 `named configuration(livetv)` 里的 `TunerHosts`、`ListingProviders` 作为结构化配置源。`POST /LiveTv/TunerHosts` 与 `POST /LiveTv/ListingProviders` 现在会生成或更新带 `Id/Type/FriendlyName/Url/Path/...` 的真实对象，同时继续同步回 `ServerConfiguration.LiveTvTunerHostsText` / `LiveTvListingProvidersText`，保证旧探测页与新实现都能读到一致状态。
+- `GET /LiveTv/Channels` 现在会真实读取 `TunerHosts` 中的 M3U 源：支持本地文件路径和 `http/https` URL，解析 `#EXTINF` 中的 `tvg-id`、`tvg-name`、`tvg-logo`、`tvg-chno` 等字段，生成 Emby 风格 `TvChannel` 结果，并支持 `StartIndex/Limit/SortBy/SortOrder` 以及 `IsMovie/IsSports/IsKids/IsNews/IsSeries` 这类按节目类别过滤的查询。
+- `GET/POST /LiveTv/Programs` 不再返回空 `QueryResult`，而是会读取 XMLTV 源并解析 `<channel>` / `<programme>`：支持节目标题、描述、子标题、类别、图标、开始/结束时间、重播标记等字段，并按频道、时间窗口、是否正在播出、类别筛选返回真实节目列表。`/LiveTv/Programs/Recommended` 也复用同一套真实节目查询。
+- `GET /LiveTv/ChannelMappingOptions` 和 `GET /LiveTv/ListingProviders/Lineups` 也随之升级：现在会根据解析出的调谐器频道和 XMLTV 频道生成候选映射，而不是固定空数组，便于后续继续补真正的频道映射编辑和持久化。
+- `GET /LiveTv/Info` 与 `GET /LiveTv/GuideInfo` 现在会统计真实配置下的 `ConfiguredChannelCount`、`ProgramCount`、当前正在播出的节目数量等信息，不再只回显配置条目数量。
+- 当前仍有一个明确边界：这轮已经做到了“真实读取外部 M3U/XMLTV 源并生成频道/节目数据”，但还没有继续做到真正的直播流代理、频道播放 URL 鉴权重写、定时 EPG 缓存刷新、录制任务调度和频道映射保存。因此它已经不是兼容壳，但也还没到完整 Emby LiveTV 后端的终点。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。当前编译输出仍有项目既有 warning，但本轮新增 LiveTV 解析链路已能稳定通过构建与路由冲突校验。
+
+## 2026-04-23 LiveTV 播放链接入 PlaybackInfo 与服务器代理流（六十七）
+- 继续对照 `Emby.Web.Mobile-master/src/bower_components/emby-webcomponents/playback/playbackmanager.js` 的频道播放流程，补上了上一节还缺的“频道条目如何进入 Emby 标准播放链”这一层。模板对 `TvChannel` 的处理并不是直接拿列表里的 URL 播放，而是先请求 `Items/{ChannelId}/PlaybackInfo`，再根据返回的 `MediaSource` 走 `Path` 或 `/Videos/{id}/stream.*`。此前当前项目虽然已经能返回 LiveTV 频道列表和节目单，但频道 id 仍不能进入现有播放主链。
+- `backend/src/routes/items.rs` 的 `playback_info()` 现在会识别 `livetv-channel-*` 这类频道 item id，不再一律按媒体库 UUID 解析。对于频道条目，后端会构造真实的 `MediaSourceDto` 返回给 EmbySDK：包含服务器内可访问的 `Path`、`Container`、`MediaSourceId`、`LiveStreamId`、`OpenToken` 和无限流标记，而不是继续报“无效项目 ID”。
+- `backend/src/routes/livetv.rs` 新增了可复用的内部 helper：`is_live_tv_channel_id()`、`find_live_tv_channel()`、`build_live_tv_media_source()`、`live_tv_stream_url()`。这样 LiveTV 配置/频道解析、PlaybackInfo 和视频流代理三条链路复用了同一套频道查找和媒体源生成逻辑，没有再塞一份手写兼容分支。
+- `backend/src/routes/videos.rs` 的 `stream_video_request()` 现在也能识别 LiveTV 频道 id。对于 `Videos/{channelId}/stream.{container}` 一类请求，会先鉴权，再回查频道配置，然后通过现有 `proxy_remote_stream()` 代理真实频道流地址，而不是试图把频道 id 当成本地媒体库项目去查 PostgreSQL。也就是说，频道播放现在已经真正走进了服务器流代理，而不是把外部 M3U URL 直接丢给前端。
+- 这轮实现后，LiveTV 的播放链已经连成闭环：`TvChannel 列表 -> Items/{ChannelId}/PlaybackInfo -> MediaSource.Path 指向服务器路由 -> /Videos/{ChannelId}/stream.* 代理远端频道流`。这比上一轮“只有频道和节目单数据”更接近 Emby 真正的 LiveTV 播放模式，也更适合浏览器和自定义播放器走统一入口。
+- 当前仍未补的一层是 `LiveStreams/Open` / `Close` 的完整会话管理、频道播放会话落库、直播流转码和多码率切换。因此这轮已经完成“频道能按 Emby PlaybackInfo 标准真正播放”，但还没有做到 Emby 级别的完整 LiveStream 生命周期管理。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。当前项目既有 warning 仍存在，但本轮 PlaybackInfo 与视频流代理改动均已通过构建和路由校验。
+
+## 2026-04-23 LiveStreams/Open 与 Close 会话链路补齐（六十八）
+- 继续对照 `Emby.Web.Mobile-master/src/bower_components/emby-webcomponents/playback/playbackmanager.js`，把上一节还留着的 `RequiresOpening/OpenToken/LiveStreamId` 生命周期继续补齐。Emby 模板在拿到 `TvChannel` 的 `PlaybackInfo` 后，如果 `MediaSource.RequiresOpening` 为真，会先调用 `POST /LiveStreams/Open`，再使用返回的 `MediaSource` 开始播放；停止或切换时通常还会携带 `LiveStreamId` 继续请求后续流地址。因此只有 `PlaybackInfo` 和 `/Videos/.../stream.*` 还不够，需要把 LiveStream 打开和关闭的会话语义也接进来。
+- `backend/src/routes/livetv.rs` 的 `build_live_tv_media_source()` 现在会根据是否已有 `LiveStreamId` 决定 `RequiresOpening`：首次从频道 `PlaybackInfo` 返回时会带 `OpenToken` 且 `RequiresOpening=true`；一旦经过 `LiveStreams/Open`，返回给客户端的新媒体源会携带真实 `LiveStreamId` 并把 `RequiresOpening` 关掉，更贴近 Emby 对直播源“先打开再播放”的语义。
+- `backend/src/routes/sessions.rs` 新增 `POST /LiveStreams/Open` 与 `POST/DELETE /LiveStreams/Close`。`Open` 目前支持 LiveTV 频道：会校验 `ItemId`、`OpenToken`，生成或复用 `LiveStreamId`，把直播会话信息写入 `system_settings`（键为 `live_stream:{id}`），并把 `LiveStreamId/PlayMethod/CanSeek/IsPaused` 写入当前 session 的 `session_state` 摘要。返回结果包含 Emby 风格的 `MediaSource`，供 PlaybackManager 后续直接使用。
+- `Close` 会按 `LiveStreamId` 清理对应 live stream 记录，并同步从当前 session 的 `session_state` 里移除 `LiveStreamId`。这样当前项目虽然还没有做到完整的转码会话和 tuner 资源释放，但至少 LiveTV 的 open/close 生命周期已经不是空洞 404，而是有真实状态生成、回读和关闭动作。
+- 这一轮也顺手把 `LiveTvChannel` 内部结构开放为 `pub(crate)`，让 `PlaybackInfo`、视频流代理和 LiveStream 会话路由共用同一套频道实体，而不是在三个地方各造一份字符串结构。
+- 当前仍有明确边界：`LiveStreams/Open` 还没有接入真正的 tuner 锁定、自动重试、直播转码、多路复用和 `Close` 后资源回收；它现在更像是 Emby LiveTV 生命周期的“最小真实实现”，重点是让客户端状态机和本地播放器调用链完整跑通。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。当前项目既有 warning 仍在，但本轮新增的 LiveStreams 路由已经通过构建和路由冲突校验。
+
+## 2026-04-23 LiveTV Timer、SeriesTimer 与 Recordings 持久化补齐（六十九）
+- 继续沿着 Emby LiveTV 的管理链往下补，这一轮对照的是模板里预约录制与录制列表这一组调用语义：不仅要有 `Timers` / `SeriesTimers` 的增删改查，还要让 `Recordings`、`Recordings/Series`、`Recordings/Groups` 能基于当前预约状态产出真实结果，而不是继续返回空数组占位。
+- `backend/src/routes/livetv.rs` 现在已经把 `/LiveTv/Programs/{id}`、`/LiveTv/Timers`、`/LiveTv/Timers/{id}`、`/LiveTv/SeriesTimers`、`/LiveTv/SeriesTimers/{id}`、`/LiveTv/Recordings`、`/LiveTv/Recordings/Series`、`/LiveTv/Recordings/Groups`、`/LiveTv/Recordings/{id}` 这一整组路由接成真实后端。也就是说，客户端不只是能打开“录制设置”页面，而是已经能创建、修改、删除预约并马上从录制列表里读回对应状态。
+- 定时器数据不再是临时内存壳：普通 `Timer` 与 `SeriesTimer` 现在会分别持久化到 `system_settings` 的 `livetv:timers` 与 `livetv:series_timers` 键中，并在写入前按 Emby 风格补齐 `Id`、`Type`、`StartDate`、`EndDate`、`Status`、padding、保留策略、是否仅录新集等核心字段。这样服务重启后预约仍然存在，也方便后续继续接入真正的后台录制执行器。
+- `GET /LiveTv/Recordings*` 这一层也已经不是兼容空壳。当前实现会把已持久化的 `Timer` 与节目单/频道数据组合，按当前时间推导出录制项的 `Status`（如 `New`、`InProgress`、`Completed`）、频道名、节目名、封面、分组信息、`SeriesTimerId`、儿童/体育/电影等分类字段，并进一步生成 `Recordings/Series` 与 `Recordings/Groups` 视图，供 Emby 风格的录制页直接消费。
+- 这一轮还把 `POST /LiveTv/Timers/{id}/Delete` 与 `POST /LiveTv/SeriesTimers/{id}/Delete` 这种模板常见的“表单式删除”入口一起补齐了，避免只有 RESTful `DELETE` 能用而模板页实际操作报错。
+- 当前剩下的边界也很明确：这一轮完成的是“预约录制状态机和录制列表数据模型”的真实化，还没有继续做到 tuner 侧实际落盘录制、录制任务调度、失败重试、录制文件入库与回放链路。因此它已经不是壳，但还没有到完整 DVR 后端那一步。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。当前编译输出仍有项目既有 warning，但本轮 Timer / SeriesTimer / Recordings 路由已通过构建与路由冲突校验。
+
+## 2026-04-23 LiveTV 真实录制执行器、自动入库与录制回放接通（七十）
+- 继续对照 Emby LiveTV 的 DVR 实际行为，这一轮不再停留在“预约存在”层，而是把后台录制 worker 真正拉起来。`backend/src/main.rs` 现在会在服务启动后启动 `routes::livetv::start_recording_worker()`，后台每 15 秒轮询一次已持久化的 `Timer`，判断是否进入录制窗口，并在到点后自动拉起录制任务。
+- `backend/src/routes/livetv.rs` 新增了 `livetv:recordings` 持久化状态，并围绕它补了一整套真实执行逻辑：`poll_recording_jobs()` 负责挑选到期任务，`run_recording_job()` 负责使用 ffmpeg 从真实频道流落盘，`resolve_recording_target()` 会按照 `RecordingPath / MovieRecordingPath / SeriesRecordingPath` 规则决定输出目录和文件名，`ensure_recording_library()` 会在录制目录第一次使用时自动创建对应媒体库，保证录制完成后不是“磁盘上有文件但系统里不可见”。
+- 为了让系列录制能被现有扫描器正确识别，这一轮没有把所有录制都粗暴扔进一个目录，而是按电影/剧集/普通节目拆分落盘路径，并为剧集录制生成符合当前命名解析器的日期型 episode 文件名。录制完成后会触发库扫描，再通过新增的 `repository::get_media_item_by_path()` 回查媒体项，把 `MediaItemId` 写回录制状态。
+- `GET /LiveTv/Recordings` 现在不只是从 `Timer` 推导状态，而是会优先吸收真实录制记录里的 `Status`、`Path`、`FileSize`、`MediaItemId`、错误信息等字段。也就是说，客户端看到的录制列表已经能区分“预约中”“正在录”“录制完成”“录制失败/错过”，而不是永远只有推算状态。
+- 这一轮还顺手补了 `GET /LiveTv/Recordings/Groups/{id}`，并把 `DELETE /LiveTv/Recordings/{id}` 提升为真实删除：它会同时清理录制状态、尝试删除录制文件，并在存在已入库媒体项时删除对应数据库条目，而不是只删一条 timer 记录。
+- 回放链也已经接上。`backend/src/routes/items.rs` 的 `PlaybackInfo` 现在会先检查传入 id 是否对应已完成录制；如果是，就通过录制状态中的 `MediaItemId` 回查真实媒体项，再返回普通媒体的 `MediaSource`。这意味着 Emby 风格录制页点开一个 `Recording` 后，后续播放已经会走你的现有媒体播放主链，而不是卡在 “录制 id 不是数据库 UUID”。
+- 当前仍有边界，但已经比上一轮更像真正的 DVR 后端：这版录制器还没有做并发配额、删除时中止 ffmpeg 子进程、失败自动重试、录制后自动抽章节图、录制冲突仲裁、多 tuner 资源分配这些更深层能力。不过“到点自动录制 -> 文件落盘 -> 自动入库 -> 录制列表可见 -> Recording 可回放”这条主闭环已经打通。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。当前仍有项目既有 warning，另外我在修这轮时顺手修复了 `items.rs` 因 UTF-8 中文字符串被错误回写导致的语法断裂，最终已恢复到可编译状态。
+
+## 2026-04-23 LiveTV 删除录制时可真实中止 ffmpeg 进程（七十一）
+- 继续把 DVR 生命周期补完整，这一轮解决的是上一节特意留下的缺口：如果录制正在进行，`DELETE /LiveTv/Recordings/{id}` 不能只是删数据库状态和磁盘文件，还必须真的把后台 ffmpeg 录制进程停掉，否则用户虽然“删了录制”，服务器实际上还在继续拉流写盘。
+- `backend/src/routes/livetv.rs` 现在新增了录制进程注册与取消状态管理：`recording_processes()` 维护 `timer_id -> process_id` 映射，`cancelled_recording_tasks()` 维护用户主动取消的录制集合，配合 `register_recording_process()`、`unregister_recording_process()`、`recording_was_cancelled()` 让删除动作和后台录制任务可以共享同一份进程生命周期状态。
+- `run_recording_job()` 不再直接 `output()` 等待匿名子进程，而是改为先 `spawn()` ffmpeg，拿到真实 `ProcessId` 后写回 `livetv:recordings`，再等待进程退出。这样管理端已经能知道一条录制当前对应哪个系统进程，也为真正的“停止录制”提供了后端控制点。
+- `DELETE /LiveTv/Recordings/{id}` 现在会先调用 `cancel_recording_task()` 标记用户取消，再根据录制状态中的 `ProcessId` 走 `terminate_recording_process()`。在 Windows 下会调用 `taskkill /PID /T /F`，也就是不再只是逻辑上删除，而是会真实结束对应 ffmpeg 子进程，然后再清理文件、录制状态和 timer。
+- 后台任务也同步补了“别和用户对着干”的行为：如果一条录制是被用户取消的，`run_recording_job()` 在 ffmpeg 退出后会识别取消标记并直接返回，不再把这条记录重新写成 `Completed` 或 `Failed`。对应的轮询任务收尾时也会清理进程映射和取消标记，避免后续状态泄漏。
+- 到这里，录制删除链已经从“删表象”变成了“停进程 -> 停写盘 -> 清状态 -> 清产物”。这比上一轮更接近 Emby DVR 对用户取消动作的实际语义，也更适合长时间录制和管理员控制场景。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。当前仍有项目既有 warning，但本轮新增的录制进程控制逻辑已经通过构建与路由冲突校验。

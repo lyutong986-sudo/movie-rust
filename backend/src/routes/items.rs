@@ -1,4 +1,4 @@
-use crate::{
+﻿use crate::{
     auth::{self, AuthSession},
     error::AppError,
     media_analyzer,
@@ -10,6 +10,7 @@ use crate::{
     },
     naming,
     repository::{self, ItemListOptions, UpdateUserDataInput},
+    routes::livetv,
     state::AppState,
 };
 use axum::{
@@ -744,8 +745,8 @@ async fn list_items_for_user(
         return libraries_as_query_result_for_user(state, user_id).await;
     }
 
-    // Emby 客户端进入详情页时会用 ListItemIds + IncludeItemTypes=BoxSet 查询“该条目所在合集”。
-    // 当前项目还没有真实 BoxSet 扫描/建模，这里返回空结果比误返回无关媒体更接近预期行为。
+    // Emby 瀹㈡埛绔繘鍏ヨ鎯呴〉鏃朵細鐢?ListItemIds + IncludeItemTypes=BoxSet 鏌ヨ鈥滆鏉＄洰鎵€鍦ㄥ悎闆嗏€濄€?
+    // 褰撳墠椤圭洰杩樻病鏈夌湡瀹?BoxSet 鎵弿/寤烘ā锛岃繖閲岃繑鍥炵┖缁撴灉姣旇杩斿洖鏃犲叧濯掍綋鏇存帴杩戦鏈熻涓恒€?
     if !requested_item_ids.is_empty()
         && !requested_include_types.is_empty()
         && requested_include_types
@@ -778,7 +779,7 @@ async fn list_items_for_user(
 
     if let Some(parent_id) = query.parent_id {
         if let Some(library) = repository::get_library(&state.pool, parent_id).await? {
-            // 对于电视剧库，如果没有指定包含的类型，默认只显示Series
+            // 瀵逛簬鐢佃鍓у簱锛屽鏋滄病鏈夋寚瀹氬寘鍚殑绫诲瀷锛岄粯璁ゅ彧鏄剧ずSeries
             let mut include_types = parse_include_types(query.include_item_types.as_deref());
             if include_types.is_empty() && library.collection_type.eq_ignore_ascii_case("tvshows") {
                 include_types = vec!["Series".to_string()];
@@ -1177,8 +1178,8 @@ async fn legacy_user_item_data(
     State(state): State<AppState>,
     Path((user_id, item_id)): Path<(String, String)>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
-    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
-    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
+    let user_id = parse_emby_uuid_path(&user_id, "鐢ㄦ埛ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "椤圭洰ID")?;
     ensure_user_access(&session, user_id)?;
     ensure_media_item_exists(&state, item_id).await?;
     Ok(Json(
@@ -1204,8 +1205,8 @@ async fn legacy_update_user_item_data(
     Path((user_id, item_id)): Path<(String, String)>,
     Json(payload): Json<UpdateUserItemDataRequest>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
-    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
-    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
+    let user_id = parse_emby_uuid_path(&user_id, "鐢ㄦ埛ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "椤圭洰ID")?;
     update_user_data_for_user(&state, &session, user_id, item_id, payload).await
 }
 
@@ -1236,8 +1237,8 @@ async fn legacy_mark_favorite(
     State(state): State<AppState>,
     Path((user_id, item_id)): Path<(String, String)>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
-    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
-    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
+    let user_id = parse_emby_uuid_path(&user_id, "鐢ㄦ埛ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "椤圭洰ID")?;
     set_favorite_for_user(&state, &session, user_id, item_id, true).await
 }
 
@@ -1246,8 +1247,8 @@ async fn legacy_unmark_favorite(
     State(state): State<AppState>,
     Path((user_id, item_id)): Path<(String, String)>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
-    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
-    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
+    let user_id = parse_emby_uuid_path(&user_id, "鐢ㄦ埛ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "椤圭洰ID")?;
     set_favorite_for_user(&state, &session, user_id, item_id, false).await
 }
 
@@ -1279,8 +1280,8 @@ async fn legacy_mark_played(
     Path((user_id, item_id)): Path<(String, String)>,
     Query(query): Query<UserItemDataQuery>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
-    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
-    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
+    let user_id = parse_emby_uuid_path(&user_id, "鐢ㄦ埛ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "椤圭洰ID")?;
     set_played_for_user(&state, &session, user_id, item_id, true, query.date_played).await
 }
 
@@ -1289,8 +1290,8 @@ async fn legacy_mark_unplayed(
     State(state): State<AppState>,
     Path((user_id, item_id)): Path<(String, String)>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
-    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
-    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
+    let user_id = parse_emby_uuid_path(&user_id, "鐢ㄦ埛ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "椤圭洰ID")?;
     set_played_for_user(&state, &session, user_id, item_id, false, None).await
 }
 
@@ -1380,7 +1381,7 @@ async fn ensure_media_item_exists(state: &AppState, item_id: Uuid) -> Result<(),
     {
         return Ok(());
     }
-    Err(AppError::NotFound("媒体条目不存在".to_string()))
+    Err(AppError::NotFound("濯掍綋鏉＄洰涓嶅瓨鍦?".to_string()))
 }
 
 async fn item_chapters(
@@ -1389,7 +1390,7 @@ async fn item_chapters(
     Path(item_id_str): Path<String>,
 ) -> Result<Json<QueryResult<Value>>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {item_id_str}")))?;
     ensure_media_item_exists(&state, item_id).await?;
     let chapters = repository::get_media_chapters(&state.pool, item_id).await?;
     let items: Vec<Value> = chapters
@@ -1426,7 +1427,7 @@ async fn item_by_id(
     Path(item_id_str): Path<String>,
 ) -> Result<Json<BaseItemDto>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
     item_dto(&state, session.user_id, item_id).await
 }
 
@@ -1636,10 +1637,10 @@ async fn metadata_editor_info(
     Path(item_id_str): Path<String>,
 ) -> Result<Json<MetadataEditorInfoDto>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {item_id_str}")))?;
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+        .ok_or_else(|| AppError::NotFound("濯掍綋鏉＄洰涓嶅瓨鍦?".to_string()))?;
 
     Ok(Json(MetadataEditorInfoDto {
         content_type: item.item_type,
@@ -1654,7 +1655,7 @@ async fn update_item_content_type(
     Query(query): Query<ContentTypeQuery>,
 ) -> Result<StatusCode, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {item_id_str}")))?;
     let Some(content_type) = query.content_type.filter(|value| !value.trim().is_empty()) else {
         return Ok(StatusCode::NO_CONTENT);
     };
@@ -1674,7 +1675,7 @@ async fn update_item(
     Json(metadata): Json<UpdateBaseItemDto>,
 ) -> Result<StatusCode, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {item_id_str}")))?;
     ensure_media_item_exists(&state, item_id).await?;
     repository::update_media_item_from_emby(&state.pool, item_id, &metadata).await?;
     broadcast_items_updated(&state, vec![item_id_str]);
@@ -1687,7 +1688,7 @@ async fn delete_item(
     Path(item_id_str): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {item_id_str}")))?;
     auth::require_content_deletion(&state, &session, item_id).await?;
     repository::delete_media_item(&state.pool, item_id).await?;
     crate::routes::websocket::broadcast_message(
@@ -1734,7 +1735,7 @@ async fn external_id_infos(
     Path(item_id_str): Path<String>,
 ) -> Result<Json<Vec<ExternalIdInfoDto>>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {item_id_str}")))?;
     ensure_media_item_exists(&state, item_id).await?;
     Ok(Json(external_id_info_options()))
 }
@@ -1745,11 +1746,11 @@ async fn item_ancestors(
     Path(item_id_str): Path<String>,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {item_id_str}")))?;
     let mut ancestors = Vec::new();
     let mut current = repository::get_media_item(&state.pool, item_id)
         .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?
+        .ok_or_else(|| AppError::NotFound("濯掍綋鏉＄洰涓嶅瓨鍦?".to_string()))?
         .parent_id;
 
     while let Some(parent_id) = current {
@@ -1874,7 +1875,7 @@ async fn apply_search_criteria(
     Json(result): Json<Value>,
 ) -> Result<StatusCode, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {item_id_str}")))?;
     ensure_media_item_exists(&state, item_id).await?;
 
     let mut provider_ids = serde_json::Map::new();
@@ -2008,7 +2009,7 @@ async fn intro_timestamps(
     Path(item_id_str): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {item_id_str}")))?;
     ensure_media_item_exists(&state, item_id).await?;
     let chapters = repository::get_media_chapters(&state.pool, item_id).await?;
     let intro_start = marker_ticks(&chapters, "IntroStart");
@@ -2032,7 +2033,7 @@ async fn related_child_items(
 ) -> Result<Vec<BaseItemDto>, AppError> {
     ensure_user_access(session, user_id)?;
     let item_id = emby_id_to_uuid(item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
     ensure_media_item_exists(state, item_id).await?;
 
     let result = repository::list_media_items(
@@ -2099,8 +2100,9 @@ async fn hide_from_resume(
 ) -> Result<Json<UserItemDataDto>, AppError> {
     let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
+
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+        .map_err(|_| AppError::BadRequest(format!("閺冪姵鏅ラ惃鍕€嶉惄鐢€D閺嶇厧绱? {}", item_id_str)))?;
     ensure_media_item_exists(&state, item_id).await?;
     if !should_hide_from_resume(&query) {
         return Ok(Json(
@@ -2135,7 +2137,7 @@ async fn additional_parts(
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+        .map_err(|_| AppError::BadRequest(format!("閺冪姵鏅ラ惃鍕€嶉惄鐢€D閺嶇厧绱? {}", item_id_str)))?;
     let result = repository::get_additional_parts_for_item(
         &state.pool,
         item_id,
@@ -2305,7 +2307,7 @@ async fn item_dto(
 
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+        .ok_or_else(|| AppError::NotFound("濯掍綋鏉＄洰涓嶅瓨鍦?".to_string()))?;
     Ok(Json(
         repository::media_item_to_dto(&state.pool, &item, Some(user_id), state.config.server_id)
             .await?,
@@ -2326,10 +2328,10 @@ async fn refresh_item_metadata(
         }),
     );
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+        .ok_or_else(|| AppError::NotFound("濯掍綋鏉＄洰涓嶅瓨鍦?".to_string()))?;
 
     if !item.item_type.eq_ignore_ascii_case("Series") && !item.item_type.eq_ignore_ascii_case("Movie") {
         crate::routes::websocket::broadcast_message(
@@ -2347,7 +2349,7 @@ async fn refresh_item_metadata(
         tracing::debug!(
             item_id = %item.id,
             item_type = %item.item_type,
-            "跳过远程元数据刷新：条目缺少 TMDb provider id"
+            "璺宠繃杩滅▼鍏冩暟鎹埛鏂帮細鏉＄洰缂哄皯 TMDb provider id"
         );
         crate::routes::websocket::broadcast_message(
             &state,
@@ -2362,10 +2364,10 @@ async fn refresh_item_metadata(
     let metadata_manager = state
         .metadata_manager
         .as_ref()
-        .ok_or_else(|| AppError::BadRequest("未配置远程元数据提供者".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("鏈厤缃繙绋嬪厓鏁版嵁鎻愪緵鑰?".to_string()))?;
     let provider = metadata_manager
         .get_provider("tmdb")
-        .ok_or_else(|| AppError::BadRequest("未配置 TMDb 元数据提供者".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("鏈厤缃?TMDb 鍏冩暟鎹彁渚涜€?".to_string()))?;
 
     if item.item_type.eq_ignore_ascii_case("Series") {
         let metadata = provider.get_series_details(&tmdb_id).await?;
@@ -2425,23 +2427,19 @@ async fn playback_info(
     Query(query_info): Query<PlaybackInfoDto>,
     request: Request,
 ) -> Result<Json<PlaybackInfoResponse>, AppError> {
-    let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
-    // 根据请求方法处理
-    auth::require_media_playback(&state, &session, item_id).await?;
     let info = if request.method() == http::Method::POST {
-        // POST请求：尝试从请求体解析JSON
-        let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024) // 10MB限制
+        // POST璇锋眰锛氬皾璇曚粠璇锋眰浣撹В鏋怞SON
+        let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024) // 10MB闄愬埗
             .await
-            .map_err(|e| AppError::BadRequest(format!("无法读取请求体: {}", e)))?;
+            .map_err(|e| AppError::BadRequest(format!("鏃犳硶璇诲彇璇锋眰浣? {}", e)))?;
         
         if body_bytes.is_empty() {
-            // 空请求体，使用查询参数
+            // 绌鸿姹備綋锛屼娇鐢ㄦ煡璇㈠弬鏁?
             query_info
         } else {
             match serde_json::from_slice::<PlaybackInfoDto>(&body_bytes) {
                 Ok(mut body_info) => {
-                    // 合并查询参数和请求体，请求体优先
+                    // 鍚堝苟鏌ヨ鍙傛暟鍜岃姹備綋锛岃姹備綋浼樺厛
                     if body_info.user_id.is_none() && query_info.user_id.is_some() {
                         body_info.user_id = query_info.user_id;
                     }
@@ -2451,22 +2449,64 @@ async fn playback_info(
                     body_info
                 }
                 Err(e) => {
-                    // JSON解析失败，只使用查询参数
-                    tracing::debug!("无法解析PlaybackInfo请求体JSON: {}, 使用查询参数", e);
+                    // JSON瑙ｆ瀽澶辫触锛屽彧浣跨敤鏌ヨ鍙傛暟
+                    tracing::debug!("鏃犳硶瑙ｆ瀽PlaybackInfo璇锋眰浣揓SON: {}, 浣跨敤鏌ヨ鍙傛暟", e);
                     query_info
                 }
             }
         }
     } else {
-        // GET请求：只使用查询参数
+        // GET璇锋眰锛氬彧浣跨敤鏌ヨ鍙傛暟
         query_info
     };
+
+    if livetv::is_live_tv_channel_id(&item_id_str) {
+        let channel = livetv::find_live_tv_channel(&state, &item_id_str)
+            .await?
+            .ok_or_else(|| AppError::NotFound("鐩存挱棰戦亾涓嶅瓨鍦?".to_string()))?;
+        let play_session_id = info
+            .current_play_session_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+        let media_source =
+            livetv::build_live_tv_media_source(&channel, &session.access_token, info.live_stream_id.as_deref());
+        return Ok(Json(PlaybackInfoResponse {
+            media_sources: vec![media_source],
+            play_session_id,
+            ..Default::default()
+        }));
+    }
+
+    if let Some(recording_item_id) = livetv::recording_media_item_id(&state.pool, &item_id_str).await? {
+        auth::require_media_playback(&state, &session, recording_item_id).await?;
+        let item = repository::get_media_item(&state.pool, recording_item_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("褰曞埗濯掍綋涓嶅瓨鍦?".to_string()))?;
+        let play_session_id = info
+            .current_play_session_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+        let media_sources =
+            repository::get_media_sources_for_item(&state.pool, &item, state.config.server_id).await?;
+        return Ok(Json(PlaybackInfoResponse {
+            media_sources,
+            play_session_id,
+            ..Default::default()
+        }));
+    }
+
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+    // 鏍规嵁璇锋眰鏂规硶澶勭悊
+    auth::require_media_playback(&state, &session, item_id).await?;
     
     let mut item = repository::get_media_item(&state.pool, item_id)
         .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+        .ok_or_else(|| AppError::NotFound("濯掍綋鏉＄洰涓嶅瓨鍦?".to_string()))?;
     if matches!(item.item_type.as_str(), "Series" | "Season" | "Folder") {
-        return Err(AppError::BadRequest("目录条目没有播放源".to_string()));
+        return Err(AppError::BadRequest("鐩綍鏉＄洰娌℃湁鎾斁婧?".to_string()));
     }
 
     let needs_metadata = item.video_codec.is_none() || item.audio_codec.is_none() || item.runtime_ticks.is_none();
@@ -2475,47 +2515,47 @@ async fn playback_info(
         let path = std::path::Path::new(&item_path);
         if path.exists() {
             if naming::is_strm(path) {
-                // 对于.strm文件，尝试分析远程URL
+                // 瀵逛簬.strm鏂囦欢锛屽皾璇曞垎鏋愯繙绋婾RL
                 match std::fs::read_to_string(path) {
                     Ok(content) => {
                         if let Some(target_url) = naming::strm_target_from_text(&content) {
-                            tracing::debug!("分析.strm文件远程URL: {}", target_url);
+                            tracing::debug!("鍒嗘瀽.strm鏂囦欢杩滅▼URL: {}", target_url);
                             match media_analyzer::analyze_remote_media(&target_url).await {
                                 Ok(analysis) => {
                                     repository::update_media_item_metadata(&state.pool, item_id, &analysis).await?;
                                     item = repository::get_media_item(&state.pool, item_id)
                                         .await?
-                                        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-                                    tracing::info!("已更新.strm文件远程媒体元数据: {}", path.display());
+                                        .ok_or_else(|| AppError::NotFound("濯掍綋鏉＄洰涓嶅瓨鍦?".to_string()))?;
+                                    tracing::info!("宸叉洿鏂?strm鏂囦欢杩滅▼濯掍綋鍏冩暟鎹? {}", path.display());
                                 }
                                 Err(e) => {
-                                    tracing::warn!("无法分析.strm远程媒体 {}: {}", target_url, e);
+                                    tracing::warn!("鏃犳硶鍒嗘瀽.strm杩滅▼濯掍綋 {}: {}", target_url, e);
                                 }
                             }
                         } else {
-                            tracing::debug!(".strm文件中未找到有效URL: {}", path.display());
+                            tracing::debug!(".strm鏂囦欢涓湭鎵惧埌鏈夋晥URL: {}", path.display());
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("无法读取.strm文件 {}: {}", path.display(), e);
+                        tracing::warn!("鏃犳硶璇诲彇.strm鏂囦欢 {}: {}", path.display(), e);
                     }
                 }
             } else {
-                // 对于普通文件，进行本地分析
+                // 瀵逛簬鏅€氭枃浠讹紝杩涜鏈湴鍒嗘瀽
                 match media_analyzer::analyze_media_file(path).await {
                     Ok(analysis) => {
                         repository::update_media_item_metadata(&state.pool, item_id, &analysis).await?;
                         item = repository::get_media_item(&state.pool, item_id)
                             .await?
-                            .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+                            .ok_or_else(|| AppError::NotFound("濯掍綋鏉＄洰涓嶅瓨鍦?".to_string()))?;
                     }
                     Err(e) => {
-                        tracing::warn!("无法分析媒体文件 {}: {}", path.display(), e);
+                        tracing::warn!("鏃犳硶鍒嗘瀽濯掍綋鏂囦欢 {}: {}", path.display(), e);
                     }
                 }
             }
         } else {
-            tracing::debug!("跳过媒体文件分析（文件不存在）: {}", path.display());
+            tracing::debug!("璺宠繃濯掍綋鏂囦欢鍒嗘瀽锛堟枃浠朵笉瀛樺湪锛? {}", path.display());
         }
     }
 
@@ -2582,10 +2622,10 @@ async fn playback_info(
         media_source.add_api_key_to_direct_stream_url = Some(true);
     }
     
-    // 设备配置文件处理
+    // 璁惧閰嶇疆鏂囦欢澶勭悊
     if let Some(device_profile) = &info.device_profile {
         for media_source in &mut media_sources {
-            // 根据最大流比特率决定是否支持转码
+            // 鏍规嵁鏈€澶ф祦姣旂壒鐜囧喅瀹氭槸鍚︽敮鎸佽浆鐮?
             if let Some(max_bitrate) = device_profile.max_streaming_bitrate {
                 if let Some(media_bitrate) = media_source.bitrate {
                     if media_bitrate > max_bitrate as i32 {
@@ -3381,13 +3421,13 @@ async fn get_similar_items(
     Query(query): Query<GetSimilarItems>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
-    // 获取目标项目
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+    // 鑾峰彇鐩爣椤圭洰
     let target_item = repository::get_media_item(&state.pool, item_id)
         .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+        .ok_or_else(|| AppError::NotFound("濯掍綋鏉＄洰涓嶅瓨鍦?".to_string()))?;
     
-    // 简单的相似性算法：基于类型和标签查找相似项目
+    // 绠€鍗曠殑鐩镐技鎬х畻娉曪細鍩轰簬绫诲瀷鍜屾爣绛炬煡鎵剧浉浼奸」鐩?
     let user_id = query.user_id.unwrap_or(session.user_id);
     let similar_items = repository::find_similar_items(
         &state.pool,
@@ -3793,4 +3833,5 @@ mod tests {
         assert_eq!(transcoding.transcoding_start_position_ticks, Some(12345));
     }
 }
+
 

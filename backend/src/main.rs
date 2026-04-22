@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
         websocket_events,
         transcoder,
     };
+    routes::livetv::start_recording_worker(state.clone());
 
     let spa =
         ServeDir::new(&static_dir).not_found_service(ServeFile::new(static_dir.join("index.html")));

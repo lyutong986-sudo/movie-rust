@@ -1,5 +1,5 @@
 use crate::{
-    auth::AuthSession,
+    auth::{AuthSession, OptionalAuthSession},
     error::AppError,
     models::{emby_id_to_uuid, uuid_to_emby_guid, BaseItemDto, LegacyPlaybackQuery, PlaybackReport, QueryResult, SessionInfoDto},
     repository,
@@ -18,10 +18,14 @@ use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/LiveStreams/Open", post(open_live_stream))
+        .route("/LiveStreams/Close", post(close_live_stream).delete(close_live_stream))
         .route("/Auth/Keys", get(list_auth_keys).post(create_auth_key))
         .route("/Auth/Keys/{key}", delete(delete_auth_key))
         .route("/Auth/Keys/{key}/Delete", post(delete_auth_key))
         .route("/Auth/Providers", get(auth_providers))
+        .route("/Auth/Pin", get(get_pin_status).post(create_pin))
+        .route("/Auth/Pin/Exchange", post(exchange_pin))
         .route("/Sessions", get(list_sessions))
         .route("/Sessions/PlayQueue", get(play_queue))
         .route("/Sessions/{id}/PlayQueue", get(session_play_queue))
@@ -83,11 +87,61 @@ struct CreateAuthKeyQuery {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
+struct PinQuery {
+    #[serde(default, alias = "deviceId")]
+    device_id: Option<String>,
+    #[serde(default)]
+    pin: Option<String>,
+    #[serde(default, alias = "appName")]
+    app_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
 struct PlayQueueQuery {
     #[serde(default, alias = "id")]
     id: Option<String>,
     #[serde(default, alias = "deviceId")]
     device_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LiveStreamOpenQuery {
+    #[serde(default, alias = "userId")]
+    user_id: Option<String>,
+    #[serde(default, alias = "itemId")]
+    item_id: Option<String>,
+    #[serde(default, alias = "playSessionId")]
+    play_session_id: Option<String>,
+    #[serde(default, alias = "startTimeTicks")]
+    start_time_ticks: Option<i64>,
+    #[serde(default, alias = "maxStreamingBitrate")]
+    max_streaming_bitrate: Option<i64>,
+    #[serde(default, alias = "audioStreamIndex")]
+    audio_stream_index: Option<i32>,
+    #[serde(default, alias = "subtitleStreamIndex")]
+    subtitle_stream_index: Option<i32>,
+    #[serde(default, alias = "liveStreamId")]
+    live_stream_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "PascalCase")]
+struct LiveStreamOpenBody {
+    #[serde(default, alias = "OpenToken")]
+    open_token: Option<String>,
+    #[serde(default)]
+    device_profile: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LiveStreamCloseQuery {
+    #[serde(default, alias = "liveStreamId")]
+    live_stream_id: Option<String>,
+    #[serde(default, alias = "playSessionId")]
+    play_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,6 +321,233 @@ async fn auth_providers(
         })
         .collect();
     Ok(Json(items))
+}
+
+async fn open_live_stream(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<LiveStreamOpenQuery>,
+    body: Option<Json<LiveStreamOpenBody>>,
+) -> Result<Json<Value>, AppError> {
+    let item_id = query
+        .item_id
+        .clone()
+        .ok_or_else(|| AppError::BadRequest("ItemId is required".to_string()))?;
+    if !crate::routes::livetv::is_live_tv_channel_id(&item_id) {
+        return Err(AppError::BadRequest("Only LiveTV channels are supported".to_string()));
+    }
+
+    let channel = crate::routes::livetv::find_live_tv_channel(&state, &item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("直播频道不存在".to_string()))?;
+    let body = body.map(|Json(value)| value).unwrap_or_default();
+    let expected_open_token = format!("livetv-open:{}", channel.id);
+    if let Some(open_token) = body.open_token.as_deref() {
+        if open_token != expected_open_token {
+            return Err(AppError::BadRequest("OpenToken is invalid".to_string()));
+        }
+    }
+
+    let live_stream_id = query
+        .live_stream_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("livestream-{}", Uuid::new_v4().simple()));
+    let play_session_id = query
+        .play_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| session.access_token.clone());
+
+    let media_source =
+        crate::routes::livetv::build_live_tv_media_source(&channel, &session.access_token, Some(&live_stream_id));
+
+    repository::set_json_setting(
+        &state.pool,
+        &format!("live_stream:{live_stream_id}"),
+        json!({
+            "LiveStreamId": live_stream_id,
+            "ItemId": item_id,
+            "ChannelName": channel.name,
+            "UserId": uuid_to_emby_guid(&session.user_id),
+            "AccessToken": session.access_token,
+            "PlaySessionId": play_session_id,
+            "StartTimeTicks": query.start_time_ticks,
+            "MaxStreamingBitrate": query.max_streaming_bitrate,
+            "AudioStreamIndex": query.audio_stream_index,
+            "SubtitleStreamIndex": query.subtitle_stream_index,
+            "OpenedAt": Utc::now(),
+            "OpenToken": body.open_token,
+            "DeviceProfile": body.device_profile
+        }),
+    )
+    .await?;
+
+    let mut session_state = repository::get_session_state_summary(&state.pool, &session.access_token)
+        .await?
+        .unwrap_or_else(|| json!({}));
+    if let Some(object) = session_state.as_object_mut() {
+        object.insert("LiveStreamId".to_string(), json!(live_stream_id));
+        object.insert("PlayMethod".to_string(), json!("DirectStream"));
+        object.insert("IsPaused".to_string(), json!(false));
+        object.insert("CanSeek".to_string(), json!(false));
+    }
+    repository::set_session_state_summary(&state.pool, &session.access_token, session_state).await?;
+
+    Ok(Json(json!({
+        "MediaSource": media_source,
+        "PlaySessionId": play_session_id
+    })))
+}
+
+async fn close_live_stream(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<LiveStreamCloseQuery>,
+) -> Result<StatusCode, AppError> {
+    let live_stream_id = query
+        .live_stream_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("LiveStreamId is required".to_string()))?;
+
+    let live_stream = repository::get_json_setting(&state.pool, &format!("live_stream:{live_stream_id}"))
+        .await?;
+    let Some(live_stream) = live_stream else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
+
+    let owner_token = live_stream
+        .get("AccessToken")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !session.is_admin && owner_token != session.access_token {
+        return Err(AppError::Forbidden);
+    }
+
+    repository::delete_json_setting(&state.pool, &format!("live_stream:{live_stream_id}")).await?;
+    if let Some(mut session_state) =
+        repository::get_session_state_summary(&state.pool, &session.access_token).await?
+    {
+        if let Some(object) = session_state.as_object_mut() {
+            object.remove("LiveStreamId");
+        }
+        repository::set_session_state_summary(&state.pool, &session.access_token, session_state).await?;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn create_pin(
+    State(state): State<AppState>,
+    Query(query): Query<PinQuery>,
+) -> Result<Json<Value>, AppError> {
+    let device_id = query
+        .device_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("device-{}", Uuid::new_v4().simple()));
+    let pin_value =
+        crate::routes::features::build_auth_pin(&device_id, query.app_name.as_deref());
+    let key = crate::routes::features::auth_pin_key(
+        &device_id,
+        pin_value
+            .get("Pin")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
+    repository::set_json_setting(&state.pool, &key, pin_value.clone()).await?;
+    Ok(Json(pin_value))
+}
+
+async fn get_pin_status(
+    State(state): State<AppState>,
+    Query(query): Query<PinQuery>,
+) -> Result<Json<Value>, AppError> {
+    let device_id = query
+        .device_id
+        .ok_or_else(|| AppError::BadRequest("DeviceId is required".to_string()))?;
+    let pin = query
+        .pin
+        .ok_or_else(|| AppError::BadRequest("Pin is required".to_string()))?;
+    let key = crate::routes::features::auth_pin_key(&device_id, &pin);
+    let mut pin_value = repository::get_json_setting(&state.pool, &key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Pin not found".to_string()))?;
+    let is_expired = pin_value
+        .get("ExpirationDate")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<chrono::DateTime<chrono::Utc>>(value).ok())
+        .is_some_and(|value| value < Utc::now());
+    if let Some(object) = pin_value.as_object_mut() {
+        object.insert("IsExpired".to_string(), json!(is_expired));
+    }
+    Ok(Json(pin_value))
+}
+
+async fn exchange_pin(
+    session: OptionalAuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<PinQuery>,
+) -> Result<Json<Value>, AppError> {
+    let device_id = query
+        .device_id
+        .ok_or_else(|| AppError::BadRequest("DeviceId is required".to_string()))?;
+    let pin = query
+        .pin
+        .ok_or_else(|| AppError::BadRequest("Pin is required".to_string()))?;
+    let key = crate::routes::features::auth_pin_key(&device_id, &pin);
+    let mut pin_value = repository::get_json_setting(&state.pool, &key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Pin not found".to_string()))?;
+    let is_expired = pin_value
+        .get("ExpirationDate")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<chrono::DateTime<chrono::Utc>>(value).ok())
+        .is_some_and(|value| value < Utc::now());
+    if is_expired {
+        return Err(AppError::BadRequest("Pin has expired".to_string()));
+    }
+
+    if let Some(session) = session.0 {
+        let user = repository::get_user_by_id(&state.pool, session.user_id)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        if let Some(object) = pin_value.as_object_mut() {
+            object.insert("IsConfirmed".to_string(), json!(true));
+            object.insert("AccessToken".to_string(), json!(session.access_token));
+            object.insert("UserId".to_string(), json!(uuid_to_emby_guid(&session.user_id)));
+            object.insert("UserName".to_string(), json!(user.name));
+            object.insert("DateConfirmed".to_string(), json!(Utc::now()));
+        }
+        repository::set_json_setting(&state.pool, &key, pin_value.clone()).await?;
+    }
+
+    if pin_value
+        .get("IsConfirmed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(Json(json!({
+            "AccessToken": pin_value.get("AccessToken").cloned().unwrap_or(Value::Null),
+            "Token": pin_value.get("AccessToken").cloned().unwrap_or(Value::Null),
+            "UserId": pin_value.get("UserId").cloned().unwrap_or(Value::Null),
+            "UserName": pin_value.get("UserName").cloned().unwrap_or(Value::Null),
+            "User": {
+                "Id": pin_value.get("UserId").cloned().unwrap_or(Value::Null),
+                "Name": pin_value.get("UserName").cloned().unwrap_or(Value::Null)
+            }
+        })));
+    }
+
+    Err(AppError::BadRequest(
+        "Pin is waiting for an authenticated confirmation".to_string(),
+    ))
 }
 
 async fn play_queue(

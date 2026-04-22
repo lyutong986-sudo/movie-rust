@@ -641,7 +641,7 @@ async fn find_scheduled_task(
         .find(|task| task.get("Id").and_then(Value::as_str) == Some(id)))
 }
 
-async fn build_plugins(state: &AppState) -> Result<Vec<Value>, crate::error::AppError> {
+pub(crate) async fn build_plugins(state: &AppState) -> Result<Vec<Value>, crate::error::AppError> {
     let config = repository::server_configuration_value(&state.pool, &state.config).await?;
     let disabled = disabled_plugins(&config);
     let global_enabled = config
