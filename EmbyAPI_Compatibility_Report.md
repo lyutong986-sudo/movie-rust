@@ -492,3 +492,9 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - `backend/src/models.rs` 为 `ItemsQuery` 新增 raw query 容错解析：重复的列表型参数会合并成逗号列表，标量参数使用最后一次有效值，兼容 EmbySDK/Jellyfin SDK 常见的 `fields=x&fields=y`、`enableImageTypes=Primary&enableImageTypes=Backdrop` 形式。
 - `backend/src/routes/shows.rs` 已将 `Shows/NextUp`、`Shows/Upcoming`、`Shows/Missing` 切换到该容错解析，避免首页 NextUp 链路因为重复字段参数直接 400。
 - 日志中的 `display_preferences` 缺表 500 已由上一轮启动自建层覆盖；该日志生成于修复前，重启当前 backend 后 `display_preferences` 会由初始化层自动创建。
+
+## 2026-04-22 前端适配补充（二十）
+- 前端设置首页存在一处纯前端层面的“硬禁用”：`frontend/packages/frontend/src/pages/settings/index.vue` 中的“媒体库 / Libraries”入口被直接写成 `link: undefined`，并不是后端能力判断结果。
+- 审计后确认后端已经具备可用的媒体库管理链路：`GET /Library/VirtualFolders`、`GET /Library/VirtualFolders/Query`、`POST /Library/Refresh`、`GET /Library/SelectableMediaFolders`，因此该功能不应继续在前端保持禁用。
+- 已新增 `frontend/packages/frontend/src/pages/settings/libraries.vue`，接入现有后端媒体库能力，提供媒体库列表查看与全库刷新入口；设置页中的 `Libraries` 现已解除禁用并可访问。
+- 其余仍保持禁用的设置项（如 `DLNA`、`Live TV`、`Plugins`、`Scheduled Tasks`、`Notifications`）要么当前后端没有对应 EmbySDK 标准管理路由，要么前端尚无完整页面，这一轮不做误开放。

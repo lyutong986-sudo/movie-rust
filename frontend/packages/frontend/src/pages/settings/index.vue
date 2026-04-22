@@ -184,7 +184,7 @@ const adminSections = computed<MenuOptions[][]>(() => {
         icon: 'i-mdi:library-shelves',
         name: t('libraries'),
         description: t('librariesSettingsDescription'),
-        link: undefined
+        link: '/settings/libraries'
       }
     ],
     [
