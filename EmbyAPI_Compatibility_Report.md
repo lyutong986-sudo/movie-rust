@@ -460,3 +460,8 @@ pnpm --filter @jellyfin-vue/frontend check:types
 ## 2026-04-22 前端适配补充（十四）
 - 根据运行日志复核，frontend WebSocket 实际调用 `GET /socket?api_key=...&deviceId=...`，而 backend 仅暴露 `GET /embywebsocket`，导致前端持续重连并产生 404。
 - `backend/src/routes/mod.rs` 已新增 `GET /socket`，复用现有 `emby_websocket_handler`，该 handler 已兼容 `api_key/token/deviceId` 查询参数；根路径、`/emby/socket`、`/mediabrowser/socket` 会随现有 router nest 一起可用。
+
+## 2026-04-22 前端适配补充（十五）
+- 本轮继续审计 frontend 的菜单和播放链路，确认 `ItemMenu.vue -> playbackManager.instantMixFromItem()` 通过 EmbySDK `InstantMixApi.getInstantMixFromItem` 调用 InstantMix，而 backend 缺少 InstantMix 端点，会导致点击“Instant Mix”后 404。
+- `backend/src/routes/items.rs` 已新增 `GET /Items/{itemId}/InstantMix`、`GET /Users/{userId}/Items/{itemId}/InstantMix`、`GET /Albums/{itemId}/InstantMix`、`GET /Artists/{name}/InstantMix`、`GET /MusicGenres/{name}/InstantMix`，返回 Emby 风格 `QueryResult<BaseItemDto>`；当前按专辑/父文件夹、艺人、流派或音频 seed 做最小可用混合，不改 frontend 的 SDK 调用。
+- 复核删除菜单时发现 `apiStore.itemDelete()` 通过 EmbySDK `LibraryApi.deleteItem({ itemId })` 走 `DELETE /Items/{itemId}`，backend 原先只有 `GET/POST /Items/{itemId}`；现已补 `DELETE /Items/{itemId}` 与兼容 `POST /Items/{itemId}/Delete`。当前实现只删除数据库 `media_items` 记录及级联关联，不直接删除磁盘文件，避免误删本地媒体。

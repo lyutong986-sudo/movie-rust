@@ -3638,6 +3638,19 @@ pub async fn get_media_item(
     .await?)
 }
 
+pub async fn delete_media_item(pool: &sqlx::PgPool, id: Uuid) -> Result<(), AppError> {
+    let result = sqlx::query("DELETE FROM media_items WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    }
+
+    Ok(())
+}
+
 pub async fn find_items_for_external_person_credit(
     pool: &sqlx::PgPool,
     credit: &ExternalPersonCredit,

@@ -35,6 +35,7 @@ pub fn router() -> Router<AppState> {
         .route("/Artists", get(artists))
         .route("/Artists/{name}", get(artist))
         .route("/Artists/{name}/Items", get(artist_items))
+        .route("/Artists/{name}/InstantMix", get(instant_mix_from_artist))
         .route("/Studios", get(studios))
         .route("/Studios/{name}", get(studio))
         .route("/Studios/{name}/Items", get(studio_items))
@@ -104,17 +105,19 @@ pub fn router() -> Router<AppState> {
         .route("/Items/RemoteSearch/Person", post(remote_search_results))
         .route("/Items/RemoteSearch/Series", post(remote_search_results))
         .route("/Items/RemoteSearch/Trailer", post(remote_search_results))
-        .route("/Items/{item_id}", get(item_by_id).post(update_item))
+        .route("/Items/{item_id}", get(item_by_id).post(update_item).delete(delete_item))
         .route("/Items/{item_id}/MetadataEditor", get(metadata_editor_info))
         .route("/Items/{item_id}/ContentType", post(update_item_content_type))
         .route("/Items/{item_id}/ExternalIdInfos", get(external_id_infos))
         .route("/Items/{item_id}/Ancestors", get(item_ancestors))
         .route("/Items/{item_id}/Refresh", post(refresh_item_metadata))
+        .route("/Items/{item_id}/Delete", post(delete_item))
         .route("/Items/{item_id}/Chapters", get(item_chapters))
         .route("/Items/{item_id}/IntroTimestamps", get(intro_timestamps))
         .route("/Videos/{item_id}/IntroTimestamps", get(intro_timestamps))
         .route("/Episodes/{item_id}/IntroTimestamps", get(intro_timestamps))
         .route("/Users/{user_id}/Items/{item_id}", get(user_item_by_id))
+        .route("/Users/{user_id}/Items/{item_id}/InstantMix", get(instant_mix_from_user_item))
         .route("/Users/{user_id}/Items/{item_id}/Similar", get(get_user_similar_items))
         .route("/Users/{user_id}/Items/{item_id}/Intros", get(item_intros))
         .route("/Users/{user_id}/Items/{item_id}/LocalTrailers", get(local_trailers))
@@ -122,6 +125,9 @@ pub fn router() -> Router<AppState> {
         .route("/Users/{user_id}/Items/{item_id}/HideFromResume", post(hide_from_resume))
         .route("/Videos/{item_id}/AdditionalParts", get(additional_parts))
         .route("/Items/{item_id}/Similar", get(get_similar_items))
+        .route("/Items/{item_id}/InstantMix", get(instant_mix_from_item))
+        .route("/Albums/{item_id}/InstantMix", get(instant_mix_from_item))
+        .route("/MusicGenres/{name}/InstantMix", get(instant_mix_from_genre))
         .route("/Movies/{item_id}/Similar", get(get_similar_items))
         .route("/Shows/{item_id}/Similar", get(get_similar_items))
         .route("/Trailers/{item_id}/Similar", get(get_similar_items))
@@ -1285,6 +1291,126 @@ async fn user_item_by_id(
     item_dto(&state, user_id, item_id).await
 }
 
+async fn instant_mix_from_item(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_or_name): Path<String>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    instant_mix_for_seed(&state, session.user_id, &item_id_or_name, query).await
+}
+
+async fn instant_mix_from_user_item(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id_or_name)): Path<(Uuid, String)>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    ensure_user_access(&session, user_id)?;
+    instant_mix_for_seed(&state, user_id, &item_id_or_name, query).await
+}
+
+async fn instant_mix_from_artist(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    instant_mix_for_scope(
+        &state,
+        session.user_id,
+        ItemListOptions {
+            artists: vec![name],
+            media_types: vec!["Audio".to_string()],
+            is_folder: Some(false),
+            recursive: true,
+            start_index: query.start_index.unwrap_or(0).max(0),
+            limit: query.limit.unwrap_or(100).clamp(1, 200),
+            sort_by: Some("SortName".to_string()),
+            sort_order: Some("Ascending".to_string()),
+            ..ItemListOptions::default()
+        },
+    )
+    .await
+}
+
+async fn instant_mix_from_genre(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    instant_mix_for_scope(
+        &state,
+        session.user_id,
+        ItemListOptions {
+            genres: vec![name],
+            media_types: vec!["Audio".to_string()],
+            is_folder: Some(false),
+            recursive: true,
+            start_index: query.start_index.unwrap_or(0).max(0),
+            limit: query.limit.unwrap_or(100).clamp(1, 200),
+            sort_by: Some("SortName".to_string()),
+            sort_order: Some("Ascending".to_string()),
+            ..ItemListOptions::default()
+        },
+    )
+    .await
+}
+
+async fn instant_mix_for_seed(
+    state: &AppState,
+    user_id: Uuid,
+    item_id_or_name: &str,
+    query: ItemsQuery,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let start_index = query.start_index.unwrap_or(0).max(0);
+    let limit = query.limit.unwrap_or(100).clamp(1, 200);
+    let mut options = ItemListOptions {
+        user_id: Some(user_id),
+        media_types: vec!["Audio".to_string()],
+        is_folder: Some(false),
+        recursive: true,
+        start_index,
+        limit,
+        sort_by: Some("SortName".to_string()),
+        sort_order: Some("Ascending".to_string()),
+        ..ItemListOptions::default()
+    };
+
+    if let Ok(item_id) = emby_id_to_uuid(item_id_or_name) {
+        if let Some(item) = repository::get_media_item(&state.pool, item_id).await? {
+            if item.item_type.eq_ignore_ascii_case("MusicAlbum") || is_folder_like_item_type(&item.item_type) {
+                options.parent_id = Some(item.id);
+            } else if item.item_type.eq_ignore_ascii_case("MusicArtist") {
+                options.artists.push(item.name);
+            } else if item.item_type.eq_ignore_ascii_case("MusicGenre") || item.item_type.eq_ignore_ascii_case("Genre") {
+                options.genres.push(item.name);
+            } else if let Some(parent_id) = item.parent_id {
+                options.parent_id = Some(parent_id);
+            } else {
+                options.item_ids.push(item.id);
+            }
+        } else {
+            options.artist_ids.push(item_id);
+        }
+    } else {
+        options.genres.push(item_id_or_name.to_string());
+    }
+
+    instant_mix_for_scope(state, user_id, options).await
+}
+
+async fn instant_mix_for_scope(
+    state: &AppState,
+    user_id: Uuid,
+    mut options: ItemListOptions,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    options.user_id = Some(user_id);
+    let result = repository::list_media_items(&state.pool, options).await?;
+    media_items_to_dto_result(state, user_id, result).await
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct MetadataEditorInfoDto {
@@ -1362,6 +1488,17 @@ async fn update_item(
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
     ensure_media_item_exists(&state, item_id).await?;
     repository::update_media_item_from_emby(&state.pool, item_id, &metadata).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_item(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    repository::delete_media_item(&state.pool, item_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
