@@ -505,6 +505,19 @@ pub struct SessionInfoDto {
     pub application_version: String,
     pub is_active: bool,
     pub last_activity_date: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_end_point: Option<String>,
+    pub supports_remote_control: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub playable_media_types: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub supported_commands: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub now_playing_item: Option<BaseItemDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub now_viewing_item: Option<BaseItemDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub play_state: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1060,6 +1073,34 @@ pub struct PlaybackInfoResponse {
     pub play_session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcoding_info: Option<TranscodingInfoDto>,
+}
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "PascalCase")]
+pub struct TranscodingInfoDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_codec: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    pub is_video_direct: bool,
+    pub is_audio_direct: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bitrate: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub framerate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_percentage: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardware_acceleration_type: Option<String>,
+    pub transcode_reasons: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1192,6 +1233,12 @@ pub struct ItemsQuery {
     pub person_ids: Option<String>,
     #[serde(default, alias = "PersonTypes", alias = "personTypes")]
     pub person_types: Option<String>,
+    #[serde(default, alias = "Artists", alias = "artists")]
+    pub artists: Option<String>,
+    #[serde(default, alias = "ArtistIds", alias = "artistIds")]
+    pub artist_ids: Option<String>,
+    #[serde(default, alias = "Albums", alias = "albums")]
+    pub albums: Option<String>,
     #[serde(default, alias = "Studios", alias = "studios")]
     pub studios: Option<String>,
     #[serde(default, alias = "StudioIds", alias = "studioIds")]
@@ -1284,6 +1331,18 @@ pub struct ItemsQuery {
     pub min_end_date: Option<DateTime<Utc>>,
     #[serde(default, alias = "MaxEndDate", alias = "maxEndDate")]
     pub max_end_date: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MinDateLastSaved", alias = "minDateLastSaved")]
+    pub min_date_last_saved: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MaxDateLastSaved", alias = "maxDateLastSaved")]
+    pub max_date_last_saved: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MinDateLastSavedForUser", alias = "minDateLastSavedForUser")]
+    pub min_date_last_saved_for_user: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MaxDateLastSavedForUser", alias = "maxDateLastSavedForUser")]
+    pub max_date_last_saved_for_user: Option<DateTime<Utc>>,
+    #[serde(default, alias = "AiredDuringSeason", alias = "airedDuringSeason")]
+    pub aired_during_season: Option<i32>,
+    #[serde(default, alias = "ProjectToMedia", alias = "projectToMedia")]
+    pub project_to_media: Option<bool>,
     #[serde(
         default,
         alias = "GroupItemsIntoCollections",

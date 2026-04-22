@@ -10,11 +10,12 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     path::{Path as StdPath, PathBuf},
@@ -27,6 +28,9 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/Items/{item_id}/Images", get(list_item_images))
         .route("/Items/{item_id}/ThumbnailSet", get(get_item_thumbnail_set))
+        .route("/Items/{item_id}/RemoteImages", get(list_item_remote_images))
+        .route("/Items/{item_id}/RemoteImages/Providers", get(list_item_remote_image_providers))
+        .route("/Items/{item_id}/RemoteImages/Download", post(download_item_remote_image))
         .route(
             "/Items/{item_id}/Images/{image_type}",
             get(get_item_image)
@@ -127,6 +131,127 @@ async fn list_item_images(
     Ok(Json(images))
 }
 
+async fn item_image_url_response(
+    state: &AppState,
+    item_id_str: &str,
+    image_type: &str,
+    image_index: Option<i32>,
+) -> Result<Json<Value>, AppError> {
+    let item_id = emby_id_to_uuid(item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    let item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let normalized = normalized_item_image_type(image_type);
+    let has_image = match normalized.as_str() {
+        "Backdrop" => item.backdrop_path.is_some(),
+        "Logo" => item.logo_path.is_some(),
+        "Thumb" => item.thumb_path.is_some(),
+        _ => item.image_primary_path.is_some(),
+    };
+    if !has_image {
+        return Err(AppError::NotFound("图片不存在".to_string()));
+    }
+    let mut url = format!("/Items/{item_id_str}/Images/{normalized}");
+    if let Some(index) = image_index {
+        url.push('/');
+        url.push_str(&index.to_string());
+    }
+    Ok(Json(json!({ "Url": url })))
+}
+
+async fn list_item_remote_images(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    Ok(Json(json!({
+        "Images": [],
+        "TotalRecordCount": 0,
+        "Providers": []
+    })))
+}
+
+async fn list_item_remote_image_providers(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Vec<String>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    Ok(Json(Vec::new()))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteImageDownloadQuery {
+    #[serde(default, alias = "imageUrl")]
+    image_url: Option<String>,
+    #[serde(default, rename = "Type", alias = "type")]
+    image_type: Option<String>,
+}
+
+async fn download_item_remote_image(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Query(query): Query<RemoteImageDownloadQuery>,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let image_url = query
+        .image_url
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("缺少 ImageUrl 参数".to_string()))?;
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+
+    let response = Client::new()
+        .get(image_url)
+        .send()
+        .await
+        .map_err(|error| AppError::Internal(format!("下载远程图片失败: {error}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::NotFound(format!("远程图片不存在: {}", response.status())));
+    }
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| AppError::Internal(format!("读取远程图片失败: {error}")))?;
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = content_type.parse() {
+        headers.insert(header::CONTENT_TYPE, value);
+    }
+    upload_item_image_impl(
+        session,
+        state,
+        item_id_str,
+        query.image_type.unwrap_or_else(|| "Primary".to_string()),
+        headers,
+        bytes,
+    )
+    .await
+}
+
 async fn get_item_image(
     session: OptionalAuthSession,
     State(state): State<AppState>,
@@ -142,6 +267,23 @@ async fn get_item_image_with_tail(
     Path((item_id_str, image_type, image_tail)): Path<(String, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
+    if image_tail
+        .split('/')
+        .last()
+        .is_some_and(|segment| segment.eq_ignore_ascii_case("Url"))
+    {
+        let image_index = image_tail
+            .split('/')
+            .next()
+            .filter(|segment| !segment.eq_ignore_ascii_case("Url"))
+            .and_then(|value| value.parse::<i32>().ok());
+        let Json(value) = item_image_url_response(&state, &item_id_str, &image_type, image_index).await?;
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(value.to_string()))
+            .map_err(|error| AppError::Internal(format!("构建图片URL响应失败: {error}")));
+    }
     let image_index = image_tail
         .split('/')
         .next()

@@ -155,9 +155,15 @@ fn genre_to_base_item(genre: GenreDto, server_id: uuid::Uuid) -> BaseItemDto {
 pub fn router() -> axum::Router<crate::state::AppState> {
     axum::Router::new()
         .route("/Genres", axum::routing::get(get_genres))
+        .route("/MusicGenres", axum::routing::get(get_genres))
+        .route("/GameGenres", axum::routing::get(get_genres))
         .route("/Users/{userId}/Genres", axum::routing::get(get_user_genres))
         .route("/Genres/{genreName}/Items", axum::routing::get(get_genre_items))
         .route("/Genres/{genreName}", axum::routing::get(get_genre))
+        .route("/MusicGenres/{genreName}/Items", axum::routing::get(get_genre_items))
+        .route("/MusicGenres/{genreName}", axum::routing::get(get_genre))
+        .route("/GameGenres/{genreName}/Items", axum::routing::get(get_genre_items))
+        .route("/GameGenres/{genreName}", axum::routing::get(get_genre))
 }
 
 pub async fn get_user_genres(

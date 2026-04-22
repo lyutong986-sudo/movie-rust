@@ -23,9 +23,12 @@ pub fn router() -> Router<AppState> {
         .route("/Auth/Providers", get(auth_providers))
         .route("/Sessions", get(list_sessions))
         .route("/Sessions/PlayQueue", get(play_queue))
+        .route("/Sessions/{id}/PlayQueue", get(session_play_queue))
+        .route("/Sessions/{id}/Commands", get(session_commands))
+        .route("/Sessions/{id}/Commands/Pending", get(session_commands))
         .route("/Sessions/{id}/Command", post(no_content_for_session))
         .route("/Sessions/{id}/Command/{command}", post(no_content_for_session_command))
-        .route("/Sessions/{id}/Message", post(no_content_for_session))
+        .route("/Sessions/{id}/Message", post(message_for_session))
         .route("/Sessions/{id}/Playing", post(no_content_for_session))
         .route("/Sessions/{id}/Playing/{command}", post(no_content_for_session_command))
         .route("/Sessions/{id}/System/{command}", post(no_content_for_session_command))
@@ -83,14 +86,39 @@ struct PlayQueueQuery {
     device_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SessionCommandQuery {
+    #[serde(default, alias = "startIndex")]
+    start_index: Option<i64>,
+    #[serde(default, alias = "limit")]
+    limit: Option<i64>,
+    #[serde(default, alias = "consume")]
+    consume: Option<bool>,
+}
+
 async fn list_sessions(
     _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<SessionInfoDto>>, AppError> {
     let sessions = repository::list_sessions(&state.pool).await?;
-    Ok(Json(
-        sessions.iter().map(repository::session_to_dto).collect(),
-    ))
+    let mut items = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        let mut dto = repository::session_to_dto(&session);
+        if let Some(runtime) = repository::session_runtime_state(
+            &state.pool,
+            &session.access_token,
+            session.user_id,
+            state.config.server_id,
+        )
+        .await?
+        {
+            dto.now_playing_item = Some(runtime.now_playing_item);
+            dto.play_state = Some(runtime.play_state);
+        }
+        items.push(dto);
+    }
+    Ok(Json(items))
 }
 
 async fn list_auth_keys(
@@ -204,6 +232,42 @@ async fn play_queue(
     Ok(Json(result))
 }
 
+async fn session_play_queue(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<PlayQueueQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let result = repository::session_play_queue(
+        &state.pool,
+        Some(&id),
+        query.device_id.as_deref(),
+        session.user_id,
+        state.config.server_id,
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+async fn session_commands(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<SessionCommandQuery>,
+) -> Result<Json<QueryResult<Value>>, AppError> {
+    let result = repository::list_session_commands(
+        &state.pool,
+        &id,
+        session.user_id,
+        session.is_admin,
+        query.start_index.unwrap_or(0),
+        query.limit.unwrap_or(100),
+        query.consume.unwrap_or(false),
+    )
+    .await?;
+    Ok(Json(result))
+}
+
 async fn no_content(_session: AuthSession) -> StatusCode {
     StatusCode::NO_CONTENT
 }
@@ -221,6 +285,17 @@ async fn no_content_for_session(
         body.map(|Json(value)| value).unwrap_or_else(|| json!({})),
     )
     .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn message_for_session(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<Value>>,
+) -> Result<StatusCode, AppError> {
+    let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
+    repository::record_session_command(&state.pool, &id, "DisplayMessage", payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -35,6 +35,19 @@ struct ActivityLogRow {
     item_name: Option<String>,
 }
 
+#[derive(Debug, FromRow)]
+struct SessionCommandRow {
+    id: Uuid,
+    command: String,
+    payload: Value,
+    created_at: DateTime<Utc>,
+}
+
+pub struct SessionRuntimeState {
+    pub now_playing_item: BaseItemDto,
+    pub play_state: Value,
+}
+
 pub async fn user_count(pool: &sqlx::PgPool) -> Result<i64, AppError> {
     Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
@@ -1626,6 +1639,9 @@ pub struct ItemListOptions {
     pub years: Vec<i32>,
     pub person_ids: Vec<Uuid>,
     pub person_types: Vec<String>,
+    pub artists: Vec<String>,
+    pub artist_ids: Vec<Uuid>,
+    pub albums: Vec<String>,
     pub studios: Vec<String>,
     pub studio_ids: Vec<String>,
     pub containers: Vec<String>,
@@ -1657,6 +1673,12 @@ pub struct ItemListOptions {
     pub max_start_date: Option<DateTime<Utc>>,
     pub min_end_date: Option<DateTime<Utc>>,
     pub max_end_date: Option<DateTime<Utc>>,
+    pub min_date_last_saved: Option<DateTime<Utc>>,
+    pub max_date_last_saved: Option<DateTime<Utc>>,
+    pub min_date_last_saved_for_user: Option<DateTime<Utc>>,
+    pub max_date_last_saved_for_user: Option<DateTime<Utc>>,
+    pub aired_during_season: Option<i32>,
+    pub project_to_media: bool,
     pub resume_only: bool,
     pub recursive: bool,
     pub search_term: Option<String>,
@@ -1691,6 +1713,9 @@ impl Default for ItemListOptions {
             years: Vec::new(),
             person_ids: Vec::new(),
             person_types: Vec::new(),
+            artists: Vec::new(),
+            artist_ids: Vec::new(),
+            albums: Vec::new(),
             studios: Vec::new(),
             studio_ids: Vec::new(),
             containers: Vec::new(),
@@ -1722,6 +1747,12 @@ impl Default for ItemListOptions {
             max_start_date: None,
             min_end_date: None,
             max_end_date: None,
+            min_date_last_saved: None,
+            max_date_last_saved: None,
+            min_date_last_saved_for_user: None,
+            max_date_last_saved_for_user: None,
+            aired_during_season: None,
+            project_to_media: false,
             resume_only: false,
             recursive: false,
             search_term: None,
@@ -1946,6 +1977,37 @@ pub async fn list_media_items(
             .push("))");
     }
 
+    if !options.artists.is_empty() {
+        builder
+            .push(
+                " AND EXISTS (SELECT 1 FROM person_roles pr INNER JOIN persons p ON p.id = pr.person_id WHERE pr.media_item_id = media_items.id AND lower(p.name) = ANY(",
+            )
+            .push_bind(lowercase_list(&options.artists))
+            .push(") AND lower(pr.role_type) = ANY(ARRAY['artist','albumartist','musicartist','composer']))");
+    }
+
+    if !options.artist_ids.is_empty() {
+        builder
+            .push(
+                " AND EXISTS (SELECT 1 FROM person_roles pr WHERE pr.media_item_id = media_items.id AND pr.person_id = ANY(",
+            )
+            .push_bind(options.artist_ids)
+            .push(") AND lower(pr.role_type) = ANY(ARRAY['artist','albumartist','musicartist','composer']))");
+    }
+
+    if !options.albums.is_empty() {
+        builder
+            .push(
+                " AND (lower(item_type) = ANY(ARRAY['album','musicalbum']) AND lower(name) = ANY(",
+            )
+            .push_bind(lowercase_list(&options.albums))
+            .push(
+                ") OR EXISTS (SELECT 1 FROM media_items parent WHERE parent.id = media_items.parent_id AND lower(parent.name) = ANY(",
+            )
+            .push_bind(lowercase_list(&options.albums))
+            .push(")))");
+    }
+
     if !options.studios.is_empty() {
         builder.push(" AND studios && ").push_bind(options.studios);
     }
@@ -2075,6 +2137,31 @@ pub async fn list_media_items(
 
     if let Some(max_date) = options.max_end_date {
         builder.push(" AND end_date <= ").push_bind(max_date).push("::date");
+    }
+
+    if let Some(min_date) = options.min_date_last_saved {
+        builder.push(" AND date_modified >= ").push_bind(min_date);
+    }
+
+    if let Some(max_date) = options.max_date_last_saved {
+        builder.push(" AND date_modified <= ").push_bind(max_date);
+    }
+
+    if let Some(min_date) = options.min_date_last_saved_for_user {
+        builder.push(" AND date_modified >= ").push_bind(min_date);
+    }
+
+    if let Some(max_date) = options.max_date_last_saved_for_user {
+        builder.push(" AND date_modified <= ").push_bind(max_date);
+    }
+
+    if let Some(season_number) = options.aired_during_season {
+        builder
+            .push(" AND (parent_index_number = ")
+            .push_bind(season_number)
+            .push(" OR (item_type = 'Season' AND index_number = ")
+            .push_bind(season_number)
+            .push("))");
     }
 
     if let Some(user_id) = options.user_id {
@@ -2383,6 +2470,21 @@ pub async fn aggregate_stream_codecs(
         "#,
     )
     .bind(stream_type)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn aggregate_artists(pool: &sqlx::PgPool) -> Result<Vec<(Uuid, String)>, AppError> {
+    Ok(sqlx::query_as::<_, (Uuid, String)>(
+        r#"
+        SELECT DISTINCT p.id, p.name
+        FROM persons p
+        INNER JOIN person_roles pr ON pr.person_id = p.id
+        WHERE lower(pr.role_type) = ANY(ARRAY['artist','albumartist','musicartist','composer'])
+          AND btrim(p.name) <> ''
+        ORDER BY p.name
+        "#,
+    )
     .fetch_all(pool)
     .await?)
 }
@@ -3492,6 +3594,73 @@ pub async fn session_play_queue(
     })
 }
 
+pub async fn session_runtime_state(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+    user_id: Uuid,
+    server_id: Uuid,
+) -> Result<Option<SessionRuntimeState>, AppError> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            q.position_ticks AS queue_position_ticks,
+            q.is_paused AS queue_is_paused,
+            q.play_state AS queue_play_state,
+            q.updated_at AS queue_updated_at,
+            mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type,
+            mi.media_type, mi.path, mi.container, mi.overview, mi.production_year,
+            mi.official_rating, mi.community_rating, mi.critic_rating, mi.runtime_ticks,
+            mi.premiere_date, mi.status, mi.end_date, mi.air_days, mi.air_time,
+            mi.series_name, mi.season_name,
+            mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
+            mi.genres, mi.studios, mi.tags, mi.production_locations,
+            mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec,
+            mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
+            mi.remote_trailers, mi.date_created, mi.date_modified
+        FROM session_play_queue q
+        INNER JOIN sessions s ON s.access_token = q.session_id
+        INNER JOIN media_items mi ON mi.id = q.item_id
+        WHERE s.user_id = $1
+          AND q.session_id = $2
+        ORDER BY q.sort_index, q.updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let item = DbMediaItem::from_row(&row)?;
+    let dto = media_item_to_dto(pool, &item, Some(user_id), server_id).await?;
+    let position_ticks: Option<i64> = row.try_get("queue_position_ticks")?;
+    let is_paused: Option<bool> = row.try_get("queue_is_paused")?;
+    let play_state: Option<String> = row.try_get("queue_play_state")?;
+    let media_source_id = dto
+        .media_sources
+        .first()
+        .map(|source| source.id.clone())
+        .unwrap_or_else(|| format!("mediasource_{}", dto.id));
+
+    Ok(Some(SessionRuntimeState {
+        now_playing_item: dto,
+        play_state: json!({
+            "PositionTicks": position_ticks.unwrap_or(0),
+            "CanSeek": true,
+            "IsPaused": is_paused.unwrap_or(false),
+            "IsMuted": false,
+            "PlayMethod": "DirectPlay",
+            "RepeatMode": "RepeatNone",
+            "MediaSourceId": media_source_id,
+            "State": play_state.unwrap_or_else(|| "Playing".to_string())
+        }),
+    }))
+}
+
 pub async fn record_session_command(
     pool: &sqlx::PgPool,
     session_id: &str,
@@ -3512,6 +3681,159 @@ pub async fn record_session_command(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn list_session_commands(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+    user_id: Uuid,
+    is_admin: bool,
+    start_index: i64,
+    limit: i64,
+    consume: bool,
+) -> Result<QueryResult<Value>, AppError> {
+    let session_owner = sqlx::query_scalar::<_, Uuid>(
+        "SELECT user_id FROM sessions WHERE access_token = $1",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(session_owner) = session_owner else {
+        return Ok(QueryResult {
+            items: Vec::new(),
+            total_record_count: 0,
+            start_index: Some(start_index.max(0)),
+        });
+    };
+
+    if !is_admin && session_owner != user_id {
+        return Err(AppError::Unauthorized);
+    }
+
+    let start_index = start_index.max(0);
+    let limit = limit.clamp(1, 200);
+    let total_record_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM session_commands
+        WHERE session_id = $1
+          AND consumed_at IS NULL
+        "#,
+    )
+    .bind(session_id)
+    .fetch_one(pool)
+    .await?;
+
+    let rows = sqlx::query_as::<_, SessionCommandRow>(
+        r#"
+        SELECT id, command, payload, created_at
+        FROM session_commands
+        WHERE session_id = $1
+          AND consumed_at IS NULL
+        ORDER BY created_at
+        OFFSET $2
+        LIMIT $3
+        "#,
+    )
+    .bind(session_id)
+    .bind(start_index)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    if consume && !rows.is_empty() {
+        let command_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+        sqlx::query(
+            r#"
+            UPDATE session_commands
+            SET consumed_at = now()
+            WHERE session_id = $1
+              AND id = ANY($2)
+            "#,
+        )
+        .bind(session_id)
+        .bind(command_ids)
+        .execute(pool)
+        .await?;
+    }
+
+    let items = rows.into_iter().map(session_command_to_json).collect();
+
+    Ok(QueryResult {
+        items,
+        total_record_count,
+        start_index: Some(start_index),
+    })
+}
+
+fn session_command_to_json(row: SessionCommandRow) -> Value {
+    let payload_object = row.payload.as_object();
+    let name = payload_object
+        .and_then(|payload| payload.get("Name").or_else(|| payload.get("name")))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&row.command);
+    let arguments = payload_object
+        .and_then(|payload| payload.get("Arguments").or_else(|| payload.get("arguments")))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    json!({
+        "Id": row.id.to_string(),
+        "Name": name,
+        "Command": name,
+        "Arguments": arguments,
+        "Payload": row.payload,
+        "DateCreated": row.created_at,
+        "CreatedAt": row.created_at
+    })
+}
+
+pub async fn get_display_preferences(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    display_preferences_id: &str,
+    client: &str,
+) -> Result<Option<Value>, AppError> {
+    Ok(sqlx::query_scalar::<_, Value>(
+        r#"
+        SELECT preferences
+        FROM display_preferences
+        WHERE user_id = $1
+          AND display_preferences_id = $2
+          AND client = $3
+        "#,
+    )
+    .bind(user_id)
+    .bind(display_preferences_id)
+    .bind(client)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn upsert_display_preferences(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    display_preferences_id: &str,
+    client: &str,
+    preferences: Value,
+) -> Result<Value, AppError> {
+    Ok(sqlx::query_scalar::<_, Value>(
+        r#"
+        INSERT INTO display_preferences (user_id, display_preferences_id, client, preferences, updated_at)
+        VALUES ($1, $2, $3, $4, now())
+        ON CONFLICT (user_id, display_preferences_id, client)
+        DO UPDATE SET preferences = EXCLUDED.preferences, updated_at = now()
+        RETURNING preferences
+        "#,
+    )
+    .bind(user_id)
+    .bind(display_preferences_id)
+    .bind(client)
+    .bind(preferences)
+    .fetch_one(pool)
+    .await?)
 }
 
 pub struct UpsertMediaItem<'a> {
@@ -3741,6 +4063,50 @@ pub fn session_to_dto(session: &AuthSessionRow) -> SessionInfoDto {
             .unwrap_or_else(|| "0.1.0".to_string()),
         is_active: true,
         last_activity_date: session.last_activity_at,
+        remote_end_point: None,
+        supports_remote_control: true,
+        playable_media_types: vec!["Audio".to_string(), "Video".to_string()],
+        supported_commands: vec![
+            "MoveUp".to_string(),
+            "MoveDown".to_string(),
+            "MoveLeft".to_string(),
+            "MoveRight".to_string(),
+            "PageUp".to_string(),
+            "PageDown".to_string(),
+            "PreviousLetter".to_string(),
+            "NextLetter".to_string(),
+            "ToggleOsd".to_string(),
+            "ToggleContextMenu".to_string(),
+            "Select".to_string(),
+            "Back".to_string(),
+            "SendKey".to_string(),
+            "SendString".to_string(),
+            "GoHome".to_string(),
+            "GoToSettings".to_string(),
+            "VolumeUp".to_string(),
+            "VolumeDown".to_string(),
+            "Mute".to_string(),
+            "Unmute".to_string(),
+            "ToggleMute".to_string(),
+            "SetVolume".to_string(),
+            "SetAudioStreamIndex".to_string(),
+            "SetSubtitleStreamIndex".to_string(),
+            "DisplayContent".to_string(),
+            "GoToSearch".to_string(),
+            "DisplayMessage".to_string(),
+            "SetRepeatMode".to_string(),
+            "ChannelUp".to_string(),
+            "ChannelDown".to_string(),
+            "PlayMediaSource".to_string(),
+            "PlayTrailers".to_string(),
+            "SetShuffleQueue".to_string(),
+            "PlayState".to_string(),
+            "PlayNext".to_string(),
+            "ToggleFullscreen".to_string(),
+        ],
+        now_playing_item: None,
+        now_viewing_item: None,
+        play_state: None,
     }
 }
 

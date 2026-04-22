@@ -5,7 +5,7 @@ use crate::{
     metadata::person_service::PersonService,
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, BaseItemDto, ContentSectionDto, GetSimilarItems, ItemCountsDto,
-        ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult,
+        ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult, TranscodingInfoDto,
         UpdateUserItemDataRequest, UserItemDataDto, UserItemDataQuery,
     },
     naming,
@@ -32,6 +32,9 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Counts", get(item_counts))
         .route("/Users/{user_id}/Items/Counts", get(user_item_counts))
         .route("/Items/Filters", get(item_filters))
+        .route("/Artists", get(artists))
+        .route("/Artists/{name}", get(artist))
+        .route("/Artists/{name}/Items", get(artist_items))
         .route("/Studios", get(studios))
         .route("/Studios/{name}", get(studio))
         .route("/Studios/{name}/Items", get(studio_items))
@@ -188,6 +191,45 @@ async fn studios(
     }))
 }
 
+async fn artists(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let items = repository::aggregate_artists(&state.pool)
+        .await?
+        .into_iter()
+        .map(|(id, name)| {
+            let mut item = virtual_folder_item(&name, "MusicArtist", state.config.server_id);
+            item.id = uuid_to_emby_guid(&id);
+            item.guid = Some(uuid_to_emby_guid(&id));
+            item.display_preferences_id = Some(uuid_to_emby_guid(&id));
+            item
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(QueryResult {
+        total_record_count: items.len() as i64,
+        items,
+        start_index: Some(0),
+    }))
+}
+
+async fn artist(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Json<BaseItemDto> {
+    Json(virtual_folder_item(&name, "MusicArtist", state.config.server_id))
+}
+
+async fn artist_items(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    virtual_folder_items(&state, &session, query, VirtualFilter::Artist(name)).await
+}
+
 async fn studio(
     _session: AuthSession,
     State(state): State<AppState>,
@@ -312,6 +354,7 @@ async fn user_items(
 }
 
 enum VirtualFilter {
+    Artist(String),
     Studio(String),
     Tag(String),
 }
@@ -397,6 +440,13 @@ async fn virtual_folder_items(
     );
 
     match filter {
+        VirtualFilter::Artist(name) => {
+            if let Ok(id) = emby_id_to_uuid(&name) {
+                options.artist_ids = vec![id];
+            } else {
+                options.artists = vec![name];
+            }
+        }
         VirtualFilter::Studio(name) => options.studios = vec![name],
         VirtualFilter::Tag(name) => options.tags = vec![name],
     }
@@ -808,6 +858,9 @@ fn item_list_options_from_query(
         years: parse_i32_list(query.years.as_deref()),
         person_ids: parse_emby_uuid_list(query.person_ids.as_deref()),
         person_types: parse_list(query.person_types.as_deref()),
+        artists: parse_list(query.artists.as_deref()),
+        artist_ids: parse_emby_uuid_list(query.artist_ids.as_deref()),
+        albums: parse_list(query.albums.as_deref()),
         studios: parse_list(query.studios.as_deref()),
         studio_ids: parse_list(query.studio_ids.as_deref()),
         containers: parse_list(query.containers.as_deref()),
@@ -839,6 +892,12 @@ fn item_list_options_from_query(
         max_start_date: query.max_start_date,
         min_end_date: query.min_end_date,
         max_end_date: query.max_end_date,
+        min_date_last_saved: query.min_date_last_saved,
+        max_date_last_saved: query.max_date_last_saved,
+        min_date_last_saved_for_user: query.min_date_last_saved_for_user,
+        max_date_last_saved_for_user: query.max_date_last_saved_for_user,
+        aired_during_season: query.aired_during_season,
+        project_to_media: query.project_to_media.unwrap_or(false),
         resume_only,
         recursive,
         search_term: query.search_term.clone(),
@@ -1621,9 +1680,14 @@ async fn playback_info(
             selected_source.transcoding_sub_protocol = Some(transcoding_sub_protocol.clone());
         }
 
+        let transcoding_info = media_sources
+            .get(selected_media_source_index)
+            .map(|source| build_transcoding_info(source, &transcoding_container, effective_max_bitrate));
+
         return Ok(Json(PlaybackInfoResponse {
             media_sources,
             play_session_id,
+            transcoding_info,
             ..Default::default()
         }));
     }
@@ -1633,6 +1697,52 @@ async fn playback_info(
         play_session_id,
         ..Default::default()
     }))
+}
+
+fn build_transcoding_info(
+    source: &crate::models::MediaSourceDto,
+    container: &str,
+    max_streaming_bitrate: Option<i64>,
+) -> TranscodingInfoDto {
+    let video_stream = source
+        .media_streams
+        .iter()
+        .find(|stream| stream.stream_type.eq_ignore_ascii_case("Video"));
+    let audio_stream = source
+        .media_streams
+        .iter()
+        .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"));
+    let source_bitrate = source.bitrate;
+    let mut reasons = Vec::new();
+    if let (Some(source_bitrate), Some(max_bitrate)) = (source_bitrate, max_streaming_bitrate) {
+        if i64::from(source_bitrate) > max_bitrate {
+            reasons.push("ContainerBitrateExceedsLimit".to_string());
+        }
+    }
+    if !source.supports_direct_play {
+        reasons.push("DirectPlayError".to_string());
+    }
+    if !source.supports_direct_stream {
+        reasons.push("DirectStreamError".to_string());
+    }
+    if reasons.is_empty() {
+        reasons.push("ContainerNotSupported".to_string());
+    }
+
+    TranscodingInfoDto {
+        audio_codec: audio_stream.and_then(|stream| stream.codec.clone()),
+        video_codec: video_stream.and_then(|stream| stream.codec.clone()),
+        container: Some(container.to_string()),
+        is_video_direct: false,
+        is_audio_direct: false,
+        bitrate: source_bitrate,
+        framerate: video_stream.and_then(|stream| stream.real_frame_rate.or(stream.average_frame_rate)),
+        completion_percentage: None,
+        width: video_stream.and_then(|stream| stream.width),
+        height: video_stream.and_then(|stream| stream.height),
+        hardware_acceleration_type: None,
+        transcode_reasons: reasons,
+    }
 }
 
 fn device_profile_supports_direct_play(
