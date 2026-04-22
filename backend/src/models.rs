@@ -1828,7 +1828,7 @@ pub struct AddVirtualFolderDto {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct UpdateLibraryOptionsDto {
-    pub id: Uuid,
+    pub id: String,
     pub library_options: LibraryOptionsDto,
 }
 

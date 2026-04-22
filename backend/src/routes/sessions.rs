@@ -507,10 +507,15 @@ async fn record_report(
     report: PlaybackReport,
 ) -> Result<StatusCode, AppError> {
     let user_id = report.user_id.unwrap_or(session.user_id);
+    let item_id = report.item_id;
+    let session_id = report
+        .session_id
+        .clone()
+        .unwrap_or_else(|| session.access_token.clone());
     repository::record_playback_event(
         &state.pool,
         user_id,
-        report.item_id,
+        item_id,
         report
             .session_id
             .as_deref()
@@ -521,6 +526,7 @@ async fn record_report(
         report.played_to_completion,
     )
     .await?;
+    broadcast_playback_updates(state, user_id, item_id, &session_id, event_type).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -563,7 +569,68 @@ async fn record_legacy_for_user(
         Some(played_to_completion),
     )
     .await?;
+    broadcast_playback_updates(state, user_id, Some(item_id), &session.access_token, event_type).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn broadcast_playback_updates(
+    state: &AppState,
+    user_id: Uuid,
+    item_id: Option<Uuid>,
+    session_id: &str,
+    event_type: &str,
+) -> Result<(), AppError> {
+    if let Some(item_id) = item_id {
+        let user_data =
+            crate::routes::items::collect_related_user_data(state, user_id, item_id).await?;
+        crate::routes::items::broadcast_user_data_changed(state, user_data.iter().collect());
+    }
+
+    let sessions = repository::list_sessions(&state.pool).await?;
+    let mut items = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        let mut dto = repository::session_to_dto(&session);
+        if let Some(runtime) = repository::session_runtime_state(
+            &state.pool,
+            &session.access_token,
+            session.user_id,
+            state.config.server_id,
+        )
+        .await?
+        {
+            dto.now_playing_item = Some(runtime.now_playing_item);
+            dto.play_state = Some(runtime.play_state);
+        }
+        if let Some(summary) =
+            repository::get_session_state_summary(&state.pool, &session.access_token).await?
+        {
+            merge_session_play_state(&mut dto, summary);
+        }
+        if let Some(capabilities) =
+            repository::get_session_capabilities(&state.pool, &session.access_token).await?
+        {
+            apply_session_capabilities(&mut dto, &capabilities);
+        }
+        if let Some(viewing_item) =
+            session_viewing_item(state, &session.access_token, session.user_id).await?
+        {
+            dto.now_viewing_item = Some(viewing_item);
+        }
+        items.push(dto);
+    }
+
+    crate::routes::websocket::broadcast_message(state, "Sessions", json!(items));
+    crate::routes::websocket::broadcast_message(
+        state,
+        "PlaybackProgress",
+        json!({
+            "SessionId": session_id,
+            "UserId": uuid_to_emby_guid(&user_id),
+            "ItemId": item_id.map(|item_id| uuid_to_emby_guid(&item_id)),
+            "EventName": event_type
+        }),
+    );
+    Ok(())
 }
 
 fn apply_session_capabilities(dto: &mut SessionInfoDto, capabilities: &Value) {

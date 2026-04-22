@@ -1212,21 +1212,22 @@ async fn update_user_data_for_user(
         played_percentage: _played_percentage,
         unplayed_item_count: _unplayed_item_count,
     } = payload;
-    Ok(Json(
-        repository::update_user_item_data(
-            &state.pool,
-            user_id,
-            item_id,
-            UpdateUserDataInput {
-                playback_position_ticks,
-                play_count,
-                is_favorite,
-                played,
-                last_played_date,
-            },
-        )
-        .await?,
-    ))
+    let user_data = repository::update_user_item_data(
+        &state.pool,
+        user_id,
+        item_id,
+        UpdateUserDataInput {
+            playback_position_ticks,
+            play_count,
+            is_favorite,
+            played,
+            last_played_date,
+        },
+    )
+    .await?;
+    let related_user_data = collect_related_user_data(state, user_id, item_id).await?;
+    broadcast_user_data_changed(state, related_user_data.iter().collect());
+    Ok(Json(user_data))
 }
 
 async fn set_favorite_for_user(
@@ -1238,9 +1239,11 @@ async fn set_favorite_for_user(
 ) -> Result<Json<UserItemDataDto>, AppError> {
     ensure_user_access(session, user_id)?;
     ensure_media_item_exists(state, item_id).await?;
-    Ok(Json(
-        repository::set_user_favorite(&state.pool, user_id, item_id, is_favorite).await?,
-    ))
+    let user_data =
+        repository::set_user_favorite(&state.pool, user_id, item_id, is_favorite).await?;
+    let related_user_data = collect_related_user_data(state, user_id, item_id).await?;
+    broadcast_user_data_changed(state, related_user_data.iter().collect());
+    Ok(Json(user_data))
 }
 
 async fn set_played_for_user(
@@ -1253,9 +1256,11 @@ async fn set_played_for_user(
 ) -> Result<Json<UserItemDataDto>, AppError> {
     ensure_user_access(session, user_id)?;
     ensure_media_item_exists(state, item_id).await?;
-    Ok(Json(
-        repository::set_user_played(&state.pool, user_id, item_id, is_played, date_played).await?,
-    ))
+    let user_data =
+        repository::set_user_played(&state.pool, user_id, item_id, is_played, date_played).await?;
+    let related_user_data = collect_related_user_data(state, user_id, item_id).await?;
+    broadcast_user_data_changed(state, related_user_data.iter().collect());
+    Ok(Json(user_data))
 }
 
 async fn ensure_media_item_exists(state: &AppState, item_id: Uuid) -> Result<(), AppError> {
@@ -1517,6 +1522,7 @@ async fn update_item_content_type(
         .bind(content_type)
         .execute(&state.pool)
         .await?;
+    broadcast_items_updated(&state, vec![item_id_str]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1530,6 +1536,7 @@ async fn update_item(
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
     ensure_media_item_exists(&state, item_id).await?;
     repository::update_media_item_from_emby(&state.pool, item_id, &metadata).await?;
+    broadcast_items_updated(&state, vec![item_id_str]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1541,6 +1548,15 @@ async fn delete_item(
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
     repository::delete_media_item(&state.pool, item_id).await?;
+    crate::routes::websocket::broadcast_message(
+        &state,
+        "LibraryChanged",
+        json!({
+            "ItemsAdded": [],
+            "ItemsRemoved": [item_id_str],
+            "ItemsUpdated": []
+        }),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1630,6 +1646,7 @@ async fn apply_search_criteria(
     .execute(&state.pool)
     .await?;
 
+    broadcast_items_updated(&state, vec![item_id_str]);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1828,21 +1845,22 @@ async fn hide_from_resume(
             repository::get_user_item_data_dto(&state.pool, user_id, item_id).await?,
         ));
     }
-    Ok(Json(
-        repository::update_user_item_data(
-            &state.pool,
-            user_id,
-            item_id,
-            UpdateUserDataInput {
-                playback_position_ticks: Some(0),
-                play_count: None,
-                is_favorite: None,
-                played: None,
-                last_played_date: None,
-            },
-        )
-        .await?,
-    ))
+    let user_data = repository::update_user_item_data(
+        &state.pool,
+        user_id,
+        item_id,
+        UpdateUserDataInput {
+            playback_position_ticks: Some(0),
+            play_count: None,
+            is_favorite: None,
+            played: None,
+            last_played_date: None,
+        },
+    )
+    .await?;
+    let related_user_data = collect_related_user_data(&state, user_id, item_id).await?;
+    broadcast_user_data_changed(&state, related_user_data.iter().collect());
+    Ok(Json(user_data))
 }
 
 async fn additional_parts(
@@ -1865,6 +1883,73 @@ async fn additional_parts(
     )
     .await?;
     Ok(Json(result))
+}
+
+fn broadcast_items_updated(state: &AppState, item_ids: Vec<String>) {
+    crate::routes::websocket::broadcast_message(
+        state,
+        "LibraryChanged",
+        json!({
+            "ItemsAdded": [],
+            "ItemsRemoved": [],
+            "ItemsUpdated": item_ids
+        }),
+    );
+}
+
+pub(crate) fn broadcast_user_data_changed(state: &AppState, user_data_list: Vec<&UserItemDataDto>) {
+    let user_data_list = user_data_list
+        .into_iter()
+        .map(|user_data| {
+            json!({
+                "ItemId": user_data.item_id,
+                "PlaybackPositionTicks": user_data.playback_position_ticks,
+                "PlayCount": user_data.play_count,
+                "IsFavorite": user_data.is_favorite,
+                "Played": user_data.played,
+                "LastPlayedDate": user_data.last_played_date,
+                "PlayedPercentage": user_data.played_percentage,
+                "UnplayedItemCount": user_data.unplayed_item_count,
+                "Likes": user_data.likes,
+                "Key": user_data.key
+            })
+        })
+        .collect::<Vec<_>>();
+
+    crate::routes::websocket::broadcast_message(
+        state,
+        "UserDataChanged",
+        json!({
+            "UserDataList": user_data_list
+        }),
+    );
+}
+
+pub(crate) async fn collect_related_user_data(
+    state: &AppState,
+    user_id: Uuid,
+    item_id: Uuid,
+) -> Result<Vec<UserItemDataDto>, AppError> {
+    let mut item_ids = vec![item_id];
+    let mut current = repository::get_media_item(&state.pool, item_id).await?;
+
+    while let Some(item) = current {
+        if let Some(parent_id) = item.parent_id {
+            if !item_ids.contains(&parent_id) {
+                item_ids.push(parent_id);
+            }
+            current = repository::get_media_item(&state.pool, parent_id).await?;
+        } else {
+            break;
+        }
+    }
+
+    let mut payload = Vec::with_capacity(item_ids.len());
+    for related_item_id in item_ids {
+        payload.push(repository::get_user_item_data_dto(&state.pool, user_id, related_item_id).await?);
+    }
+
+    Ok(payload)
 }
 
 async fn item_dto(
@@ -1981,13 +2066,15 @@ async fn refresh_item_metadata(
             "Progress": 100
         }),
     );
-    crate::routes::websocket::broadcast_message(
-        &state,
-        "LibraryChanged",
-        json!({
-            "ItemsUpdated": [item_id_str]
-        }),
-    );
+        crate::routes::websocket::broadcast_message(
+            &state,
+            "LibraryChanged",
+            json!({
+                "ItemsAdded": [],
+                "ItemsRemoved": [],
+                "ItemsUpdated": [item_id_str]
+            }),
+        );
 
     Ok(StatusCode::NO_CONTENT)
 }

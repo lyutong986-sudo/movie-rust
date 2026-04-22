@@ -82,6 +82,7 @@ class ApiStore {
    */
   public readonly baseItemAdd = apiDb.baseItemAdd;
   public readonly requestAdd = apiDb.requestAdd;
+  public readonly clearBaseItemResponses = apiDb.clearBaseItemResponses;
   private readonly _notifyUpdates = (ids: string[]) => {
     lastUpdatedIds.value = ids;
   };
@@ -138,12 +139,14 @@ class ApiStore {
           && 'ItemsUpdated' in Data
           && isArray(Data.ItemsUpdated)
         ) {
+          await this.clearBaseItemResponses();
           await this._update(Data.ItemsUpdated);
         } else if (
           MessageType === 'UserDataChanged'
           && 'UserDataList' in Data
           && isArray(Data.UserDataList)
         ) {
+          await this.clearBaseItemResponses();
           await this._update(Data.UserDataList.map(userData => userData.ItemId));
         }
       }

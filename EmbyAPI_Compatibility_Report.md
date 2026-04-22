@@ -548,3 +548,20 @@ pnpm --filter @jellyfin-vue/frontend check:types
   - 当前 SessionInfoDto 已覆盖前端与 EmbySDK 常见会话字段：Id、UserId、UserName、Client、DeviceId、DeviceName、ApplicationVersion、IsActive、LastActivityDate、RemoteEndPoint、SupportsRemoteControl、PlayableMediaTypes、SupportedCommands、NowPlayingItem、PlayState、NowViewingItem。
   - 审计当前前端工作区后，未发现更多已被直接消费但缺失的 SessionInfoDto 字段；并且 websocket SessionsStart 与 REST /Sessions 现都基于同一套会话 DTO 组装逻辑，避免两条链路字段漂移。
 - 本轮后端验证：cargo check --manifest-path backend\\Cargo.toml 已通过。
+## 2026-04-22 前端适配补充（二十六）
+
+- 继续按 Emby 风格细化 websocket 变更载荷：`LibraryChanged` 现在统一补齐 `ItemsAdded`、`ItemsRemoved`、`ItemsUpdated` 三组字段，不再只发 `ItemsUpdated`。目前已接到全库刷新、单项元数据刷新、项目编辑、内容类型变更、远程识别 Apply、项目删除等真实写路径；删除场景会走 `ItemsRemoved`，更新场景走 `ItemsUpdated`。
+- `backend/src/routes/items.rs` 新增了面向 websocket 的 `broadcast_user_data_changed(...)`，把 `ItemId`、`PlaybackPositionTicks`、`PlayCount`、`IsFavorite`、`Played`、`LastPlayedDate`、`PlayedPercentage` 等 `UserItemDataDto` 常用字段封装为 `UserDataChanged { UserDataList: [...] }`。这和当前 frontend `apiStore` 的消费方式直接对齐，收到推送后会按 `ItemId` 重新拉取项目详情。
+- 这组 `UserDataChanged` 推送已经接到前端真实会改用户状态的高频入口：`POST /UserItems/{id}/UserData`、`POST /Users/{userId}/Items/{id}/UserData`、收藏/取消收藏、标记已播放/未播放、`HideFromResume`。这样收藏、播放进度、已播放状态在不同页面之间的同步更接近 Emby 客户端行为。
+- `backend/src/routes/sessions.rs` 继续顺着播放态上报链路补 websocket 推送：`/Sessions/Playing`、`/Sessions/Playing/Progress`、`/Sessions/Playing/Stopped` 以及 legacy `PlayingItems` 路径，在写入 `playback_events` 后会主动广播最新 `UserDataChanged`，并额外推送一次最新 `Sessions` 列表和轻量 `PlaybackProgress` 事件，补上播放态变化的实时通知面。
+- 这次补完后，当前项目 websocket 的高频同步链路已经覆盖三类核心状态：任务刷新（`RefreshProgress`）、媒体库项目变更（`LibraryChanged`）、用户项目状态与播放态变化（`UserDataChanged` / `Sessions` / `PlaybackProgress`）。frontend 现有代码会直接受益于前两类，而后三类也为 EmbySDK 客户端继续兼容预留了更完整的标准推送面。
+- 本轮后端验证：`cargo check --manifest-path backend\\Cargo.toml` 已通过；仍只有既有 warning，未新增编译错误。
+
+## 2026-04-22 前端适配补充（二十七）
+
+- 继续把 `UserDataChanged` 往 Emby 客户端更在意的“批量列表变化”场景补深：后端现在不会只推当前条目本身，而是会顺着父级链一路补齐相关的 `UserItemDataDto`。对于剧集播放、标记已播放、收藏、HideFromResume、播放进度上报等操作，websocket 推送现在会一起覆盖当前集、父季、父剧等相关条目，给前端同步未播放计数、父级播放状态提供更完整的刷新线索。
+- 为了让“继续观看 / 最新媒体 / Next Up”这类 BaseItem 列表缓存不再卡在旧结果上，frontend 的 BaseItem 缓存层也做了联动修复：`apiDb` 新增 BaseItem 请求缓存清理，websocket 收到 `LibraryChanged` / `UserDataChanged` 时会清掉相关 BaseItem 响应缓存；同时 `useBaseItem` 在 `lastUpdatedIds` 变化时不再只刷新本地 item 缓存，也会主动重新请求当前活跃的 BaseItem 查询。这样继续观看命中变化和父级列表变化不会再长期停留在旧缓存里。
+- `settings/libraries` 原先只是一个最小只读页，空数据时几乎只剩一张空卡片，且没有把 EmbySDK 风格的媒体库管理动作接完整。本轮将 [frontend/packages/frontend/src/pages/settings/libraries.vue] 重做为可实际操作的管理页：支持查看虚拟媒体库、编辑名称、调整元数据语言/国家、开关基础库选项、增删路径、创建媒体库，以及全库刷新。
+- 针对这个页面的 Emby 兼容坑，后端一并修正了媒体库选项保存的 ID 语义：[backend/src/models.rs] 中 `UpdateLibraryOptionsDto.Id` 不再按原始 `Uuid` 直接反序列化，而是按 Emby GUID 字符串接收，再由 [backend/src/routes/admin.rs] 转回内部 UUID；同时 `GET /Library/SelectableMediaFolders` 返回的 `Id/Guid` 也统一改为 Emby GUID，避免前端和 EmbySDK 继续混用两套 ID 语义。
+- 这轮仍以 EmbySDK 为准，没有强行让 frontend 去兼容后端旧行为；相反是把 backend 的媒体库管理 DTO 和 websocket 用户数据联动都往 EmbySDK/Jellyfin SDK 的使用习惯靠拢。
+- 验证情况：`cargo check --manifest-path backend\\Cargo.toml` 已通过。前端这轮没有跑完整构建检查，当前结论基于代码级审计与修复。

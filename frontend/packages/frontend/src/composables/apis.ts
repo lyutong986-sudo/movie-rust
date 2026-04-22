@@ -470,6 +470,7 @@ function _sharedInternalLogic<T extends Record<K, (...args: any[]) => any>, K ex
         void cachedItems?.trigger(
           fetchResult.value as ExtractBaseItemDtoResponse<ReturnData<T, K, typeof ofBaseItem>>
         );
+        void runNormally();
       };
 
       setupEffects({

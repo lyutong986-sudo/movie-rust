@@ -194,7 +194,9 @@ async fn update_library_options(
     Json(payload): Json<UpdateLibraryOptionsDto>,
 ) -> Result<StatusCode, AppError> {
     auth::require_admin(&session)?;
-    repository::update_library_options(&state.pool, payload.id, payload.library_options).await?;
+    let library_id = crate::models::emby_id_to_uuid(&payload.id)
+        .map_err(|_| AppError::BadRequest(format!("无效的媒体库ID格式: {}", payload.id)))?;
+    repository::update_library_options(&state.pool, library_id, payload.library_options).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -302,6 +304,8 @@ fn broadcast_library_refresh_finished(state: &AppState, library_ids: Vec<String>
         state,
         "LibraryChanged",
         serde_json::json!({
+            "ItemsAdded": [],
+            "ItemsRemoved": [],
             "ItemsUpdated": library_ids
         }),
     );
@@ -340,8 +344,8 @@ async fn selectable_media_folders(
         .iter()
         .map(|library| LibraryMediaFolderDto {
             name: library.name.clone(),
-            id: library.id.to_string(),
-            guid: library.id.to_string(),
+            id: uuid_to_emby_guid(&library.id),
+            guid: uuid_to_emby_guid(&library.id),
             sub_folders: repository::library_to_virtual_folder_dto(library)
                 .locations
                 .into_iter()

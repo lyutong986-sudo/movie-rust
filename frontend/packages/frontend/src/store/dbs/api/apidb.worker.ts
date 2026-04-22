@@ -85,6 +85,12 @@ class ApiDatabase extends BaseDb {
     });
   };
 
+  public readonly clearBaseItemResponses = async (): Promise<void> => {
+    await this.responses
+      .filter(response => response.ofBaseItem)
+      .delete();
+  };
+
   public constructor() {
     /**
      * Unique indexes (function and params are composite keys)
