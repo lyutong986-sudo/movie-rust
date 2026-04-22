@@ -77,6 +77,11 @@ pub fn router() -> Router<AppState> {
         .route("/Items/{item_id}", get(item_by_id))
         .route("/Items/{item_id}/Refresh", post(refresh_item_metadata))
         .route("/Users/{user_id}/Items/{item_id}", get(user_item_by_id))
+        .route("/Users/{user_id}/Items/{item_id}/Intros", get(empty_item_query_result))
+        .route("/Users/{user_id}/Items/{item_id}/LocalTrailers", get(empty_item_list))
+        .route("/Users/{user_id}/Items/{item_id}/SpecialFeatures", get(empty_item_list))
+        .route("/Users/{user_id}/Items/{item_id}/HideFromResume", post(hide_from_resume))
+        .route("/Videos/{item_id}/AdditionalParts", get(additional_parts))
         .route("/Items/{item_id}/Similar", get(get_similar_items))
         .route("/Movies/{item_id}/Similar", get(get_similar_items))
         .route("/Shows/{item_id}/Similar", get(get_similar_items))
@@ -615,6 +620,95 @@ async fn user_item_by_id(
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     item_dto(&state, user_id, item_id).await
+}
+
+async fn empty_item_query_result(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id_str)): Path<(Uuid, String)>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    ensure_user_access(&session, user_id)?;
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(Json(QueryResult {
+        items: Vec::new(),
+        total_record_count: 0,
+        start_index: Some(0),
+    }))
+}
+
+async fn empty_item_list(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id_str)): Path<(Uuid, String)>,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    ensure_user_access(&session, user_id)?;
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(Json(Vec::new()))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct HideFromResumeQuery {
+    #[serde(default, alias = "hide")]
+    hide: Option<bool>,
+}
+
+async fn hide_from_resume(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id_str)): Path<(Uuid, String)>,
+    Query(query): Query<HideFromResumeQuery>,
+) -> Result<Json<UserItemDataDto>, AppError> {
+    ensure_user_access(&session, user_id)?;
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    if query.hide != Some(true) {
+        return Ok(Json(
+            repository::get_user_item_data_dto(&state.pool, user_id, item_id).await?,
+        ));
+    }
+    Ok(Json(
+        repository::update_user_item_data(
+            &state.pool,
+            user_id,
+            item_id,
+            UpdateUserDataInput {
+                playback_position_ticks: Some(0),
+                play_count: None,
+                is_favorite: None,
+                played: None,
+                last_played_date: None,
+            },
+        )
+        .await?,
+    ))
+}
+
+async fn additional_parts(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+    let result = repository::get_additional_parts_for_item(
+        &state.pool,
+        item_id,
+        user_id,
+        state.config.server_id,
+        query.start_index.unwrap_or(0).max(0),
+        query.limit.unwrap_or(100).clamp(1, 200),
+    )
+    .await?;
+    Ok(Json(result))
 }
 
 async fn item_dto(

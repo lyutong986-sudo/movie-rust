@@ -54,6 +54,10 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/hls1/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
         .route("/Video/{item_id}/hls1/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
         .route("/video/{item_id}/hls1/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
+        .route("/Videos/{item_id}/hls/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
+        .route("/videos/{item_id}/hls/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
+        .route("/Video/{item_id}/hls/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
+        .route("/video/{item_id}/hls/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
         .route("/Audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/Audio/{item_id}/main.m3u8", get(audio_master_playlist).head(audio_master_playlist))
@@ -62,6 +66,8 @@ pub fn router() -> Router<AppState> {
         .route("/audio/{item_id}/live.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/Audio/{item_id}/hls1/{_playlist_id}/{segment_file}", get(audio_hls_segment).head(audio_hls_segment))
         .route("/audio/{item_id}/hls1/{_playlist_id}/{segment_file}", get(audio_hls_segment).head(audio_hls_segment))
+        .route("/Audio/{item_id}/hls/{_playlist_id}/{segment_file}", get(audio_hls_segment).head(audio_hls_segment))
+        .route("/audio/{item_id}/hls/{_playlist_id}/{segment_file}", get(audio_hls_segment).head(audio_hls_segment))
         .route("/Videos/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
         .route("/videos/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
         .route("/Items/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
@@ -90,6 +96,10 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/stream.{container}", get(stream_video_with_container).head(stream_video_with_container))
         .route("/Video/{item_id}/stream.{container}", get(stream_video_with_container).head(stream_video_with_container))
         .route("/video/{item_id}/stream.{container}", get(stream_video_with_container).head(stream_video_with_container))
+        .route("/Videos/{item_id}/{stream_file_name}", get(stream_video_by_file_name).head(stream_video_by_file_name))
+        .route("/videos/{item_id}/{stream_file_name}", get(stream_video_by_file_name).head(stream_video_by_file_name))
+        .route("/Video/{item_id}/{stream_file_name}", get(stream_video_by_file_name).head(stream_video_by_file_name))
+        .route("/video/{item_id}/{stream_file_name}", get(stream_video_by_file_name).head(stream_video_by_file_name))
         .route("/Videos/{item_id}/{_media_source_id}/stream", get(stream_video_for_media_source).head(stream_video_for_media_source))
         .route("/videos/{item_id}/{_media_source_id}/stream", get(stream_video_for_media_source).head(stream_video_for_media_source))
         .route("/Video/{item_id}/{_media_source_id}/stream", get(stream_video_for_media_source).head(stream_video_for_media_source))
@@ -125,6 +135,12 @@ struct VideoItemPath {
 struct VideoItemContainerPath {
     item_id: String,
     container: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VideoStreamFilePath {
+    item_id: String,
+    stream_file_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,6 +218,19 @@ async fn stream_video_with_container(
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     stream_video_request(&state, &path.item_id, None, Some(path.container), query, request).await
+}
+
+async fn stream_video_by_file_name(
+    State(state): State<AppState>,
+    Path(path): Path<VideoStreamFilePath>,
+    Query(query): Query<VideoStreamQuery>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let container = path
+        .stream_file_name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_string());
+    stream_video_request(&state, &path.item_id, None, container, query, request).await
 }
 
 async fn stream_video_for_media_source(

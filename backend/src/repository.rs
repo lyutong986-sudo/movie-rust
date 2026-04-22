@@ -3942,6 +3942,37 @@ async fn version_group_items_for_item(
     Ok(grouped_items)
 }
 
+pub async fn get_additional_parts_for_item(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    user_id: Uuid,
+    server_id: Uuid,
+    start_index: i64,
+    limit: i64,
+) -> Result<QueryResult<BaseItemDto>, AppError> {
+    let item = get_media_item(pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let mut grouped_items = version_group_items_for_item(pool, &item).await?;
+    grouped_items.retain(|candidate| candidate.id != item.id);
+
+    let total_record_count = grouped_items.len() as i64;
+    let start = start_index.max(0) as usize;
+    let take = limit.clamp(1, 200) as usize;
+    let page_items = grouped_items.into_iter().skip(start).take(take);
+
+    let mut items = Vec::new();
+    for candidate in page_items {
+        items.push(media_item_to_dto(pool, &candidate, Some(user_id), server_id).await?);
+    }
+
+    Ok(QueryResult {
+        items,
+        total_record_count,
+        start_index: Some(start_index.max(0)),
+    })
+}
+
 pub async fn get_media_sources_for_item(
     pool: &sqlx::PgPool,
     item: &DbMediaItem,
