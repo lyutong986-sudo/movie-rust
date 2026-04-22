@@ -9,6 +9,7 @@ import { createApp } from 'vue';
 import { routes } from 'vue-router/auto-routes';
 import i18next from 'i18next';
 import I18NextVue from 'i18next-vue';
+import { resolveSupportedLanguage } from '@jellyfin-vue/i18n';
 import { getFontFaces } from '#/utils/data-manipulation.ts';
 import { hideDirective } from '#/plugins/directives.ts';
 import { createPlugin as createRemote } from '#/plugins/remote/index.ts';
@@ -27,6 +28,12 @@ import '#/assets/styles/index.css';
  */
 const remote = createRemote();
 const app = createApp(Root);
+const startupLocale = resolveSupportedLanguage(i18next.resolvedLanguage ?? i18next.language);
+
+if (startupLocale) {
+  vuetify.locale.current.value = startupLocale;
+  document.documentElement.lang = startupLocale;
+}
 
 /**
  * We add routes at this point instead of in the router plugin to avoid circular references

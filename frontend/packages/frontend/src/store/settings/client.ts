@@ -6,7 +6,7 @@ import { computed } from 'vue';
 import { isNil, sealed } from '@jellyfin-vue/shared/validation';
 import type { KeysOfUnion } from 'type-fest';
 import i18next from 'i18next';
-import { languages } from '@jellyfin-vue/i18n';
+import { languages, resolveSupportedLanguage } from '@jellyfin-vue/i18n';
 import { vuetify } from '#/plugins/vuetify.ts';
 import { SyncedStore } from '#/store/super/synced-store.ts';
 
@@ -22,29 +22,8 @@ export interface ClientSettingsState {
 @sealed
 class ClientSettingsStore extends SyncedStore<ClientSettingsState, KeysOfUnion<ClientSettingsState>> {
   private readonly _navigatorLanguage = useNavigatorLanguage();
-  private readonly _resolveSupportedLocale = (locale?: string): string | undefined => {
-    if (!locale) {
-      return undefined;
-    }
-
-    const normalized = locale.trim().toLowerCase();
-    const exact = languages.find(language => language.toLowerCase() === normalized);
-
-    if (exact) {
-      return exact;
-    }
-
-    const baseLanguage = normalized.split('-')[0];
-    const baseMatch = languages.find(language => language.toLowerCase() === baseLanguage);
-
-    if (baseMatch) {
-      return baseMatch;
-    }
-
-    return languages.find(language => language.toLowerCase().startsWith(`${baseLanguage}-`));
-  };
   private readonly _BROWSER_LANGUAGE = computed(() =>
-    this._resolveSupportedLocale(this._navigatorLanguage.language.value)
+    resolveSupportedLanguage(this._navigatorLanguage.language.value)
   );
 
   /**
@@ -65,10 +44,11 @@ class ClientSettingsStore extends SyncedStore<ClientSettingsState, KeysOfUnion<C
   private readonly _updateLocale = (): void => {
     const targetLocale = isNil(this.locale.value)
       ? this._BROWSER_LANGUAGE.value
-      : this._resolveSupportedLocale(this.locale.value);
+      : resolveSupportedLanguage(this.locale.value);
 
     if (targetLocale) {
       vuetify.locale.current.value = targetLocale;
+      document.documentElement.lang = targetLocale;
       void i18next.changeLanguage(targetLocale);
     }
   };

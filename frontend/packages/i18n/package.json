@@ -19,6 +19,7 @@
     "@vue/shared": "catalog:runtime",
     "date-fns": "catalog:runtime",
     "i18next": "catalog:runtime",
+    "i18next-browser-languagedetector": "8.2.1",
     "vuetify": "catalog:runtime"
   },
   "devDependencies": {

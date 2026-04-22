@@ -949,3 +949,10 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - 后台任务也同步补了“别和用户对着干”的行为：如果一条录制是被用户取消的，`run_recording_job()` 在 ffmpeg 退出后会识别取消标记并直接返回，不再把这条记录重新写成 `Completed` 或 `Failed`。对应的轮询任务收尾时也会清理进程映射和取消标记，避免后续状态泄漏。
 - 到这里，录制删除链已经从“删表象”变成了“停进程 -> 停写盘 -> 清状态 -> 清产物”。这比上一轮更接近 Emby DVR 对用户取消动作的实际语义，也更适合长时间录制和管理员控制场景。
 - 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。当前仍有项目既有 warning，但本轮新增的录制进程控制逻辑已经通过构建与路由冲突校验。
+## 2026-04-23 前端首屏多语言检测修复（七十二）
+
+- 针对 `/#/settings` 刷新后先显示英文、数秒后才切回中文的问题，本轮不再沿用项目内自建的启动语言判断，而是按 i18next 官方推荐接入 `i18next-browser-languagedetector`。
+- `frontend/packages/i18n/src/index.ts` 现在移除固定 `lng: 'en'`，改为通过 detector 从 `querystring/hash/localStorage/sessionStorage/cookie/navigator/htmlTag` 获取浏览器语言参数，并用 `supportedLngs` 限定到当前项目真实存在的翻译资源，避免浏览器返回不支持语言码时误选。
+- `frontend/packages/frontend/src/main.ts` 会在 Vue 挂载前把 Vuetify 的当前语言同步到 i18next 已解析出的语言，并同步 `<html lang>`，避免 Vuetify 组件和页面翻译在首屏出现英文闪烁。
+- `frontend/packages/frontend/src/store/settings/client.ts` 继续保留设置页语言切换能力，但语言码匹配改为复用 i18n 包导出的 `resolveSupportedLanguage()`，切换语言时也会更新 `<html lang>`；由于 detector 会缓存 `changeLanguage()` 的结果，用户在浏览器里的语言选择会被标准 `i18nextLng`/cookie 机制记住。
+- 验证情况：`corepack pnpm --filter @jellyfin-vue/frontend build` 已通过；`corepack pnpm --filter @jellyfin-vue/i18n check:types` 当前被既有 `packages/configs/src/lint/rules/typescript-vue.ts` 中 `sonarjs.configs` 可能为 `undefined` 的类型错误阻塞，与本轮多语言改动无关。
