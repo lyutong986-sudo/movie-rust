@@ -250,7 +250,7 @@ meta:
 </route>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, ref, type PropType } from 'vue';
+import { defineComponent, h, ref, type PropType } from 'vue';
 import {
   VCol,
   VCombobox,
@@ -259,55 +259,49 @@ import {
   VTextField
 } from 'vuetify/components';
 import { useTranslation } from 'i18next-vue';
+import type {
+  SettingsLibraryOptions,
+  SettingsMediaPathInfo,
+  SettingsSelectableMediaFolder,
+  SettingsVirtualFolderInfo
+} from '#/composables/use-settings-sdk.ts';
+import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
-import { remote } from '#/plugins/remote/index.ts';
 
-interface MediaPathInfoDto {
-  Path: string;
-  NetworkPath?: string | null;
-}
+type MediaPathInfoDto = SettingsMediaPathInfo;
+type LibraryOptionsDto = Required<Pick<SettingsLibraryOptions,
+  'Enabled'
+  | 'EnableArchiveMediaFiles'
+  | 'EnablePhotos'
+  | 'EnableRealtimeMonitor'
+  | 'EnableChapterImageExtraction'
+  | 'ExtractChapterImagesDuringLibraryScan'
+  | 'SaveLocalMetadata'
+  | 'EnableInternetProviders'
+  | 'DownloadImagesInAdvance'
+  | 'ImportMissingEpisodes'
+  | 'EnableAutomaticSeriesGrouping'
+  | 'EnableEmbeddedTitles'
+  | 'EnableEmbeddedEpisodeInfos'
+  | 'AutomaticRefreshIntervalDays'
+  | 'SeasonZeroDisplayName'
+  | 'MetadataSavers'
+  | 'DisabledLocalMetadataReaders'
+  | 'LocalMetadataReaderOrder'
+  | 'PathInfos'
+>> & Pick<SettingsLibraryOptions, 'PreferredMetadataLanguage' | 'MetadataCountryCode'>;
 
-interface LibraryOptionsDto {
-  Enabled: boolean;
-  EnableArchiveMediaFiles: boolean;
-  EnablePhotos: boolean;
-  EnableRealtimeMonitor: boolean;
-  EnableChapterImageExtraction: boolean;
-  ExtractChapterImagesDuringLibraryScan: boolean;
-  SaveLocalMetadata: boolean;
-  EnableInternetProviders: boolean;
-  DownloadImagesInAdvance: boolean;
-  ImportMissingEpisodes: boolean;
-  EnableAutomaticSeriesGrouping: boolean;
-  EnableEmbeddedTitles: boolean;
-  EnableEmbeddedEpisodeInfos: boolean;
-  AutomaticRefreshIntervalDays: number;
-  PreferredMetadataLanguage?: string | null;
-  MetadataCountryCode?: string | null;
-  SeasonZeroDisplayName: string;
-  MetadataSavers: string[];
-  DisabledLocalMetadataReaders: string[];
-  LocalMetadataReaderOrder: string[];
-  PathInfos: MediaPathInfoDto[];
-}
-
-interface VirtualFolderInfoDto {
-  Name: string;
-  CollectionType: string;
-  ItemId: string;
-  Locations: string[];
+interface VirtualFolderInfoDto extends Omit<SettingsVirtualFolderInfo, 'LibraryOptions'> {
   LibraryOptions: LibraryOptionsDto;
   _draftName: string;
   _newPath: string;
   _newNetworkPath: string;
 }
 
-interface SelectableMediaFolderDto {
-  Name: string;
-  Id: string;
-}
+interface SelectableMediaFolderDto extends SettingsSelectableMediaFolder {}
 
 const { t } = useTranslation();
+const { librariesApi } = useSettingsSdk();
 const libraries = ref<VirtualFolderInfoDto[]>([]);
 const selectableFolders = ref<SelectableMediaFolderDto[]>([]);
 const loading = ref(false);
@@ -329,9 +323,6 @@ const createForm = ref({
   pathsText: '',
   libraryOptions: defaultLibraryOptions()
 });
-
-const apiBase = computed(() => remote.sdk.api?.basePath ?? '');
-const apiKey = computed(() => remote.auth.currentUserToken.value ?? '');
 
 const LibraryOptionsFields = defineComponent({
   props: {
@@ -443,16 +434,6 @@ const LibraryOptionsFields = defineComponent({
   }
 });
 
-function buildUrl(path: string): string {
-  const url = new URL(`${apiBase.value}${path}`);
-
-  if (apiKey.value) {
-    url.searchParams.set('api_key', apiKey.value);
-  }
-
-  return url.toString();
-}
-
 function defaultLibraryOptions(): LibraryOptionsDto {
   return {
     Enabled: true,
@@ -525,36 +506,14 @@ function parsePathInfos(text: string): MediaPathInfoDto[] {
     .filter(pathInfo => pathInfo.Path);
 }
 
-async function requestJson<T>(path: string): Promise<T> {
-  const response = await fetch(buildUrl(path));
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-
-  return await response.json() as T;
-}
-
-async function request(path: string, init?: RequestInit): Promise<void> {
-  const response = await fetch(buildUrl(path), init);
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-}
-
 async function loadLibraries(): Promise<void> {
-  if (!apiBase.value) {
-    return;
-  }
-
   loading.value = true;
   errorMessage.value = '';
 
   try {
     const [virtualFolders, mediaFolders] = await Promise.all([
-      requestJson<Omit<VirtualFolderInfoDto, '_draftName' | '_newPath' | '_newNetworkPath'>[]>('/Library/VirtualFolders/Query'),
-      requestJson<SelectableMediaFolderDto[]>('/Library/SelectableMediaFolders')
+      librariesApi.getLibraryVirtualfoldersQuery(),
+      librariesApi.getLibrarySelectablemediafolders()
     ]);
 
     libraries.value = virtualFolders.map(normalizeLibrary);
@@ -571,7 +530,7 @@ async function loadLibraries(): Promise<void> {
 
 async function refreshAllLibraries(): Promise<void> {
   try {
-    await request('/Library/Refresh', { method: 'POST' });
+    await librariesApi.postLibraryRefresh();
     useSnackbar('Library refresh started', 'success');
     await loadLibraries();
   } catch (error) {
@@ -585,26 +544,17 @@ async function saveLibrary(library: VirtualFolderInfoDto): Promise<void> {
 
   try {
     if (nextName && nextName !== library.Name) {
-      await request(
-        `/Library/VirtualFolders/Name?Name=${encodeURIComponent(library.Name)}&NewName=${encodeURIComponent(nextName)}`,
-        { method: 'POST' }
-      );
+      await librariesApi.postLibraryVirtualfoldersName({
+        Id: library.ItemId,
+        Name: library.Name,
+        NewName: nextName
+      });
       library.Name = nextName;
     }
 
-    await fetch(buildUrl('/Library/VirtualFolders/LibraryOptions'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        Id: library.ItemId,
-        LibraryOptions: library.LibraryOptions
-      })
-    }).then(async (response) => {
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+    await librariesApi.postLibraryVirtualfoldersLibraryoptions({
+      Id: library.ItemId,
+      LibraryOptions: library.LibraryOptions
     });
 
     useSnackbar(`${library.Name} saved`, 'success');
@@ -628,19 +578,10 @@ async function addLibraryPath(library: VirtualFolderInfoDto): Promise<void> {
   };
 
   try {
-    await fetch(buildUrl('/Library/VirtualFolders/Paths'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        Name: library.Name,
-        PathInfo: pathInfo
-      })
-    }).then(async (response) => {
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+    await librariesApi.postLibraryVirtualfoldersPaths({
+      Id: library.ItemId,
+      Name: library.Name,
+      PathInfo: pathInfo
     });
 
     library._newPath = '';
@@ -655,8 +596,10 @@ async function addLibraryPath(library: VirtualFolderInfoDto): Promise<void> {
 
 async function removeLibraryPath(library: VirtualFolderInfoDto, path: string): Promise<void> {
   try {
-    await request(`/Library/VirtualFolders/Paths?Name=${encodeURIComponent(library.Name)}&Path=${encodeURIComponent(path)}`, {
-      method: 'DELETE'
+    await librariesApi.deleteLibraryVirtualfoldersPaths({
+      Id: library.ItemId,
+      Name: library.Name,
+      Path: path
     });
     useSnackbar('Path removed', 'success');
     await loadLibraries();
@@ -668,8 +611,9 @@ async function removeLibraryPath(library: VirtualFolderInfoDto, path: string): P
 
 async function removeLibrary(library: VirtualFolderInfoDto): Promise<void> {
   try {
-    await request(`/Library/VirtualFolders?Name=${encodeURIComponent(library.Name)}`, {
-      method: 'DELETE'
+    await librariesApi.deleteLibraryVirtualfolders({
+      Id: library.ItemId,
+      Name: library.Name
     });
     useSnackbar(`${library.Name} removed`, 'success');
     await loadLibraries();
@@ -689,23 +633,16 @@ async function createLibrary(): Promise<void> {
 
   try {
     const collectionType = createForm.value.collectionType === 'mixed' ? '' : createForm.value.collectionType;
-    const response = await fetch(buildUrl(`/Library/VirtualFolders?Name=${encodeURIComponent(createForm.value.name.trim())}&CollectionType=${encodeURIComponent(collectionType)}`), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        LibraryOptions: {
-          ...createForm.value.libraryOptions,
-          PathInfos: pathInfos
-        }
-      })
+    await librariesApi.postLibraryVirtualfolders({
+      Name: createForm.value.name.trim(),
+      CollectionType: collectionType,
+      RefreshLibrary: false,
+      Paths: pathInfos.map(pathInfo => pathInfo.Path),
+      LibraryOptions: {
+        ...createForm.value.libraryOptions,
+        PathInfos: pathInfos
+      }
     });
-
-    if (!response.ok) {
-      useSnackbar(`Create failed: HTTP ${response.status}`, 'error');
-      return;
-    }
 
     createDialog.value = false;
     createForm.value = {

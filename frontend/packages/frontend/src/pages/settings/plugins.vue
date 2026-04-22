@@ -65,36 +65,28 @@ meta:
 
 <script setup lang="ts">
 import { ref } from 'vue';
-import RemotePluginAxiosInstance from '#/plugins/remote/axios.ts';
+import type { SettingsPluginInfo } from '#/composables/use-settings-sdk.ts';
 import { useServerConfiguration } from '#/composables/server-configuration.ts';
-
-type PluginInfo = {
-  Id: string;
-  Name: string;
-  Version?: string;
-  Description?: string;
-  Enabled?: boolean;
-};
+import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 
 const { configuration, saving } = await useServerConfiguration({
   EnablePlugins: false,
   PluginRepositoriesText: '',
   DisabledPluginsText: ''
 });
+const { pluginsApi } = useSettingsSdk();
 
-const plugins = ref(
-  (await RemotePluginAxiosInstance.instance.get<PluginInfo[]>('/Plugins')).data
-);
+const plugins = ref<SettingsPluginInfo[]>(await pluginsApi.getPlugins());
 const busyId = ref<string>();
 
 async function reloadPlugins(): Promise<void> {
-  plugins.value = (await RemotePluginAxiosInstance.instance.get<PluginInfo[]>('/Plugins')).data;
+  plugins.value = await pluginsApi.getPlugins();
 }
 
-async function togglePlugin(plugin: PluginInfo): Promise<void> {
+async function togglePlugin(plugin: SettingsPluginInfo): Promise<void> {
   busyId.value = plugin.Id;
   try {
-    await RemotePluginAxiosInstance.instance.post(`/Plugins/${plugin.Id}/Configuration`, {
+    await pluginsApi.postPluginsByIdConfiguration(plugin.Id, {
       Enabled: !plugin.Enabled
     });
     await reloadPlugins();

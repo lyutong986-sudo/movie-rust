@@ -4,7 +4,7 @@ use crate::{
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, LibraryMediaFolderDto,
         LibrarySubFolderDto, MediaPathDto, ScanSummary, UpdateLibraryOptionsDto,
-        UpdateMediaPathRequestDto, VirtualFolderInfoDto,
+        RemoveMediaPathDto, RemoveVirtualFolderDto, UpdateMediaPathRequestDto, VirtualFolderInfoDto,
         VirtualFolderQuery,
     },
     repository, scanner,
@@ -32,10 +32,12 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Library/VirtualFolders/Query", get(virtual_folders))
         .route("/Library/VirtualFolders/Name", post(rename_virtual_folder))
+        .route("/Library/VirtualFolders/Delete", post(remove_virtual_folder_body))
         .route(
             "/Library/VirtualFolders/Paths",
             post(add_media_path).delete(remove_media_path),
         )
+        .route("/Library/VirtualFolders/Paths/Delete", post(remove_media_path_body))
         .route(
             "/Library/VirtualFolders/Paths/Update",
             post(update_media_path),
@@ -170,6 +172,28 @@ async fn remove_virtual_folder(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn remove_virtual_folder_body(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<RemoveVirtualFolderDto>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    if let Some(id) = payload.id.as_deref().filter(|id| !id.trim().is_empty()) {
+        let library_id = emby_id_to_uuid(id)
+            .map_err(|_| AppError::BadRequest(format!("invalid library id format: {id}")))?;
+        repository::delete_library(&state.pool, library_id).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let name = payload
+        .name
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("missing library name".to_string()))?;
+    let _refresh_library = payload.refresh_library.unwrap_or(false);
+    repository::delete_library_by_name(&state.pool, name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn rename_virtual_folder(
     session: AuthSession,
     State(state): State<AppState>,
@@ -245,6 +269,35 @@ async fn remove_media_path(
         .as_deref()
         .ok_or_else(|| AppError::BadRequest("缺少媒体路径".to_string()))?;
     let _refresh_library = query.refresh_library.unwrap_or(false);
+    repository::remove_library_path(&state.pool, name, path).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remove_media_path_body(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<RemoveMediaPathDto>,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    let name_from_id = if let Some(id) = payload.id.as_deref().filter(|id| !id.trim().is_empty()) {
+        let library_id = emby_id_to_uuid(id)
+            .map_err(|_| AppError::BadRequest(format!("invalid library id format: {id}")))?;
+        repository::get_library(&state.pool, library_id)
+            .await?
+            .map(|library| library.name)
+    } else {
+        None
+    };
+    let name = payload
+        .name
+        .as_deref()
+        .or(name_from_id.as_deref())
+        .ok_or_else(|| AppError::BadRequest("missing library name".to_string()))?;
+    let path = payload
+        .path
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("missing library path".to_string()))?;
+    let _refresh_library = payload.refresh_library.unwrap_or(false);
     repository::remove_library_path(&state.pool, name, path).await?;
     Ok(StatusCode::NO_CONTENT)
 }

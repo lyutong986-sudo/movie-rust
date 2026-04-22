@@ -27,6 +27,7 @@ import { apiStore } from '#/store/dbs/api/index.ts';
 import { getImageInfo } from '#/utils/images.ts';
 import { getItemRuntime } from '#/utils/items.ts';
 import playbackProfile from '#/utils/playback-profiles/index.ts';
+import { getSdkPlaybackStreamUrl } from '#/utils/sdk-url.ts';
 import { msToTicks } from '#/utils/time.ts';
 import { mediaControls, mediaElementRef } from '#/store/index.ts';
 import { CommonStore } from '#/store/super/common-store.ts';
@@ -717,35 +718,7 @@ class PlaybackManagerStore extends CommonStore<PlaybackManagerState> {
     mediaSource = this.currentMediaSource.value,
     mediaType = this._currentlyPlayingMediaType.value
   ): string | undefined => {
-    if (
-      remote.sdk.api?.basePath
-      && remote.auth.currentUserToken.value
-      && mediaType
-      && mediaSource?.SupportsDirectStream
-      && mediaSource.Type
-      && mediaSource.Id
-      && mediaSource.Container
-    ) {
-      const directOptions: Record<string, string> = {
-        Static: String(true),
-        mediaSourceId: mediaSource.Id,
-        deviceId: remote.sdk.deviceInfo.id,
-        api_key: remote.auth.currentUserToken.value,
-        Tag: mediaSource.ETag ?? '',
-        LiveStreamId: mediaSource.LiveStreamId ?? ''
-      };
-
-      const parameters = new URLSearchParams(directOptions).toString();
-
-      if (mediaType === 'Video') {
-        // @ts-expect-error - There's an API mismatch here
-        mediaType = 'Videos';
-      }
-
-      return `${remote.sdk.api.basePath}/${mediaType}/${mediaSource.Id}/stream.${mediaSource.Container}?${parameters}`;
-    } else if (remote.sdk.api?.basePath && mediaSource?.SupportsTranscoding && mediaSource.TranscodingUrl) {
-      return `${remote.sdk.api.basePath}${mediaSource.TranscodingUrl}`;
-    }
+    return getSdkPlaybackStreamUrl(mediaSource, mediaType);
   };
 
   public constructor() {

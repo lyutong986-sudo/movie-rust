@@ -4,6 +4,7 @@ import { computed, watch } from 'vue';
 import { isNil, sealed } from '@jellyfin-vue/shared/validation';
 import auth from './auth.ts';
 import sdk from './sdk/index.ts';
+import { buildSdkWebSocketUrl } from '#/utils/sdk-url.ts';
 
 interface WebSocketMessage {
   MessageType: string;
@@ -16,21 +17,9 @@ class RemotePluginSocket {
    * == STATE ==
    */
   private readonly _socketUrl = computed(() => {
-    if (
-      auth.currentUserToken.value
-      && auth.currentServer.value
-      && sdk.deviceInfo.id
-      && sdk.api?.basePath
-    ) {
-      const socketParameters = new URLSearchParams({
-        api_key: auth.currentUserToken.value,
-        deviceId: sdk.deviceInfo.id
-      }).toString();
-
-      return `${sdk.api.basePath}/socket?${socketParameters}`
-        .replace('https:', 'wss:')
-        .replace('http:', 'ws:');
-    }
+    return auth.currentServer.value
+      ? buildSdkWebSocketUrl(sdk.api?.basePath, auth.currentUserToken.value, sdk.deviceInfo.id)
+      : undefined;
   });
 
   private readonly _keepAliveMessage = 'KeepAlive';

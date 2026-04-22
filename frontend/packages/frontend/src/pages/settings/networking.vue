@@ -117,26 +117,14 @@ meta:
 
 <script setup lang="ts">
 import { computed } from 'vue';
-import RemotePluginAxiosInstance from '#/plugins/remote/axios.ts';
+import type { SystemInfo } from '@jellyfin/sdk/lib/generated-client';
+import type {
+  SettingsNetEndPointInfo,
+  SettingsServerDomain,
+  SettingsWakeOnLanInfo
+} from '#/composables/use-settings-sdk.ts';
 import { useServerConfiguration } from '#/composables/server-configuration.ts';
-
-type SystemInfo = {
-  ServerName?: string;
-  LocalAddress?: string;
-  Version?: string;
-};
-
-type EndpointInfo = {
-  IsLocal?: boolean;
-  IsInNetwork?: boolean;
-};
-
-type DomainInfo = {
-  name?: string;
-  url: string;
-  isLocal?: boolean;
-  isRemote?: boolean;
-};
+import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 
 const { configuration, saving } = await useServerConfiguration({
   EnableRemoteAccess: true,
@@ -146,23 +134,22 @@ const { configuration, saving } = await useServerConfiguration({
   HttpsPortNumber: 8920,
   LocalNetworkSubnetsText: ''
 });
+const { serverApi } = useSettingsSdk();
 
 const [
-  systemInfoResponse,
-  endpointInfoResponse,
-  domainsResponse,
-  wakeOnLanInfoResponse
+  systemInfo,
+  endpointInfo,
+  domainsValue,
+  wakeOnLanInfoValue
 ] = await Promise.all([
-  RemotePluginAxiosInstance.instance.get<SystemInfo>('/System/Info'),
-  RemotePluginAxiosInstance.instance.get<EndpointInfo>('/System/Endpoint'),
-  RemotePluginAxiosInstance.instance.get<{ data?: DomainInfo[] }>('/System/Ext/ServerDomains'),
-  RemotePluginAxiosInstance.instance.get<unknown[]>('/System/WakeOnLanInfo')
+  serverApi.getSystemInfo() as Promise<SystemInfo>,
+  serverApi.getSystemEndpoint() as Promise<SettingsNetEndPointInfo>,
+  serverApi.getServerDomains() as Promise<SettingsServerDomain[]>,
+  serverApi.getSystemWakeonlaninfo() as Promise<SettingsWakeOnLanInfo[]>
 ]);
 
-const systemInfo = systemInfoResponse.data;
-const endpointInfo = endpointInfoResponse.data;
-const domains = computed(() => domainsResponse.data.data ?? []);
-const wakeOnLanInfo = computed(() => wakeOnLanInfoResponse.data ?? []);
+const domains = computed(() => domainsValue);
+const wakeOnLanInfo = computed(() => wakeOnLanInfoValue);
 
 function formatWakeOnLan(item: unknown): string {
   if (typeof item === 'string') {

@@ -63,39 +63,32 @@ meta:
 
 <script setup lang="ts">
 import { ref } from 'vue';
-import RemotePluginAxiosInstance from '#/plugins/remote/axios.ts';
+import type { SettingsTaskInfo } from '#/composables/use-settings-sdk.ts';
 import { useServerConfiguration } from '#/composables/server-configuration.ts';
-
-type TaskInfo = {
-  Id: string;
-  Name: string;
-  Description?: string;
-  Category?: string;
-  State?: string;
-  LastExecutionResult?: {
-    EndTimeUtc?: string;
-  };
-};
+import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 
 const { configuration, saving } = await useServerConfiguration({
   EnableScheduledTasks: true,
   LibraryScanIntervalHours: 24,
   MetadataRefreshIntervalHours: 72
 });
+const { scheduledTasksApi } = useSettingsSdk();
 
-const tasks = ref(
-  (await RemotePluginAxiosInstance.instance.get<TaskInfo[]>('/ScheduledTasks')).data
-);
+const tasks = ref<SettingsTaskInfo[]>(await scheduledTasksApi.getScheduledtasks());
 const busyId = ref<string>();
 
 async function reloadTasks(): Promise<void> {
-  tasks.value = (await RemotePluginAxiosInstance.instance.get<TaskInfo[]>('/ScheduledTasks')).data;
+  tasks.value = await scheduledTasksApi.getScheduledtasks();
 }
 
-async function runTask(id: string): Promise<void> {
+async function runTask(id?: string): Promise<void> {
+  if (!id) {
+    return;
+  }
+
   busyId.value = id;
   try {
-    await RemotePluginAxiosInstance.instance.post(`/ScheduledTasks/Running/${id}`);
+    await scheduledTasksApi.postScheduledtasksRunningById(id);
     await reloadTasks();
   } finally {
     busyId.value = undefined;

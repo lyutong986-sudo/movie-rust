@@ -4,8 +4,6 @@
  * Helper for subtitle manipulation and subtitle-related utility functions
  */
 
-import axios from 'axios';
-
 export interface Dialogue {
   start: number;
   end: number;
@@ -57,8 +55,8 @@ function replaceTags(input: string, tagMap: TagMap) {
  */
 export async function parseVttFile(src: string) {
   try {
-    const file = await axios.get<string>(src);
-    const vttText: string = file.data;
+    const response = await fetch(src);
+    const vttText = await response.text();
 
     if (!vttText) {
       return;

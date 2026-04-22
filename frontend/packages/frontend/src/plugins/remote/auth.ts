@@ -2,7 +2,6 @@ import type { UserDto, PublicSystemInfo, BrandingOptions } from '@jellyfin/sdk/l
 import { getSystemApi } from '@jellyfin/sdk/lib/utils/api/system-api';
 import { getBrandingApi } from '@jellyfin/sdk/lib/utils/api/branding-api';
 import { getUserApi } from '@jellyfin/sdk/lib/utils/api/user-api';
-import axios from 'axios';
 import { computed } from 'vue';
 import { isAxiosError, isNil, sealed } from '@jellyfin-vue/shared/validation';
 import i18next from 'i18next';
@@ -120,23 +119,19 @@ class RemotePluginAuth extends BaseState<AuthState> {
     }
   };
 
-  private readonly _fetchServerDataByHttp = async (
-    address: string,
-    isDefault = false
-  ): Promise<ServerInfo> => {
+  private readonly _fetchServerData = async (address: string, isDefault = false): Promise<ServerInfo> => {
     let lastError: unknown;
 
     for (const candidate of this._getProbeCandidates(address)) {
       try {
-        const { data: systemInfo } = await axios.get<PartialPublicSystemInfo>(
-          `${candidate}/System/Info/Public`
-        );
-        const brandingOptions = await this._requestOptional(
-          async () => (await axios.get<BrandingOptions>(`${candidate}/Branding/Configuration`)).data,
+        const api = useOneTimeAPI(candidate);
+        const { data: systemInfo } = await getSystemApi(api).getPublicSystemInfo();
+        const BrandingOptions = await this._requestOptional(
+          async () => (await getBrandingApi(api).getBrandingOptions()).data,
           {} as BrandingOptions
         );
-        const publicUsers = await this._requestOptional(
-          async () => (await axios.get<UserDto[]>(`${candidate}/Users/Public`)).data,
+        const PublicUsers = await this._requestOptional(
+          async () => (await getUserApi(api).getPublicUsers({})).data,
           []
         );
 
@@ -149,8 +144,8 @@ class RemotePluginAuth extends BaseState<AuthState> {
           StartupWizardCompleted: systemInfo.StartupWizardCompleted ?? true,
           PublicAddress: candidate,
           isDefault,
-          BrandingOptions: brandingOptions,
-          PublicUsers: publicUsers
+          BrandingOptions,
+          PublicUsers
         };
       } catch (error) {
         lastError = error;
@@ -158,38 +153,6 @@ class RemotePluginAuth extends BaseState<AuthState> {
     }
 
     throw lastError ?? new Error('Unable to fetch server information');
-  };
-
-  private readonly _fetchServerData = async (address: string, isDefault = false): Promise<ServerInfo> => {
-    const normalizedAddress = this._normalizeServerUrl(address);
-
-    try {
-      const api = useOneTimeAPI(normalizedAddress);
-      const { data: systemInfo } = await getSystemApi(api).getPublicSystemInfo();
-      const BrandingOptions = await this._requestOptional(
-        async () => (await getBrandingApi(api).getBrandingOptions()).data,
-        {} as BrandingOptions
-      );
-      const PublicUsers = await this._requestOptional(
-        async () => (await getUserApi(api).getPublicUsers({})).data,
-        []
-      );
-
-      return {
-        Id: systemInfo.Id ?? normalizedAddress,
-        ServerName: systemInfo.ServerName ?? 'Movie Rust',
-        Version: systemInfo.Version ?? '',
-        ProductName: systemInfo.ProductName ?? 'Movie Rust',
-        OperatingSystem: systemInfo.OperatingSystem ?? '',
-        StartupWizardCompleted: systemInfo.StartupWizardCompleted ?? true,
-        PublicAddress: normalizedAddress,
-        isDefault,
-        BrandingOptions,
-        PublicUsers
-      };
-    } catch {
-      return await this._fetchServerDataByHttp(normalizedAddress, isDefault);
-    }
   };
 
   private readonly _runCallbacks = async (callbacks: MaybePromise<void>[]) =>

@@ -82,16 +82,9 @@ meta:
 
 <script setup lang="ts">
 import { ref } from 'vue';
-import RemotePluginAxiosInstance from '#/plugins/remote/axios.ts';
+import type { SettingsActiveEncoding } from '#/composables/use-settings-sdk.ts';
 import { useServerConfiguration } from '#/composables/server-configuration.ts';
-
-type ActiveEncoding = {
-  Id: string;
-  PlaySessionId?: string;
-  ItemId?: string;
-  State?: string;
-  Progress?: number;
-};
+import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 
 const hardwareAcceleration = ['none', 'vaapi', 'qsv', 'nvenc', 'amf', 'videotoolbox'];
 const { configuration, saving } = await useServerConfiguration({
@@ -101,24 +94,19 @@ const { configuration, saving } = await useServerConfiguration({
   HardwareAccelerationType: 'none',
   EnableTranscodingThrottle: true
 });
+const { transcodingApi } = useSettingsSdk();
 
-const activeEncodings = ref(
-  (await RemotePluginAxiosInstance.instance.get<ActiveEncoding[]>('/Videos/ActiveEncodings')).data
-);
+const activeEncodings = ref<SettingsActiveEncoding[]>(await transcodingApi.getVideosActiveEncodings());
 const busyId = ref<string>();
 
 async function reloadActiveEncodings(): Promise<void> {
-  activeEncodings.value = (
-    await RemotePluginAxiosInstance.instance.get<ActiveEncoding[]>('/Videos/ActiveEncodings')
-  ).data;
+  activeEncodings.value = await transcodingApi.getVideosActiveEncodings();
 }
 
 async function stopEncoding(id: string): Promise<void> {
   busyId.value = id;
   try {
-    await RemotePluginAxiosInstance.instance.delete('/Videos/ActiveEncodings', {
-      params: { Id: id }
-    });
+    await transcodingApi.deleteVideosActiveEncodings(id);
     await reloadActiveEncodings();
   } finally {
     busyId.value = undefined;

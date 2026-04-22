@@ -20,6 +20,7 @@ import { remote } from '#/plugins/remote/index.ts';
 import type { ParsedSubtitleTrack } from '#/plugins/workers/generic/subtitles.ts';
 import { runGenericWorkerFunc } from '#/plugins/workers/index.ts';
 import { subtitleSettings } from '#/store/settings/subtitle.ts';
+import { getSdkSubtitleDeliveryUrl } from '#/utils/sdk-url.ts';
 
 /**
  * == INTERFACES AND TYPES ==
@@ -105,8 +106,8 @@ class PlayerElementStore extends CommonStore<PlayerElementState, 'isStretched' |
         label: sub.DisplayTitle ?? 'Undefined',
         src:
           sub.DeliveryMethod === SubtitleDeliveryMethod.External
-          && remote.sdk.api?.basePath && sub.DeliveryUrl
-            ? `${remote.sdk.api.basePath}${sub.DeliveryUrl}`
+          && sub.DeliveryUrl
+            ? getSdkSubtitleDeliveryUrl(sub.DeliveryUrl)
             : undefined,
         srcLang: sub.Language ?? undefined,
         type: sub.DeliveryMethod ?? SubtitleDeliveryMethod.Drop,

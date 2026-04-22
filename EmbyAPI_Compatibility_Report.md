@@ -707,3 +707,37 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - 审计前端剩余非 EmbySDK 直接调用面，当前仍明显存在于：settings/libraries.vue、settings/networking.vue、settings/plugins.vue、settings/scheduled-tasks.vue、settings/transcoding.vue，以及登录探测阶段 plugins/remote/auth.ts 的 server bootstrap 请求。下一轮应按“存在 EmbySDK 方法优先切回 SDK，不存在再评估保留兼容层”的规则继续收口。
 - 本轮未新增后端接口；前端当前环境仍无法执行 
 ode/pnpm，因此验证仍为代码级静态校对。
+
+## 2026-04-22 rg 模板对照审计补充（四十四）
+
+- 优先处理 `libraries / networking / scheduled-tasks` 三个仍保留明显 `fetch`/`RemotePluginAxiosInstance` 直连的设置页，把页面侧调用统一收口到 `frontend/packages/frontend/src/composables/use-settings-sdk.ts`。
+- `useSettingsSdk().librariesApi` 新增 EmbySDK operationId 风格方法：`getLibraryVirtualfoldersQuery`、`getLibrarySelectablemediafolders`、`postLibraryRefresh`、`postLibraryVirtualfolders`、`postLibraryVirtualfoldersName`、`postLibraryVirtualfoldersLibraryoptions`、`postLibraryVirtualfoldersPaths`、`deleteLibraryVirtualfoldersPaths`、`deleteLibraryVirtualfolders`、`postLibraryVirtualfoldersDelete`。`settings/libraries.vue` 现在不再自己拼 URL、注入 `api_key` 或直接 `fetch`，创建/重命名/保存 LibraryOptions/增删路径/刷新都走统一 facade。
+- `useSettingsSdk().scheduledTasksApi` 新增 `getScheduledtasks`、`getScheduledtasksById`、`postScheduledtasksRunningById`、`postScheduledtasksRunningByIdDelete`；`settings/scheduled-tasks.vue` 已移除页面内手写 `/ScheduledTasks` axios 调用，并改用 SDK 风格任务方法读取和执行任务。
+- `useSettingsSdk().serverApi` 扩展 networking 需要的 `getSystemEndpoint`、`getSystemWakeonlaninfo`、`getServerDomains`；`settings/networking.vue` 已从页面内直连 `/System/Info`、`/System/Endpoint`、`/System/WakeOnLanInfo`、`/System/Ext/ServerDomains` 改为统一调用 `serverApi`。其中 `/System/Ext/ServerDomains` 仍是项目扩展端点，但已集中在 facade，避免页面继续散落自定义请求。
+- 后端同步补齐 EmbySDK LibraryStructure body 风格删除入口：新增 `POST /Library/VirtualFolders/Delete` 和 `POST /Library/VirtualFolders/Paths/Delete`，支持 `Id/Name/Path/RefreshLibrary` 请求体；这样后续前端或本地播放器如果按 EmbySDK `postLibraryVirtualfoldersDelete`、`postLibraryVirtualfoldersPathsDelete` 风格调用，不会命中 404。
+- 验证情况：`cargo check` 在 `backend` 目录通过，只剩项目既有 warning；`rg` 已确认 `settings/libraries.vue`、`settings/networking.vue`、`settings/scheduled-tasks.vue` 三页不再包含 `fetch(`/`RemotePluginAxiosInstance` 或这些目标路径直连。当前环境未执行前端 typecheck/build。
+
+## 2026-04-22 rg 模板对照审计补充（四十五）
+
+- 本轮继续按“前端全部代码优先使用 EmbySDK 调用方法，而不是页面内被迫兼容 SDK”的要求做全量 `rg` 审计。扫描范围覆盖 `frontend/packages/frontend/src` 的 `fetch`、`axios`、`RemotePluginAxiosInstance`、硬编码 Emby REST 路径和已存在 `newUserApi/useApi/useBaseItem` 调用。
+- 业务页面和 store 中绝大多数媒体、用户、播放、图片、元数据、筛选、用户设置链路已经直接使用 `remote.sdk.newUserApi(...)`、`useApi(...)` 或 `useBaseItem(...)`；本轮重点清理剩余设置页与登录探测里的直连残留。
+- `frontend/packages/frontend/src/composables/use-settings-sdk.ts` 不再直接导入 `RemotePluginAxiosInstance`，统一改为通过 `remote.sdk.api!.axiosInstance` 使用 SDK 已配置的传输层。该文件现在作为少量 EmbySDK operationId 风格方法的集中 facade，避免页面继续散落手写路径。
+- `settings/plugins.vue` 已改用 `useSettingsSdk().pluginsApi`，对应 EmbySDK/OpenAPI 的 `getPlugins`、`postPluginsByIdConfiguration` 等语义；页面内不再手写 `/Plugins` axios 调用，并顺手修复插件页中文乱码。
+- `settings/transcoding.vue` 已改用 `useSettingsSdk().transcodingApi`，对应 EmbySDK/OpenAPI 的 `getVideosActiveEncodings`、`deleteVideosActiveEncodings`、`postVideosActiveEncodingsDelete` 语义；页面内不再手写 `/Videos/ActiveEncodings` axios 调用。
+- 登录探测 `plugins/remote/auth.ts` 去掉历史 HTTP fallback，不再在 SDK 失败后直接 `axios.get('/System/Info/Public')`、`Branding/Configuration`、`Users/Public`；现在候选地址探测也统一使用 `useOneTimeAPI(...)` 加 `getSystemApi/getBrandingApi/getUserApi`。
+- 字幕 worker 的 VTT 文本下载不是 Emby REST API 调用，本轮去掉 `axios` 依赖改为浏览器 `fetch(src)` 读取静态字幕资源，避免被误判为绕过 SDK。剩余 `fetch('config.json')` 同样属于本地静态配置读取，不纳入 EmbySDK API 替换。
+- 当前全量 `rg` 结果：除核心 SDK 传输层 `plugins/remote/axios.ts`、类型导入 `AxiosRequestConfig/AxiosResponse/AxiosError`、静态资源读取，以及 `use-settings-sdk.ts` 这个集中 facade 外，未发现页面/组件/store 中继续散落 `RemotePluginAxiosInstance` 或设置相关 Emby REST 直连。
+- 仍需注意的非 REST URL 生成：`utils/items.ts` 的 `/Items/{Id}/Download?api_key=...` 和 `logsApi.getLogFileUrl(...)` 属于浏览器打开/下载链接，不是 axios/fetch 调用。EmbySDK/OpenAPI 中对应 operationId 分别是 `getItemsByIdDownload` 与系统日志下载语义；如果后续要做到“链接生成也完全由 SDK 封装”，建议继续新增 URL builder facade，并把这些 URL 字符串也从页面/工具层收口。
+- 验证情况：`cargo check` 在 `backend` 目录通过，只剩项目既有 warning；前端本机验证仍受限，`node --version` 返回 `Access is denied`，`pnpm` 未安装，因此未能执行 frontend typecheck/build。
+
+## 2026-04-22 URL builder facade 收口补充（四十六）
+
+- 继续处理上一轮遗留的“不是 axios/fetch 调用、但仍在页面或 store 里手写 Emby URL”的位置，新增 `frontend/packages/frontend/src/utils/sdk-url.ts` 作为统一 URL builder facade。
+- 新 facade 集中提供 `getSdkItemDownloadUrl`、`getSdkSystemLogUrl`、`getSdkSubtitleDeliveryUrl`、`getSdkPlaybackStreamUrl`、`buildSdkWebSocketUrl`，统一处理 `basePath` 末尾斜杠、路径前导斜杠、`api_key`、`deviceId`、直连播放参数和 websocket `http/ws` 协议转换。
+- `frontend/packages/frontend/src/utils/items.ts` 的 `getItemDownloadUrl(...)` 不再手写 `${serverAddress}/Items/${itemId}/Download?api_key=...`，改为委托 `getSdkItemDownloadUrl(...)`。调用方 `ItemMenu` 和剧集批量下载映射无需改接口。
+- `frontend/packages/frontend/src/store/playback-manager.ts` 的播放 URL 生成不再在 store 内拼 `/Videos/{Id}/stream.{Container}` 或拼接 `TranscodingUrl`，改为委托 `getSdkPlaybackStreamUrl(...)`，让直连播放和转码播放 URL 语义集中维护。
+- `frontend/packages/frontend/src/store/player-element.ts` 的外部字幕 `DeliveryUrl` 不再直接拼 `remote.sdk.api.basePath + DeliveryUrl`，改为 `getSdkSubtitleDeliveryUrl(...)`。
+- `frontend/packages/frontend/src/plugins/remote/socket.ts` 的 websocket URL 不再在 socket 类里手写 `URLSearchParams` 与 `/socket`，改为 `buildSdkWebSocketUrl(...)`。为避免循环依赖，`sdk-url.ts` 直接引用底层 `auth` 和 `sdk` 实例，不从 `remote/index.ts` 聚合入口导入。
+- `useSettingsSdk().logsApi.getLogFileUrl(...)` 已改为调用 `getSdkSystemLogUrl(...)`，日志页面继续通过 `logsApi` 获取打开链接，页面侧不再拼 `/System/Logs/{Name}`。
+- 当前 `rg` 复扫结果：`basePath/api_key/Download/socket/DeliveryUrl/TranscodingUrl` 相关拼装已集中在 `utils/sdk-url.ts`；其余命中为 SDK 调用、类型/状态读取或 facade 调用点。
+- 验证情况：`cargo check` 在 `backend` 目录通过，只剩项目既有 warning；`git diff --check` 通过。前端 typecheck/build 仍受本机 `node`/`pnpm` 环境限制未执行。

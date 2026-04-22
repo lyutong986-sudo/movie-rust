@@ -22,6 +22,7 @@ import { ticksToMs } from './time.ts';
 import { router } from '#/plugins/router/index.ts';
 import { remote } from '#/plugins/remote/index.ts';
 import { useBaseItem } from '#/composables/apis.ts';
+import { getSdkItemDownloadUrl } from '#/utils/sdk-url.ts';
 
 /**
  * A list of valid collections that should be treated as folders.
@@ -470,14 +471,7 @@ export function getItemIdFromSourceIndex(
  * @returns - A download object.
  */
 export function getItemDownloadUrl(itemId: string): string | undefined {
-  const serverAddress = remote.sdk.api?.basePath;
-  const userToken = remote.sdk.api?.accessToken;
-
-  if (!serverAddress || !userToken) {
-    return undefined;
-  }
-
-  return `${serverAddress}/Items/${itemId}/Download?api_key=${userToken}`;
+  return getSdkItemDownloadUrl(itemId);
 }
 
 /**

@@ -1846,7 +1846,26 @@ pub struct LibraryMediaFolderDto {
 #[serde(rename_all = "PascalCase")]
 pub struct AddVirtualFolderDto {
     #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub collection_type: Option<String>,
+    #[serde(default)]
+    pub refresh_library: Option<bool>,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
     pub library_options: Option<LibraryOptionsDto>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemoveVirtualFolderDto {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub refresh_library: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1859,11 +1878,29 @@ pub struct UpdateLibraryOptionsDto {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct MediaPathDto {
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
     pub path_info: Option<MediaPathInfoDto>,
+    #[serde(default)]
+    pub refresh_library: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemoveMediaPathDto {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub refresh_library: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

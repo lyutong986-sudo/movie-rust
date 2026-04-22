@@ -133,7 +133,6 @@ import { ref } from 'vue';
 import { useTranslation } from 'i18next-vue';
 import { useTheme } from 'vuetify';
 import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
-import { remote } from '#/plugins/remote/index.ts';
 import { useDateFns } from '#/composables/use-datefns.ts';
 
 const { t } = useTranslation();
@@ -193,9 +192,7 @@ function getFormattedLogDate(date: string | undefined): string | undefined {
 }
 
 function getLogFileLink(name: string): string | undefined {
-  return remote.sdk.api?.basePath && remote.auth.currentUserToken.value
-    ? `${remote.sdk.api.basePath}/System/Logs/${encodeURIComponent(name)}?api_key=${remote.auth.currentUserToken.value}`
-    : undefined;
+  return logsApi.getLogFileUrl(name);
 }
 
 async function refreshData(): Promise<void> {
