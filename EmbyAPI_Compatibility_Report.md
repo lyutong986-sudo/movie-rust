@@ -771,3 +771,20 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 ### 仍待继续
 - 这轮修复的是前端首启路由逻辑，远端实例仍需重新部署后才能在 `https://test.emby.yun:4443/` 上看到实际效果。
 - 部署后还应继续实测首个用户创建完成后的 `wizardlibrary.html`、`wizardremoteaccess.html`、`wizardfinish.html`，确认初始化闭环没有新的后端字段缺口。
+
+## 2026-04-23 WebDashboard 适配进展（二十三）
+### 本轮完成
+- 修复 Docker 构建上下文把 WebDashboard 运行时依赖错误排除的问题：
+  - [`.dockerignore`](/C:/Users/11797/Desktop/movie-rust/.dockerignore:1) 原先使用全局规则 `**/dist`，会把 `frontend/dashboard-ui/bower_components/**/dist/**` 一并排除出镜像构建上下文。
+  - 这会直接导致线上镜像缺失一批 WebDashboard 真实运行依赖，例如 MCP 现场已经命中的 `frontend/dashboard-ui/bower_components/jquery/dist/jquery.slim.min.js`，从而让 `wizardstart.html` 这类页面在 RequireJS 阶段因 `404` 黑屏。
+  - 现在已为 `frontend/dashboard-ui` 下的 `dist` 目录增加白名单例外，保留前端模板需要的运行时静态资源，同时继续忽略项目中其它无关构建产物目录。
+### 现场证据
+- MCP 访问 `https://test.emby.yun:4443/web/#!/wizardstart.html` 时，控制台报：
+  - `RequireJS error: Load failed: bower_components/jquery/dist/jquery.slim.min`
+- 网络请求中对应资源：
+  - `GET /web/bower_components/jquery/dist/jquery.slim.min.js?v=23 -> 404`
+- 本地仓库文件实际存在：
+  - [frontend/dashboard-ui/bower_components/jquery/dist/jquery.slim.min.js](/C:/Users/11797/Desktop/movie-rust/frontend/dashboard-ui/bower_components/jquery/dist/jquery.slim.min.js:1)
+### 仍待继续
+- 仓库侧构建规则已经修正，但远端实例仍需基于新镜像重新部署，部署后再用 MCP 继续复测 `wizardstart` 与后续向导页。
+- 由于这类 `dist` 目录里还包含 `howlerjs`、`Swiper` 等前端依赖，修正 `.dockerignore` 后也能一并避免后续更多页面再出现同类静态资源 404。
