@@ -9,15 +9,15 @@
       <VChip
         size="small"
         class="uno-m-2 uno-hidden uno-min-[960px]:flex">
-        <template v-if="library && loading && items.length === lazyLoadLimit && initialId === route.params.itemId">
-          {{ t('lazyLoading', { value: items.length }) }}
+        <template v-if="library && loading && safeItems.length === lazyLoadLimit && initialId === route.params.itemId">
+          {{ t('lazyLoading', { value: safeItems.length }) }}
         </template>
         <JProgressCircular
           v-else-if="loading"
           indeterminate
           class="uno-h-full" />
         <template v-else>
-          {{ items.length ?? 0 }}
+          {{ safeItems.length }}
         </template>
       </VChip>
       <VDivider
@@ -61,7 +61,7 @@
       </VAlert>
       <ItemGrid
         v-if="library"
-        :items="items">
+        :items="safeItems">
         <h1
           v-if="!hasFilters"
           class="text-h5">
@@ -219,7 +219,7 @@ const method = computed(() => library.value ? methods.value[1] : undefined);
 /**
  * TODO: Improve the type situation of this statement
  */
-const { loading, data: items } = await useBaseItem(api, method)(() => ({
+const { loading, data: itemsData } = await useBaseItem(api, method)(() => ({
   parentId: parentId.value,
   personTypes: viewType.value === 'Person' ? ['Actor'] : undefined,
   includeItemTypes: viewType.value ? [viewType.value] : undefined,
@@ -240,6 +240,7 @@ const { loading, data: items } = await useBaseItem(api, method)(() => ({
   is3D: filters.value.types.includes('is3D') || undefined,
   limit: queryLimit.value
 }));
+const safeItems = computed(() => itemsData.value ?? []);
 
 useItemPageTitle(library);
 
