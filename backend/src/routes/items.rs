@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/UserViews", get(user_views_by_query))
         .route("/Users/{user_id}/Views", get(user_views))
         .route("/Library/MediaFolders", get(media_folders))
         .route("/Items/Root", get(root_item))
@@ -138,6 +139,25 @@ async fn user_views(
     State(state): State<AppState>,
     Path(_user_id): Path<Uuid>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    libraries_as_query_result(&state).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct UserViewsQuery {
+    #[serde(default, alias = "userId")]
+    user_id: Option<Uuid>,
+}
+
+async fn user_views_by_query(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<UserViewsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    if let Some(user_id) = query.user_id {
+        ensure_user_access(&session, user_id)?;
+    }
+
     libraries_as_query_result(&state).await
 }
 

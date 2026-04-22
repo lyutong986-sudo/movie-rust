@@ -4393,7 +4393,7 @@ pub async fn list_session_commands(
 
     let start_index = start_index.max(0);
     let limit = limit.clamp(1, 200);
-    let total_record_count = sqlx::query_scalar::<_, i64>(
+    let total_record_count = match sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*)
         FROM session_commands
@@ -4403,9 +4403,16 @@ pub async fn list_session_commands(
     )
     .bind(session_id)
     .fetch_one(pool)
-    .await?;
+    .await
+    {
+        Ok(count) => count,
+        Err(error) if is_missing_session_commands_table(&error) => {
+            return Ok(empty_session_commands_result(start_index));
+        }
+        Err(error) => return Err(error.into()),
+    };
 
-    let rows = sqlx::query_as::<_, SessionCommandRow>(
+    let rows = match sqlx::query_as::<_, SessionCommandRow>(
         r#"
         SELECT id, command, payload, created_at
         FROM session_commands
@@ -4420,11 +4427,18 @@ pub async fn list_session_commands(
     .bind(start_index)
     .bind(limit)
     .fetch_all(pool)
-    .await?;
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) if is_missing_session_commands_table(&error) => {
+            return Ok(empty_session_commands_result(start_index));
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     if consume && !rows.is_empty() {
         let command_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
-        sqlx::query(
+        if let Err(error) = sqlx::query(
             r#"
             UPDATE session_commands
             SET consumed_at = now()
@@ -4435,7 +4449,12 @@ pub async fn list_session_commands(
         .bind(session_id)
         .bind(command_ids)
         .execute(pool)
-        .await?;
+        .await
+        {
+            if !is_missing_session_commands_table(&error) {
+                return Err(error.into());
+            }
+        }
     }
 
     let items = rows.into_iter().map(session_command_to_json).collect();
@@ -4445,6 +4464,22 @@ pub async fn list_session_commands(
         total_record_count,
         start_index: Some(start_index),
     })
+}
+
+fn empty_session_commands_result(start_index: i64) -> QueryResult<Value> {
+    QueryResult {
+        items: Vec::new(),
+        total_record_count: 0,
+        start_index: Some(start_index.max(0)),
+    }
+}
+
+fn is_missing_session_commands_table(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(db_error)
+            if matches!(db_error.code().as_deref(), Some("42P01") | Some("42703"))
+    )
 }
 
 fn session_command_to_json(row: SessionCommandRow) -> Value {
