@@ -190,7 +190,7 @@ const recursive = computed(() =>
     : true
 );
 
-const parentId = computed(() => library.value.Id);
+const parentId = computed(() => library.value?.Id);
 const methods = computed(() => {
   switch (viewType.value) {
     case 'MusicArtist': {
@@ -213,8 +213,8 @@ const methods = computed(() => {
     }
   }
 });
-const api = computed(() => methods.value[0]);
-const method = computed(() => methods.value[1]);
+const api = computed(() => library.value ? methods.value[0] : undefined);
+const method = computed(() => library.value ? methods.value[1] : undefined);
 
 /**
  * TODO: Improve the type situation of this statement

@@ -971,3 +971,12 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - `frontend/packages/frontend/src/plugins/remote/auth.ts` 启动阶段刷新当前用户信息时，如果发现本地持久化 token 已经失效，也会自动清理登录态；这样数据库重建、服务端清会话或用户被后台登出后，浏览器不会长时间保留脏 token。
 - `backend/src/routes/sessions.rs` 将 `/Sessions/Playing/Stopped` 改为 `OptionalAuthSession`：播放停止属于客户端收尾事件，若 token 对应会话已不存在，后端直接幂等返回 204，不再记录 401 噪音，也减少播放器因停止上报失败而重复补报的概率。开始播放和进度上报仍然要求有效会话。
 - 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`corepack pnpm --filter @jellyfin-vue/frontend build` 通过。后端仍只有项目既有 warning。
+
+## 2026-04-23 MCP 全功能巡检与播放/媒体库修复（七十五）
+
+- 本轮使用 Chrome DevTools MCP 访问 `https://test.emby.yun:4443/`，用账号 `yuanhu` 登录后实际巡检首页、媒体库、影片详情、元数据编辑、搜索、播放页，以及 `settings` 下 account/home/playback/media-players/subtitles/server/devices/libraries/users/users/new/apikeys/transcoding/dlna/live-tv/networking/plugins/scheduled-tasks/notifications/logs-and-activity 等管理入口。
+- 首页、登录、搜索、详情页、元数据编辑和大部分设置页接口主链路均能返回 200/204；用户头像、媒体库封面和部分人物头像缺图会产生图片 404，这类属于资源缺失回退，不是 API 主链路错误。
+- 发现媒体库详情页 `/#/library/{itemId}` 会空白：前端在库对象尚未从 `useBaseItem(getItems)` 解析出来时直接读取 `library.value.Id`，Vue 抛出 `Cannot read properties of undefined (reading 'Id')`，导致主体 Suspense 挂掉。`frontend/packages/frontend/src/pages/library/[itemId].vue` 已修复为先用 `library.value?.Id`，并在库对象存在后才启用子项查询 API，避免刷新/直达媒体库页时空白。
+- 播放页实测 `PLAY` 后发现 `POST /Items/{Id}/PlaybackInfo` 偶发 500，响应为 PostgreSQL 唯一键冲突 `media_streams_media_item_id_index_stream_type_key`。根因是网页播放器会短时间连续触发 PlaybackInfo，后端对同一媒体项执行 `DELETE media_streams` 后重新插入时存在并发窗口。`backend/src/repository.rs::save_media_streams` 已改为事务内执行，并使用 `pg_advisory_xact_lock(hashtextextended(item_id, 0))` 按媒体项串行化流重建，避免并发 DELETE/INSERT 撞唯一索引。
+- 播放页还发现浏览器会请求 `/undefined`，根因是 `PlayerElement.vue` 把缺失海报图通过 `String(posterUrl)` 写成了字面量 `undefined`。现在改为直接绑定 `posterUrl`，无海报图时不再生成错误 URL。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过，仅剩项目既有 warning；`corepack pnpm --filter @jellyfin-vue/frontend build` 通过。MCP 上的线上站点仍是部署版本，需部署本次构建后才能在远端复验库页空白、PlaybackInfo 并发 500 和 `/undefined` 请求是否消失。

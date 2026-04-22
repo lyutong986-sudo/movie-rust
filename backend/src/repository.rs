@@ -8365,14 +8365,23 @@ pub async fn save_media_streams(
     media_item_id: Uuid,
     analysis: &crate::media_analyzer::MediaAnalysisResult,
 ) -> Result<(), crate::error::AppError> {
+    let mut tx = pool.begin().await?;
+
+    // 网页播放器可能在短时间内连续请求 PlaybackInfo。
+    // 按媒体项串行化流重建，避免 DELETE/INSERT 并发撞上唯一键。
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(media_item_id)
+        .execute(&mut *tx)
+        .await?;
+
     // 先删除该媒体项的所有现有流
     sqlx::query("DELETE FROM media_streams WHERE media_item_id = $1")
         .bind(media_item_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM media_chapters WHERE media_item_id = $1")
         .bind(media_item_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
     for stream in &analysis.streams {
@@ -8536,7 +8545,7 @@ pub async fn save_media_streams(
         .bind(pixel_format)
         .bind(ref_frames)
         .bind(stream_start_time_ticks)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -8556,10 +8565,11 @@ pub async fn save_media_streams(
         .bind(chapter.start_position_ticks)
         .bind(chapter.name.clone())
         .bind(chapter.marker_type.clone())
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
 
+    tx.commit().await?;
     Ok(())
 }
 

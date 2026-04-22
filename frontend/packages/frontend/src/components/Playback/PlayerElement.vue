@@ -9,7 +9,7 @@
           :is="mediaElementType"
           v-show="playbackManager.isVideo.value && videoContainerRef"
           ref="mediaElementRef"
-          :poster="String(posterUrl)"
+          :poster="posterUrl"
           autoplay
           crossorigin
           playsinline
