@@ -1291,7 +1291,7 @@ pub struct VideoStreamQuery {
 
 
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsQuery {
     #[serde(default, alias = "UserId", alias = "userId")]
@@ -1455,6 +1455,165 @@ pub struct ItemsQuery {
     pub group_items_into_collections: Option<bool>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
+}
+
+impl ItemsQuery {
+    pub fn from_raw_query(raw_query: Option<&str>) -> Result<Self, String> {
+        let mut query = Self::default();
+        let Some(raw_query) = raw_query else {
+            return Ok(query);
+        };
+
+        for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+            query.apply_raw_pair(&key, value.as_ref())?;
+        }
+
+        Ok(query)
+    }
+
+    fn apply_raw_pair(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let key = key.to_ascii_lowercase();
+        match key.as_str() {
+            "userid" => self.user_id = parse_optional_query_uuid(value)?,
+            "seriesid" => self.series_id = parse_optional_query_uuid(value)?,
+            "parentid" => self.parent_id = parse_optional_query_uuid(value)?,
+            "includeitemtypes" => append_csv_value(&mut self.include_item_types, value),
+            "excludeitemtypes" => append_csv_value(&mut self.exclude_item_types, value),
+            "mediatypes" => append_csv_value(&mut self.media_types, value),
+            "videotypes" => append_csv_value(&mut self.video_types, value),
+            "imagetypes" => append_csv_value(&mut self.image_types, value),
+            "genres" | "genreids" => append_csv_value(&mut self.genres, value),
+            "officialratings" => append_csv_value(&mut self.official_ratings, value),
+            "tags" => append_csv_value(&mut self.tags, value),
+            "excludetags" => append_csv_value(&mut self.exclude_tags, value),
+            "years" => append_csv_value(&mut self.years, value),
+            "personids" => append_csv_value(&mut self.person_ids, value),
+            "persontypes" => append_csv_value(&mut self.person_types, value),
+            "artists" => append_csv_value(&mut self.artists, value),
+            "artistids" => append_csv_value(&mut self.artist_ids, value),
+            "albums" => append_csv_value(&mut self.albums, value),
+            "studios" => append_csv_value(&mut self.studios, value),
+            "studioids" => append_csv_value(&mut self.studio_ids, value),
+            "containers" => append_csv_value(&mut self.containers, value),
+            "audiocodecs" => append_csv_value(&mut self.audio_codecs, value),
+            "videocodecs" => append_csv_value(&mut self.video_codecs, value),
+            "subtitlecodecs" => append_csv_value(&mut self.subtitle_codecs, value),
+            "ids" => append_csv_value(&mut self.ids, value),
+            "anyprovideridequals" => append_csv_value(&mut self.any_provider_id_equals, value),
+            "recursive" => self.recursive = parse_optional_bool(value),
+            "searchterm" => self.search_term = non_empty_query_value(value),
+            "namestartswith" => self.name_starts_with = non_empty_query_value(value),
+            "namestartswithorgreater" => self.name_starts_with_or_greater = non_empty_query_value(value),
+            "namelessthan" => self.name_less_than = non_empty_query_value(value),
+            "sortby" => append_csv_value(&mut self.sort_by, value),
+            "sortorder" => self.sort_order = non_empty_query_value(value),
+            "filters" => append_csv_value(&mut self.filters, value),
+            "fields" => append_csv_value(&mut self.fields, value),
+            "enableimages" => self.enable_images = parse_optional_bool(value),
+            "imagetypelimit" => self.image_type_limit = parse_optional_i64(value),
+            "enableimagetypes" => append_csv_value(&mut self.enable_image_types, value),
+            "enableuserdata" => self.enable_user_data = parse_optional_bool(value),
+            "startindex" => self.start_index = parse_optional_i64(value),
+            "limit" => self.limit = parse_optional_i64(value),
+            "listitemids" => append_csv_value(&mut self.list_item_ids, value),
+            "isplayed" => self.is_played = parse_optional_bool(value),
+            "isfavorite" => self.is_favorite = parse_optional_bool(value),
+            "ismovie" => self.is_movie = parse_optional_bool(value),
+            "isseries" => self.is_series = parse_optional_bool(value),
+            "isfolder" => self.is_folder = parse_optional_bool(value),
+            "ishd" => self.is_hd = parse_optional_bool(value),
+            "is3d" => self.is_3d = parse_optional_bool(value),
+            "islocked" => self.is_locked = parse_optional_bool(value),
+            "isplaceholder" => self.is_place_holder = parse_optional_bool(value),
+            "hasoverview" => self.has_overview = parse_optional_bool(value),
+            "hassubtitles" => self.has_subtitles = parse_optional_bool(value),
+            "hastrailer" => self.has_trailer = parse_optional_bool(value),
+            "hasthemesong" => self.has_theme_song = parse_optional_bool(value),
+            "hasthemevideo" => self.has_theme_video = parse_optional_bool(value),
+            "hasspecialfeature" => self.has_special_feature = parse_optional_bool(value),
+            "hastmdbid" => self.has_tmdb_id = parse_optional_bool(value),
+            "hasimdbid" => self.has_imdb_id = parse_optional_bool(value),
+            "seriesstatus" => self.series_status = non_empty_query_value(value),
+            "mincommunityrating" => self.min_community_rating = parse_optional_f64(value),
+            "mincriticrating" => self.min_critic_rating = parse_optional_f64(value),
+            "minpremieredate" => self.min_premiere_date = parse_optional_datetime(value),
+            "maxpremieredate" => self.max_premiere_date = parse_optional_datetime(value),
+            "minstartdate" => self.min_start_date = parse_optional_datetime(value),
+            "maxstartdate" => self.max_start_date = parse_optional_datetime(value),
+            "minenddate" => self.min_end_date = parse_optional_datetime(value),
+            "maxenddate" => self.max_end_date = parse_optional_datetime(value),
+            "mindatelastsaved" => self.min_date_last_saved = parse_optional_datetime(value),
+            "maxdatelastsaved" => self.max_date_last_saved = parse_optional_datetime(value),
+            "mindatelastsavedforuser" => self.min_date_last_saved_for_user = parse_optional_datetime(value),
+            "maxdatelastsavedforuser" => self.max_date_last_saved_for_user = parse_optional_datetime(value),
+            "airedduringseason" => self.aired_during_season = parse_optional_i32(value),
+            "projecttomedia" => self.project_to_media = parse_optional_bool(value),
+            "groupitemsintocollections" => self.group_items_into_collections = parse_optional_bool(value),
+            "api_key" | "apikey" => self._api_key = non_empty_query_value(value),
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+fn append_csv_value(target: &mut Option<String>, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+
+    match target {
+        Some(current) if !current.trim().is_empty() => {
+            current.push(',');
+            current.push_str(value);
+        }
+        _ => *target = Some(value.to_string()),
+    }
+}
+
+fn non_empty_query_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn parse_optional_query_uuid(value: &str) -> Result<Option<Uuid>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    emby_id_to_uuid(value)
+        .map(Some)
+        .map_err(|_| format!("无效的 UUID 查询参数: {value}"))
+}
+
+fn parse_optional_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_optional_i64(value: &str) -> Option<i64> {
+    value.trim().parse::<i64>().ok()
+}
+
+fn parse_optional_i32(value: &str) -> Option<i32> {
+    value.trim().parse::<i32>().ok()
+}
+
+fn parse_optional_f64(value: &str) -> Option<f64> {
+    value.trim().parse::<f64>().ok()
+}
+
+fn parse_optional_datetime(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value.trim())
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
 }
 
 #[derive(Debug, Deserialize)]

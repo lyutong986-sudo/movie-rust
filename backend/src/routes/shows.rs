@@ -6,7 +6,7 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     routing::get,
     Json, Router,
 };
@@ -26,8 +26,10 @@ pub fn router() -> Router<AppState> {
 async fn get_next_up(
     session: AuthSession,
     State(state): State<AppState>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let query = ItemsQuery::from_raw_query(raw_query.as_deref())
+        .map_err(AppError::BadRequest)?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     let scope_id = query.series_id.or(query.parent_id);
@@ -46,8 +48,10 @@ async fn get_next_up(
 async fn get_upcoming(
     session: AuthSession,
     State(state): State<AppState>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let query = ItemsQuery::from_raw_query(raw_query.as_deref())
+        .map_err(AppError::BadRequest)?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     let scope_id = query.series_id.or(query.parent_id);
@@ -66,8 +70,10 @@ async fn get_upcoming(
 async fn get_missing(
     session: AuthSession,
     State(state): State<AppState>,
-    Query(query): Query<ItemsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let query = ItemsQuery::from_raw_query(raw_query.as_deref())
+        .map_err(AppError::BadRequest)?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     let scope_id = query.series_id.or(query.parent_id);

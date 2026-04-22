@@ -485,3 +485,10 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - `user_item_data` 初始化预留已补齐 `Rating/PlayedPercentage/UnplayedItemCount/Likes/AudioStreamIndex/SubtitleStreamIndex/HideFromResume/CustomData`，对应 EmbySDK `UserItemDataDto` 的标准形状，避免用户设置、播放轨道选择、隐藏继续观看等功能后续无字段可写。
 - 新增预留表 `media_sources`、`item_images`、`device_registry`、`api_keys`、`activity_log`、`scheduled_tasks`，对应 EmbySDK 的 `MediaSourceInfo`、多图槽位、设备管理、API Key 管理、活动日志和计划任务 websocket/设置页能力。当前部分路由仍可从现有 sessions/playback_events 推导响应，但数据库已经具备真实实现的落库位置。
 - 本轮依旧不改 frontend：前端和本地播放器按 SDK 标准消费字段；backend 初始化层负责把这些标准字段和基础表预先建好。
+
+## 2026-04-22 前端适配补充（十九）
+- 根据 `log/movie-rust-20260422174410.log` 复核高频错误：`GET /UserItems/Resume` 返回 404，`GET /Items/Latest` 被动态路由 `/Items/{itemId}` 当成 itemId 解析并返回 400，`GET /Shows/NextUp` 因 EmbySDK 重复 query key（如多次 `fields=`、多次 `enableImageTypes=`）触发参数解析 400。
+- `backend/src/routes/items.rs` 已新增 EmbySDK 标准 `GET /Items/Latest` 与 `GET /UserItems/Resume`。前者按 `userId` 查询最新媒体并返回 `BaseItemDto[]`，后者按 `userId` 查询继续观看并返回 `QueryResult<BaseItemDto>`，均复用既有用户权限和 DTO 转换逻辑。
+- `backend/src/models.rs` 为 `ItemsQuery` 新增 raw query 容错解析：重复的列表型参数会合并成逗号列表，标量参数使用最后一次有效值，兼容 EmbySDK/Jellyfin SDK 常见的 `fields=x&fields=y`、`enableImageTypes=Primary&enableImageTypes=Backdrop` 形式。
+- `backend/src/routes/shows.rs` 已将 `Shows/NextUp`、`Shows/Upcoming`、`Shows/Missing` 切换到该容错解析，避免首页 NextUp 链路因为重复字段参数直接 400。
+- 日志中的 `display_preferences` 缺表 500 已由上一轮启动自建层覆盖；该日志生成于修复前，重启当前 backend 后 `display_preferences` 会由初始化层自动创建。

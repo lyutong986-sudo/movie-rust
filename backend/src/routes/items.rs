@@ -13,7 +13,7 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    extract::{Path, Query, Request, State},
+    extract::{Path, Query, RawQuery, Request, State},
     http::{self, StatusCode},
     routing::{get, post},
     Json, Router,
@@ -33,6 +33,7 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Counts", get(item_counts))
         .route("/Users/{user_id}/Items/Counts", get(user_item_counts))
         .route("/Items/Filters", get(item_filters))
+        .route("/Items/Latest", get(latest_items_by_query))
         .route("/Artists", get(artists))
         .route("/Artists/{name}", get(artist))
         .route("/Artists/{name}/Items", get(artist_items))
@@ -60,6 +61,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Users/{user_id}/Items/Latest", get(latest_items))
         .route("/Users/{user_id}/Items/Resume", get(user_resume_items))
+        .route("/UserItems/Resume", get(user_resume_items_by_query))
         .route(
             "/Items/{item_id}/PlaybackInfo",
             get(playback_info).post(playback_info),
@@ -574,6 +576,26 @@ async fn latest_items(
     Path(user_id): Path<Uuid>,
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    latest_items_for_user(&state, user_id, &mut query).await
+}
+
+async fn latest_items_by_query(
+    session: AuthSession,
+    State(state): State<AppState>,
+    RawQuery(raw_query): RawQuery,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let mut query = ItemsQuery::from_raw_query(raw_query.as_deref())
+        .map_err(AppError::BadRequest)?;
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    latest_items_for_user(&state, user_id, &mut query).await
+}
+
+async fn latest_items_for_user(
+    state: &AppState,
+    user_id: Uuid,
+    query: &mut ItemsQuery,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
     query.user_id = Some(user_id);
     query.recursive = Some(true);
     query.sort_by = Some("DateCreated".to_string());
@@ -585,7 +607,7 @@ async fn latest_items(
             infer_latest_include_item_types(&state, query.parent_id).await?;
     }
 
-    let result = list_items_for_user(&state, user_id, query).await?;
+    let result = list_items_for_user(state, user_id, query.clone()).await?;
     Ok(Json(result.0.items))
 }
 
@@ -2833,6 +2855,26 @@ async fn user_resume_items(
     Path(user_id): Path<Uuid>,
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    resume_items_for_user(&state, user_id, &mut query).await
+}
+
+async fn user_resume_items_by_query(
+    session: AuthSession,
+    State(state): State<AppState>,
+    RawQuery(raw_query): RawQuery,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let mut query = ItemsQuery::from_raw_query(raw_query.as_deref())
+        .map_err(AppError::BadRequest)?;
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    resume_items_for_user(&state, user_id, &mut query).await
+}
+
+async fn resume_items_for_user(
+    state: &AppState,
+    user_id: Uuid,
+    query: &mut ItemsQuery,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     query.user_id = Some(user_id);
     let parent_is_user_root = query.parent_id == Some(user_id);
     if parent_is_user_root {
@@ -2859,8 +2901,8 @@ async fn user_resume_items(
         recursive,
     );
     options.resume_only = true;
-    options.sort_by = query.sort_by.or_else(|| Some("DatePlayed".to_string()));
-    options.sort_order = query.sort_order.or_else(|| Some("Descending".to_string()));
+    options.sort_by = query.sort_by.clone().or_else(|| Some("DatePlayed".to_string()));
+    options.sort_order = query.sort_order.clone().or_else(|| Some("Descending".to_string()));
     options.limit = query.limit.unwrap_or(50);
 
     let result = repository::list_media_items(
