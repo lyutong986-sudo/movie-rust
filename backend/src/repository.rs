@@ -1617,6 +1617,8 @@ pub struct ItemListOptions {
     pub include_types: Vec<String>,
     pub exclude_types: Vec<String>,
     pub media_types: Vec<String>,
+    pub video_types: Vec<String>,
+    pub image_types: Vec<String>,
     pub genres: Vec<String>,
     pub official_ratings: Vec<String>,
     pub tags: Vec<String>,
@@ -1634,7 +1636,16 @@ pub struct ItemListOptions {
     pub is_played: Option<bool>,
     pub is_favorite: Option<bool>,
     pub is_folder: Option<bool>,
+    pub is_hd: Option<bool>,
+    pub is_3d: Option<bool>,
+    pub is_locked: Option<bool>,
+    pub is_place_holder: Option<bool>,
     pub has_overview: Option<bool>,
+    pub has_subtitles: Option<bool>,
+    pub has_trailer: Option<bool>,
+    pub has_theme_song: Option<bool>,
+    pub has_theme_video: Option<bool>,
+    pub has_special_feature: Option<bool>,
     pub has_tmdb_id: Option<bool>,
     pub has_imdb_id: Option<bool>,
     pub series_status: Vec<String>,
@@ -1642,9 +1653,16 @@ pub struct ItemListOptions {
     pub min_critic_rating: Option<f64>,
     pub min_premiere_date: Option<DateTime<Utc>>,
     pub max_premiere_date: Option<DateTime<Utc>>,
+    pub min_start_date: Option<DateTime<Utc>>,
+    pub max_start_date: Option<DateTime<Utc>>,
+    pub min_end_date: Option<DateTime<Utc>>,
+    pub max_end_date: Option<DateTime<Utc>>,
     pub resume_only: bool,
     pub recursive: bool,
     pub search_term: Option<String>,
+    pub name_starts_with: Option<String>,
+    pub name_starts_with_or_greater: Option<String>,
+    pub name_less_than: Option<String>,
     pub sort_by: Option<String>,
     pub sort_order: Option<String>,
     pub filters: Option<String>,
@@ -1664,6 +1682,8 @@ impl Default for ItemListOptions {
             include_types: Vec::new(),
             exclude_types: Vec::new(),
             media_types: Vec::new(),
+            video_types: Vec::new(),
+            image_types: Vec::new(),
             genres: Vec::new(),
             official_ratings: Vec::new(),
             tags: Vec::new(),
@@ -1681,7 +1701,16 @@ impl Default for ItemListOptions {
             is_played: None,
             is_favorite: None,
             is_folder: None,
+            is_hd: None,
+            is_3d: None,
+            is_locked: None,
+            is_place_holder: None,
             has_overview: None,
+            has_subtitles: None,
+            has_trailer: None,
+            has_theme_song: None,
+            has_theme_video: None,
+            has_special_feature: None,
             has_tmdb_id: None,
             has_imdb_id: None,
             series_status: Vec::new(),
@@ -1689,9 +1718,16 @@ impl Default for ItemListOptions {
             min_critic_rating: None,
             min_premiere_date: None,
             max_premiere_date: None,
+            min_start_date: None,
+            max_start_date: None,
+            min_end_date: None,
+            max_end_date: None,
             resume_only: false,
             recursive: false,
             search_term: None,
+            name_starts_with: None,
+            name_starts_with_or_greater: None,
+            name_less_than: None,
             sort_by: None,
             sort_order: None,
             filters: None,
@@ -1780,6 +1816,18 @@ pub async fn list_media_items(
             .push(")");
     }
 
+    if !options.video_types.is_empty() {
+        let video_types = lowercase_list(&options.video_types);
+        if video_types
+            .iter()
+            .any(|value| matches!(value.as_str(), "videofile" | "video"))
+        {
+            builder.push(" AND media_type = 'Video'");
+        } else {
+            builder.push(" AND false");
+        }
+    }
+
     if !options.genres.is_empty() {
         builder.push(" AND genres && ").push_bind(options.genres);
     }
@@ -1849,6 +1897,32 @@ pub async fn list_media_items(
             .push("))");
     }
 
+    if !options.image_types.is_empty() {
+        let image_types = lowercase_list(&options.image_types);
+        let mut has_known_image_type = false;
+        builder.push(" AND (false");
+        if image_types.iter().any(|value| value == "primary") {
+            has_known_image_type = true;
+            builder.push(" OR image_primary_path IS NOT NULL");
+        }
+        if image_types.iter().any(|value| value == "backdrop") {
+            has_known_image_type = true;
+            builder.push(" OR backdrop_path IS NOT NULL");
+        }
+        if image_types.iter().any(|value| value == "logo") {
+            has_known_image_type = true;
+            builder.push(" OR logo_path IS NOT NULL");
+        }
+        if image_types.iter().any(|value| value == "thumb") {
+            has_known_image_type = true;
+            builder.push(" OR thumb_path IS NOT NULL");
+        }
+        builder.push(")");
+        if !has_known_image_type {
+            builder.push(" AND false");
+        }
+    }
+
     if !options.person_ids.is_empty() {
         builder
             .push(
@@ -1900,6 +1974,29 @@ pub async fn list_media_items(
         }
     }
 
+    if let Some(has_subtitles) = options.has_subtitles {
+        if has_subtitles {
+            builder.push(" AND EXISTS (SELECT 1 FROM media_streams ms WHERE ms.media_item_id = media_items.id AND ms.stream_type = 'Subtitle')");
+        } else {
+            builder.push(" AND NOT EXISTS (SELECT 1 FROM media_streams ms WHERE ms.media_item_id = media_items.id AND ms.stream_type = 'Subtitle')");
+        }
+    }
+
+    if let Some(has_trailer) = options.has_trailer {
+        if has_trailer {
+            builder.push(" AND COALESCE(cardinality(remote_trailers), 0) > 0");
+        } else {
+            builder.push(" AND COALESCE(cardinality(remote_trailers), 0) = 0");
+        }
+    }
+
+    if matches!(options.has_theme_song, Some(true))
+        || matches!(options.has_theme_video, Some(true))
+        || matches!(options.has_special_feature, Some(true))
+    {
+        builder.push(" AND false");
+    }
+
     if let Some(has_tmdb_id) = options.has_tmdb_id {
         if has_tmdb_id {
             builder.push(" AND (provider_ids ? 'Tmdb' OR provider_ids ? 'TMDb' OR provider_ids ? 'tmdb')");
@@ -1922,6 +2019,21 @@ pub async fn list_media_items(
         } else {
             builder.push(" AND NOT (item_type = ANY(ARRAY['Series','Season','BoxSet','Folder','CollectionFolder']))");
         }
+    }
+
+    if let Some(is_hd) = options.is_hd {
+        if is_hd {
+            builder.push(" AND (COALESCE(width, 0) >= 1280 OR COALESCE(height, 0) >= 720)");
+        } else {
+            builder.push(" AND (COALESCE(width, 0) < 1280 AND COALESCE(height, 0) < 720)");
+        }
+    }
+
+    if matches!(options.is_3d, Some(true))
+        || matches!(options.is_locked, Some(true))
+        || matches!(options.is_place_holder, Some(true))
+    {
+        builder.push(" AND false");
     }
 
     if !options.series_status.is_empty() {
@@ -1947,6 +2059,22 @@ pub async fn list_media_items(
 
     if let Some(max_date) = options.max_premiere_date {
         builder.push(" AND premiere_date <= ").push_bind(max_date).push("::date");
+    }
+
+    if let Some(min_date) = options.min_start_date {
+        builder.push(" AND premiere_date >= ").push_bind(min_date).push("::date");
+    }
+
+    if let Some(max_date) = options.max_start_date {
+        builder.push(" AND premiere_date <= ").push_bind(max_date).push("::date");
+    }
+
+    if let Some(min_date) = options.min_end_date {
+        builder.push(" AND end_date >= ").push_bind(min_date).push("::date");
+    }
+
+    if let Some(max_date) = options.max_end_date {
+        builder.push(" AND end_date <= ").push_bind(max_date).push("::date");
     }
 
     if let Some(user_id) = options.user_id {
@@ -2006,6 +2134,33 @@ pub async fn list_media_items(
             )
             .push_bind(search_pattern)
             .push(")")
+            .push(")");
+    }
+
+    if let Some(prefix) = options.name_starts_with.filter(|value| !value.trim().is_empty()) {
+        let pattern = format!("{}%", prefix.trim());
+        builder
+            .push(" AND (sort_name ILIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR name ILIKE ")
+            .push_bind(pattern)
+            .push(")");
+    }
+
+    if let Some(lower_bound) = options
+        .name_starts_with_or_greater
+        .filter(|value| !value.trim().is_empty())
+    {
+        builder
+            .push(" AND lower(COALESCE(sort_name, name)) >= lower(")
+            .push_bind(lower_bound.trim().to_string())
+            .push(")");
+    }
+
+    if let Some(upper_bound) = options.name_less_than.filter(|value| !value.trim().is_empty()) {
+        builder
+            .push(" AND lower(COALESCE(sort_name, name)) < lower(")
+            .push_bind(upper_bound.trim().to_string())
             .push(")");
     }
 
@@ -2095,7 +2250,7 @@ pub async fn list_media_items(
         .push(" OFFSET ")
         .push_bind(options.start_index.max(0))
         .push(" LIMIT ")
-        .push_bind(options.limit.clamp(1, 500));
+        .push_bind(options.limit.clamp(1, 10_000));
 
     let rows = builder
         .build_query_as::<MediaItemRow>()
@@ -2113,6 +2268,123 @@ pub async fn list_media_items(
         total_record_count,
         start_index: Some(options.start_index.max(0)),
     })
+}
+
+pub async fn media_stream_codecs_for_items(
+    pool: &sqlx::PgPool,
+    item_ids: &[Uuid],
+) -> Result<Vec<(String, String)>, AppError> {
+    if item_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT DISTINCT stream_type, codec
+        FROM media_streams
+        WHERE media_item_id = ANY($1)
+          AND codec IS NOT NULL
+          AND btrim(codec) <> ''
+        ORDER BY stream_type, codec
+        "#,
+    )
+    .bind(item_ids)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn aggregate_text_values(
+    pool: &sqlx::PgPool,
+    field: &str,
+) -> Result<Vec<String>, AppError> {
+    let sql = match field {
+        "container" => {
+            r#"
+            SELECT DISTINCT container AS value
+            FROM media_items
+            WHERE container IS NOT NULL AND btrim(container) <> ''
+            ORDER BY container
+            "#
+        }
+        "official_rating" => {
+            r#"
+            SELECT DISTINCT official_rating AS value
+            FROM media_items
+            WHERE official_rating IS NOT NULL AND btrim(official_rating) <> ''
+            ORDER BY official_rating
+            "#
+        }
+        _ => return Ok(Vec::new()),
+    };
+
+    Ok(sqlx::query_scalar::<_, String>(sql).fetch_all(pool).await?)
+}
+
+pub async fn aggregate_array_values(
+    pool: &sqlx::PgPool,
+    field: &str,
+) -> Result<Vec<String>, AppError> {
+    let sql = match field {
+        "tags" => {
+            r#"
+            SELECT DISTINCT value
+            FROM media_items, unnest(tags) AS value
+            WHERE btrim(value) <> ''
+            ORDER BY value
+            "#
+        }
+        "studios" => {
+            r#"
+            SELECT DISTINCT value
+            FROM media_items, unnest(studios) AS value
+            WHERE btrim(value) <> ''
+            ORDER BY value
+            "#
+        }
+        "genres" => {
+            r#"
+            SELECT DISTINCT value
+            FROM media_items, unnest(genres) AS value
+            WHERE btrim(value) <> ''
+            ORDER BY value
+            "#
+        }
+        _ => return Ok(Vec::new()),
+    };
+
+    Ok(sqlx::query_scalar::<_, String>(sql).fetch_all(pool).await?)
+}
+
+pub async fn aggregate_years(pool: &sqlx::PgPool) -> Result<Vec<i32>, AppError> {
+    Ok(sqlx::query_scalar::<_, i32>(
+        r#"
+        SELECT DISTINCT production_year
+        FROM media_items
+        WHERE production_year IS NOT NULL
+        ORDER BY production_year DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn aggregate_stream_codecs(
+    pool: &sqlx::PgPool,
+    stream_type: &str,
+) -> Result<Vec<String>, AppError> {
+    Ok(sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT codec
+        FROM media_streams
+        WHERE stream_type = $1
+          AND codec IS NOT NULL
+          AND btrim(codec) <> ''
+        ORDER BY codec
+        "#,
+    )
+    .bind(stream_type)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn get_next_up_episodes(

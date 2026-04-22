@@ -32,6 +32,18 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Counts", get(item_counts))
         .route("/Users/{user_id}/Items/Counts", get(user_item_counts))
         .route("/Items/Filters", get(item_filters))
+        .route("/Studios", get(studios))
+        .route("/Studios/{name}", get(studio))
+        .route("/Studios/{name}/Items", get(studio_items))
+        .route("/Years", get(years))
+        .route("/Tags", get(tags))
+        .route("/Tags/{name}", get(tag))
+        .route("/Tags/{name}/Items", get(tag_items))
+        .route("/OfficialRatings", get(official_ratings))
+        .route("/Containers", get(containers))
+        .route("/AudioCodecs", get(audio_codecs))
+        .route("/VideoCodecs", get(video_codecs))
+        .route("/SubtitleCodecs", get(subtitle_codecs))
         .route("/Items", get(items))
         .route("/Users/{user_id}/Items", get(user_items))
         .route("/Users/{user_id}/Items/Filters", get(user_item_filters))
@@ -160,6 +172,127 @@ async fn user_item_counts(
     Ok(Json(repository::item_counts(&state.pool).await?))
 }
 
+async fn studios(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let items = repository::aggregate_array_values(&state.pool, "studios")
+        .await?
+        .into_iter()
+        .map(|name| virtual_folder_item(&name, "Studio", state.config.server_id))
+        .collect::<Vec<_>>();
+    Ok(Json(QueryResult {
+        total_record_count: items.len() as i64,
+        items,
+        start_index: Some(0),
+    }))
+}
+
+async fn studio(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Json<BaseItemDto> {
+    Json(virtual_folder_item(&name, "Studio", state.config.server_id))
+}
+
+async fn studio_items(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    virtual_folder_items(&state, &session, query, VirtualFilter::Studio(name)).await
+}
+
+async fn tags(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let items = repository::aggregate_array_values(&state.pool, "tags")
+        .await?
+        .into_iter()
+        .map(|name| virtual_folder_item(&name, "Tag", state.config.server_id))
+        .collect::<Vec<_>>();
+    Ok(Json(QueryResult {
+        total_record_count: items.len() as i64,
+        items,
+        start_index: Some(0),
+    }))
+}
+
+async fn tag(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Json<BaseItemDto> {
+    Json(virtual_folder_item(&name, "Tag", state.config.server_id))
+}
+
+async fn tag_items(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    virtual_folder_items(&state, &session, query, VirtualFilter::Tag(name)).await
+}
+
+async fn official_ratings(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(string_list_result(repository::aggregate_text_values(&state.pool, "official_rating").await?)))
+}
+
+async fn containers(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(string_list_result(repository::aggregate_text_values(&state.pool, "container").await?)))
+}
+
+async fn audio_codecs(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(string_list_result(repository::aggregate_stream_codecs(&state.pool, "Audio").await?)))
+}
+
+async fn video_codecs(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(string_list_result(repository::aggregate_stream_codecs(&state.pool, "Video").await?)))
+}
+
+async fn subtitle_codecs(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(string_list_result(repository::aggregate_stream_codecs(&state.pool, "Subtitle").await?)))
+}
+
+async fn years(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    let items = repository::aggregate_years(&state.pool)
+        .await?
+        .into_iter()
+        .map(|year| {
+            json!({
+                "Name": year.to_string(),
+                "Id": year.to_string(),
+                "Type": "Year",
+                "ProductionYear": year,
+                "IsFolder": true
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(query_result_from_items(items)))
+}
+
 async fn items(
     session: AuthSession,
     State(state): State<AppState>,
@@ -176,6 +309,107 @@ async fn user_items(
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     query.user_id = Some(user_id);
     list_items_for_user(&state, user_id, query).await
+}
+
+enum VirtualFilter {
+    Studio(String),
+    Tag(String),
+}
+
+fn string_list_result(values: Vec<String>) -> Value {
+    let total = values.len();
+    json!({ "Items": values, "TotalRecordCount": total, "StartIndex": 0 })
+}
+
+fn query_result_from_items(items: Vec<Value>) -> Value {
+    let total = items.len();
+    json!({
+        "Items": items,
+        "TotalRecordCount": total,
+        "StartIndex": 0
+    })
+}
+
+fn virtual_folder_item(name: &str, item_type: &str, server_id: Uuid) -> BaseItemDto {
+    let mut item = repository::root_item_dto(server_id);
+    item.name = name.to_string();
+    item.id = name.to_string();
+    item.guid = None;
+    item.etag = None;
+    item.can_delete = false;
+    item.can_download = false;
+    item.can_edit_items = Some(false);
+    item.presentation_unique_key = Some(format!("{name}_"));
+    item.item_type = item_type.to_string();
+    item.is_folder = true;
+    item.sort_name = Some(name.to_lowercase());
+    item.forced_sort_name = item.sort_name.clone();
+    item.location_type = Some("Virtual".to_string());
+    item.display_preferences_id = Some(name.to_string());
+    item.size = None;
+    item.special_feature_count = None;
+    item
+}
+
+async fn virtual_folder_items(
+    state: &AppState,
+    session: &AuthSession,
+    mut query: ItemsQuery,
+    filter: VirtualFilter,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(session, user_id)?;
+    query.user_id = Some(user_id);
+
+    let parent_is_user_root = query.parent_id == Some(user_id);
+    if parent_is_user_root {
+        query.parent_id = None;
+    }
+
+    let (library_id, parent_id) = if let Some(parent_id) = query.parent_id {
+        if let Some(library) = repository::get_library(&state.pool, parent_id).await? {
+            (Some(library.id), None)
+        } else {
+            (None, Some(parent_id))
+        }
+    } else {
+        (None, None)
+    };
+
+    let mut include_types = parse_include_types(query.include_item_types.as_deref());
+    if include_types.is_empty() {
+        include_types = vec!["Movie".to_string(), "Series".to_string(), "Episode".to_string()];
+    }
+
+    let mut requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
+    requested_item_ids.extend(parse_emby_uuid_list(query.ids.as_deref()));
+    requested_item_ids.sort_unstable();
+    requested_item_ids.dedup();
+
+    let mut options = item_list_options_from_query(
+        &query,
+        user_id,
+        library_id,
+        parent_id,
+        requested_item_ids,
+        include_types,
+        query.recursive.unwrap_or(true),
+    );
+
+    match filter {
+        VirtualFilter::Studio(name) => options.studios = vec![name],
+        VirtualFilter::Tag(name) => options.tags = vec![name],
+    }
+
+    let result = repository::list_media_items(&state.pool, options).await?;
+    let mut items = Vec::with_capacity(result.items.len());
+    for item in result.items {
+        items.push(
+            repository::media_item_to_dto(&state.pool, &item, Some(user_id), state.config.server_id)
+                .await?,
+        );
+    }
+    Ok(Json(items))
 }
 
 async fn home_sections(
@@ -436,31 +670,55 @@ async fn item_filters_for_query(
     let mut tags = BTreeSet::new();
     let mut official_ratings = BTreeSet::new();
     let mut containers = BTreeSet::new();
+    let mut audio_codecs = BTreeSet::new();
+    let mut video_codecs = BTreeSet::new();
+    let mut subtitle_codecs = BTreeSet::new();
     let mut years = BTreeSet::new();
     let mut series_statuses = BTreeSet::new();
+    let item_ids = result.items.iter().map(|item| item.id).collect::<Vec<_>>();
 
-    for item in result.items {
-        for genre in item.genres {
+    for item in &result.items {
+        for genre in &item.genres {
             if !genre.trim().is_empty() {
-                genres.insert(genre);
+                genres.insert(genre.clone());
             }
         }
-        for tag in item.tags {
+        for tag in &item.tags {
             if !tag.trim().is_empty() {
-                tags.insert(tag);
+                tags.insert(tag.clone());
             }
         }
-        if let Some(rating) = item.official_rating.filter(|value| !value.trim().is_empty()) {
-            official_ratings.insert(rating);
+        if let Some(rating) = item.official_rating.as_ref().filter(|value| !value.trim().is_empty()) {
+            official_ratings.insert(rating.clone());
         }
-        if let Some(container) = item.container.filter(|value| !value.trim().is_empty()) {
-            containers.insert(container);
+        if let Some(container) = item.container.as_ref().filter(|value| !value.trim().is_empty()) {
+            containers.insert(container.clone());
+        }
+        if let Some(codec) = item.audio_codec.as_ref().filter(|value| !value.trim().is_empty()) {
+            audio_codecs.insert(codec.clone());
+        }
+        if let Some(codec) = item.video_codec.as_ref().filter(|value| !value.trim().is_empty()) {
+            video_codecs.insert(codec.clone());
         }
         if let Some(year) = item.production_year {
             years.insert(year);
         }
-        if let Some(status) = item.status.filter(|value| !value.trim().is_empty()) {
-            series_statuses.insert(status);
+        if let Some(status) = item.status.as_ref().filter(|value| !value.trim().is_empty()) {
+            series_statuses.insert(status.clone());
+        }
+    }
+    for (stream_type, codec) in repository::media_stream_codecs_for_items(&state.pool, &item_ids).await? {
+        match stream_type.as_str() {
+            "Audio" => {
+                audio_codecs.insert(codec);
+            }
+            "Video" => {
+                video_codecs.insert(codec);
+            }
+            "Subtitle" => {
+                subtitle_codecs.insert(codec);
+            }
+            _ => {}
         }
     }
 
@@ -477,6 +735,9 @@ async fn item_filters_for_query(
         "Tags": tags.into_iter().collect::<Vec<_>>(),
         "OfficialRatings": official_ratings.into_iter().collect::<Vec<_>>(),
         "Containers": containers.into_iter().collect::<Vec<_>>(),
+        "AudioCodecs": audio_codecs.into_iter().collect::<Vec<_>>(),
+        "VideoCodecs": video_codecs.into_iter().collect::<Vec<_>>(),
+        "SubtitleCodecs": subtitle_codecs.into_iter().collect::<Vec<_>>(),
         "Years": years_vec.clone(),
         "ProductionYears": years_vec,
         "SeriesStatuses": series_statuses.into_iter().collect::<Vec<_>>(),
@@ -538,6 +799,8 @@ fn item_list_options_from_query(
         include_types,
         exclude_types,
         media_types: parse_list(query.media_types.as_deref()),
+        video_types: parse_list(query.video_types.as_deref()),
+        image_types: parse_list(query.image_types.as_deref()),
         genres: parse_list(query.genres.as_deref()),
         official_ratings: parse_list(query.official_ratings.as_deref()),
         tags: parse_list(query.tags.as_deref()),
@@ -555,7 +818,16 @@ fn item_list_options_from_query(
         is_played,
         is_favorite: query.is_favorite,
         is_folder,
+        is_hd: query.is_hd,
+        is_3d: query.is_3d,
+        is_locked: query.is_locked,
+        is_place_holder: query.is_place_holder,
         has_overview: query.has_overview,
+        has_subtitles: query.has_subtitles,
+        has_trailer: query.has_trailer,
+        has_theme_song: query.has_theme_song,
+        has_theme_video: query.has_theme_video,
+        has_special_feature: query.has_special_feature,
         has_tmdb_id: query.has_tmdb_id,
         has_imdb_id: query.has_imdb_id,
         series_status: parse_list(query.series_status.as_deref()),
@@ -563,9 +835,16 @@ fn item_list_options_from_query(
         min_critic_rating: query.min_critic_rating,
         min_premiere_date: query.min_premiere_date,
         max_premiere_date: query.max_premiere_date,
+        min_start_date: query.min_start_date,
+        max_start_date: query.max_start_date,
+        min_end_date: query.min_end_date,
+        max_end_date: query.max_end_date,
         resume_only,
         recursive,
         search_term: query.search_term.clone(),
+        name_starts_with: query.name_starts_with.clone(),
+        name_starts_with_or_greater: query.name_starts_with_or_greater.clone(),
+        name_less_than: query.name_less_than.clone(),
         sort_by: query.sort_by.clone(),
         sort_order: query.sort_order.clone(),
         filters: query.filters.clone(),
@@ -1282,10 +1561,16 @@ async fn playback_info(
             }
 
             if !device_profile.direct_play_profiles.is_empty() {
-                media_source.supports_direct_play = true;
+                media_source.supports_direct_play =
+                    device_profile_supports_direct_play(device_profile, media_source);
             }
 
-            media_source.supports_direct_stream = true;
+            media_source.supports_direct_stream =
+                media_source.supports_direct_play || device_profile.transcoding_profiles.is_empty();
+            if !device_profile.transcoding_profiles.is_empty() {
+                media_source.supports_transcoding =
+                    device_profile_supports_transcoding(device_profile, media_source);
+            }
         }
     }
 
@@ -1348,6 +1633,73 @@ async fn playback_info(
         play_session_id,
         ..Default::default()
     }))
+}
+
+fn device_profile_supports_direct_play(
+    profile: &crate::models::DeviceProfile,
+    source: &crate::models::MediaSourceDto,
+) -> bool {
+    profile.direct_play_profiles.iter().any(|direct_profile| {
+        direct_profile
+            .r#type
+            .as_deref()
+            .is_none_or(|value| value.eq_ignore_ascii_case("Video"))
+            && csv_option_contains(direct_profile.container.as_deref(), &source.container)
+            && codec_profile_matches(direct_profile.video_codec.as_deref(), source, "Video")
+            && codec_profile_matches(direct_profile.audio_codec.as_deref(), source, "Audio")
+    })
+}
+
+fn device_profile_supports_transcoding(
+    profile: &crate::models::DeviceProfile,
+    source: &crate::models::MediaSourceDto,
+) -> bool {
+    profile.transcoding_profiles.iter().any(|transcoding_profile| {
+        transcoding_profile
+            .r#type
+            .as_deref()
+            .is_none_or(|value| value.eq_ignore_ascii_case("Video"))
+            && transcoding_profile
+                .container
+                .as_deref()
+                .is_none_or(|value| !value.trim().is_empty())
+            && match (source.bitrate.map(i64::from), profile.max_streaming_bitrate) {
+                (Some(source_bitrate), Some(max_bitrate)) => source_bitrate <= max_bitrate,
+                _ => true,
+            }
+    })
+}
+
+fn codec_profile_matches(
+    codec_csv: Option<&str>,
+    source: &crate::models::MediaSourceDto,
+    stream_type: &str,
+) -> bool {
+    let Some(codec_csv) = codec_csv else {
+        return true;
+    };
+    let allowed = parse_list(Some(codec_csv))
+        .into_iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if allowed.is_empty() {
+        return true;
+    }
+
+    source
+        .media_streams
+        .iter()
+        .filter(|stream| stream.stream_type.eq_ignore_ascii_case(stream_type))
+        .filter_map(|stream| stream.codec.as_deref())
+        .all(|codec| allowed.iter().any(|allowed_codec| allowed_codec.eq_ignore_ascii_case(codec)))
+}
+
+fn csv_option_contains(csv: Option<&str>, value: &str) -> bool {
+    csv.is_none_or(|csv| {
+        parse_list(Some(csv))
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(value))
+    })
 }
 
 fn should_force_transcoding(

@@ -1174,6 +1174,10 @@ pub struct ItemsQuery {
     pub exclude_item_types: Option<String>,
     #[serde(default, alias = "MediaTypes", alias = "mediaTypes")]
     pub media_types: Option<String>,
+    #[serde(default, alias = "VideoTypes", alias = "videoTypes")]
+    pub video_types: Option<String>,
+    #[serde(default, alias = "ImageTypes", alias = "imageTypes")]
+    pub image_types: Option<String>,
     #[serde(default, alias = "Genres", alias = "genres", alias = "GenreIds", alias = "genreIds")]
     pub genres: Option<String>,
     #[serde(default, alias = "OfficialRatings", alias = "officialRatings")]
@@ -1208,6 +1212,12 @@ pub struct ItemsQuery {
     pub recursive: Option<bool>,
     #[serde(default, alias = "SearchTerm", alias = "searchTerm")]
     pub search_term: Option<String>,
+    #[serde(default, alias = "NameStartsWith", alias = "nameStartsWith")]
+    pub name_starts_with: Option<String>,
+    #[serde(default, alias = "NameStartsWithOrGreater", alias = "nameStartsWithOrGreater")]
+    pub name_starts_with_or_greater: Option<String>,
+    #[serde(default, alias = "NameLessThan", alias = "nameLessThan")]
+    pub name_less_than: Option<String>,
     #[serde(default, alias = "SortBy", alias = "sortBy")]
     pub sort_by: Option<String>,
     #[serde(default, alias = "SortOrder", alias = "sortOrder")]
@@ -1232,8 +1242,26 @@ pub struct ItemsQuery {
     pub is_series: Option<bool>,
     #[serde(default, alias = "IsFolder", alias = "isFolder")]
     pub is_folder: Option<bool>,
+    #[serde(default, alias = "IsHD", alias = "isHD", alias = "isHd")]
+    pub is_hd: Option<bool>,
+    #[serde(default, alias = "Is3D", alias = "is3D", alias = "is3d")]
+    pub is_3d: Option<bool>,
+    #[serde(default, alias = "IsLocked", alias = "isLocked")]
+    pub is_locked: Option<bool>,
+    #[serde(default, alias = "IsPlaceHolder", alias = "isPlaceHolder")]
+    pub is_place_holder: Option<bool>,
     #[serde(default, alias = "HasOverview", alias = "hasOverview")]
     pub has_overview: Option<bool>,
+    #[serde(default, alias = "HasSubtitles", alias = "hasSubtitles")]
+    pub has_subtitles: Option<bool>,
+    #[serde(default, alias = "HasTrailer", alias = "hasTrailer")]
+    pub has_trailer: Option<bool>,
+    #[serde(default, alias = "HasThemeSong", alias = "hasThemeSong")]
+    pub has_theme_song: Option<bool>,
+    #[serde(default, alias = "HasThemeVideo", alias = "hasThemeVideo")]
+    pub has_theme_video: Option<bool>,
+    #[serde(default, alias = "HasSpecialFeature", alias = "hasSpecialFeature")]
+    pub has_special_feature: Option<bool>,
     #[serde(default, alias = "HasTmdbId", alias = "hasTmdbId")]
     pub has_tmdb_id: Option<bool>,
     #[serde(default, alias = "HasImdbId", alias = "hasImdbId")]
@@ -1248,6 +1276,14 @@ pub struct ItemsQuery {
     pub min_premiere_date: Option<DateTime<Utc>>,
     #[serde(default, alias = "MaxPremiereDate", alias = "maxPremiereDate")]
     pub max_premiere_date: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MinStartDate", alias = "minStartDate")]
+    pub min_start_date: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MaxStartDate", alias = "maxStartDate")]
+    pub max_start_date: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MinEndDate", alias = "minEndDate")]
+    pub min_end_date: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MaxEndDate", alias = "maxEndDate")]
+    pub max_end_date: Option<DateTime<Utc>>,
     #[serde(
         default,
         alias = "GroupItemsIntoCollections",
@@ -1735,6 +1771,14 @@ pub struct EpisodesQuery {
     pub sort_order: Option<String>,
     #[serde(default, alias = "MediaTypes", alias = "mediaTypes")]
     pub media_types: Option<String>,
+    #[serde(default, alias = "VideoTypes", alias = "videoTypes")]
+    pub video_types: Option<String>,
+    #[serde(default, alias = "ImageTypes", alias = "imageTypes")]
+    pub image_types: Option<String>,
+    #[serde(default, alias = "Genres", alias = "genres", alias = "GenreIds", alias = "genreIds")]
+    pub genres: Option<String>,
+    #[serde(default, alias = "OfficialRatings", alias = "officialRatings")]
+    pub official_ratings: Option<String>,
     #[serde(default, alias = "IsPlayed", alias = "isPlayed")]
     pub is_played: Option<bool>,
     #[serde(default, alias = "IsFavorite", alias = "isFavorite")]
@@ -1749,6 +1793,28 @@ pub struct EpisodesQuery {
     pub video_codecs: Option<String>,
     #[serde(default, alias = "SubtitleCodecs", alias = "subtitleCodecs")]
     pub subtitle_codecs: Option<String>,
+    #[serde(default, alias = "Containers", alias = "containers")]
+    pub containers: Option<String>,
+    #[serde(default, alias = "SearchTerm", alias = "searchTerm")]
+    pub search_term: Option<String>,
+    #[serde(default, alias = "IsHD", alias = "isHD", alias = "isHd")]
+    pub is_hd: Option<bool>,
+    #[serde(default, alias = "HasSubtitles", alias = "hasSubtitles")]
+    pub has_subtitles: Option<bool>,
+    #[serde(default, alias = "HasTrailer", alias = "hasTrailer")]
+    pub has_trailer: Option<bool>,
+    #[serde(default, alias = "MinPremiereDate", alias = "minPremiereDate")]
+    pub min_premiere_date: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MaxPremiereDate", alias = "maxPremiereDate")]
+    pub max_premiere_date: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MinStartDate", alias = "minStartDate")]
+    pub min_start_date: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MaxStartDate", alias = "maxStartDate")]
+    pub max_start_date: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MinEndDate", alias = "minEndDate")]
+    pub min_end_date: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MaxEndDate", alias = "maxEndDate")]
+    pub max_end_date: Option<DateTime<Utc>>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
 }
