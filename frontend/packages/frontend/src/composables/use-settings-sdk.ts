@@ -78,6 +78,22 @@ export type SettingsLibraryOptions = {
   DisabledLocalMetadataReaders?: string[];
   LocalMetadataReaderOrder?: string[];
   PathInfos?: SettingsMediaPathInfo[];
+} & Record<string, unknown>;
+
+export type SettingsLibraryOptionInfo = {
+  Name?: string;
+  SetupUrl?: string;
+  DefaultEnabled?: boolean;
+  Features?: string[];
+};
+
+export type SettingsLibraryOptionsResult = {
+  MetadataSavers?: SettingsLibraryOptionInfo[];
+  MetadataReaders?: SettingsLibraryOptionInfo[];
+  SubtitleFetchers?: SettingsLibraryOptionInfo[];
+  LyricsFetchers?: SettingsLibraryOptionInfo[];
+  TypeOptions?: unknown[];
+  DefaultLibraryOptions?: SettingsLibraryOptions;
 };
 
 export type SettingsVirtualFolderInfo = {
@@ -253,6 +269,8 @@ export function useSettingsSdk() {
 
       return Array.isArray(data) ? data : data.Items ?? [];
     },
+    getLibrariesAvailableoptions: async (): Promise<SettingsLibraryOptionsResult> =>
+      ((await sdkAxios().get<SettingsLibraryOptionsResult>('/Libraries/AvailableOptions')).data ?? {}),
     postLibraryRefresh: () =>
       sdkAxios().post('/Library/Refresh'),
     postLibraryVirtualfolders: (body: {

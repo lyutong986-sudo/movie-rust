@@ -260,7 +260,9 @@ import {
 } from 'vuetify/components';
 import { useTranslation } from 'i18next-vue';
 import type {
+  SettingsLibraryOptionInfo,
   SettingsLibraryOptions,
+  SettingsLibraryOptionsResult,
   SettingsMediaPathInfo,
   SettingsSelectableMediaFolder,
   SettingsVirtualFolderInfo
@@ -269,7 +271,7 @@ import { useSettingsSdk } from '#/composables/use-settings-sdk.ts';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
 
 type MediaPathInfoDto = SettingsMediaPathInfo;
-type LibraryOptionsDto = Required<Pick<SettingsLibraryOptions,
+type EditableLibraryOptionsFields = Required<Pick<SettingsLibraryOptions,
   'Enabled'
   | 'EnableArchiveMediaFiles'
   | 'EnablePhotos'
@@ -290,6 +292,7 @@ type LibraryOptionsDto = Required<Pick<SettingsLibraryOptions,
   | 'LocalMetadataReaderOrder'
   | 'PathInfos'
 >> & Pick<SettingsLibraryOptions, 'PreferredMetadataLanguage' | 'MetadataCountryCode'>;
+type LibraryOptionsDto = SettingsLibraryOptions & EditableLibraryOptionsFields;
 
 interface VirtualFolderInfoDto extends Omit<SettingsVirtualFolderInfo, 'LibraryOptions'> {
   LibraryOptions: LibraryOptionsDto;
@@ -304,6 +307,7 @@ const { t } = useTranslation();
 const { librariesApi } = useSettingsSdk();
 const libraries = ref<VirtualFolderInfoDto[]>([]);
 const selectableFolders = ref<SelectableMediaFolderDto[]>([]);
+const availableLibraryOptions = ref<SettingsLibraryOptionsResult>({});
 const loading = ref(false);
 const errorMessage = ref('');
 const createDialog = ref(false);
@@ -353,6 +357,11 @@ const LibraryOptionsFields = defineComponent({
     const showMetadata = !['homevideos', 'photos'].includes(props.collectionType);
     const showChapters = ['tvshows', 'movies', 'homevideos', 'musicvideos', 'mixed', ''].includes(props.collectionType);
     const showTv = props.collectionType === 'tvshows';
+    const metadataSaverItems = computed(() => libraryOptionNames(availableLibraryOptions.value.MetadataSavers, props.modelValue.MetadataSavers));
+    const metadataReaderItems = computed(() => libraryOptionNames(availableLibraryOptions.value.MetadataReaders, [
+      ...props.modelValue.LocalMetadataReaderOrder,
+      ...props.modelValue.DisabledLocalMetadataReaders
+    ]));
 
     return () => h('div', { class: 'uno-mt-4' }, [
       h(VRow, {}, () => [
@@ -406,7 +415,7 @@ const LibraryOptionsFields = defineComponent({
           variant: 'outlined',
           multiple: true,
           chips: true,
-          items: ['Nfo'],
+          items: metadataSaverItems.value,
           'onUpdate:modelValue': (value: string[]) => update('MetadataSavers', value)
         })),
         h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
@@ -416,7 +425,7 @@ const LibraryOptionsFields = defineComponent({
           variant: 'outlined',
           multiple: true,
           chips: true,
-          items: ['Nfo'],
+          items: metadataReaderItems.value,
           'onUpdate:modelValue': (value: string[]) => update('LocalMetadataReaderOrder', value)
         })),
         h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
@@ -426,7 +435,7 @@ const LibraryOptionsFields = defineComponent({
           variant: 'outlined',
           multiple: true,
           chips: true,
-          items: ['Nfo'],
+          items: metadataReaderItems.value,
           'onUpdate:modelValue': (value: string[]) => update('DisabledLocalMetadataReaders', value)
         }))
       ])
@@ -434,7 +443,16 @@ const LibraryOptionsFields = defineComponent({
   }
 });
 
-function defaultLibraryOptions(): LibraryOptionsDto {
+function libraryOptionNames(options: SettingsLibraryOptionInfo[] | undefined, fallback: string[] = []): string[] {
+  const values = [
+    ...(options?.map(option => option.Name).filter((value): value is string => Boolean(value)) ?? []),
+    ...fallback
+  ];
+
+  return [...new Set(values.filter(Boolean))];
+}
+
+function defaultLibraryOptions(base?: Partial<SettingsLibraryOptions>): LibraryOptionsDto {
   return {
     Enabled: true,
     EnableArchiveMediaFiles: false,
@@ -456,12 +474,13 @@ function defaultLibraryOptions(): LibraryOptionsDto {
     MetadataSavers: ['Nfo'],
     DisabledLocalMetadataReaders: [],
     LocalMetadataReaderOrder: ['Nfo'],
-    PathInfos: []
+    PathInfos: [],
+    ...base
   };
 }
 
 function normalizeOptions(options: Partial<LibraryOptionsDto> | undefined, locations: string[]): LibraryOptionsDto {
-  const defaults = defaultLibraryOptions();
+  const defaults = defaultLibraryOptions(availableLibraryOptions.value.DefaultLibraryOptions);
   const pathInfos = options?.PathInfos?.length
     ? options.PathInfos
     : locations.map(path => ({ Path: path }));
@@ -511,17 +530,23 @@ async function loadLibraries(): Promise<void> {
   errorMessage.value = '';
 
   try {
-    const [virtualFolders, mediaFolders] = await Promise.all([
+    const [virtualFolders, mediaFolders, availableOptions] = await Promise.all([
       librariesApi.getLibraryVirtualfoldersQuery(),
-      librariesApi.getLibrarySelectablemediafolders()
+      librariesApi.getLibrarySelectablemediafolders(),
+      librariesApi.getLibrariesAvailableoptions()
     ]);
 
+    availableLibraryOptions.value = availableOptions;
+    if (!createForm.value.name && !createForm.value.pathsText) {
+      createForm.value.libraryOptions = defaultLibraryOptions(availableOptions.DefaultLibraryOptions);
+    }
     libraries.value = virtualFolders.map(normalizeLibrary);
     selectableFolders.value = mediaFolders;
   } catch (error) {
     console.error(error);
     libraries.value = [];
     selectableFolders.value = [];
+    availableLibraryOptions.value = {};
     errorMessage.value = t('failedToLoadLibraries');
   } finally {
     loading.value = false;
@@ -649,7 +674,7 @@ async function createLibrary(): Promise<void> {
       name: '',
       collectionType: 'movies',
       pathsText: '',
-      libraryOptions: defaultLibraryOptions()
+      libraryOptions: defaultLibraryOptions(availableLibraryOptions.value.DefaultLibraryOptions)
     };
     useSnackbar(t('libraryCreated'), 'success');
     await loadLibraries();

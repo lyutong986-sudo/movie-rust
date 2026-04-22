@@ -782,3 +782,11 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - 根因有两处：其一，`SyncedStore` 只在 `remote.auth.currentUser` 变化时触发远端同步，但监听不是 `immediate`，刷新首屏时常出现用户状态已经就绪、却没有立刻拉回 `clientSettings` 的情况；其二，`ClientSettingsStore` 之前把浏览器语言直接裁成基础语言（例如 `zh-CN -> zh`），在项目语言包只有 `zh-CN` 没有裸 `zh` 时会错误回退到英文。
 - 现已将 `frontend/packages/frontend/src/store/super/synced-store.ts` 的用户同步监听改为 `immediate: true`，确保刷新首屏就会主动拉回 `DisplayPreferences`；同时在 `frontend/packages/frontend/src/store/settings/client.ts` 中加入受支持语言解析逻辑，优先精确匹配 locale，其次匹配基础语言，最后再回退到同语种的区域变体（例如浏览器 `zh-CN`/`zh-TW` 均能正确命中现有中文语言包）。
 - 这样一来，无论是用户显式保存的 `CustomPrefs.locale`，还是“自动”模式下来自浏览器的区域语言，刷新页面后都能重新驱动 `i18next.changeLanguage(...)` 与 Vuetify locale，不再无故掉回英文。
+
+## 2026-04-22 媒体库设置参数保留与可选项补齐（五十三）
+- 通过 MCP 实测 `https://test.emby.yun:4443/#/settings/libraries` 后确认，这页已经会真实调用 `POST /Library/VirtualFolders/LibraryOptions` 保存媒体库参数，但原实现有两个兼容缺口：一是后端 `LibraryOptionsDto` 只覆盖少量字段，任何 EmbySDK 更完整的 `LibraryOptions` 字段一旦进出接口就会被反序列化丢弃；二是前端“元数据保存器/本地元数据读取顺序/禁用的本地元数据读取器”选项写死为 `Nfo`，没有遵循 EmbySDK 的 `/Libraries/AvailableOptions`。
+- 后端 `backend/src/models.rs` 现已为 `LibraryOptionsDto` 增加 `#[serde(flatten)] extra_fields`，把当前模型未显式声明但 EmbySDK/Emby 客户端会携带的 `LibraryOptions` 字段原样保留、原样回传，避免媒体库设置在保存时把未知字段越存越瘦。
+- 同时新增 `LibraryOptionsResultDto` / `LibraryOptionInfoDto`，并在 `backend/src/routes/admin.rs` 注册 `GET /Libraries/AvailableOptions`，返回与 EmbySDK 结构对齐的 `MetadataSavers`、`MetadataReaders`、`SubtitleFetchers`、`LyricsFetchers`、`TypeOptions`、`DefaultLibraryOptions`。当前项目先提供 `Nfo` 作为默认 metadata saver/reader，并把 `LibraryOptionsDto::default()` 作为默认参数基线，供前端按 SDK 方式读取。
+- 前端 `frontend/packages/frontend/src/composables/use-settings-sdk.ts` 新增 `getLibrariesAvailableoptions()` 与对应类型；`frontend/packages/frontend/src/pages/settings/libraries.vue` 现在会在加载媒体库时同时请求 `/Libraries/AvailableOptions`，并用返回的 `DefaultLibraryOptions` 作为表单默认值、用 `MetadataSavers/MetadataReaders` 动态填充三个组合框，不再把选项硬编码死在页面里。
+- `libraries.vue` 的本地 `LibraryOptionsDto` 也改成以 `SettingsLibraryOptions` 为底，再叠加当前页面实际编辑字段。这样页面在保存已存在媒体库时，会连同后端回传的额外 EmbySDK 字段一起原样提交，保证“当前没在 UI 上编辑”的参数不会被页面意外擦除。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`npm.cmd exec vite build -- --configLoader runner` 在 `frontend/packages/frontend` 下通过。当前尚未把这版部署到 `test.emby.yun:4443`，线上要看到新的可选项接口与字段保留行为还需要发布新构建。

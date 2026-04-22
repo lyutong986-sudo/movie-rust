@@ -1802,6 +1802,8 @@ pub struct LibraryOptionsDto {
     pub local_metadata_reader_order: Vec<String>,
     #[serde(default)]
     pub path_infos: Vec<MediaPathInfoDto>,
+    #[serde(flatten)]
+    pub extra_fields: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for LibraryOptionsDto {
@@ -1828,8 +1830,36 @@ impl Default for LibraryOptionsDto {
             disabled_local_metadata_readers: Vec::new(),
             local_metadata_reader_order: vec!["Nfo".to_string()],
             path_infos: Vec::new(),
+            extra_fields: std::collections::BTreeMap::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibraryOptionInfoDto {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<String>,
+    pub default_enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct LibraryOptionsResultDto {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_savers: Vec<LibraryOptionInfoDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_readers: Vec<LibraryOptionInfoDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtitle_fetchers: Vec<LibraryOptionInfoDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lyrics_fetchers: Vec<LibraryOptionInfoDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_options: Vec<serde_json::Value>,
+    pub default_library_options: LibraryOptionsDto,
 }
 
 #[derive(Debug, Serialize)]

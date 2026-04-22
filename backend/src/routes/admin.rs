@@ -3,7 +3,7 @@ use crate::{
     error::AppError,
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, LibraryMediaFolderDto,
-        LibrarySubFolderDto, MediaPathDto, ScanSummary, UpdateLibraryOptionsDto,
+        LibraryOptionInfoDto, LibraryOptionsResultDto, LibrarySubFolderDto, MediaPathDto, ScanSummary, UpdateLibraryOptionsDto,
         RemoveMediaPathDto, RemoveVirtualFolderDto, UpdateMediaPathRequestDto, VirtualFolderInfoDto,
         VirtualFolderQuery,
     },
@@ -47,6 +47,7 @@ pub fn router() -> Router<AppState> {
             post(update_library_options),
         )
         .route("/Library/Refresh", post(refresh_libraries))
+        .route("/Libraries/AvailableOptions", get(library_available_options))
         .route("/Library/PhysicalPaths", get(physical_paths))
         .route("/Library/SelectableMediaFolders", get(selectable_media_folders))
         .route("/api/admin/scan", post(scan_libraries))
@@ -332,6 +333,29 @@ async fn refresh_libraries(
     let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref()).await?;
     broadcast_library_refresh_finished(&state, library_ids);
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn library_available_options(
+    session: AuthSession,
+    State(_state): State<AppState>,
+) -> Result<Json<LibraryOptionsResultDto>, AppError> {
+    auth::require_admin(&session)?;
+
+    let nfo_enabled = LibraryOptionInfoDto {
+        name: "Nfo".to_string(),
+        setup_url: None,
+        default_enabled: true,
+        features: Vec::new(),
+    };
+
+    Ok(Json(LibraryOptionsResultDto {
+        metadata_savers: vec![nfo_enabled.clone()],
+        metadata_readers: vec![nfo_enabled],
+        subtitle_fetchers: Vec::new(),
+        lyrics_fetchers: Vec::new(),
+        type_options: Vec::new(),
+        default_library_options: crate::models::LibraryOptionsDto::default(),
+    }))
 }
 
 fn broadcast_library_refresh_started(state: &AppState, library_ids: &[String]) {
