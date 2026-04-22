@@ -812,16 +812,18 @@ fn read_nfo_file(path: &Path) -> Option<NfoMetadata> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut metadata = NfoMetadata {
         title: first_tag(&xml, &["title", "localtitle", "name"]),
-        original_title: first_tag(&xml, &["originaltitle"]),
-        overview: first_tag(&xml, &["plot", "outline", "review", "biography"]),
-        production_year: first_tag(&xml, &["year"]).and_then(|value| value.parse().ok()),
+        original_title: first_tag(&xml, &["originaltitle", "original_title"]),
+        overview: first_tag(&xml, &["plot", "outline", "review", "biography", "overview"]),
+        production_year: first_tag(&xml, &["year", "productionyear", "production_year"])
+            .and_then(|value| parse_i32(&value)),
         official_rating: first_tag(&xml, &["mpaa", "certification", "officialrating"]),
         community_rating: first_tag(&xml, &["rating", "communityrating", "userrating"])
             .and_then(|value| parse_decimal(&value)),
         critic_rating: first_tag(&xml, &["criticrating", "critic_rating"])
             .and_then(|value| parse_decimal(&value)),
-        runtime_ticks: first_tag(&xml, &["runtime"]).and_then(|value| parse_runtime_ticks(&value)),
-        premiere_date: first_tag(&xml, &["premiered", "aired", "releasedate"])
+        runtime_ticks: first_tag(&xml, &["runtime", "duration"])
+            .and_then(|value| parse_runtime_ticks(&value)),
+        premiere_date: first_tag(&xml, &["premiered", "aired", "releasedate", "date"])
             .and_then(|value| parse_date(&value)),
         status: parse_series_status(&xml),
         end_date: first_tag(&xml, &["enddate", "end_date", "ended", "lastaired", "last_air_date"])
@@ -829,11 +831,22 @@ fn read_nfo_file(path: &Path) -> Option<NfoMetadata> {
         air_days: parse_air_days(&xml),
         air_time: first_tag(&xml, &["airtime", "airs_time", "air_time"])
             .filter(|value| !value.trim().is_empty()),
-        series_name: first_tag(&xml, &["showtitle"]),
-        season_number: first_tag(&xml, &["season"]).and_then(|value| value.parse().ok()),
-        episode_number: first_tag(&xml, &["episode"]).and_then(|value| value.parse().ok()),
-        episode_number_end: first_tag(&xml, &["episodenumberend"])
-            .and_then(|value| value.parse().ok()),
+        series_name: first_tag(&xml, &["showtitle", "tvshowtitle", "seriesname", "series"]),
+        season_number: first_tag(
+            &xml,
+            &["season", "seasonnumber", "parentindexnumber", "parent_index_number"],
+        )
+        .and_then(|value| parse_i32(&value)),
+        episode_number: first_tag(
+            &xml,
+            &["episode", "episodenumber", "indexnumber", "displayepisode"],
+        )
+        .and_then(|value| parse_i32(&value)),
+        episode_number_end: first_tag(
+            &xml,
+            &["episodenumberend", "episodeend", "indexnumberend", "displayepisodeend"],
+        )
+        .and_then(|value| parse_i32(&value)),
         provider_ids: provider_ids_from_nfo(&xml),
         genres: repeated_tags(&xml, "genre")
             .into_iter()
@@ -1320,15 +1333,30 @@ fn parse_decimal(value: &str) -> Option<f64> {
 }
 
 fn parse_date(value: &str) -> Option<NaiveDate> {
+    let value = value.trim();
+    let date_part = value
+        .split(['T', ' '])
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or(value);
+
     ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"]
         .into_iter()
-        .find_map(|format| NaiveDate::parse_from_str(value.trim(), format).ok())
+        .find_map(|format| NaiveDate::parse_from_str(date_part, format).ok())
 }
 
 fn parse_runtime_ticks(value: &str) -> Option<i64> {
     let minutes_text = value.split_whitespace().next().unwrap_or(value).trim();
     let minutes = minutes_text.parse::<i64>().ok()?;
     Some(minutes * 60 * TICKS_PER_SECOND)
+}
+
+fn parse_i32(value: &str) -> Option<i32> {
+    value
+        .trim()
+        .split(['.', ',', ' '])
+        .next()
+        .and_then(|value| value.parse().ok())
 }
 
 fn series_name_for_file(file: &Path, parsed_series_name: Option<&str>) -> String {
@@ -1554,5 +1582,36 @@ mod tests {
         );
 
         assert_eq!(path, PathBuf::from("C:/media/TV/Show/Specials"));
+    }
+
+    #[test]
+    fn nfo_parser_accepts_emby_tv_number_aliases() {
+        let path = std::env::temp_dir().join(format!(
+            "movie-rust-nfo-{}.nfo",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+            <episodedetails>
+              <title>Episode Title</title>
+              <showtitle>Example Show</showtitle>
+              <seasonnumber>2</seasonnumber>
+              <indexnumber>3</indexnumber>
+              <indexnumberend>4</indexnumberend>
+              <aired>2026-04-21T00:00:00.0000000Z</aired>
+            </episodedetails>
+            "#,
+        )
+        .unwrap();
+
+        let metadata = read_nfo_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(metadata.series_name.as_deref(), Some("Example Show"));
+        assert_eq!(metadata.season_number, Some(2));
+        assert_eq!(metadata.episode_number, Some(3));
+        assert_eq!(metadata.episode_number_end, Some(4));
+        assert_eq!(metadata.premiere_date, NaiveDate::from_ymd_opt(2026, 4, 21));
     }
 }
