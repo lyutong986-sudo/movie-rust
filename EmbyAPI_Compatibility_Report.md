@@ -523,3 +523,28 @@ pnpm --filter @jellyfin-vue/frontend check:types
   - logs-and-activity：前端页面按 SDK 的 LogLevel.Information/Warning/Error/... 与活动类型 SessionStarted / SessionEnded / VideoPlayback / VideoPlaybackStopped / UserPasswordChanged 做显示分支。后端原先活动日志使用了不匹配的 Severity = Info 与较原始的播放事件类型；本轮已修正为前端当前识别的枚举值与类型映射，避免颜色、图标和文案分支失效。
 - 审计说明：当前工作区内未直接检索到本地 SDK 生成类型定义文件本体，因此“完全一致性”判断以当前前端实际 import 的类型用法和运行调用形状为准，并已优先修复真实会影响页面行为的字段名、枚举值与 method 兼容问题。
 - 本轮后端验证：cargo check --manifest-path backend\\Cargo.toml 已通过。
+
+## 2026-04-22 前端适配补充（二十四）
+
+- 对 System/Configuration 与前端 [server.vue] 设置页双向绑定字段做了更细的默认值/可写性核对，并修正后端保存策略：
+  - 当前前端实际双绑字段为 ServerName、UICulture、QuickConnectAvailable、CachePath、MetadataPath、LibraryScanFanoutConcurrency、ParallelImageEncodingLimit。
+  - 后端 update_server_configuration_value(...) 现不再把前端传入 JSON 原样入库，而是按这些字段做规范化和默认值回填后再持久化，避免空字符串、错误类型或缺字段导致下一次读取时配置形状漂移。
+  - 启动向导与服务器设置共用的 ServerName/UICulture/PreferredMetadataLanguage/MetadataCountryCode/EnableRemoteAccess/EnableUPnP 也会同步回写到对应的启动配置与远程访问配置，保证读写语义一致。
+- 顺着 websocket 和 ctivity/session 链路补了 EmbySDK 订阅协议兼容：
+  - 前端连接建立后会发送 ScheduledTasksInfoStart、ActivityLogEntryStart、SessionsStart。后端此前仅把任意文本消息包装成 KeepAlive 回写，协议层不完整。
+  - 现在 websocket 已支持识别这些订阅消息并返回对应应答：ScheduledTasksInfo（当前为空数组占位）、ActivityLogEntry（活动日志列表）、Sessions（当前会话列表）。这使得协议层更接近 EmbySDK，避免“连接建立成功但订阅消息没有任何语义响应”的兼容缺口。
+  - 说明：当前项目内前端真正直接消费 websocket 推送的仍主要是 RefreshProgress / LibraryChanged / UserDataChanged，ScheduledTasksInfo / ActivityLogEntry / Sessions 目前更多是为 EmbySDK 握手与未来兼容预留；这次补的是协议完整性与后续客户端兼容性。
+- 进一步修正了活动日志与会话相关返回语义：活动日志 Severity 已对齐为前端识别的 Information，播放事件已映射到前端当前识别的 SessionStarted / VideoPlayback / VideoPlaybackStopped 类型；API key 列表中的 UserId 也统一输出为 Emby GUID。
+- 本轮后端验证：cargo check --manifest-path backend\\Cargo.toml 已通过。
+
+## 2026-04-22 前端适配补充（二十五）
+
+- 继续核对 websocket 的 RefreshProgress / LibraryChanged 推送时机，并补齐主动广播能力：
+  - 后端 AppState 新增 websocket 广播通道，websocket 连接除处理客户端消息外，也会订阅后端主动广播事件，不再局限于“收到什么就即时回复什么”。
+  - POST /Library/Refresh 与后台扫描入口现在会在扫描开始时为每个媒体库广播 RefreshProgress { ItemId, Progress: 0 }，扫描完成后广播 RefreshProgress { Progress: 100 }，并额外广播 LibraryChanged { ItemsUpdated: [...] }。
+  - POST /Items/{id}/Refresh 也会在单项元数据刷新前后广播对应的 RefreshProgress，并在完成后发出 LibraryChanged，这样前端卡片和任务状态都能通过 websocket 同步更新。
+- 继续审计 Sessions 相关 REST 与 websocket 数据字段：
+  - SessionInfoDto.user_id 原先仍输出原始 UUID，现已统一修正为 Emby GUID，保证 Sessions 链路的用户 ID 语义与项目其余接口一致。
+  - 当前 SessionInfoDto 已覆盖前端与 EmbySDK 常见会话字段：Id、UserId、UserName、Client、DeviceId、DeviceName、ApplicationVersion、IsActive、LastActivityDate、RemoteEndPoint、SupportsRemoteControl、PlayableMediaTypes、SupportedCommands、NowPlayingItem、PlayState、NowViewingItem。
+  - 审计当前前端工作区后，未发现更多已被直接消费但缺失的 SessionInfoDto 字段；并且 websocket SessionsStart 与 REST /Sessions 现都基于同一套会话 DTO 组装逻辑，避免两条链路字段漂移。
+- 本轮后端验证：cargo check --manifest-path backend\\Cargo.toml 已通过。

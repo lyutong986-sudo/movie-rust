@@ -250,10 +250,10 @@ pub async fn update_server_configuration_value(
     update_startup_configuration(
         pool,
         &StartupConfiguration {
-            server_name,
-            ui_culture,
-            metadata_country_code,
-            preferred_metadata_language,
+            server_name: server_name.clone(),
+            ui_culture: ui_culture.clone(),
+            metadata_country_code: metadata_country_code.clone(),
+            preferred_metadata_language: preferred_metadata_language.clone(),
         },
     )
     .await?;
@@ -276,7 +276,90 @@ pub async fn update_server_configuration_value(
     )
     .await?;
 
-    set_system_setting(pool, "server_configuration", value).await
+    let default_cache_path = config.transcode_dir.to_string_lossy().to_string();
+    let current = server_configuration_value(pool, config).await?;
+    let current_object = current
+        .as_object()
+        .ok_or_else(|| AppError::Internal("current server configuration is not an object".to_string()))?;
+    let mut normalized = serde_json::Map::new();
+
+    normalized.insert("ServerName".to_string(), json!(server_name));
+    normalized.insert("UICulture".to_string(), json!(ui_culture));
+    normalized.insert("MetadataCountryCode".to_string(), json!(metadata_country_code));
+    normalized.insert(
+        "PreferredMetadataLanguage".to_string(),
+        json!(preferred_metadata_language),
+    );
+    normalized.insert(
+        "EnableRemoteAccess".to_string(),
+        json!(object
+            .get("EnableRemoteAccess")
+            .and_then(Value::as_bool)
+            .unwrap_or(current_remote.enable_remote_access)),
+    );
+    normalized.insert(
+        "EnableUPnP".to_string(),
+        json!(object
+            .get("EnableUPnP")
+            .and_then(Value::as_bool)
+            .unwrap_or(current_remote.enable_automatic_port_mapping.unwrap_or(false))),
+    );
+    normalized.insert(
+        "QuickConnectAvailable".to_string(),
+        json!(object
+            .get("QuickConnectAvailable")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| current_object
+                .get("QuickConnectAvailable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false))),
+    );
+    normalized.insert(
+        "CachePath".to_string(),
+        json!(object
+            .get("CachePath")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| current_object
+                .get("CachePath")
+                .and_then(Value::as_str)
+                .unwrap_or(default_cache_path.as_str()))),
+    );
+    normalized.insert(
+        "MetadataPath".to_string(),
+        json!(object
+            .get("MetadataPath")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| current_object
+                .get("MetadataPath")
+                .and_then(Value::as_str)
+                .unwrap_or("metadata"))),
+    );
+    normalized.insert(
+        "LibraryScanFanoutConcurrency".to_string(),
+        json!(object
+            .get("LibraryScanFanoutConcurrency")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| current_object
+                .get("LibraryScanFanoutConcurrency")
+                .and_then(Value::as_i64)
+                .unwrap_or(0))),
+    );
+    normalized.insert(
+        "ParallelImageEncodingLimit".to_string(),
+        json!(object
+            .get("ParallelImageEncodingLimit")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| current_object
+                .get("ParallelImageEncodingLimit")
+                .and_then(Value::as_i64)
+                .unwrap_or(0))),
+    );
+
+    set_system_setting(pool, "server_configuration", Value::Object(normalized)).await
 }
 
 pub async fn get_session_capabilities(
@@ -4817,7 +4900,7 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
 pub fn session_to_dto(session: &AuthSessionRow) -> SessionInfoDto {
     SessionInfoDto {
         id: session.access_token.clone(),
-        user_id: session.user_id.to_string(),
+        user_id: uuid_to_emby_guid(&session.user_id),
         user_name: session.user_name.clone(),
         client: session
             .client

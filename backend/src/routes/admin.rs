@@ -2,7 +2,7 @@ use crate::{
     auth::{self, AuthSession},
     error::AppError,
     models::{
-        AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, LibraryMediaFolderDto,
+        uuid_to_emby_guid, AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, LibraryMediaFolderDto,
         LibrarySubFolderDto, MediaPathDto, ScanSummary, UpdateLibraryOptionsDto,
         UpdateMediaPathRequestDto, VirtualFolderInfoDto,
         VirtualFolderQuery,
@@ -247,9 +247,15 @@ async fn scan_libraries(
     State(state): State<AppState>,
 ) -> Result<Json<ScanSummary>, AppError> {
     auth::require_admin(&session)?;
-    Ok(Json(
-        scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref()).await?,
-    ))
+    let libraries = repository::list_libraries(&state.pool).await?;
+    let library_ids = libraries
+        .iter()
+        .map(|library| uuid_to_emby_guid(&library.id))
+        .collect::<Vec<_>>();
+    broadcast_library_refresh_started(&state, &library_ids);
+    let result = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref()).await?;
+    broadcast_library_refresh_finished(&state, library_ids);
+    Ok(Json(result))
 }
 
 async fn refresh_libraries(
@@ -257,8 +263,48 @@ async fn refresh_libraries(
     State(state): State<AppState>,
 ) -> Result<StatusCode, AppError> {
     auth::require_admin(&session)?;
+    let libraries = repository::list_libraries(&state.pool).await?;
+    let library_ids = libraries
+        .iter()
+        .map(|library| uuid_to_emby_guid(&library.id))
+        .collect::<Vec<_>>();
+    broadcast_library_refresh_started(&state, &library_ids);
     let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref()).await?;
+    broadcast_library_refresh_finished(&state, library_ids);
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn broadcast_library_refresh_started(state: &AppState, library_ids: &[String]) {
+    for library_id in library_ids {
+        crate::routes::websocket::broadcast_message(
+            state,
+            "RefreshProgress",
+            serde_json::json!({
+                "ItemId": library_id,
+                "Progress": 0
+            }),
+        );
+    }
+}
+
+fn broadcast_library_refresh_finished(state: &AppState, library_ids: Vec<String>) {
+    for library_id in &library_ids {
+        crate::routes::websocket::broadcast_message(
+            state,
+            "RefreshProgress",
+            serde_json::json!({
+                "ItemId": library_id,
+                "Progress": 100
+            }),
+        );
+    }
+    crate::routes::websocket::broadcast_message(
+        state,
+        "LibraryChanged",
+        serde_json::json!({
+            "ItemsUpdated": library_ids
+        }),
+    );
 }
 
 async fn physical_paths(

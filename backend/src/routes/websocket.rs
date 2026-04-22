@@ -1,8 +1,9 @@
 use axum::{
-    extract::{ws::WebSocket, Query, State, WebSocketUpgrade},
+    extract::{ws::{Message, WebSocket}, Query, State, WebSocketUpgrade},
     response::Response,
 };
 use serde::Deserialize;
+use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -74,6 +75,8 @@ pub async fn emby_websocket_handler(
 async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: AppState) {
     let session_id = session.id;
     let sessions = state.websocket_sessions.clone();
+    let mut event_receiver = state.websocket_events.subscribe();
+    let mut command_interval = tokio::time::interval(Duration::from_secs(1));
     sessions.write().await.insert(session_id, session.clone());
 
     tracing::info!(
@@ -86,81 +89,94 @@ async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: 
     let mut close_reason = None;
 
     loop {
-        match tokio::time::timeout(Duration::from_secs(1), socket.recv()).await {
-            Ok(Some(Ok(message))) => match message {
-                axum::extract::ws::Message::Text(text) => {
+        tokio::select! {
+            received = socket.recv() => match received {
+                Some(Ok(message)) => match message {
+                Message::Text(text) => {
                     tracing::debug!(session_id = %session_id, message = %text, "received WebSocket message");
-                    let payload = serde_json::json!({
-                        "MessageType": "KeepAlive",
-                        "Data": text.to_string()
-                    });
-                    if socket
-                        .send(axum::extract::ws::Message::Text(payload.to_string().into()))
-                        .await
-                        .is_err()
-                    {
-                        close_reason = Some("send failed".to_string());
-                        break;
+                    match handle_client_message(&mut socket, &state, &session, &text).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let payload = json!({
+                                "MessageType": "KeepAlive",
+                                "Data": text.to_string()
+                            });
+                            if socket.send(Message::Text(payload.to_string().into())).await.is_err() {
+                                close_reason = Some("send failed".to_string());
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(session_id = %session_id, error = %error, "failed to handle WebSocket message");
+                        }
                     }
                 }
-                axum::extract::ws::Message::Ping(bytes) => {
-                    if socket
-                        .send(axum::extract::ws::Message::Pong(bytes))
-                        .await
-                        .is_err()
-                    {
+                Message::Ping(bytes) => {
+                    if socket.send(Message::Pong(bytes)).await.is_err() {
                         close_reason = Some("pong failed".to_string());
                         break;
                     }
                 }
-                axum::extract::ws::Message::Close(frame) => {
+                Message::Close(frame) => {
                     close_reason = frame.map(|frame| frame.reason.to_string());
                     break;
                 }
                 _ => {}
-            },
-            Ok(Some(Err(error))) => {
+                },
+                Some(Err(error)) => {
                 tracing::error!(session_id = %session_id, error = %error, "WebSocket receive failed");
                 close_reason = Some(error.to_string());
                 break;
-            }
-            Ok(None) => break,
-            Err(_) => {}
-        }
-
-        if let (Some(access_token), Some(user_id)) = (&session.access_token, session.user_id) {
-            match crate::repository::list_session_commands(
-                &state.pool,
-                access_token,
-                user_id,
-                false,
-                0,
-                50,
-                true,
-            )
-            .await
-            {
-                Ok(result) => {
-                    for command in result.items {
-                        let payload = serde_json::json!({
-                            "MessageType": "Command",
-                            "Data": command
-                        });
-                        if socket
-                            .send(axum::extract::ws::Message::Text(payload.to_string().into()))
-                            .await
-                            .is_err()
-                        {
-                            close_reason = Some("command push failed".to_string());
-                            break;
-                        }
-                    }
-                    if close_reason.is_some() {
+                }
+                None => break,
+            },
+            broadcast = event_receiver.recv() => match broadcast {
+                Ok(payload) => {
+                    if socket.send(Message::Text(payload.into())).await.is_err() {
+                        close_reason = Some("broadcast push failed".to_string());
                         break;
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(session_id = %session_id, error = %error, "failed to push session commands");
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    close_reason = Some("broadcast channel closed".to_string());
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(session_id = %session_id, skipped, "websocket event receiver lagged");
+                }
+            },
+            _ = command_interval.tick() => {
+                if let (Some(access_token), Some(user_id)) = (&session.access_token, session.user_id) {
+                    match crate::repository::list_session_commands(
+                        &state.pool,
+                        access_token,
+                        user_id,
+                        false,
+                        0,
+                        50,
+                        true,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            for command in result.items {
+                                let payload = serde_json::json!({
+                                    "MessageType": "Command",
+                                    "Data": command
+                                });
+                                if socket.send(Message::Text(payload.to_string().into())).await.is_err() {
+                                    close_reason = Some("command push failed".to_string());
+                                    break;
+                                }
+                            }
+                            if close_reason.is_some() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(session_id = %session_id, error = %error, "failed to push session commands");
+                        }
+                    }
                 }
             }
         }
@@ -168,4 +184,162 @@ async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: 
 
     sessions.write().await.remove(&session_id);
     tracing::info!(session_id = %session_id, reason = ?close_reason, "WebSocket connection closed");
+}
+
+async fn handle_client_message(
+    socket: &mut WebSocket,
+    state: &AppState,
+    _session: &WebSocketSession,
+    text: &str,
+) -> Result<bool, AppError> {
+    let payload = match serde_json::from_str::<Value>(text) {
+        Ok(payload) => payload,
+        Err(_) => return Ok(false),
+    };
+
+    let message_type = payload
+        .get("MessageType")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let Some(message_type) = message_type else {
+        return Ok(false);
+    };
+
+    match message_type {
+        "KeepAlive" => {
+            send_socket_message(socket, "KeepAlive", json!({})).await?;
+            Ok(true)
+        }
+        "SessionsStart" => {
+            let sessions = crate::repository::list_sessions(&state.pool).await?;
+            let mut items = Vec::with_capacity(sessions.len());
+            for listed in sessions {
+                let mut dto = crate::repository::session_to_dto(&listed);
+                if let Some(runtime) = crate::repository::session_runtime_state(
+                    &state.pool,
+                    &listed.access_token,
+                    listed.user_id,
+                    state.config.server_id,
+                )
+                .await?
+                {
+                    dto.now_playing_item = Some(runtime.now_playing_item);
+                    dto.play_state = Some(runtime.play_state);
+                }
+                if let Some(summary) =
+                    crate::repository::get_session_state_summary(&state.pool, &listed.access_token).await?
+                {
+                    merge_play_state_summary(&mut dto, summary);
+                }
+                if let Some(capabilities) =
+                    crate::repository::get_session_capabilities(&state.pool, &listed.access_token).await?
+                {
+                    apply_capabilities(&mut dto, &capabilities);
+                }
+                items.push(dto);
+            }
+            send_socket_message(socket, "Sessions", json!(items)).await?;
+            Ok(true)
+        }
+        "ActivityLogEntryStart" => {
+            let items = crate::repository::list_activity_logs(&state.pool, 50).await?;
+            send_socket_message(socket, "ActivityLogEntry", json!(items)).await?;
+            Ok(true)
+        }
+        "ScheduledTasksInfoStart" => {
+            send_socket_message(socket, "ScheduledTasksInfo", json!([])).await?;
+            Ok(true)
+        }
+        "ForceKeepAlive" => {
+            send_socket_message(socket, "KeepAlive", json!({})).await?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+async fn send_socket_message(
+    socket: &mut WebSocket,
+    message_type: &str,
+    data: Value,
+) -> Result<(), AppError> {
+    let payload = json!({
+        "MessageType": message_type,
+        "Data": data
+    });
+    socket
+        .send(Message::Text(payload.to_string().into()))
+        .await
+        .map_err(|error| AppError::Internal(format!("发送 WebSocket 消息失败: {error}")))?;
+    Ok(())
+}
+
+pub fn broadcast_message(state: &AppState, message_type: &str, data: Value) {
+    let payload = json!({
+        "MessageType": message_type,
+        "Data": data
+    })
+    .to_string();
+    let _ = state.websocket_events.send(payload);
+}
+
+fn merge_play_state_summary(dto: &mut crate::models::SessionInfoDto, summary: Value) {
+    match dto.play_state.as_mut() {
+        Some(Value::Object(play_state)) => {
+            if let Some(summary_object) = summary.as_object() {
+                for (key, value) in summary_object {
+                    play_state.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        _ => {
+            dto.play_state = Some(summary);
+        }
+    }
+}
+
+fn apply_capabilities(dto: &mut crate::models::SessionInfoDto, capabilities: &Value) {
+    if let Some(supports_remote_control) = capabilities
+        .get("SupportsRemoteControl")
+        .and_then(Value::as_bool)
+    {
+        dto.supports_remote_control = supports_remote_control;
+    }
+
+    if let Some(remote_end_point) = capabilities
+        .get("RemoteEndPoint")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        dto.remote_end_point = Some(remote_end_point);
+    }
+
+    if let Some(playable_media_types) = value_string_vec(
+        capabilities
+            .get("PlayableMediaTypes")
+            .or_else(|| capabilities.get("SupportedMediaTypes")),
+    ) {
+        dto.playable_media_types = playable_media_types;
+    }
+
+    if let Some(supported_commands) = value_string_vec(
+        capabilities
+            .get("SupportedCommands")
+            .or_else(|| capabilities.get("SupportedRemoteCommands")),
+    ) {
+        dto.supported_commands = supported_commands;
+    }
+}
+
+fn value_string_vec(value: Option<&Value>) -> Option<Vec<String>> {
+    let values = value?
+        .as_array()?
+        .iter()
+        .filter_map(|entry| entry.as_str().map(str::trim))
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    Some(values)
 }

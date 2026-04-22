@@ -1903,6 +1903,14 @@ async fn refresh_item_metadata(
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
 ) -> Result<StatusCode, AppError> {
+    crate::routes::websocket::broadcast_message(
+        &state,
+        "RefreshProgress",
+        json!({
+            "ItemId": item_id_str,
+            "Progress": 0
+        }),
+    );
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     let item = repository::get_media_item(&state.pool, item_id)
@@ -1910,6 +1918,14 @@ async fn refresh_item_metadata(
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
     if !item.item_type.eq_ignore_ascii_case("Series") && !item.item_type.eq_ignore_ascii_case("Movie") {
+        crate::routes::websocket::broadcast_message(
+            &state,
+            "RefreshProgress",
+            json!({
+                "ItemId": item_id_str,
+                "Progress": 100
+            }),
+        );
         return Ok(StatusCode::NO_CONTENT);
     }
 
@@ -1918,6 +1934,14 @@ async fn refresh_item_metadata(
             item_id = %item.id,
             item_type = %item.item_type,
             "跳过远程元数据刷新：条目缺少 TMDb provider id"
+        );
+        crate::routes::websocket::broadcast_message(
+            &state,
+            "RefreshProgress",
+            json!({
+                "ItemId": item_id_str,
+                "Progress": 100
+            }),
         );
         return Ok(StatusCode::NO_CONTENT);
     };
@@ -1948,6 +1972,22 @@ async fn refresh_item_metadata(
     person_service
         .fetch_persons_for_item(item.id, "tmdb", &tmdb_id, media_type)
         .await?;
+
+    crate::routes::websocket::broadcast_message(
+        &state,
+        "RefreshProgress",
+        json!({
+            "ItemId": item_id_str,
+            "Progress": 100
+        }),
+    );
+    crate::routes::websocket::broadcast_message(
+        &state,
+        "LibraryChanged",
+        json!({
+            "ItemsUpdated": [item_id_str]
+        }),
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }

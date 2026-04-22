@@ -72,11 +72,13 @@ async fn main() -> Result<()> {
     let bind_addr = config.bind_addr()?;
     let config = Arc::new(config);
     let transcoder = Transcoder::new(config.clone());
+    let (websocket_events, _) = tokio::sync::broadcast::channel(256);
     let state = AppState {
         pool,
         config,
         metadata_manager: Some(Arc::new(metadata_manager)),
         websocket_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        websocket_events,
         transcoder,
     };
 
