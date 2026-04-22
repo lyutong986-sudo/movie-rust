@@ -202,7 +202,12 @@ watch(playbackManager.currentSourceUrl,
        * We stringify undefined instead of skipping this block when there's no new source url,
        * so the player doesn't restart playback of the previous item
        */
-      mediaElementRef.value.src = String(newUrl);
+      if (newUrl) {
+        mediaElementRef.value.src = newUrl;
+      } else {
+        mediaElementRef.value.removeAttribute('src');
+        mediaElementRef.value.load();
+      }
     } else if (
       hls
       && playbackManager.isVideo.value

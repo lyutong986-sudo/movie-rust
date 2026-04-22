@@ -989,3 +989,11 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - `backend/src/routes/images.rs` 补齐了媒体库 id 的图片服务能力：当 `/Items/{libraryId}/Images/Primary|Backdrop` 命中的是媒体库而非普通媒体条目时，会从库目录查找真实 folder/backdrop 图片并返回。这样目录级封面不再只是 DTO 字段，而是真正可被 Emby 图片接口读取。
 - `backend/src/routes/websocket.rs` 将 `Connection reset without closing handshake` 这类浏览器刷新、路由跳转、页面关闭导致的正常断开从 `ERROR` 降级为 `DEBUG`，保留真正异常的 WebSocket receive failure 仍按 `ERROR` 记录，避免日志告警被正常断开噪声淹没。
 - 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过；在 `frontend` 工作区执行 `corepack pnpm@10.33.0 --filter @jellyfin-vue/frontend build` 通过。后端仍有项目既有 warning；根目录直接执行 pnpm 会被模板项目同名 package 干扰，需在 `frontend` 工作区执行。
+## 2026-04-23 MCP 播放排查与媒体库/播放链路修复（七十七）
+
+- 本轮结合 `log/movie-rust-20260423040520.log` 与 Chrome DevTools MCP 复现 `https://test.emby.yun:4443/#/item/9E2246831E405F788606CB0F909DE22B` 的媒体库与播放链路，确认“媒体库打不开”和“播放失败”分别落在两个独立但都与 EmbySDK 契约偏差有关的问题上。
+- 媒体库打不开的根因是后端 `backend/src/repository.rs::list_media_items()` 在 `GET /Items?ids=...` 这类 EmbySDK 精确取项请求下，仍然无条件附加了 `parent_id IS NULL`。日志中可见 `ids=949AF6...` 时实际 SQL 变成了 `AND parent_id IS NULL AND id = ANY($1)`，导致媒体库这类非根节点视图对象被直接过滤，前端随后出现“条目缺失/库页空白”。现已改为：只在“无 parentId、无显式 itemIds、且非 recursive”时才追加根节点过滤。
+- 播放失败的根因是前端 URL 生成没有优先遵循 Emby `PlaybackInfo.MediaSources[*].DirectStreamUrl`。MCP 抓到页面先成功请求 `POST /Items/{Id}/PlaybackInfo`，随后却访问了 `GET /Videos/mediasource_.../stream.mkv?...`；这说明前端错误地把 `MediaSource.Id` 当成了 `/Videos/{Id}` 的条目 ID。EmbySDK 文档要求这里的路径 ID 仍应是条目 ID，`MediaSourceId` 只放在 query string。现已将 `frontend/packages/frontend/src/utils/sdk-url.ts` 改为优先使用后端返回的 `DirectStreamUrl`，仅在缺失时才回退到旧的本地拼接逻辑。
+- “很多没必要的网络日志”里确认有一类是前端自己制造的：播放器在播放地址为空时执行 `mediaElement.src = String(undefined)`，浏览器就会真实发出 `GET /undefined`。现已在 `frontend/packages/frontend/src/components/Playback/PlayerElement.vue` 改为无地址时移除 `src` 并 `load()`，停止生成这类伪请求。
+- MCP 复现时还能看到 `GET /Users/{userId}/Images/Primary?format=Webp -> 404`，这属于用户头像缺图回退，不是本轮播放/媒体库主故障；真正影响播放的是前端没有消费 `DirectStreamUrl`，真正影响媒体库打开的是 `ids` 精确查询被额外根节点过滤。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`corepack pnpm --filter @jellyfin-vue/frontend build` 通过。MCP 访问的远程站点仍是当前已部署版本，因此线上页面抓到的 `/Videos/mediasource_.../stream.mkv` 与 `/undefined` 现象属于“修复前复现结果”；需部署本轮构建后再对远程站点复验请求是否切换为 `DirectStreamUrl` 且不再产生 `/undefined`。

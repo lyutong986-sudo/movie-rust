@@ -5,6 +5,7 @@ type PlaybackMediaSource = {
   Id?: string | null;
   Type?: string | null;
   Container?: string | null;
+  DirectStreamUrl?: string | null;
   SupportsDirectStream?: boolean;
   SupportsTranscoding?: boolean;
   TranscodingUrl?: string | null;
@@ -57,6 +58,15 @@ export function getSdkPlaybackStreamUrl(
 ): string | undefined {
   const basePath = sdk.api?.basePath;
   const accessToken = auth.currentUserToken.value;
+
+  if (
+    basePath
+    && mediaType
+    && mediaSource?.SupportsDirectStream
+    && mediaSource.DirectStreamUrl
+  ) {
+    return appendPath(basePath, mediaSource.DirectStreamUrl);
+  }
 
   if (
     basePath

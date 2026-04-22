@@ -2715,6 +2715,8 @@ pub async fn list_media_items(
         }
     }
 
+    let has_explicit_item_ids = !options.item_ids.is_empty();
+
     if let Some(parent_id) = options.parent_id {
         if options.recursive {
             builder.push(
@@ -2739,11 +2741,11 @@ pub async fn list_media_items(
         } else {
             builder.push(" AND parent_id = ").push_bind(parent_id);
         }
-    } else if !options.recursive {
+    } else if !options.recursive && !has_explicit_item_ids {
         builder.push(" AND parent_id IS NULL");
     }
 
-    if !options.item_ids.is_empty() {
+    if has_explicit_item_ids {
         builder.push(" AND id = ANY(").push_bind(options.item_ids).push(")");
     }
 
