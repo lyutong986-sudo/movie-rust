@@ -2762,22 +2762,31 @@ pub async fn get_next_up_episodes(
 ) -> Result<QueryResult<BaseItemDto>, AppError> {
     let total_record_count: i64 = sqlx::query_scalar(
         r#"
-        SELECT COUNT(*)
-        FROM media_items mi
-        LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
-        WHERE mi.item_type = 'Episode'
-          AND COALESCE(uid.is_played, false) = false
-          AND (
-              $2::uuid IS NULL
-              OR mi.parent_id = $2
-              OR mi.library_id = $2
-              OR EXISTS (
-                  SELECT 1
-                  FROM media_items season
-                  WHERE season.id = mi.parent_id
-                    AND (season.parent_id = $2 OR season.library_id = $2)
+        WITH ranked AS (
+            SELECT
+                mi.id,
+                row_number() OVER (
+                    PARTITION BY COALESCE(season.parent_id, mi.parent_id, mi.id)
+                    ORDER BY
+                        mi.series_name NULLS LAST,
+                        mi.parent_index_number NULLS LAST,
+                        mi.index_number NULLS LAST,
+                        mi.sort_name
+                ) AS next_rank
+            FROM media_items mi
+            LEFT JOIN media_items season ON season.id = mi.parent_id AND season.item_type = 'Season'
+            LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
+            WHERE mi.item_type = 'Episode'
+              AND COALESCE(uid.is_played, false) = false
+              AND (
+                  $2::uuid IS NULL
+                  OR mi.parent_id = $2
+                  OR mi.library_id = $2
+                  OR season.parent_id = $2
+                  OR season.library_id = $2
               )
-          )
+        )
+        SELECT COUNT(*) FROM ranked WHERE next_rank = 1
         "#,
     )
     .bind(user_id)
@@ -2787,35 +2796,46 @@ pub async fn get_next_up_episodes(
 
     let rows = sqlx::query_as::<_, DbMediaItem>(
         r#"
-        SELECT
-            mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type,
-            mi.media_type, mi.path, mi.container, mi.overview, mi.production_year,
-            mi.official_rating, mi.community_rating, mi.runtime_ticks, mi.premiere_date,
-            mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
-            mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
-            mi.genres, mi.studios, mi.tags, mi.production_locations, mi.width, mi.height,
-            mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path,
-            mi.backdrop_path, mi.logo_path, mi.thumb_path, mi.remote_trailers,
-            mi.date_created, mi.date_modified
-        FROM media_items mi
-        LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
-        WHERE mi.item_type = 'Episode'
-          AND COALESCE(uid.is_played, false) = false
-          AND (
-              $2::uuid IS NULL
-              OR mi.parent_id = $2
-              OR mi.library_id = $2
-              OR EXISTS (
-                  SELECT 1
-                  FROM media_items season
-                  WHERE season.id = mi.parent_id
-                    AND (season.parent_id = $2 OR season.library_id = $2)
+        WITH ranked AS (
+            SELECT
+                mi.*,
+                row_number() OVER (
+                    PARTITION BY COALESCE(season.parent_id, mi.parent_id, mi.id)
+                    ORDER BY
+                        mi.series_name NULLS LAST,
+                        mi.parent_index_number NULLS LAST,
+                        mi.index_number NULLS LAST,
+                        mi.sort_name
+                ) AS next_rank
+            FROM media_items mi
+            LEFT JOIN media_items season ON season.id = mi.parent_id AND season.item_type = 'Season'
+            LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
+            WHERE mi.item_type = 'Episode'
+              AND COALESCE(uid.is_played, false) = false
+              AND (
+                  $2::uuid IS NULL
+                  OR mi.parent_id = $2
+                  OR mi.library_id = $2
+                  OR season.parent_id = $2
+                  OR season.library_id = $2
               )
-          )
-        ORDER BY mi.series_name NULLS LAST,
-                 mi.parent_index_number NULLS LAST,
-                 mi.index_number NULLS LAST,
-                 mi.sort_name
+        )
+        SELECT
+            id, parent_id, name, original_title, sort_name, item_type,
+            media_type, path, container, overview, production_year,
+            official_rating, community_rating, runtime_ticks, premiere_date,
+            status, end_date, air_days, air_time, series_name, season_name,
+            index_number, index_number_end, parent_index_number, provider_ids,
+            genres, studios, tags, production_locations, width, height,
+            bit_rate, video_codec, audio_codec, image_primary_path,
+            backdrop_path, logo_path, thumb_path, remote_trailers,
+            date_created, date_modified
+        FROM ranked
+        WHERE next_rank = 1
+        ORDER BY series_name NULLS LAST,
+                 parent_index_number NULLS LAST,
+                 index_number NULLS LAST,
+                 sort_name
         OFFSET $3 LIMIT $4
         "#,
     )
@@ -3675,16 +3695,32 @@ pub async fn update_user_item_data(
             )
         VALUES
             (
-                $1, $2, COALESCE($3, 0), COALESCE($4, 0), COALESCE($5, false),
-                COALESCE($6, false), $7, now()
+                $1,
+                $2,
+                CASE WHEN COALESCE($6, false) THEN 0 ELSE COALESCE($3, 0) END,
+                COALESCE($4, CASE WHEN COALESCE($6, false) THEN 1 ELSE 0 END),
+                COALESCE($5, false),
+                COALESCE($6, false),
+                CASE WHEN COALESCE($6, false) THEN COALESCE($7, now()) ELSE $7 END,
+                now()
             )
         ON CONFLICT (user_id, item_id)
         DO UPDATE SET
-            playback_position_ticks = COALESCE($3, user_item_data.playback_position_ticks),
-            play_count = COALESCE($4, user_item_data.play_count),
+            playback_position_ticks = CASE
+                WHEN $6 = true THEN 0
+                ELSE COALESCE($3, user_item_data.playback_position_ticks)
+            END,
+            play_count = COALESCE(
+                $4,
+                CASE WHEN $6 = true THEN GREATEST(user_item_data.play_count, 1) ELSE user_item_data.play_count END
+            ),
             is_favorite = COALESCE($5, user_item_data.is_favorite),
             is_played = COALESCE($6, user_item_data.is_played),
-            last_played_date = COALESCE($7, user_item_data.last_played_date),
+            last_played_date = CASE
+                WHEN $6 = true THEN COALESCE($7, now())
+                WHEN $6 = false THEN NULL
+                ELSE COALESCE($7, user_item_data.last_played_date)
+            END,
             updated_at = now()
         RETURNING playback_position_ticks, play_count, is_favorite, is_played, last_played_date
         "#,
@@ -4918,9 +4954,6 @@ pub async fn media_item_to_dto(
         None
     };
     let (series_id, season_id) = resolve_series_and_season_ids(pool, item).await?;
-    let genre_items = genre_items_from_names(&item.genres);
-    let people = get_item_people(pool, item.id).await?;
-    let extra_fields = emby_extra_fields(item, &people, is_folder);
     let provider_ids = provider_ids_for_item(item);
     let primary_image_tag = item
         .image_primary_path
@@ -4969,6 +5002,15 @@ pub async fn media_item_to_dto(
                 .as_ref()
                 .map(|_| series_item.date_modified.timestamp().to_string())
         });
+    let genre_items = genre_items_from_names(&item.genres);
+    let people = get_item_people(pool, item.id).await?;
+    let metadata_preferences = metadata_preferences_from_settings(pool).await?;
+    let extra_fields = emby_extra_fields(
+        item,
+        &people,
+        parent_item.as_ref(),
+        metadata_preferences.as_ref(),
+    );
     let resolved_series_name = item
         .series_name
         .clone()
@@ -5115,8 +5157,28 @@ fn sanitize_media_sources_for_item_detail(media_sources: Vec<MediaSourceDto>) ->
         .collect()
 }
 
-fn emby_extra_fields(item: &DbMediaItem, people: &[PersonDto], is_folder: bool) -> BTreeMap<String, Value> {
+fn emby_extra_fields(
+    item: &DbMediaItem,
+    people: &[PersonDto],
+    parent_item: Option<&DbMediaItem>,
+    metadata_preferences: Option<&StartupConfiguration>,
+) -> BTreeMap<String, Value> {
     let mut fields = BTreeMap::new();
+
+    if let Some(preferences) = metadata_preferences {
+        if !preferences.preferred_metadata_language.trim().is_empty() {
+            fields.insert(
+                "PreferredMetadataLanguage".to_string(),
+                json!(preferences.preferred_metadata_language),
+            );
+        }
+        if !preferences.metadata_country_code.trim().is_empty() {
+            fields.insert(
+                "PreferredMetadataCountryCode".to_string(),
+                json!(preferences.metadata_country_code),
+            );
+        }
+    }
 
     if let Some(index) = item.index_number {
         fields.insert("SortIndexNumber".to_string(), json!(index));
@@ -5144,7 +5206,7 @@ fn emby_extra_fields(item: &DbMediaItem, people: &[PersonDto], is_folder: bool) 
             person
                 .person_type
                 .as_deref()
-                .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "artist" | "albumartist" | "musicartist" | "composer"))
+                .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "artist" | "albumartist" | "musicartist"))
         })
         .collect::<Vec<_>>();
     if !artists.is_empty() {
@@ -5161,12 +5223,75 @@ fn emby_extra_fields(item: &DbMediaItem, people: &[PersonDto], is_folder: bool) 
         );
     }
 
-    if !is_folder {
-        fields.insert("CanMakePublic".to_string(), json!(false));
-        fields.insert("CanManageAccess".to_string(), json!(false));
+    let composers = people
+        .iter()
+        .filter(|person| {
+            person
+                .person_type
+                .as_deref()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("composer"))
+        })
+        .collect::<Vec<_>>();
+    if !composers.is_empty() {
+        fields.insert(
+            "Composers".to_string(),
+            json!(composers
+                .iter()
+                .map(|person| json!({ "Name": person.name, "Id": person.id }))
+                .collect::<Vec<_>>()),
+        );
     }
 
+    if let Some(album) = parent_item.filter(|parent| {
+        matches!(
+            parent.item_type.to_ascii_lowercase().as_str(),
+            "album" | "musicalbum"
+        )
+    }) {
+        fields.insert("Album".to_string(), json!(album.name));
+        fields.insert("AlbumId".to_string(), json!(uuid_to_emby_guid(&album.id)));
+        if album.image_primary_path.is_some() {
+            fields.insert(
+                "AlbumPrimaryImageTag".to_string(),
+                json!(album.date_modified.timestamp().to_string()),
+            );
+        }
+        let album_artists = artists
+            .iter()
+            .filter(|person| {
+                person
+                    .person_type
+                    .as_deref()
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("AlbumArtist"))
+            })
+            .collect::<Vec<_>>();
+        if let Some(first_album_artist) = album_artists.first() {
+            fields.insert("AlbumArtist".to_string(), json!(first_album_artist.name));
+        }
+        if !album_artists.is_empty() {
+            fields.insert(
+                "AlbumArtists".to_string(),
+                json!(album_artists
+                    .iter()
+                    .map(|person| json!({ "Name": person.name, "Id": person.id }))
+                    .collect::<Vec<_>>()),
+            );
+        }
+    }
+
+    fields.insert("CanMakePublic".to_string(), json!(false));
+    fields.insert("CanManageAccess".to_string(), json!(false));
+    fields.insert("CanLeaveContent".to_string(), json!(false));
     fields
+}
+
+async fn metadata_preferences_from_settings(
+    pool: &sqlx::PgPool,
+) -> Result<Option<StartupConfiguration>, AppError> {
+    let Some(value) = get_system_setting(pool, "startup_configuration").await? else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_value::<StartupConfiguration>(value).ok())
 }
 
 async fn resolve_series_and_season_ids(
