@@ -29,11 +29,17 @@ pub fn router() -> Router<AppState> {
         .route("/Items/{item_id}/ThumbnailSet", get(get_item_thumbnail_set))
         .route(
             "/Items/{item_id}/Images/{image_type}",
-            get(get_item_image).head(get_item_image),
+            get(get_item_image)
+                .head(get_item_image)
+                .post(upload_item_image)
+                .delete(delete_item_image),
         )
         .route(
             "/Items/{item_id}/Images/{image_type}/{*image_tail}",
-            get(get_item_image_with_tail).head(get_item_image_with_tail),
+            get(get_item_image_with_tail)
+                .head(get_item_image_with_tail)
+                .post(upload_item_image_with_tail)
+                .delete(delete_item_image_with_tail),
         )
         .route(
             "/Persons/{name}/Images/{image_type}",
@@ -143,6 +149,42 @@ async fn get_item_image_with_tail(
     serve_item_image(session.0, state, item_id_str, image_type, image_index, request).await
 }
 
+async fn upload_item_image(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((item_id_str, image_type)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    upload_item_image_impl(session, state, item_id_str, image_type, headers, body).await
+}
+
+async fn upload_item_image_with_tail(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((item_id_str, image_type, _image_tail)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    upload_item_image_impl(session, state, item_id_str, image_type, headers, body).await
+}
+
+async fn delete_item_image(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((item_id_str, image_type)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    delete_item_image_impl(session, state, item_id_str, image_type).await
+}
+
+async fn delete_item_image_with_tail(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((item_id_str, image_type, _image_tail)): Path<(String, String, String)>,
+) -> Result<StatusCode, AppError> {
+    delete_item_image_impl(session, state, item_id_str, image_type).await
+}
+
 async fn get_person_image(
     _session: OptionalAuthSession,
     State(state): State<AppState>,
@@ -209,6 +251,80 @@ async fn serve_person_image(
     serve_image(&path, request).await
 }
 
+async fn upload_item_image_impl(
+    session: AuthSession,
+    state: AppState,
+    item_id_str: String,
+    image_type: String,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    if body.is_empty() {
+        return Err(AppError::BadRequest("图片内容不能为空".to_string()));
+    }
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+
+    let image_type = normalized_item_image_type(&image_type);
+    let extension = image_extension_from_headers(&headers);
+    let dir = state.config.static_dir.join("item-images");
+    fs::create_dir_all(&dir).await.map_err(AppError::Io)?;
+    let filename = format!(
+        "{}-{}.{}",
+        item_id,
+        image_type.to_ascii_lowercase(),
+        extension
+    );
+    let path = dir.join(filename);
+    fs::write(&path, &body).await.map_err(AppError::Io)?;
+
+    repository::update_media_item_image_path(
+        &state.pool,
+        item_id,
+        &image_type,
+        Some(&path.to_string_lossy()),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_item_image_impl(
+    session: AuthSession,
+    state: AppState,
+    item_id_str: String,
+    image_type: String,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    let item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let image_type = normalized_item_image_type(&image_type);
+    let current_path = match image_type.as_str() {
+        "Backdrop" => item.backdrop_path,
+        "Logo" => item.logo_path,
+        "Thumb" => item.thumb_path,
+        _ => item.image_primary_path,
+    };
+    if let Some(path) = current_path {
+        let path_buf = PathBuf::from(&path);
+        if path_buf.exists() && path_buf.starts_with(state.config.static_dir.join("item-images")) {
+            let _ = fs::remove_file(path_buf).await;
+        }
+    }
+    repository::update_media_item_image_path(&state.pool, item_id, &image_type, None).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn serve_genre_image(
     state: AppState,
     name: String,
@@ -251,9 +367,16 @@ async fn serve_item_image(
         return serve_image(&path, request).await;
     }
 
-    let item = repository::get_media_item(&state.pool, item_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
+        if image_type.eq_ignore_ascii_case("Primary") {
+            if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
+                if let Some(path) = repository::get_person_image_path(&state.pool, &person.id, &image_type).await? {
+                    return serve_image(&path, request).await;
+                }
+            }
+        }
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    };
 
     let path = match image_type.to_ascii_lowercase().as_str() {
         "backdrop" => item.backdrop_path,
@@ -395,6 +518,15 @@ fn normalized_user_image_type(image_type: &str) -> String {
     match image_type.to_ascii_lowercase().as_str() {
         "backdrop" => "Backdrop".to_string(),
         "logo" => "Logo".to_string(),
+        _ => "Primary".to_string(),
+    }
+}
+
+fn normalized_item_image_type(image_type: &str) -> String {
+    match image_type.to_ascii_lowercase().as_str() {
+        "backdrop" => "Backdrop".to_string(),
+        "logo" => "Logo".to_string(),
+        "thumb" => "Thumb".to_string(),
         _ => "Primary".to_string(),
     }
 }

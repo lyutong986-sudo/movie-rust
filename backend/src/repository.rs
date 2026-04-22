@@ -1122,6 +1122,36 @@ pub async fn list_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, A
     .await?)
 }
 
+pub async fn delete_session(pool: &sqlx::PgPool, access_token: &str) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM sessions WHERE access_token = $1")
+        .bind(access_token)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn update_media_item_image_path(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    image_type: &str,
+    path: Option<&str>,
+) -> Result<(), AppError> {
+    let column = match image_type.to_ascii_lowercase().as_str() {
+        "backdrop" => "backdrop_path",
+        "logo" => "logo_path",
+        "thumb" => "thumb_path",
+        _ => "image_primary_path",
+    };
+
+    let query = format!("UPDATE media_items SET {column} = $1, date_modified = now() WHERE id = $2");
+    sqlx::query(&query)
+        .bind(path)
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn list_server_logs(_pool: &sqlx::PgPool) -> Result<Vec<LogFileDto>, AppError> {
     Ok(Vec::new())
 }
@@ -1580,11 +1610,39 @@ fn library_paths_from_options_or_path(options: &Value, fallback_path: &str) -> V
 }
 
 pub struct ItemListOptions {
+    pub user_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
     pub parent_id: Option<Uuid>,
     pub item_ids: Vec<Uuid>,
     pub include_types: Vec<String>,
+    pub exclude_types: Vec<String>,
+    pub media_types: Vec<String>,
     pub genres: Vec<String>,
+    pub official_ratings: Vec<String>,
+    pub tags: Vec<String>,
+    pub exclude_tags: Vec<String>,
+    pub years: Vec<i32>,
+    pub person_ids: Vec<Uuid>,
+    pub person_types: Vec<String>,
+    pub studios: Vec<String>,
+    pub studio_ids: Vec<String>,
+    pub containers: Vec<String>,
+    pub audio_codecs: Vec<String>,
+    pub video_codecs: Vec<String>,
+    pub subtitle_codecs: Vec<String>,
+    pub any_provider_id_equals: Vec<String>,
+    pub is_played: Option<bool>,
+    pub is_favorite: Option<bool>,
+    pub is_folder: Option<bool>,
+    pub has_overview: Option<bool>,
+    pub has_tmdb_id: Option<bool>,
+    pub has_imdb_id: Option<bool>,
+    pub series_status: Vec<String>,
+    pub min_community_rating: Option<f64>,
+    pub min_critic_rating: Option<f64>,
+    pub min_premiere_date: Option<DateTime<Utc>>,
+    pub max_premiere_date: Option<DateTime<Utc>>,
+    pub resume_only: bool,
     pub recursive: bool,
     pub search_term: Option<String>,
     pub sort_by: Option<String>,
@@ -1593,6 +1651,54 @@ pub struct ItemListOptions {
     pub fields: Option<String>,
     pub start_index: i64,
     pub limit: i64,
+}
+
+impl Default for ItemListOptions {
+    fn default() -> Self {
+        Self {
+            user_id: None,
+            library_id: None,
+            parent_id: None,
+            item_ids: Vec::new(),
+            include_types: Vec::new(),
+            exclude_types: Vec::new(),
+            media_types: Vec::new(),
+            genres: Vec::new(),
+            official_ratings: Vec::new(),
+            tags: Vec::new(),
+            exclude_tags: Vec::new(),
+            years: Vec::new(),
+            person_ids: Vec::new(),
+            person_types: Vec::new(),
+            studios: Vec::new(),
+            studio_ids: Vec::new(),
+            containers: Vec::new(),
+            audio_codecs: Vec::new(),
+            video_codecs: Vec::new(),
+            subtitle_codecs: Vec::new(),
+            any_provider_id_equals: Vec::new(),
+            is_played: None,
+            is_favorite: None,
+            is_folder: None,
+            has_overview: None,
+            has_tmdb_id: None,
+            has_imdb_id: None,
+            series_status: Vec::new(),
+            min_community_rating: None,
+            min_critic_rating: None,
+            min_premiere_date: None,
+            max_premiere_date: None,
+            resume_only: false,
+            recursive: false,
+            search_term: None,
+            sort_by: None,
+            sort_order: None,
+            filters: None,
+            fields: None,
+            start_index: 0,
+            limit: 100,
+        }
+    }
 }
 
 pub async fn list_media_items(
@@ -1658,8 +1764,226 @@ pub async fn list_media_items(
             .push(")");
     }
 
+    if !options.exclude_types.is_empty() {
+        builder
+            .push(" AND NOT (item_type = ANY(")
+            .push_bind(options.exclude_types)
+            .push("))");
+    }
+
+    if !options.media_types.is_empty() {
+        builder
+            .push(" AND media_type = ANY(")
+            .push_bind(options.media_types)
+            .push(")");
+    }
+
     if !options.genres.is_empty() {
         builder.push(" AND genres && ").push_bind(options.genres);
+    }
+
+    if !options.official_ratings.is_empty() {
+        builder
+            .push(" AND official_rating = ANY(")
+            .push_bind(options.official_ratings)
+            .push(")");
+    }
+
+    if !options.tags.is_empty() {
+        builder.push(" AND tags && ").push_bind(options.tags);
+    }
+
+    if !options.exclude_tags.is_empty() {
+        builder
+            .push(" AND NOT (tags && ")
+            .push_bind(options.exclude_tags)
+            .push(")");
+    }
+
+    if !options.years.is_empty() {
+        builder
+            .push(" AND production_year = ANY(")
+            .push_bind(options.years)
+            .push(")");
+    }
+
+    if !options.containers.is_empty() {
+        builder
+            .push(" AND lower(container) = ANY(")
+            .push_bind(lowercase_list(&options.containers))
+            .push(")");
+    }
+
+    if !options.audio_codecs.is_empty() {
+        builder
+            .push(
+                " AND (lower(audio_codec) = ANY(",
+            )
+            .push_bind(lowercase_list(&options.audio_codecs))
+            .push(
+                ") OR EXISTS (SELECT 1 FROM media_streams ms WHERE ms.media_item_id = media_items.id AND ms.stream_type = 'Audio' AND lower(ms.codec) = ANY(",
+            )
+            .push_bind(lowercase_list(&options.audio_codecs))
+            .push(")))");
+    }
+
+    if !options.video_codecs.is_empty() {
+        builder
+            .push(" AND (lower(video_codec) = ANY(")
+            .push_bind(lowercase_list(&options.video_codecs))
+            .push(
+                ") OR EXISTS (SELECT 1 FROM media_streams ms WHERE ms.media_item_id = media_items.id AND ms.stream_type = 'Video' AND lower(ms.codec) = ANY(",
+            )
+            .push_bind(lowercase_list(&options.video_codecs))
+            .push(")))");
+    }
+
+    if !options.subtitle_codecs.is_empty() {
+        builder
+            .push(
+                " AND EXISTS (SELECT 1 FROM media_streams ms WHERE ms.media_item_id = media_items.id AND ms.stream_type = 'Subtitle' AND lower(ms.codec) = ANY(",
+            )
+            .push_bind(lowercase_list(&options.subtitle_codecs))
+            .push("))");
+    }
+
+    if !options.person_ids.is_empty() {
+        builder
+            .push(
+                " AND EXISTS (SELECT 1 FROM person_roles pr WHERE pr.media_item_id = media_items.id AND pr.person_id = ANY(",
+            )
+            .push_bind(options.person_ids)
+            .push(")");
+        if !options.person_types.is_empty() {
+            builder
+                .push(" AND pr.role_type = ANY(")
+                .push_bind(options.person_types)
+                .push(")");
+        }
+        builder.push(")");
+    } else if !options.person_types.is_empty() {
+        builder
+            .push(
+                " AND EXISTS (SELECT 1 FROM person_roles pr WHERE pr.media_item_id = media_items.id AND pr.role_type = ANY(",
+            )
+            .push_bind(options.person_types)
+            .push("))");
+    }
+
+    if !options.studios.is_empty() {
+        builder.push(" AND studios && ").push_bind(options.studios);
+    }
+
+    if !options.studio_ids.is_empty() {
+        builder
+            .push(" AND (studios && ")
+            .push_bind(options.studio_ids)
+            .push(")");
+    }
+
+    if !options.any_provider_id_equals.is_empty() {
+        builder
+            .push(
+                " AND EXISTS (SELECT 1 FROM jsonb_each_text(provider_ids) provider WHERE provider.value = ANY(",
+            )
+            .push_bind(options.any_provider_id_equals)
+            .push("))");
+    }
+
+    if let Some(has_overview) = options.has_overview {
+        if has_overview {
+            builder.push(" AND overview IS NOT NULL AND btrim(overview) <> ''");
+        } else {
+            builder.push(" AND (overview IS NULL OR btrim(overview) = '')");
+        }
+    }
+
+    if let Some(has_tmdb_id) = options.has_tmdb_id {
+        if has_tmdb_id {
+            builder.push(" AND (provider_ids ? 'Tmdb' OR provider_ids ? 'TMDb' OR provider_ids ? 'tmdb')");
+        } else {
+            builder.push(" AND NOT (provider_ids ? 'Tmdb' OR provider_ids ? 'TMDb' OR provider_ids ? 'tmdb')");
+        }
+    }
+
+    if let Some(has_imdb_id) = options.has_imdb_id {
+        if has_imdb_id {
+            builder.push(" AND (provider_ids ? 'Imdb' OR provider_ids ? 'IMDb' OR provider_ids ? 'imdb')");
+        } else {
+            builder.push(" AND NOT (provider_ids ? 'Imdb' OR provider_ids ? 'IMDb' OR provider_ids ? 'imdb')");
+        }
+    }
+
+    if let Some(is_folder) = options.is_folder {
+        if is_folder {
+            builder.push(" AND item_type = ANY(ARRAY['Series','Season','BoxSet','Folder','CollectionFolder'])");
+        } else {
+            builder.push(" AND NOT (item_type = ANY(ARRAY['Series','Season','BoxSet','Folder','CollectionFolder']))");
+        }
+    }
+
+    if !options.series_status.is_empty() {
+        builder
+            .push(" AND status = ANY(")
+            .push_bind(options.series_status)
+            .push(")");
+    }
+
+    if let Some(min_rating) = options.min_community_rating {
+        builder
+            .push(" AND community_rating >= ")
+            .push_bind(min_rating);
+    }
+
+    if let Some(min_rating) = options.min_critic_rating {
+        builder.push(" AND critic_rating >= ").push_bind(min_rating);
+    }
+
+    if let Some(min_date) = options.min_premiere_date {
+        builder.push(" AND premiere_date >= ").push_bind(min_date).push("::date");
+    }
+
+    if let Some(max_date) = options.max_premiere_date {
+        builder.push(" AND premiere_date <= ").push_bind(max_date).push("::date");
+    }
+
+    if let Some(user_id) = options.user_id {
+        if let Some(is_played) = options.is_played {
+            if is_played {
+                builder
+                    .push(" AND EXISTS (SELECT 1 FROM user_item_data uid WHERE uid.user_id = ")
+                    .push_bind(user_id)
+                    .push(" AND uid.item_id = media_items.id AND uid.is_played = true)");
+            } else {
+                builder
+                    .push(" AND NOT EXISTS (SELECT 1 FROM user_item_data uid WHERE uid.user_id = ")
+                    .push_bind(user_id)
+                    .push(" AND uid.item_id = media_items.id AND uid.is_played = true)");
+            }
+        }
+
+        if let Some(is_favorite) = options.is_favorite {
+            if is_favorite {
+                builder
+                    .push(" AND EXISTS (SELECT 1 FROM user_item_data uid WHERE uid.user_id = ")
+                    .push_bind(user_id)
+                    .push(" AND uid.item_id = media_items.id AND uid.is_favorite = true)");
+            } else {
+                builder
+                    .push(" AND NOT EXISTS (SELECT 1 FROM user_item_data uid WHERE uid.user_id = ")
+                    .push_bind(user_id)
+                    .push(" AND uid.item_id = media_items.id AND uid.is_favorite = true)");
+            }
+        }
+
+        if options.resume_only {
+            builder
+                .push(" AND EXISTS (SELECT 1 FROM user_item_data uid WHERE uid.user_id = ")
+                .push_bind(user_id)
+                .push(" AND uid.item_id = media_items.id AND uid.playback_position_ticks > 0)");
+        }
+    } else if options.resume_only {
+        builder.push(" AND false");
     }
 
     if let Some(search_term) = options.search_term.filter(|value| !value.trim().is_empty()) {
@@ -1672,9 +1996,9 @@ pub async fn list_media_items(
         "DateCreated" | "DateLastContentAdded" => "date_created",
         "IndexNumber" => "index_number",
         "PremiereDate" => "premiere_date",
-        "DatePlayed" => "date_created",
         "ProductionYear" => "production_year",
         "Random" => "random()",
+        "DatePlayed" => "date_created",
         _ => "sort_name",
     };
     let sort_order = if options
@@ -2690,6 +3014,42 @@ pub async fn record_playback_event(
     .await?;
 
     if let Some(item_id) = item_id {
+        if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
+            if matches!(event_type, "Started" | "Progress") {
+                sqlx::query(
+                    r#"
+                    INSERT INTO session_play_queue
+                        (session_id, item_id, sort_index, position_ticks, is_paused, play_state, updated_at)
+                    SELECT $1, $2, 0, $3, $4, CASE WHEN COALESCE($4, false) THEN 'Paused' ELSE 'Playing' END, now()
+                    WHERE EXISTS (SELECT 1 FROM sessions WHERE access_token = $1)
+                    ON CONFLICT (session_id, item_id)
+                    DO UPDATE SET
+                        position_ticks = COALESCE(EXCLUDED.position_ticks, session_play_queue.position_ticks),
+                        is_paused = EXCLUDED.is_paused,
+                        play_state = EXCLUDED.play_state,
+                        updated_at = now()
+                    "#,
+                )
+                .bind(session_id)
+                .bind(item_id)
+                .bind(position_ticks)
+                .bind(is_paused)
+                .execute(pool)
+                .await?;
+            } else if event_type == "Stopped" {
+                sqlx::query(
+                    r#"
+                    DELETE FROM session_play_queue
+                    WHERE session_id = $1 AND item_id = $2
+                    "#,
+                )
+                .bind(session_id)
+                .bind(item_id)
+                .execute(pool)
+                .await?;
+            }
+        }
+
         if matches!(event_type, "Progress" | "Stopped") {
             let is_played = played_to_completion.unwrap_or(false);
             sqlx::query(
@@ -2715,6 +3075,76 @@ pub async fn record_playback_event(
         }
     }
 
+    Ok(())
+}
+
+pub async fn session_play_queue(
+    pool: &sqlx::PgPool,
+    session_id: Option<&str>,
+    device_id: Option<&str>,
+    user_id: Uuid,
+    server_id: Uuid,
+) -> Result<QueryResult<BaseItemDto>, AppError> {
+    let rows = sqlx::query_as::<_, DbMediaItem>(
+        r#"
+        SELECT
+            mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type,
+            mi.media_type, mi.path, mi.container, mi.overview, mi.production_year,
+            mi.official_rating, mi.community_rating, mi.critic_rating, mi.runtime_ticks,
+            mi.premiere_date, mi.status, mi.end_date, mi.air_days, mi.air_time,
+            mi.series_name, mi.season_name,
+            mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
+            mi.genres, mi.studios, mi.tags, mi.production_locations,
+            mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec,
+            mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
+            mi.remote_trailers, mi.date_created, mi.date_modified
+        FROM session_play_queue q
+        INNER JOIN sessions s ON s.access_token = q.session_id
+        INNER JOIN media_items mi ON mi.id = q.item_id
+        WHERE s.user_id = $1
+          AND ($2::text IS NULL OR q.session_id = $2)
+          AND ($3::text IS NULL OR s.device_id = $3)
+        ORDER BY q.sort_index, q.updated_at DESC
+        "#,
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .bind(device_id)
+    .fetch_all(pool)
+    .await?;
+
+    let total_record_count = rows.len() as i64;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        items.push(media_item_to_dto(pool, &row, Some(user_id), server_id).await?);
+    }
+
+    Ok(QueryResult {
+        items,
+        total_record_count,
+        start_index: Some(0),
+    })
+}
+
+pub async fn record_session_command(
+    pool: &sqlx::PgPool,
+    session_id: &str,
+    command: &str,
+    payload: Value,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO session_commands (id, session_id, command, payload)
+        SELECT $1, $2, $3, $4
+        WHERE EXISTS (SELECT 1 FROM sessions WHERE access_token = $2)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(session_id)
+    .bind(command)
+    .bind(payload)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -3940,6 +4370,14 @@ async fn version_group_items_for_item(
     grouped_items.sort_by_key(|candidate| candidate.date_created);
     grouped_items.dedup_by_key(|candidate| candidate.id);
     Ok(grouped_items)
+}
+
+fn lowercase_list(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 pub async fn get_additional_parts_for_item(

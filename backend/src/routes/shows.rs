@@ -30,10 +30,11 @@ async fn get_next_up(
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
+    let scope_id = query.series_id.or(query.parent_id);
     let result = repository::get_next_up_episodes(
         &state.pool,
         user_id,
-        query.parent_id,
+        scope_id,
         state.config.server_id,
         query.start_index.unwrap_or(0).max(0),
         query.limit.unwrap_or(100).clamp(1, 200),
@@ -49,10 +50,11 @@ async fn get_upcoming(
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
+    let scope_id = query.series_id.or(query.parent_id);
     let result = repository::get_upcoming_episodes(
         &state.pool,
         user_id,
-        query.parent_id,
+        scope_id,
         state.config.server_id,
         query.start_index.unwrap_or(0).max(0),
         query.limit.unwrap_or(100).clamp(1, 200),
@@ -68,10 +70,11 @@ async fn get_missing(
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
+    let scope_id = query.series_id.or(query.parent_id);
     let result = repository::get_missing_episodes(
         &state.pool,
         user_id,
-        query.parent_id,
+        scope_id,
         state.config.server_id,
         query.start_index.unwrap_or(0).max(0),
         query.limit.unwrap_or(100).clamp(1, 200),
@@ -109,6 +112,7 @@ async fn get_seasons(
             item_ids: vec![],
             include_types: vec!["Season".to_string()],
             genres: vec![],
+            user_id: Some(user_id),
             recursive: false,
             search_term: None,
             sort_by: Some("SortName".to_string()),
@@ -117,6 +121,7 @@ async fn get_seasons(
             fields: None,
             start_index: 0,
             limit: 1000, // 假设季的数量不会太多
+            ..ItemListOptions::default()
         },
     )
     .await?;
@@ -209,6 +214,7 @@ async fn get_episodes(
                 item_ids: vec![],
                 include_types: vec!["Season".to_string()],
                 genres: vec![],
+                user_id: Some(user_id),
                 recursive: false,
                 search_term: None,
                 sort_by: None,
@@ -217,6 +223,7 @@ async fn get_episodes(
                 fields: None,
                 start_index: 0,
                 limit: 200,
+                ..ItemListOptions::default()
             },
         )
         .await?;
@@ -256,6 +263,15 @@ async fn get_episodes(
                 item_ids: vec![],
                 include_types: vec!["Episode".to_string()],
                 genres: vec![],
+                user_id: Some(user_id),
+                media_types: parse_list(query.media_types.as_deref()),
+                tags: parse_list(query.tags.as_deref()),
+                years: parse_i32_list(query.years.as_deref()),
+                audio_codecs: parse_list(query.audio_codecs.as_deref()),
+                video_codecs: parse_list(query.video_codecs.as_deref()),
+                subtitle_codecs: parse_list(query.subtitle_codecs.as_deref()),
+                is_played: query.is_played,
+                is_favorite: query.is_favorite,
                 recursive,
                 search_term: None,
                 sort_by: query.sort_by.clone().or_else(|| Some("SortName".to_string())),
@@ -267,6 +283,7 @@ async fn get_episodes(
                 fields: query.fields.clone(),
                 start_index: 0,
                 limit: 10_000,
+                ..ItemListOptions::default()
             },
         )
         .await?;
@@ -307,6 +324,25 @@ fn collect_missing_season_numbers(result: &QueryResult<BaseItemDto>) -> BTreeSet
         .items
         .iter()
         .filter_map(|item| item.parent_index_number)
+        .collect()
+}
+
+fn parse_list(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split([',', '|'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_i32_list(value: Option<&str>) -> Vec<i32> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter_map(|value| value.parse::<i32>().ok())
         .collect()
 }
 
@@ -390,6 +426,15 @@ async fn get_episodes_by_season(
             item_ids: vec![],
             include_types: vec!["Episode".to_string()],
             genres: vec![],
+            user_id: Some(user_id),
+            media_types: parse_list(query.media_types.as_deref()),
+            tags: parse_list(query.tags.as_deref()),
+            years: parse_i32_list(query.years.as_deref()),
+            audio_codecs: parse_list(query.audio_codecs.as_deref()),
+            video_codecs: parse_list(query.video_codecs.as_deref()),
+            subtitle_codecs: parse_list(query.subtitle_codecs.as_deref()),
+            is_played: query.is_played,
+            is_favorite: query.is_favorite,
             recursive: false,
             search_term: None,
             sort_by: Some("SortName".to_string()),
@@ -398,6 +443,7 @@ async fn get_episodes_by_season(
             fields: None,
             start_index: query.start_index.unwrap_or(0),
             limit: query.limit.unwrap_or(100),
+            ..ItemListOptions::default()
         },
     )
     .await?;

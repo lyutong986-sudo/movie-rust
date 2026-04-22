@@ -1154,11 +1154,13 @@ pub struct VideoStreamQuery {
 
 
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsQuery {
     #[serde(default, alias = "UserId", alias = "userId")]
     pub user_id: Option<Uuid>,
+    #[serde(default, alias = "SeriesId", alias = "seriesId")]
+    pub series_id: Option<Uuid>,
     #[serde(
         default,
         alias = "ParentId",
@@ -1168,8 +1170,40 @@ pub struct ItemsQuery {
     pub parent_id: Option<Uuid>,
     #[serde(default, alias = "IncludeItemTypes", alias = "includeItemTypes")]
     pub include_item_types: Option<String>,
+    #[serde(default, alias = "ExcludeItemTypes", alias = "excludeItemTypes")]
+    pub exclude_item_types: Option<String>,
+    #[serde(default, alias = "MediaTypes", alias = "mediaTypes")]
+    pub media_types: Option<String>,
     #[serde(default, alias = "GenreIds", alias = "genreIds")]
     pub genres: Option<String>,
+    #[serde(default, alias = "OfficialRatings", alias = "officialRatings")]
+    pub official_ratings: Option<String>,
+    #[serde(default, alias = "Tags", alias = "tags")]
+    pub tags: Option<String>,
+    #[serde(default, alias = "ExcludeTags", alias = "excludeTags")]
+    pub exclude_tags: Option<String>,
+    #[serde(default, alias = "Years", alias = "years")]
+    pub years: Option<String>,
+    #[serde(default, alias = "PersonIds", alias = "personIds")]
+    pub person_ids: Option<String>,
+    #[serde(default, alias = "PersonTypes", alias = "personTypes")]
+    pub person_types: Option<String>,
+    #[serde(default, alias = "Studios", alias = "studios")]
+    pub studios: Option<String>,
+    #[serde(default, alias = "StudioIds", alias = "studioIds")]
+    pub studio_ids: Option<String>,
+    #[serde(default, alias = "Containers", alias = "containers")]
+    pub containers: Option<String>,
+    #[serde(default, alias = "AudioCodecs", alias = "audioCodecs")]
+    pub audio_codecs: Option<String>,
+    #[serde(default, alias = "VideoCodecs", alias = "videoCodecs")]
+    pub video_codecs: Option<String>,
+    #[serde(default, alias = "SubtitleCodecs", alias = "subtitleCodecs")]
+    pub subtitle_codecs: Option<String>,
+    #[serde(default, alias = "Ids", alias = "ids")]
+    pub ids: Option<String>,
+    #[serde(default, alias = "AnyProviderIdEquals", alias = "anyProviderIdEquals")]
+    pub any_provider_id_equals: Option<String>,
     #[serde(default, alias = "Recursive")]
     pub recursive: Option<bool>,
     #[serde(default, alias = "SearchTerm", alias = "searchTerm")]
@@ -1188,6 +1222,32 @@ pub struct ItemsQuery {
     pub limit: Option<i64>,
     #[serde(default, alias = "ListItemIds", alias = "listItemIds")]
     pub list_item_ids: Option<String>,
+    #[serde(default, alias = "IsPlayed", alias = "isPlayed")]
+    pub is_played: Option<bool>,
+    #[serde(default, alias = "IsFavorite", alias = "isFavorite")]
+    pub is_favorite: Option<bool>,
+    #[serde(default, alias = "IsMovie", alias = "isMovie")]
+    pub is_movie: Option<bool>,
+    #[serde(default, alias = "IsSeries", alias = "isSeries")]
+    pub is_series: Option<bool>,
+    #[serde(default, alias = "IsFolder", alias = "isFolder")]
+    pub is_folder: Option<bool>,
+    #[serde(default, alias = "HasOverview", alias = "hasOverview")]
+    pub has_overview: Option<bool>,
+    #[serde(default, alias = "HasTmdbId", alias = "hasTmdbId")]
+    pub has_tmdb_id: Option<bool>,
+    #[serde(default, alias = "HasImdbId", alias = "hasImdbId")]
+    pub has_imdb_id: Option<bool>,
+    #[serde(default, alias = "SeriesStatus", alias = "seriesStatus")]
+    pub series_status: Option<String>,
+    #[serde(default, alias = "MinCommunityRating", alias = "minCommunityRating")]
+    pub min_community_rating: Option<f64>,
+    #[serde(default, alias = "MinCriticRating", alias = "minCriticRating")]
+    pub min_critic_rating: Option<f64>,
+    #[serde(default, alias = "MinPremiereDate", alias = "minPremiereDate")]
+    pub min_premiere_date: Option<DateTime<Utc>>,
+    #[serde(default, alias = "MaxPremiereDate", alias = "maxPremiereDate")]
+    pub max_premiere_date: Option<DateTime<Utc>>,
     #[serde(
         default,
         alias = "GroupItemsIntoCollections",
@@ -1673,6 +1733,22 @@ pub struct EpisodesQuery {
     pub sort_by: Option<String>,
     #[serde(default)]
     pub sort_order: Option<String>,
+    #[serde(default, alias = "MediaTypes", alias = "mediaTypes")]
+    pub media_types: Option<String>,
+    #[serde(default, alias = "IsPlayed", alias = "isPlayed")]
+    pub is_played: Option<bool>,
+    #[serde(default, alias = "IsFavorite", alias = "isFavorite")]
+    pub is_favorite: Option<bool>,
+    #[serde(default, alias = "Years", alias = "years")]
+    pub years: Option<String>,
+    #[serde(default, alias = "Tags", alias = "tags")]
+    pub tags: Option<String>,
+    #[serde(default, alias = "AudioCodecs", alias = "audioCodecs")]
+    pub audio_codecs: Option<String>,
+    #[serde(default, alias = "VideoCodecs", alias = "videoCodecs")]
+    pub video_codecs: Option<String>,
+    #[serde(default, alias = "SubtitleCodecs", alias = "subtitleCodecs")]
+    pub subtitle_codecs: Option<String>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
 }

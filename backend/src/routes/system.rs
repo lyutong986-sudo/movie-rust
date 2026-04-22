@@ -14,6 +14,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use serde_json::{json, Value};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -23,6 +24,8 @@ pub fn router() -> Router<AppState> {
         .route("/system/info", get(system_info))
         .route("/System/Endpoint", get(endpoint_info))
         .route("/system/endpoint", get(endpoint_info))
+        .route("/System/Ext/ServerDomains", get(server_domains))
+        .route("/system/ext/serverdomains", get(server_domains))
         .route("/System/Ping", get(ping).post(ping))
         .route("/system/ping", get(ping).post(ping))
         .route("/Branding/Configuration", get(branding_configuration))
@@ -76,6 +79,18 @@ async fn endpoint_info(_session: AuthSession) -> Json<EndpointInfo> {
         is_local: true,
         is_in_network: true,
     })
+}
+
+async fn server_domains(_session: AuthSession, State(state): State<AppState>) -> Json<Value> {
+    let local_address = format!("http://{}:{}", state.config.host, state.config.port);
+    Json(json!({
+        "data": [
+            {
+                "name": state.config.server_name.clone(),
+                "url": local_address
+            }
+        ]
+    }))
 }
 
 async fn branding_configuration() -> Json<BrandingConfiguration> {

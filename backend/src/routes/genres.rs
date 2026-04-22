@@ -98,6 +98,19 @@ fn genre_to_base_item(genre: GenreDto, server_id: uuid::Uuid) -> BaseItemDto {
 pub fn router() -> axum::Router<crate::state::AppState> {
     axum::Router::new()
         .route("/Genres", axum::routing::get(get_genres))
+        .route("/Users/{userId}/Genres", axum::routing::get(get_user_genres))
         .route("/Genres/{genreName}/Items", axum::routing::get(get_genre_items))
         .route("/Genres/{genreName}", axum::routing::get(get_genre))
+}
+
+pub async fn get_user_genres(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<uuid::Uuid>,
+    Query(query): Query<GetGenresQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    if session.user_id != user_id && !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    get_genres(session, State(state), Query(query)).await
 }

@@ -19,6 +19,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -28,8 +30,10 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Root", get(root_item))
         .route("/Users/{user_id}/Items/Root", get(root_item_for_user))
         .route("/Items/Counts", get(item_counts))
+        .route("/Items/Filters", get(item_filters))
         .route("/Items", get(items))
         .route("/Users/{user_id}/Items", get(user_items))
+        .route("/Users/{user_id}/Items/Filters", get(user_item_filters))
         .route("/Users/{user_id}/HomeSections", get(home_sections))
         .route("/Users/{user_id}/Suggestions", get(user_suggestions))
         .route(
@@ -76,7 +80,12 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Items/{item_id}", get(item_by_id))
         .route("/Items/{item_id}/Refresh", post(refresh_item_metadata))
+        .route("/Items/{item_id}/Chapters", get(item_chapters))
+        .route("/Items/{item_id}/IntroTimestamps", get(no_intro_timestamps))
+        .route("/Videos/{item_id}/IntroTimestamps", get(no_intro_timestamps))
+        .route("/Episodes/{item_id}/IntroTimestamps", get(no_intro_timestamps))
         .route("/Users/{user_id}/Items/{item_id}", get(user_item_by_id))
+        .route("/Users/{user_id}/Items/{item_id}/Similar", get(get_user_similar_items))
         .route("/Users/{user_id}/Items/{item_id}/Intros", get(empty_item_query_result))
         .route("/Users/{user_id}/Items/{item_id}/LocalTrailers", get(empty_item_list))
         .route("/Users/{user_id}/Items/{item_id}/SpecialFeatures", get(empty_item_list))
@@ -251,7 +260,14 @@ async fn list_items_for_user(
     user_id: Uuid,
     query: ItemsQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    let requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
+    let mut query = query;
+    if query.parent_id == Some(user_id) {
+        query.parent_id = None;
+    }
+    let mut requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
+    requested_item_ids.extend(parse_emby_uuid_list(query.ids.as_deref()));
+    requested_item_ids.sort_unstable();
+    requested_item_ids.dedup();
     let requested_include_types = parse_include_types(query.include_item_types.as_deref());
 
     if is_top_level_items_request(&query, &requested_item_ids, &requested_include_types) {
@@ -296,21 +312,15 @@ async fn list_items_for_user(
             
             let result = repository::list_media_items(
                 &state.pool,
-                ItemListOptions {
-                    library_id: Some(library.id),
-                    parent_id: None,
-                    item_ids: requested_item_ids.clone(),
+                item_list_options_from_query(
+                    &query,
+                    user_id,
+                    Some(library.id),
+                    None,
+                    requested_item_ids.clone(),
                     include_types,
-                    genres: parse_list(query.genres.as_deref()),
                     recursive,
-                    search_term: query.search_term,
-                    sort_by: query.sort_by,
-                    sort_order: query.sort_order,
-                    filters: query.filters,
-                    fields: query.fields,
-                    start_index: query.start_index.unwrap_or(0),
-                    limit: query.limit.unwrap_or(100),
-                },
+                ),
             )
             .await?;
             return media_items_to_dto_result(state, user_id, result).await;
@@ -319,25 +329,222 @@ async fn list_items_for_user(
 
     let result = repository::list_media_items(
         &state.pool,
-        ItemListOptions {
-            library_id: None,
-            parent_id: query.parent_id,
-            item_ids: requested_item_ids,
-            include_types: requested_include_types,
-            genres: parse_list(query.genres.as_deref()),
+        item_list_options_from_query(
+            &query,
+            user_id,
+            None,
+            query.parent_id,
+            requested_item_ids,
+            requested_include_types,
             recursive,
-            search_term: query.search_term,
-            sort_by: query.sort_by,
-            sort_order: query.sort_order,
-            filters: query.filters,
-            fields: query.fields,
-            start_index: query.start_index.unwrap_or(0),
-            limit: query.limit.unwrap_or(100),
-        },
+        ),
     )
     .await?;
 
     media_items_to_dto_result(state, user_id, result).await
+}
+
+async fn item_filters(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(mut query): Query<ItemsQuery>,
+) -> Result<Json<Value>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    query.user_id = Some(user_id);
+    item_filters_for_query(&state, user_id, query).await
+}
+
+async fn user_item_filters(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Query(mut query): Query<ItemsQuery>,
+) -> Result<Json<Value>, AppError> {
+    ensure_user_access(&session, user_id)?;
+    query.user_id = Some(user_id);
+    item_filters_for_query(&state, user_id, query).await
+}
+
+async fn item_filters_for_query(
+    state: &AppState,
+    user_id: Uuid,
+    mut query: ItemsQuery,
+) -> Result<Json<Value>, AppError> {
+    if query.parent_id == Some(user_id) {
+        query.parent_id = None;
+    }
+    let mut requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
+    requested_item_ids.extend(parse_emby_uuid_list(query.ids.as_deref()));
+    requested_item_ids.sort_unstable();
+    requested_item_ids.dedup();
+
+    let include_types = parse_include_types(query.include_item_types.as_deref());
+    let recursive = query.recursive.unwrap_or(true);
+    query.start_index = Some(0);
+    query.limit = Some(10_000);
+
+    let (library_id, parent_id, include_types) = if let Some(parent_id) = query.parent_id {
+        if let Some(library) = repository::get_library(&state.pool, parent_id).await? {
+            let mut include_types = include_types;
+            if include_types.is_empty() && library.collection_type.eq_ignore_ascii_case("tvshows") {
+                include_types = vec!["Series".to_string()];
+            }
+            (Some(library.id), None, include_types)
+        } else {
+            (None, Some(parent_id), include_types)
+        }
+    } else {
+        (None, None, include_types)
+    };
+
+    let result = repository::list_media_items(
+        &state.pool,
+        item_list_options_from_query(
+            &query,
+            user_id,
+            library_id,
+            parent_id,
+            requested_item_ids,
+            include_types,
+            recursive,
+        ),
+    )
+    .await?;
+
+    let mut genres = BTreeSet::new();
+    let mut tags = BTreeSet::new();
+    let mut official_ratings = BTreeSet::new();
+    let mut containers = BTreeSet::new();
+    let mut years = BTreeSet::new();
+    let mut series_statuses = BTreeSet::new();
+
+    for item in result.items {
+        for genre in item.genres {
+            if !genre.trim().is_empty() {
+                genres.insert(genre);
+            }
+        }
+        for tag in item.tags {
+            if !tag.trim().is_empty() {
+                tags.insert(tag);
+            }
+        }
+        if let Some(rating) = item.official_rating.filter(|value| !value.trim().is_empty()) {
+            official_ratings.insert(rating);
+        }
+        if let Some(container) = item.container.filter(|value| !value.trim().is_empty()) {
+            containers.insert(container);
+        }
+        if let Some(year) = item.production_year {
+            years.insert(year);
+        }
+        if let Some(status) = item.status.filter(|value| !value.trim().is_empty()) {
+            series_statuses.insert(status);
+        }
+    }
+
+    let genres_vec: Vec<String> = genres.into_iter().collect();
+    let genre_items: Vec<Value> = genres_vec
+        .iter()
+        .map(|name| json!({ "Name": name, "Id": name }))
+        .collect();
+    let years_vec: Vec<i32> = years.into_iter().collect();
+
+    Ok(Json(json!({
+        "Genres": genres_vec,
+        "GenreItems": genre_items,
+        "Tags": tags.into_iter().collect::<Vec<_>>(),
+        "OfficialRatings": official_ratings.into_iter().collect::<Vec<_>>(),
+        "Containers": containers.into_iter().collect::<Vec<_>>(),
+        "Years": years_vec.clone(),
+        "ProductionYears": years_vec,
+        "SeriesStatuses": series_statuses.into_iter().collect::<Vec<_>>(),
+    })))
+}
+
+fn item_list_options_from_query(
+    query: &ItemsQuery,
+    user_id: Uuid,
+    library_id: Option<Uuid>,
+    parent_id: Option<Uuid>,
+    item_ids: Vec<Uuid>,
+    mut include_types: Vec<String>,
+    recursive: bool,
+) -> ItemListOptions {
+    let mut exclude_types = parse_list(query.exclude_item_types.as_deref());
+    let filters = parse_filter_list(query.filters.as_deref());
+    let mut is_folder = query.is_folder;
+    let mut is_played = query.is_played;
+    let mut resume_only = false;
+    for filter in &filters {
+        if filter.eq_ignore_ascii_case("IsFolder") {
+            is_folder = Some(true);
+        } else if filter.eq_ignore_ascii_case("IsNotFolder") {
+            is_folder = Some(false);
+        } else if filter.eq_ignore_ascii_case("IsResumable") {
+            resume_only = true;
+        } else if filter.eq_ignore_ascii_case("IsPlayed") {
+            is_played.get_or_insert(true);
+        } else if filter.eq_ignore_ascii_case("IsUnplayed") {
+            is_played.get_or_insert(false);
+        }
+    }
+    if query.is_movie == Some(true) && !include_types.iter().any(|value| value.eq_ignore_ascii_case("Movie")) {
+        include_types.push("Movie".to_string());
+    } else if query.is_movie == Some(false) {
+        exclude_types.push("Movie".to_string());
+    }
+    if query.is_series == Some(true) && !include_types.iter().any(|value| value.eq_ignore_ascii_case("Series")) {
+        include_types.push("Series".to_string());
+    } else if query.is_series == Some(false) {
+        exclude_types.push("Series".to_string());
+    }
+
+    ItemListOptions {
+        user_id: Some(query.user_id.unwrap_or(user_id)),
+        library_id,
+        parent_id,
+        item_ids,
+        include_types,
+        exclude_types,
+        media_types: parse_list(query.media_types.as_deref()),
+        genres: parse_list(query.genres.as_deref()),
+        official_ratings: parse_list(query.official_ratings.as_deref()),
+        tags: parse_list(query.tags.as_deref()),
+        exclude_tags: parse_list(query.exclude_tags.as_deref()),
+        years: parse_i32_list(query.years.as_deref()),
+        person_ids: parse_emby_uuid_list(query.person_ids.as_deref()),
+        person_types: parse_list(query.person_types.as_deref()),
+        studios: parse_list(query.studios.as_deref()),
+        studio_ids: parse_list(query.studio_ids.as_deref()),
+        containers: parse_list(query.containers.as_deref()),
+        audio_codecs: parse_list(query.audio_codecs.as_deref()),
+        video_codecs: parse_list(query.video_codecs.as_deref()),
+        subtitle_codecs: parse_list(query.subtitle_codecs.as_deref()),
+        any_provider_id_equals: parse_list(query.any_provider_id_equals.as_deref()),
+        is_played,
+        is_favorite: query.is_favorite,
+        is_folder,
+        has_overview: query.has_overview,
+        has_tmdb_id: query.has_tmdb_id,
+        has_imdb_id: query.has_imdb_id,
+        series_status: parse_list(query.series_status.as_deref()),
+        min_community_rating: query.min_community_rating,
+        min_critic_rating: query.min_critic_rating,
+        min_premiere_date: query.min_premiere_date,
+        max_premiere_date: query.max_premiere_date,
+        resume_only,
+        recursive,
+        search_term: query.search_term.clone(),
+        sort_by: query.sort_by.clone(),
+        sort_order: query.sort_order.clone(),
+        filters: query.filters.clone(),
+        fields: query.fields.clone(),
+        start_index: query.start_index.unwrap_or(0),
+        limit: query.limit.unwrap_or(100),
+        ..ItemListOptions::default()
+    }
 }
 
 fn is_top_level_items_request(
@@ -358,6 +565,18 @@ fn is_top_level_items_request(
             .is_none_or(|value| value.trim().is_empty())
         && query
             .genres
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && query
+            .media_types
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && query
+            .ids
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        && query
+            .list_item_ids
             .as_deref()
             .is_none_or(|value| value.trim().is_empty())
         && query
@@ -592,6 +811,46 @@ async fn ensure_media_item_exists(state: &AppState, item_id: Uuid) -> Result<(),
         return Ok(());
     }
     Err(AppError::NotFound("媒体条目不存在".to_string()))
+}
+
+async fn item_chapters(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<QueryResult<Value>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    let chapters = repository::get_media_chapters(&state.pool, item_id).await?;
+    let items: Vec<Value> = chapters
+        .into_iter()
+        .map(|chapter| {
+            json!({
+                "StartPositionTicks": chapter.start_position_ticks,
+                "Name": chapter.name.unwrap_or_else(|| format!("Chapter {}", chapter.chapter_index + 1)),
+                "ImageTag": chapter.image_path.as_ref().map(|_| chapter.updated_at.timestamp().to_string()),
+                "MarkerType": chapter.marker_type.unwrap_or_else(|| "Chapter".to_string()),
+                "ChapterIndex": chapter.chapter_index
+            })
+        })
+        .collect();
+
+    Ok(Json(QueryResult {
+        total_record_count: items.len() as i64,
+        items,
+        start_index: Some(0),
+    }))
+}
+
+async fn no_intro_timestamps(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn ensure_user_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppError> {
@@ -1140,10 +1399,30 @@ fn parse_include_types(value: Option<&str>) -> Vec<String> {
 fn parse_list(value: Option<&str>) -> Vec<String> {
     value
         .unwrap_or_default()
-        .split(',')
+        .split([',', '|'])
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_filter_list(value: Option<&str>) -> Vec<String> {
+    value
+        .unwrap_or_default()
+        .split([',', '|'])
+        .flat_map(|value| value.split(';'))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_i32_list(value: Option<&str>) -> Vec<i32> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter_map(|value| value.parse::<i32>().ok())
         .collect()
 }
 
@@ -1193,24 +1472,33 @@ async fn user_resume_items(
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     query.user_id = Some(user_id);
-    
-    // 使用repository中的get_user_resume_items函数
-    let limit = query.limit.unwrap_or(50);
-    let start_index = query.start_index.unwrap_or(0);
-    
-    let (items, total_count) = repository::get_user_resume_items(
-        &state.pool,
+
+    let mut requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
+    requested_item_ids.extend(parse_emby_uuid_list(query.ids.as_deref()));
+    requested_item_ids.sort_unstable();
+    requested_item_ids.dedup();
+
+    let recursive = query.recursive.unwrap_or(true);
+    let mut options = item_list_options_from_query(
+        &query,
         user_id,
-        Some(limit),
-        Some(start_index),
-        state.config.server_id,
+        None,
+        query.parent_id,
+        requested_item_ids,
+        parse_include_types(query.include_item_types.as_deref()),
+        recursive,
+    );
+    options.resume_only = true;
+    options.sort_by = query.sort_by.or_else(|| Some("DatePlayed".to_string()));
+    options.sort_order = query.sort_order.or_else(|| Some("Descending".to_string()));
+    options.limit = query.limit.unwrap_or(50);
+
+    let result = repository::list_media_items(
+        &state.pool,
+        options,
     ).await?;
-    
-    Ok(Json(QueryResult {
-        items,
-        total_record_count: total_count,
-        start_index: Some(start_index),
-    }))
+
+    media_items_to_dto_result(&state, user_id, result).await
 }
 
 async fn get_similar_items(
@@ -1242,4 +1530,15 @@ async fn get_similar_items(
         total_record_count,
         start_index: Some(0),
     }))
+}
+
+async fn get_user_similar_items(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id, item_id_str)): Path<(Uuid, String)>,
+    Query(mut query): Query<GetSimilarItems>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    ensure_user_access(&session, user_id)?;
+    query.user_id = Some(user_id);
+    get_similar_items(session, State(state), Path(item_id_str), Query(query)).await
 }

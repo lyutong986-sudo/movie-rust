@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::{auth, error::AppError, state::AppState};
+use crate::{error::AppError, state::AppState};
 
 #[derive(Debug, Deserialize)]
 pub struct WebSocketQuery {
@@ -34,7 +34,28 @@ pub async fn emby_websocket_handler(
     Query(query): Query<WebSocketQuery>,
     State(state): State<AppState>,
 ) -> Result<Response, AppError> {
-    let user_id = None;
+    let token = query
+        .token
+        .as_deref()
+        .or(query.api_key.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let user_id = if let Some(token) = token {
+        if state
+            .config
+            .api_key
+            .as_ref()
+            .is_some_and(|api_key| api_key == token)
+        {
+            Some(state.config.server_id)
+        } else {
+            crate::repository::get_session(&state.pool, token)
+                .await?
+                .map(|session| session.user_id)
+        }
+    } else {
+        None
+    };
     
     let session = WebSocketSession {
         id: Uuid::new_v4(),
