@@ -4,7 +4,7 @@ on:
   push:
     branches: ["bbll"]
   pull_request:
-    branches: ["mms"]
+    branches: ["bbll"]
 
 env:
   IMAGE_TAG: ${{ github.sha }}
@@ -23,7 +23,7 @@ jobs:
           driver: docker-container
 
       - name: Log in to Docker Hub
-        if: github.event_name == 'push' && github.ref == 'refs/heads/mms'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/bbll'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -41,7 +41,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=movie-rust
 
       - name: Build and push image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/mms'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/bbll'
         uses: docker/build-push-action@v6
         with:
           context: .

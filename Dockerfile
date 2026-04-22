@@ -1,17 +1,5 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22-alpine AS frontend-builder
-
-WORKDIR /app/frontend
-
-COPY frontend/package*.json ./
-RUN npm install
-
-COPY frontend/index.html frontend/tsconfig.json frontend/vite.config.ts ./
-COPY frontend/src ./src
-
-RUN npm run build
-
 FROM rust:1-bookworm AS backend-builder
 
 WORKDIR /app/backend
@@ -33,7 +21,7 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=backend-builder /app/backend/target/release/movie-rust-backend /usr/local/bin/movie-rust-backend
-COPY --from=frontend-builder /app/frontend/dist /app/public
+COPY frontend/dashboard-ui /app/public
 
 ENV APP_HOST=0.0.0.0 \
     APP_PORT=8096 \
