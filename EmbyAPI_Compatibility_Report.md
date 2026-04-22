@@ -498,3 +498,28 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - 审计后确认后端已经具备可用的媒体库管理链路：`GET /Library/VirtualFolders`、`GET /Library/VirtualFolders/Query`、`POST /Library/Refresh`、`GET /Library/SelectableMediaFolders`，因此该功能不应继续在前端保持禁用。
 - 已新增 `frontend/packages/frontend/src/pages/settings/libraries.vue`，接入现有后端媒体库能力，提供媒体库列表查看与全库刷新入口；设置页中的 `Libraries` 现已解除禁用并可访问。
 - 其余仍保持禁用的设置项（如 `DLNA`、`Live TV`、`Plugins`、`Scheduled Tasks`、`Notifications`）要么当前后端没有对应 EmbySDK 标准管理路由，要么前端尚无完整页面，这一轮不做误开放。
+
+## 2026-04-22 前端适配补充（二十一）
+
+- 对照前端现有设置页与 EmbySDK 调用，补齐并修正了 Users 相关链路的后端兼容性：新增 POST /Users/Password、为 POST|PUT|DELETE /Users/{user_id} 提供标准支持，并将 Users/{user_id}、Users/{user_id}/Password、Users/{user_id}/Policy 等路径统一改为按 Emby GUID 解析，避免前端直接使用 UserDto.Id 时因后端只认原始 UUID 而出现 400/404。
+- 后端新增 epository::update_user_name(...)，用于承接前端用户详情页的 updateUser(...) 调用；这样设置页里的用户名编辑不再只是前端存在、后端缺失。
+- ResetPassword 分支改为可直接落库，当前兼容行为为重置为默认密码  000，避免前端“重置密码”按钮走到后端时报不支持。
+- 兼容层 DisplayPreferences / UserSettings 的用户路径也同步切换为 Emby GUID 解析，补齐前端同步配置、用户设置等 SDK 能力与后端 ID 语义不一致的问题。
+- 前端账户页移除了“把头像文件转 base64 再上传”的临时绕行，恢复按 EmbySDK 预期直接提交 File 到 postUserImage(...)；当前项目前后端以 SDK 约定为准，不再让前端为旧后端行为做特殊兼容。
+- 本轮后端验证：cargo check --manifest-path backend\\Cargo.toml 已通过。
+
+## 2026-04-22 前端适配补充（二十二）
+
+- 继续对照前端用户管理页与 EmbySDK 调用，修正 UserPolicyDto 中与库/频道访问相关的 ID 字段兼容性：EnabledFolders、EnabledChannels、BlockedMediaFolders、BlockedChannels 现在按 Emby GUID 字符串进行序列化/反序列化，内部仍保留 Uuid 存储。这样前端用户详情页、新建用户页在保存媒体库访问范围时，不会再因为后端直接按原始 UUID 反序列化而报错。
+- 为 Startup 初始化向导相关更新接口补充更宽容的 method 兼容：/Startup/Configuration、/Startup/User、/Startup/RemoteAccess、/Startup/Complete 现支持 EmbySDK/前端可能使用的 POST/PUT 写入方式，降低首次初始化流程因 method 不匹配而失败的风险。
+- 本轮后端验证：cargo check --manifest-path backend\\Cargo.toml 已通过。
+
+## 2026-04-22 前端适配补充（二十三）
+
+- 针对启动向导进行了返回体与调用链审计。当前前端实际使用的向导字段集中在 StartupConfiguration 的 UICulture、PreferredMetadataLanguage、MetadataCountryCode，以及 StartupRemoteAccess 的 EnableRemoteAccess、EnableAutomaticPortMapping，后端现有返回体已覆盖这些真实使用字段；同时为 /Startup/Configuration、/Startup/User、/Startup/RemoteAccess、/Startup/Complete 增补了 POST/PUT 双兼容，降低 SDK method 差异带来的初始化失败风险。
+- 对设置页 server / apikeys / logs-and-activity 做了逐项审计：
+  - server：后端 System/Configuration 现已提供前端实际双向绑定的字段，包括 ServerName、UICulture、QuickConnectAvailable、CachePath、MetadataPath、LibraryScanFanoutConcurrency、ParallelImageEncodingLimit；并为 /System/Configuration 与 /System/Configuration/{key} 更新接口补充 POST/PUT 双兼容。
+  - pikeys：/Auth/Keys 返回结构已符合前端 useApi 对 Items 的拆包逻辑；本轮进一步将 AuthenticationInfo.UserId 统一输出为 Emby GUID，保持与项目其余用户 ID 语义一致。
+  - logs-and-activity：前端页面按 SDK 的 LogLevel.Information/Warning/Error/... 与活动类型 SessionStarted / SessionEnded / VideoPlayback / VideoPlaybackStopped / UserPasswordChanged 做显示分支。后端原先活动日志使用了不匹配的 Severity = Info 与较原始的播放事件类型；本轮已修正为前端当前识别的枚举值与类型映射，避免颜色、图标和文案分支失效。
+- 审计说明：当前工作区内未直接检索到本地 SDK 生成类型定义文件本体，因此“完全一致性”判断以当前前端实际 import 的类型用法和运行调用形状为准，并已优先修复真实会影响页面行为的字段名、枚举值与 method 兼容问题。
+- 本轮后端验证：cargo check --manifest-path backend\\Cargo.toml 已通过。

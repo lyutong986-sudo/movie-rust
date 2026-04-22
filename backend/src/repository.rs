@@ -1184,6 +1184,38 @@ pub async fn delete_user(pool: &sqlx::PgPool, user_id: Uuid) -> Result<(), AppEr
     Ok(())
 }
 
+pub async fn update_user_name(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    name: &str,
+) -> Result<(), AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("用户名不能为空".to_string()));
+    }
+
+    if let Some(existing) = get_user_by_name(pool, name).await? {
+        if existing.id != user_id {
+            return Err(AppError::BadRequest("用户已存在".to_string()));
+        }
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET name = $1,
+            date_modified = now()
+        WHERE id = $2
+        "#,
+    )
+    .bind(name)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn change_user_password(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -1568,7 +1600,7 @@ pub async fn list_activity_logs(
     Ok(rows
         .into_iter()
         .map(|row| {
-            let entry_type = row.event_type.clone();
+            let entry_type = activity_entry_type(&row.event_type);
             let item_name = row.item_name.unwrap_or_else(|| "未知媒体".to_string());
             let short_overview = Some(format_activity_overview(
                 &row.user_name,
@@ -1584,11 +1616,20 @@ pub async fn list_activity_logs(
                 name: format!("{} · {}", row.user_name, item_name),
                 entry_type,
                 short_overview,
-                severity: "Info".to_string(),
+                severity: "Information".to_string(),
                 date: row.created_at,
             }
         })
         .collect())
+}
+
+fn activity_entry_type(event_type: &str) -> String {
+    match event_type {
+        "Started" => "SessionStarted".to_string(),
+        "Progress" => "VideoPlayback".to_string(),
+        "Stopped" => "VideoPlaybackStopped".to_string(),
+        other => other.to_string(),
+    }
 }
 
 pub async fn create_library(

@@ -1,7 +1,7 @@
 ﻿use crate::{
     auth::AuthSession,
     error::AppError,
-    models::UserConfigurationDto,
+    models::{emby_id_to_uuid, UserConfigurationDto},
     repository,
     state::AppState,
 };
@@ -40,6 +40,11 @@ struct DisplayPreferencesQuery {
     client: Option<String>,
 }
 
+fn parse_user_id(user_id: &str) -> Result<Uuid, AppError> {
+    emby_id_to_uuid(user_id)
+        .map_err(|_| AppError::BadRequest(format!("无效的用户ID格式: {user_id}")))
+}
+
 async fn display_preferences(
     session: AuthSession,
     State(state): State<AppState>,
@@ -75,9 +80,10 @@ async fn display_preferences(
 async fn user_display_preferences(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, display_preferences_id)): Path<(Uuid, String)>,
+    Path((user_id, display_preferences_id)): Path<(String, String)>,
     Query(query): Query<DisplayPreferencesQuery>,
 ) -> Result<Json<Value>, AppError> {
+    let user_id = parse_user_id(&user_id)?;
     ensure_settings_access(&session, user_id)?;
     let client = normalized_display_preferences_client(query.client.as_deref());
     if let Some(saved) = repository::get_display_preferences(
@@ -126,10 +132,11 @@ async fn update_display_preferences(
 async fn update_user_display_preferences(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, display_preferences_id)): Path<(Uuid, String)>,
+    Path((user_id, display_preferences_id)): Path<(String, String)>,
     Query(query): Query<DisplayPreferencesQuery>,
     Json(mut payload): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
+    let user_id = parse_user_id(&user_id)?;
     update_display_preferences_for_user(
         &state,
         &session,
@@ -285,8 +292,9 @@ async fn localization_parental_ratings() -> Result<Json<Value>, AppError> {
 async fn user_settings(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
+    let user_id = parse_user_id(&user_id)?;
     ensure_settings_access(&session, user_id)?;
 
     let user = repository::get_user_by_id(&state.pool, user_id)
@@ -307,9 +315,10 @@ async fn user_settings(
 async fn update_user_settings(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
     Json(configuration): Json<UserConfigurationDto>,
 ) -> Result<Json<Value>, AppError> {
+    let user_id = parse_user_id(&user_id)?;
     ensure_settings_access(&session, user_id)?;
     repository::update_user_configuration(&state.pool, user_id, &configuration).await?;
     Ok(Json(json!(configuration)))
@@ -318,9 +327,10 @@ async fn update_user_settings(
 async fn update_user_settings_partial(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
+    let user_id = parse_user_id(&user_id)?;
     ensure_settings_access(&session, user_id)?;
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?

@@ -1,7 +1,7 @@
 use crate::{
     auth::AuthSession,
     error::AppError,
-    models::{BaseItemDto, LegacyPlaybackQuery, PlaybackReport, QueryResult, SessionInfoDto},
+    models::{uuid_to_emby_guid, BaseItemDto, LegacyPlaybackQuery, PlaybackReport, QueryResult, SessionInfoDto},
     repository,
     state::AppState,
 };
@@ -164,7 +164,7 @@ async fn list_auth_keys(
             json!({
                 "Id": session.access_token,
                 "AccessToken": session.access_token,
-                "UserId": session.user_id.to_string(),
+                "UserId": uuid_to_emby_guid(&session.user_id),
                 "UserName": session.user_name,
                 "AppName": session.client.unwrap_or_else(|| "Movie Rust Client".to_string()),
                 "AppVersion": session.application_version.unwrap_or_else(|| "0.1.0".to_string()),
@@ -211,7 +211,7 @@ async fn create_auth_key(
     Ok(Json(json!({
         "Id": created.access_token,
         "AccessToken": created.access_token,
-        "UserId": created.user_id.to_string(),
+        "UserId": uuid_to_emby_guid(&created.user_id),
         "UserName": created.user_name,
         "AppName": created.client,
         "AppVersion": created.application_version,

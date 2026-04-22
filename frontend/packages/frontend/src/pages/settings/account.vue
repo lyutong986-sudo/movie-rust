@@ -16,7 +16,6 @@
             </div>
             <div class="uno-flex uno-flex-col sm:uno-flex-row">
               <JFileUpload
-                ref="fileUploadRef"
                 v-model="selectedUserPicture"
                 :loading="isChangeImageLoading"
                 type="button"
@@ -91,7 +90,6 @@ const isChangePasswordLoading = shallowRef(false);
 const isChangeImageLoading = shallowRef(false);
 const isDeleteImageLoading = shallowRef(false);
 
-const fileUploadRef = ref(undefined);
 const selectedUserPicture = ref<File | undefined>(undefined);
 
 /**
@@ -127,14 +125,9 @@ async function changeUserImage() {
     return;
   }
 
-  // According to the TypeScript typings, the SDK expects the body to be a File.
-  // However, sending a File causes the backend to return a 500 error due to a base64 parsing exception.
-  // When the File is converted to a base64 string, the backend works as expected.
-  const base64FileContent = await fileUploadRef.value?.readSelectedFileAsBase64();
-
   const payload: ImageApiPostUserImageRequest = {
     userId: remote.auth.currentUserId.value,
-    body: base64FileContent as unknown as File
+    body: selectedUserPicture.value
   };
 
   const config: AxiosRequestConfig = {

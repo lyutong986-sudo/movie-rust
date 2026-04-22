@@ -433,13 +433,29 @@ pub struct UserPolicyDto {
     pub remote_client_bitrate_limit: i32,
     pub blocked_tags: Vec<String>,
     pub allowed_tags: Vec<String>,
+    #[serde(
+        serialize_with = "serialize_uuid_vec_as_emby_guids",
+        deserialize_with = "deserialize_uuid_vec_from_emby_guids"
+    )]
     pub enabled_folders: Vec<Uuid>,
     pub enable_all_folders: bool,
+    #[serde(
+        serialize_with = "serialize_uuid_vec_as_emby_guids",
+        deserialize_with = "deserialize_uuid_vec_from_emby_guids"
+    )]
     pub enabled_channels: Vec<Uuid>,
     pub enable_all_channels: bool,
     pub enabled_devices: Vec<String>,
     pub enable_all_devices: bool,
+    #[serde(
+        serialize_with = "serialize_uuid_vec_as_emby_guids",
+        deserialize_with = "deserialize_uuid_vec_from_emby_guids"
+    )]
     pub blocked_media_folders: Vec<Uuid>,
+    #[serde(
+        serialize_with = "serialize_uuid_vec_as_emby_guids",
+        deserialize_with = "deserialize_uuid_vec_from_emby_guids"
+    )]
     pub blocked_channels: Vec<Uuid>,
     pub authentication_provider_id: String,
     pub password_reset_provider_id: String,
@@ -2170,6 +2186,29 @@ pub fn emby_id_to_uuid(id_str: &str) -> Result<Uuid, uuid::Error> {
 /// 尝试将Emby API中的ID字符串转换为UUID，如果失败返回None
 pub fn try_emby_id_to_uuid(id_str: &str) -> Option<Uuid> {
     emby_id_to_uuid(id_str).ok()
+}
+
+fn serialize_uuid_vec_as_emby_guids<S>(value: &[Uuid], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let ids = value
+        .iter()
+        .map(uuid_to_emby_guid)
+        .collect::<Vec<_>>();
+    ids.serialize(serializer)
+}
+
+fn deserialize_uuid_vec_from_emby_guids<'de, D>(deserializer: D) -> Result<Vec<Uuid>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    let ids = Vec::<String>::deserialize(deserializer)?;
+    ids.into_iter()
+        .map(|value| emby_id_to_uuid(value.trim()).map_err(serde::de::Error::custom))
+        .collect()
 }
 
 fn deserialize_optional_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>

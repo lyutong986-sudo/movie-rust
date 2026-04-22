@@ -10,15 +10,15 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route(
             "/Startup/Configuration",
-            get(configuration).post(update_configuration),
+            get(configuration).post(update_configuration).put(update_configuration),
         )
-        .route("/Startup/User", get(first_user).post(create_first_user))
+        .route("/Startup/User", get(first_user).post(create_first_user).put(create_first_user))
         .route("/Startup/FirstUser", get(first_user))
         .route(
             "/Startup/RemoteAccess",
-            get(get_remote_access).post(remote_access),
+            get(get_remote_access).post(remote_access).put(remote_access),
         )
-        .route("/Startup/Complete", axum::routing::post(complete))
+        .route("/Startup/Complete", axum::routing::post(complete).put(complete))
 }
 
 async fn configuration(

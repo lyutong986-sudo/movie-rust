@@ -1,7 +1,10 @@
 use crate::{
     auth::{self, AuthSession},
     error::AppError,
-    models::{uuid_to_emby_guid, AuthenticateByNameRequest, AuthenticationResult, CreateUserByNameRequest, UpdateUserPasswordRequest, UserDto, UserPolicyDto},
+    models::{
+        emby_id_to_uuid, uuid_to_emby_guid, AuthenticateByNameRequest, AuthenticationResult,
+        CreateUserByNameRequest, UpdateUserPasswordRequest, UserDto, UserPolicyDto,
+    },
     repository, security,
     state::AppState,
 };
@@ -9,9 +12,10 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
-    routing::{get, post, put},
+    routing::{get, post},
     Json, Router,
 };
+use serde_json::Value;
 use url::form_urlencoded;
 use uuid::Uuid;
 
@@ -29,18 +33,37 @@ pub fn router() -> Router<AppState> {
         .route("/Users/{user_id}/Authenticate", post(authenticate_by_id))
         .route("/Users/{user_id}/authenticate", post(authenticate_by_id))
         .route("/users/{user_id}/authenticate", post(authenticate_by_id))
+        .route("/Users/Password", post(update_my_password))
+        .route("/users/password", post(update_my_password))
         .route("/Users/{user_id}/Password", post(update_password))
         .route("/Users/{user_id}/password", post(update_password))
         .route("/users/{user_id}/password", post(update_password))
         .route("/Users/Me", get(me))
         .route("/users/me", get(me))
-        .route("/Users/{user_id}", get(user_by_id))
-        .route("/users/{user_id}", get(user_by_id))
+        .route(
+            "/Users/{user_id}",
+            get(user_by_id)
+                .post(update_user)
+                .put(update_user)
+                .delete(delete_user),
+        )
+        .route(
+            "/users/{user_id}",
+            get(user_by_id)
+                .post(update_user)
+                .put(update_user)
+                .delete(delete_user),
+        )
         .route("/Users/{user_id}/Delete", post(delete_user))
         .route("/users/{user_id}/delete", post(delete_user))
         .route("/Users/{user_id}/Policy", post(update_user_policy))
         .route("/Users/{user_id}/policy", post(update_user_policy))
         .route("/users/{user_id}/policy", post(update_user_policy))
+}
+
+fn parse_user_id(user_id: &str) -> Result<Uuid, AppError> {
+    emby_id_to_uuid(user_id)
+        .map_err(|_| AppError::BadRequest(format!("无效的用户ID格式: {user_id}")))
 }
 
 async fn public_users(State(state): State<AppState>) -> Result<Json<Vec<UserDto>>, AppError> {
@@ -69,8 +92,9 @@ async fn users(
 async fn user_by_id(
     _session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
 ) -> Result<Json<UserDto>, AppError> {
+    let user_id = parse_user_id(&user_id)?;
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
@@ -83,7 +107,7 @@ async fn me(
 ) -> Result<Json<UserDto>, AppError> {
     let user = repository::get_user_by_id(&state.pool, session.user_id)
         .await?
-        .ok_or_else(|| AppError::Unauthorized)?;
+        .ok_or(AppError::Unauthorized)?;
     Ok(Json(repository::user_to_dto(&user, state.config.server_id)))
 }
 
@@ -100,13 +124,33 @@ async fn create_user(
 async fn delete_user(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
+    let user_id = parse_user_id(&user_id)?;
     auth::require_admin(&session)?;
     if session.user_id == user_id {
         return Err(AppError::BadRequest("不能删除当前登录用户".to_string()));
     }
     repository::delete_user(&state.pool, user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_user(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<StatusCode, AppError> {
+    let user_id = parse_user_id(&user_id)?;
+    auth::require_admin(&session)?;
+    repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+    let name = payload
+        .get("Name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::BadRequest("缺少用户名".to_string()))?;
+    repository::update_user_name(&state.pool, user_id, name).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -122,9 +166,10 @@ async fn authenticate_by_name(
 async fn authenticate_by_id(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<AuthenticationResult>, AppError> {
+    let user_id = parse_user_id(&user_id)?;
     let mut payload = parse_authenticate_request(&headers, &body)?;
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
@@ -158,12 +203,9 @@ async fn authenticate(
         return Err(AppError::Unauthorized);
     }
 
-    let device_id = auth::client_value(&headers, "DeviceId")
-        .or(payload.device_id);
-    let device_name = auth::client_value(&headers, "Device")
-        .or(payload.device_name);
-    let client = auth::client_value(&headers, "Client")
-        .or(payload.client);
+    let device_id = auth::client_value(&headers, "DeviceId").or(payload.device_id);
+    let device_name = auth::client_value(&headers, "Device").or(payload.device_name);
+    let client = auth::client_value(&headers, "Client").or(payload.client);
     let application_version = auth::client_value(&headers, "Version");
 
     let session = repository::create_session(
@@ -188,17 +230,17 @@ async fn authenticate(
 async fn update_password(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
     Json(payload): Json<UpdateUserPasswordRequest>,
 ) -> Result<StatusCode, AppError> {
+    let user_id = parse_user_id(&user_id)?;
     if session.user_id != user_id && !session.is_admin {
         return Err(AppError::Forbidden);
     }
 
     if payload.reset_password.unwrap_or(false) {
-        return Err(AppError::BadRequest(
-            "当前版本暂不支持无密码重置，请直接设置新密码".to_string(),
-        ));
+        repository::change_user_password(&state.pool, user_id, "0000").await?;
+        return Ok(StatusCode::NO_CONTENT);
     }
 
     let new_password = payload
@@ -227,6 +269,21 @@ async fn update_password(
 
     repository::change_user_password(&state.pool, user_id, new_password).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_my_password(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateUserPasswordRequest>,
+) -> Result<StatusCode, AppError> {
+    let user_id = uuid_to_emby_guid(&session.user_id);
+    update_password(
+        session,
+        State(state),
+        Path(user_id),
+        Json(payload),
+    )
+    .await
 }
 
 fn parse_authenticate_request(
@@ -293,10 +350,10 @@ fn form_value(values: &[(String, String)], names: &[&str]) -> Option<String> {
 async fn update_user_policy(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
     Json(policy): Json<UserPolicyDto>,
 ) -> Result<StatusCode, AppError> {
-    // 只有管理员可以更新用户策略
+    let user_id = parse_user_id(&user_id)?;
     if !session.is_admin {
         return Err(AppError::Forbidden);
     }
@@ -305,29 +362,24 @@ async fn update_user_policy(
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
 
-    // 如果移除管理员权限，检查是否至少还有一个管理员
     if !policy.is_administrator && user.is_admin {
         let admin_count = repository::count_admin_users(&state.pool).await?;
         if admin_count <= 1 {
-            return Err(AppError::BadRequest("系统中必须至少有一个管理员用户".to_string()));
+            return Err(AppError::BadRequest("系统中至少要保留一个管理员".to_string()));
         }
     }
 
-    // 管理员不能被禁用
     if policy.is_disabled && user.is_admin {
         return Err(AppError::BadRequest("管理员用户不能被禁用".to_string()));
     }
 
-    // 如果禁用用户，检查是否至少还有一个启用用户
     if policy.is_disabled && !user.is_disabled {
         let enabled_count = repository::count_enabled_users(&state.pool).await?;
         if enabled_count <= 1 {
-            return Err(AppError::BadRequest("系统中必须至少有一个启用用户".to_string()));
+            return Err(AppError::BadRequest("系统中至少要保留一个启用用户".to_string()));
         }
     }
 
-    // 更新用户策略
     repository::update_user_policy(&state.pool, user_id, &policy).await?;
-
     Ok(StatusCode::NO_CONTENT)
 }
