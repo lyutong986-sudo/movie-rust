@@ -1,6 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Query, State},
     Json,
 };
 use serde::Deserialize;
@@ -10,8 +9,8 @@ use crate::{
     metadata::{
         models::ExternalPersonSearchResult,
         person_service::PersonService,
-        provider::MetadataProviderManager,
     },
+    models::uuid_to_emby_guid,
     state::AppState,
 };
 
@@ -59,7 +58,7 @@ pub async fn fetch_person_from_external(
     let person_id = person_service.fetch_person_from_external(&request.provider, &request.external_id).await?;
     
     Ok(Json(FetchPersonResponse {
-        person_id,
+        person_id: uuid_to_emby_guid(&person_id),
         success: true,
         message: "Person data fetched successfully".to_string(),
     }))
@@ -68,7 +67,7 @@ pub async fn fetch_person_from_external(
 /// 提取人物数据响应
 #[derive(Debug, serde::Serialize)]
 pub struct FetchPersonResponse {
-    pub person_id: uuid::Uuid,
+    pub person_id: String,
     pub success: bool,
     pub message: String,
 }

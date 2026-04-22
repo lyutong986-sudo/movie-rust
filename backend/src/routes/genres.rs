@@ -20,7 +20,12 @@ pub struct GetGenresQuery {
     start_index: Option<i32>,
     #[serde(default, alias = "Limit", alias = "limit")]
     limit: Option<i32>,
-    #[serde(default, alias = "UserId", alias = "userId")]
+    #[serde(
+        default,
+        alias = "UserId",
+        alias = "userId",
+        deserialize_with = "crate::models::deserialize_optional_uuid"
+    )]
     user_id: Option<uuid::Uuid>,
     #[serde(default, alias = "ParentId", alias = "parentId")]
     parent_id: Option<String>,
@@ -169,9 +174,11 @@ pub fn router() -> axum::Router<crate::state::AppState> {
 pub async fn get_user_genres(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<uuid::Uuid>,
+    Path(user_id): Path<String>,
     Query(mut query): Query<GetGenresQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = emby_id_to_uuid(&user_id)
+        .map_err(|_| AppError::BadRequest(format!("无效的用户ID格式: {user_id}")))?;
     if session.user_id != user_id && !session.is_admin {
         return Err(AppError::Forbidden);
     }

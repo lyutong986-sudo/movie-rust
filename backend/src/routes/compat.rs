@@ -1,7 +1,7 @@
 ﻿use crate::{
     auth::AuthSession,
     error::AppError,
-    models::{emby_id_to_uuid, UserConfigurationDto},
+    models::{emby_id_to_uuid, uuid_to_emby_guid, UserConfigurationDto},
     repository,
     state::AppState,
 };
@@ -34,7 +34,7 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct DisplayPreferencesQuery {
-    #[serde(default, alias = "UserId", alias = "userId")]
+    #[serde(default, alias = "UserId", alias = "userId", deserialize_with = "crate::models::deserialize_optional_uuid")]
     user_id: Option<Uuid>,
     #[serde(default, alias = "Client", alias = "client")]
     client: Option<String>,
@@ -164,7 +164,7 @@ async fn update_display_preferences_for_user(
             .or_insert_with(|| json!(display_preferences_id.clone()));
         object
             .entry("UserId".to_string())
-            .or_insert_with(|| json!(user_id.to_string().to_uppercase()));
+            .or_insert_with(|| json!(uuid_to_emby_guid(&user_id)));
         object
             .entry("Client".to_string())
             .or_insert_with(|| json!(client.clone()));
@@ -199,7 +199,7 @@ fn display_preferences_value(id: String, user_id: Uuid, client: &str, ui_culture
 
     json!({
         "Id": id,
-        "UserId": user_id.to_string().to_uppercase(),
+        "UserId": uuid_to_emby_guid(&user_id),
         "Client": client,
         "ViewType": view_type,
         "SortBy": "SortName",

@@ -42,7 +42,7 @@
             cols="12"
             md="8">
             <VCard variant="tonal">
-              <VCardTitle>Paths</VCardTitle>
+              <VCardTitle>Selectable media folders</VCardTitle>
               <VCardText>{{ selectableFolders.length }}</VCardText>
             </VCard>
           </VCol>
@@ -59,13 +59,13 @@
                     {{ library.Name }}
                   </div>
                   <div class="uno-text-sm text-medium-emphasis">
-                    {{ formatLocations(library.Locations) || 'No paths configured' }}
+                    {{ formatLocations(library.LibraryOptions.PathInfos) || 'No paths configured' }}
                   </div>
                 </div>
                 <VChip
                   size="small"
                   variant="outlined">
-                  {{ library.CollectionType }}
+                  {{ library.CollectionType || 'mixed' }}
                 </VChip>
               </div>
             </VExpansionPanelTitle>
@@ -76,66 +76,28 @@
                   md="6">
                   <VTextField
                     v-model="library._draftName"
-                    label="Library Name"
+                    label="Library name"
                     density="comfortable"
                     variant="outlined" />
                 </VCol>
                 <VCol
                   cols="12"
                   md="6">
-                  <VTextField
-                    :model-value="library.CollectionType"
-                    label="Type"
+                  <VSelect
+                    :model-value="library.CollectionType || 'mixed'"
+                    label="Content type"
                     density="comfortable"
                     variant="outlined"
+                    :items="collectionTypes"
+                    item-title="title"
+                    item-value="value"
                     readonly />
                 </VCol>
-                <VCol
-                  cols="12"
-                  md="6">
-                  <VTextField
-                    v-model="library.LibraryOptions.PreferredMetadataLanguage"
-                    label="Metadata Language"
-                    density="comfortable"
-                    variant="outlined" />
-                </VCol>
-                <VCol
-                  cols="12"
-                  md="6">
-                  <VTextField
-                    v-model="library.LibraryOptions.MetadataCountryCode"
-                    label="Country Code"
-                    density="comfortable"
-                    variant="outlined" />
-                </VCol>
-                <VCol
-                  cols="12"
-                  md="4">
-                  <VSwitch
-                    v-model="library.LibraryOptions.Enabled"
-                    label="Enabled"
-                    color="primary"
-                    inset />
-                </VCol>
-                <VCol
-                  cols="12"
-                  md="4">
-                  <VSwitch
-                    v-model="library.LibraryOptions.EnablePhotos"
-                    label="Enable Photos"
-                    color="primary"
-                    inset />
-                </VCol>
-                <VCol
-                  cols="12"
-                  md="4">
-                  <VSwitch
-                    v-model="library.LibraryOptions.EnableRealtimeMonitor"
-                    label="Realtime Monitor"
-                    color="primary"
-                    inset />
-                </VCol>
               </VRow>
+
+              <LibraryOptionsFields
+                v-model="library.LibraryOptions"
+                :collection-type="library.CollectionType" />
 
               <div class="uno-mt-4">
                 <div class="uno-mb-2 uno-text-sm uno-font-medium">
@@ -145,35 +107,55 @@
                   density="comfortable"
                   class="uno-border uno-rounded">
                   <VListItem
-                    v-for="path in library.Locations"
-                    :key="`${library.ItemId}-${path}`"
-                    :title="path">
+                    v-for="pathInfo in library.LibraryOptions.PathInfos"
+                    :key="`${library.ItemId}-${pathInfo.Path}`"
+                    :title="pathInfo.Path"
+                    :subtitle="pathInfo.NetworkPath || undefined">
                     <template #append>
                       <VBtn
                         variant="text"
                         color="error"
-                        @click="removeLibraryPath(library, path)">
+                        @click="removeLibraryPath(library, pathInfo.Path)">
                         {{ t('remove') }}
                       </VBtn>
                     </template>
                   </VListItem>
-                  <VListItem v-if="!library.Locations.length">
+                  <VListItem v-if="!library.LibraryOptions.PathInfos.length">
                     <VListItemTitle>No paths</VListItemTitle>
                   </VListItem>
                 </VList>
-                <div class="uno-mt-3 uno-flex uno-gap-2">
-                  <VTextField
-                    v-model="library._newPath"
-                    label="New Path"
-                    density="comfortable"
-                    variant="outlined"
-                    hide-details />
-                  <VBtn
-                    variant="outlined"
-                    @click="addLibraryPath(library)">
-                    {{ t('add') }}
-                  </VBtn>
-                </div>
+                <VRow class="uno-mt-3">
+                  <VCol
+                    cols="12"
+                    md="5">
+                    <VTextField
+                      v-model="library._newPath"
+                      label="Folder path"
+                      density="comfortable"
+                      variant="outlined"
+                      hide-details />
+                  </VCol>
+                  <VCol
+                    cols="12"
+                    md="5">
+                    <VTextField
+                      v-model="library._newNetworkPath"
+                      label="Network path"
+                      density="comfortable"
+                      variant="outlined"
+                      hide-details />
+                  </VCol>
+                  <VCol
+                    cols="12"
+                    md="2">
+                    <VBtn
+                      block
+                      variant="outlined"
+                      @click="addLibraryPath(library)">
+                      {{ t('add') }}
+                    </VBtn>
+                  </VCol>
+                </VRow>
               </div>
 
               <div class="uno-mt-4 uno-flex uno-flex-wrap uno-gap-2">
@@ -202,9 +184,9 @@
 
       <VDialog
         v-model="createDialog"
-        max-width="720">
+        max-width="920">
         <VCard>
-          <VCardTitle>Create Library</VCardTitle>
+          <VCardTitle>Create library</VCardTitle>
           <VCardText>
             <VRow>
               <VCol
@@ -212,7 +194,7 @@
                 md="6">
                 <VTextField
                   v-model="createForm.name"
-                  label="Library Name"
+                  label="Library name"
                   density="comfortable"
                   variant="outlined" />
               </VCol>
@@ -221,38 +203,26 @@
                 md="6">
                 <VSelect
                   v-model="createForm.collectionType"
-                  label="Type"
+                  label="Content type"
                   density="comfortable"
                   variant="outlined"
-                  :items="collectionTypes" />
+                  :items="collectionTypes"
+                  item-title="title"
+                  item-value="value" />
               </VCol>
               <VCol cols="12">
                 <VTextarea
                   v-model="createForm.pathsText"
-                  label="Paths (one per line)"
+                  label="Paths, one per line. Use path | network path when needed."
                   rows="4"
                   density="comfortable"
                   variant="outlined" />
               </VCol>
-              <VCol
-                cols="12"
-                md="6">
-                <VTextField
-                  v-model="createForm.preferredMetadataLanguage"
-                  label="Metadata Language"
-                  density="comfortable"
-                  variant="outlined" />
-              </VCol>
-              <VCol
-                cols="12"
-                md="6">
-                <VTextField
-                  v-model="createForm.metadataCountryCode"
-                  label="Country Code"
-                  density="comfortable"
-                  variant="outlined" />
-              </VCol>
             </VRow>
+
+            <LibraryOptionsFields
+              v-model="createForm.libraryOptions"
+              :collection-type="createForm.collectionType" />
           </VCardText>
           <VCardActions>
             <VSpacer />
@@ -280,22 +250,45 @@ meta:
 </route>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, defineComponent, h, ref, type PropType } from 'vue';
+import {
+  VCol,
+  VCombobox,
+  VRow,
+  VSwitch,
+  VTextField
+} from 'vuetify/components';
 import { useTranslation } from 'i18next-vue';
 import { useSnackbar } from '#/composables/use-snackbar.ts';
 import { remote } from '#/plugins/remote/index.ts';
 
 interface MediaPathInfoDto {
   Path: string;
+  NetworkPath?: string | null;
 }
 
 interface LibraryOptionsDto {
   Enabled: boolean;
+  EnableArchiveMediaFiles: boolean;
   EnablePhotos: boolean;
   EnableRealtimeMonitor: boolean;
+  EnableChapterImageExtraction: boolean;
+  ExtractChapterImagesDuringLibraryScan: boolean;
+  SaveLocalMetadata: boolean;
+  EnableInternetProviders: boolean;
+  DownloadImagesInAdvance: boolean;
+  ImportMissingEpisodes: boolean;
+  EnableAutomaticSeriesGrouping: boolean;
+  EnableEmbeddedTitles: boolean;
+  EnableEmbeddedEpisodeInfos: boolean;
+  AutomaticRefreshIntervalDays: number;
   PreferredMetadataLanguage?: string | null;
   MetadataCountryCode?: string | null;
-  PathInfos?: MediaPathInfoDto[];
+  SeasonZeroDisplayName: string;
+  MetadataSavers: string[];
+  DisabledLocalMetadataReaders: string[];
+  LocalMetadataReaderOrder: string[];
+  PathInfos: MediaPathInfoDto[];
 }
 
 interface VirtualFolderInfoDto {
@@ -306,6 +299,7 @@ interface VirtualFolderInfoDto {
   LibraryOptions: LibraryOptionsDto;
   _draftName: string;
   _newPath: string;
+  _newNetworkPath: string;
 }
 
 interface SelectableMediaFolderDto {
@@ -319,18 +313,135 @@ const selectableFolders = ref<SelectableMediaFolderDto[]>([]);
 const loading = ref(false);
 const errorMessage = ref('');
 const createDialog = ref(false);
-const collectionTypes = ['movies', 'tvshows', 'music', 'musicvideos', 'homevideos', 'books'];
+const collectionTypes = [
+  { title: 'Movies', value: 'movies' },
+  { title: 'TV Shows', value: 'tvshows' },
+  { title: 'Music', value: 'music' },
+  { title: 'Music Videos', value: 'musicvideos' },
+  { title: 'Home Videos', value: 'homevideos' },
+  { title: 'Books', value: 'books' },
+  { title: 'Mixed', value: 'mixed' }
+];
 
 const createForm = ref({
   name: '',
   collectionType: 'movies',
   pathsText: '',
-  preferredMetadataLanguage: '',
-  metadataCountryCode: ''
+  libraryOptions: defaultLibraryOptions()
 });
 
 const apiBase = computed(() => remote.sdk.api?.basePath ?? '');
 const apiKey = computed(() => remote.auth.currentUserToken.value ?? '');
+
+const LibraryOptionsFields = defineComponent({
+  props: {
+    modelValue: {
+      type: Object as PropType<LibraryOptionsDto>,
+      required: true
+    },
+    collectionType: {
+      type: String,
+      required: true
+    }
+  },
+  emits: ['update:modelValue'],
+  setup(props, { emit }) {
+    const update = <K extends keyof LibraryOptionsDto>(key: K, value: LibraryOptionsDto[K]): void => {
+      emit('update:modelValue', {
+        ...props.modelValue,
+        [key]: value
+      });
+    };
+    const field = (key: keyof LibraryOptionsDto, label: string) => h(VSwitch, {
+      modelValue: props.modelValue[key],
+      label,
+      color: 'primary',
+      inset: true,
+      'onUpdate:modelValue': (value: boolean) => update(key, value as never)
+    });
+    const showMetadata = !['homevideos', 'photos'].includes(props.collectionType);
+    const showChapters = ['tvshows', 'movies', 'homevideos', 'musicvideos', 'mixed', ''].includes(props.collectionType);
+    const showTv = props.collectionType === 'tvshows';
+
+    return () => h('div', { class: 'uno-mt-4' }, [
+      h(VRow, {}, () => [
+        showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
+          modelValue: props.modelValue.PreferredMetadataLanguage,
+          label: 'Metadata language',
+          density: 'comfortable',
+          variant: 'outlined',
+          'onUpdate:modelValue': (value: string) => update('PreferredMetadataLanguage', value || null)
+        })),
+        showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
+          modelValue: props.modelValue.MetadataCountryCode,
+          label: 'Country code',
+          density: 'comfortable',
+          variant: 'outlined',
+          'onUpdate:modelValue': (value: string) => update('MetadataCountryCode', value || null)
+        })),
+        showTv && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
+          modelValue: props.modelValue.SeasonZeroDisplayName,
+          label: 'Season zero display name',
+          density: 'comfortable',
+          variant: 'outlined',
+          'onUpdate:modelValue': (value: string) => update('SeasonZeroDisplayName', value || 'Specials')
+        })),
+        h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
+          modelValue: props.modelValue.AutomaticRefreshIntervalDays,
+          label: 'Automatic refresh interval days',
+          density: 'comfortable',
+          variant: 'outlined',
+          type: 'number',
+          min: 0,
+          'onUpdate:modelValue': (value: string) => update('AutomaticRefreshIntervalDays', Number(value) || 0)
+        })),
+        h(VCol, { cols: '12', md: '4' }, () => field('Enabled', 'Enabled')),
+        props.collectionType === 'homevideos' && h(VCol, { cols: '12', md: '4' }, () => field('EnablePhotos', 'Enable photos')),
+        h(VCol, { cols: '12', md: '4' }, () => field('EnableRealtimeMonitor', 'Realtime monitor')),
+        showMetadata && h(VCol, { cols: '12', md: '4' }, () => field('EnableInternetProviders', 'Download internet metadata')),
+        showMetadata && h(VCol, { cols: '12', md: '4' }, () => field('DownloadImagesInAdvance', 'Download images in advance')),
+        props.collectionType !== 'photos' && h(VCol, { cols: '12', md: '4' }, () => field('SaveLocalMetadata', 'Save local metadata')),
+        showTv && h(VCol, { cols: '12', md: '4' }, () => field('ImportMissingEpisodes', 'Import missing episodes')),
+        showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableAutomaticSeriesGrouping', 'Automatically group series')),
+        showChapters && h(VCol, { cols: '12', md: '4' }, () => field('EnableChapterImageExtraction', 'Extract chapter images')),
+        showChapters && h(VCol, { cols: '12', md: '4' }, () => field('ExtractChapterImagesDuringLibraryScan', 'Extract chapters during scan')),
+        h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedTitles', 'Use embedded titles')),
+        showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedEpisodeInfos', 'Use embedded episode info')),
+        h(VCol, { cols: '12', md: '4' }, () => field('EnableArchiveMediaFiles', 'Archive media files')),
+        h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
+          modelValue: props.modelValue.MetadataSavers,
+          label: 'Metadata savers',
+          density: 'comfortable',
+          variant: 'outlined',
+          multiple: true,
+          chips: true,
+          items: ['Nfo'],
+          'onUpdate:modelValue': (value: string[]) => update('MetadataSavers', value)
+        })),
+        h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
+          modelValue: props.modelValue.LocalMetadataReaderOrder,
+          label: 'Local metadata reader order',
+          density: 'comfortable',
+          variant: 'outlined',
+          multiple: true,
+          chips: true,
+          items: ['Nfo'],
+          'onUpdate:modelValue': (value: string[]) => update('LocalMetadataReaderOrder', value)
+        })),
+        h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
+          modelValue: props.modelValue.DisabledLocalMetadataReaders,
+          label: 'Disabled local metadata readers',
+          density: 'comfortable',
+          variant: 'outlined',
+          multiple: true,
+          chips: true,
+          items: ['Nfo'],
+          'onUpdate:modelValue': (value: string[]) => update('DisabledLocalMetadataReaders', value)
+        }))
+      ])
+    ]);
+  }
+});
 
 function buildUrl(path: string): string {
   const url = new URL(`${apiBase.value}${path}`);
@@ -342,31 +453,76 @@ function buildUrl(path: string): string {
   return url.toString();
 }
 
-function normalizeLibrary(library: Omit<VirtualFolderInfoDto, '_draftName' | '_newPath'>): VirtualFolderInfoDto {
+function defaultLibraryOptions(): LibraryOptionsDto {
+  return {
+    Enabled: true,
+    EnableArchiveMediaFiles: false,
+    EnablePhotos: true,
+    EnableRealtimeMonitor: false,
+    EnableChapterImageExtraction: false,
+    ExtractChapterImagesDuringLibraryScan: false,
+    SaveLocalMetadata: false,
+    EnableInternetProviders: true,
+    DownloadImagesInAdvance: false,
+    ImportMissingEpisodes: false,
+    EnableAutomaticSeriesGrouping: true,
+    EnableEmbeddedTitles: false,
+    EnableEmbeddedEpisodeInfos: false,
+    AutomaticRefreshIntervalDays: 0,
+    PreferredMetadataLanguage: 'zh',
+    MetadataCountryCode: 'CN',
+    SeasonZeroDisplayName: 'Specials',
+    MetadataSavers: ['Nfo'],
+    DisabledLocalMetadataReaders: [],
+    LocalMetadataReaderOrder: ['Nfo'],
+    PathInfos: []
+  };
+}
+
+function normalizeOptions(options: Partial<LibraryOptionsDto> | undefined, locations: string[]): LibraryOptionsDto {
+  const defaults = defaultLibraryOptions();
+  const pathInfos = options?.PathInfos?.length
+    ? options.PathInfos
+    : locations.map(path => ({ Path: path }));
+
+  return {
+    ...defaults,
+    ...options,
+    PathInfos: pathInfos.map(pathInfo => ({
+      Path: pathInfo.Path,
+      NetworkPath: pathInfo.NetworkPath || null
+    }))
+  };
+}
+
+function normalizeLibrary(library: Omit<VirtualFolderInfoDto, '_draftName' | '_newPath' | '_newNetworkPath'>): VirtualFolderInfoDto {
   return {
     ...library,
     _draftName: library.Name,
     _newPath: '',
-    LibraryOptions: {
-      Enabled: library.LibraryOptions?.Enabled ?? true,
-      EnablePhotos: library.LibraryOptions?.EnablePhotos ?? true,
-      EnableRealtimeMonitor: library.LibraryOptions?.EnableRealtimeMonitor ?? false,
-      PreferredMetadataLanguage: library.LibraryOptions?.PreferredMetadataLanguage ?? '',
-      MetadataCountryCode: library.LibraryOptions?.MetadataCountryCode ?? '',
-      PathInfos: library.LibraryOptions?.PathInfos ?? library.Locations.map(path => ({ Path: path }))
-    }
+    _newNetworkPath: '',
+    LibraryOptions: normalizeOptions(library.LibraryOptions, library.Locations)
   };
 }
 
-function formatLocations(locations: string[]): string {
-  return locations.filter(Boolean).join(' | ');
+function formatLocations(pathInfos: MediaPathInfoDto[]): string {
+  return pathInfos.map(pathInfo => pathInfo.Path).filter(Boolean).join(' | ');
 }
 
-function parsePaths(text: string): string[] {
+function parsePathInfos(text: string): MediaPathInfoDto[] {
   return text
     .split(/\r?\n/g)
     .map(line => line.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((line) => {
+      const [path, networkPath] = line.split('|').map(value => value.trim());
+
+      return {
+        Path: path ?? '',
+        NetworkPath: networkPath || null
+      };
+    })
+    .filter(pathInfo => pathInfo.Path);
 }
 
 async function requestJson<T>(path: string): Promise<T> {
@@ -397,7 +553,7 @@ async function loadLibraries(): Promise<void> {
 
   try {
     const [virtualFolders, mediaFolders] = await Promise.all([
-      requestJson<Omit<VirtualFolderInfoDto, '_draftName' | '_newPath'>[]>('/Library/VirtualFolders/Query'),
+      requestJson<Omit<VirtualFolderInfoDto, '_draftName' | '_newPath' | '_newNetworkPath'>[]>('/Library/VirtualFolders/Query'),
       requestJson<SelectableMediaFolderDto[]>('/Library/SelectableMediaFolders')
     ]);
 
@@ -443,10 +599,7 @@ async function saveLibrary(library: VirtualFolderInfoDto): Promise<void> {
       },
       body: JSON.stringify({
         Id: library.ItemId,
-        LibraryOptions: {
-          ...library.LibraryOptions,
-          PathInfos: library.Locations.map(path => ({ Path: path }))
-        }
+        LibraryOptions: library.LibraryOptions
       })
     }).then(async (response) => {
       if (!response.ok) {
@@ -469,6 +622,11 @@ async function addLibraryPath(library: VirtualFolderInfoDto): Promise<void> {
     return;
   }
 
+  const pathInfo = {
+    Path: path,
+    NetworkPath: library._newNetworkPath.trim() || null
+  };
+
   try {
     await fetch(buildUrl('/Library/VirtualFolders/Paths'), {
       method: 'POST',
@@ -477,7 +635,7 @@ async function addLibraryPath(library: VirtualFolderInfoDto): Promise<void> {
       },
       body: JSON.stringify({
         Name: library.Name,
-        Path: path
+        PathInfo: pathInfo
       })
     }).then(async (response) => {
       if (!response.ok) {
@@ -486,6 +644,7 @@ async function addLibraryPath(library: VirtualFolderInfoDto): Promise<void> {
     });
 
     library._newPath = '';
+    library._newNetworkPath = '';
     useSnackbar('Path added', 'success');
     await loadLibraries();
   } catch (error) {
@@ -521,27 +680,24 @@ async function removeLibrary(library: VirtualFolderInfoDto): Promise<void> {
 }
 
 async function createLibrary(): Promise<void> {
-  const paths = parsePaths(createForm.value.pathsText);
+  const pathInfos = parsePathInfos(createForm.value.pathsText);
 
-  if (!createForm.value.name.trim() || !paths.length) {
+  if (!createForm.value.name.trim() || !pathInfos.length) {
     useSnackbar('Provide a name and at least one path', 'error');
     return;
   }
 
   try {
-    const response = await fetch(buildUrl(`/Library/VirtualFolders?Name=${encodeURIComponent(createForm.value.name.trim())}&CollectionType=${encodeURIComponent(createForm.value.collectionType)}`), {
+    const collectionType = createForm.value.collectionType === 'mixed' ? '' : createForm.value.collectionType;
+    const response = await fetch(buildUrl(`/Library/VirtualFolders?Name=${encodeURIComponent(createForm.value.name.trim())}&CollectionType=${encodeURIComponent(collectionType)}`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         LibraryOptions: {
-          Enabled: true,
-          EnablePhotos: true,
-          EnableRealtimeMonitor: false,
-          PreferredMetadataLanguage: createForm.value.preferredMetadataLanguage || null,
-          MetadataCountryCode: createForm.value.metadataCountryCode || null,
-          PathInfos: paths.map(path => ({ Path: path }))
+          ...createForm.value.libraryOptions,
+          PathInfos: pathInfos
         }
       })
     });
@@ -556,8 +712,7 @@ async function createLibrary(): Promise<void> {
       name: '',
       collectionType: 'movies',
       pathsText: '',
-      preferredMetadataLanguage: '',
-      metadataCountryCode: ''
+      libraryOptions: defaultLibraryOptions()
     };
     useSnackbar('Library created', 'success');
     await loadLibraries();

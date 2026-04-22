@@ -1310,9 +1310,19 @@ pub struct VideoStreamQuery {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsQuery {
-    #[serde(default, alias = "UserId", alias = "userId")]
+    #[serde(
+        default,
+        alias = "UserId",
+        alias = "userId",
+        deserialize_with = "deserialize_optional_uuid"
+    )]
     pub user_id: Option<Uuid>,
-    #[serde(default, alias = "SeriesId", alias = "seriesId")]
+    #[serde(
+        default,
+        alias = "SeriesId",
+        alias = "seriesId",
+        deserialize_with = "deserialize_optional_uuid"
+    )]
     pub series_id: Option<Uuid>,
     #[serde(
         default,
@@ -1635,7 +1645,7 @@ fn parse_optional_datetime(value: &str) -> Option<DateTime<Utc>> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct UserItemDataQuery {
-    #[serde(default, alias = "userId")]
+    #[serde(default, alias = "userId", deserialize_with = "deserialize_optional_uuid")]
     pub user_id: Option<Uuid>,
     #[serde(default, alias = "datePlayed")]
     pub date_played: Option<DateTime<Utc>>,
@@ -1669,9 +1679,9 @@ pub struct UpdateUserItemDataRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlaybackReport {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     pub item_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     pub user_id: Option<Uuid>,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -1724,6 +1734,8 @@ fn default_collection_type() -> String {
 #[serde(rename_all = "PascalCase")]
 pub struct MediaPathInfoDto {
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1731,6 +1743,8 @@ pub struct MediaPathInfoDto {
 pub struct LibraryOptionsDto {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub enable_archive_media_files: bool,
     #[serde(default = "default_true")]
     pub enable_photos: bool,
     #[serde(default)]
@@ -1741,6 +1755,12 @@ pub struct LibraryOptionsDto {
     pub extract_chapter_images_during_library_scan: bool,
     #[serde(default)]
     pub save_local_metadata: bool,
+    #[serde(default = "default_true")]
+    pub enable_internet_providers: bool,
+    #[serde(default)]
+    pub download_images_in_advance: bool,
+    #[serde(default)]
+    pub import_missing_episodes: bool,
     #[serde(default = "default_true")]
     pub enable_automatic_series_grouping: bool,
     #[serde(default)]
@@ -1769,11 +1789,15 @@ impl Default for LibraryOptionsDto {
     fn default() -> Self {
         Self {
             enabled: true,
+            enable_archive_media_files: false,
             enable_photos: true,
             enable_realtime_monitor: false,
             enable_chapter_image_extraction: false,
             extract_chapter_images_during_library_scan: false,
             save_local_metadata: false,
+            enable_internet_providers: true,
+            download_images_in_advance: false,
+            import_missing_episodes: false,
             enable_automatic_series_grouping: true,
             enable_embedded_titles: false,
             enable_embedded_episode_infos: false,
@@ -2022,9 +2046,9 @@ pub struct EpisodeDto {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct SeasonsQuery {
-    #[serde(default, alias = "userId")]
+    #[serde(default, alias = "userId", deserialize_with = "deserialize_optional_uuid")]
     pub user_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     pub series_id: Option<Uuid>,
     #[serde(default)]
     pub fields: Option<String>,
@@ -2077,11 +2101,11 @@ pub struct TranscodingProfile {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct EpisodesQuery {
-    #[serde(default, alias = "userId")]
+    #[serde(default, alias = "userId", deserialize_with = "deserialize_optional_uuid")]
     pub user_id: Option<Uuid>,
     #[serde(default)]
     pub season: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     pub season_id: Option<Uuid>,
     #[serde(default)]
     pub is_missing: Option<bool>,
@@ -2159,7 +2183,7 @@ pub struct EpisodesQuery {
 
 /// 将UUID转换为Emby API兼容的大写GUID格式
 pub fn uuid_to_emby_guid(uuid: &Uuid) -> String {
-    uuid.to_string().to_uppercase()
+    uuid.simple().to_string().to_uppercase()
 }
 
 /// 将Option<Uuid>转换为Option<Emby GUID字符串>
@@ -2211,7 +2235,7 @@ where
         .collect()
 }
 
-fn deserialize_optional_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
+pub(crate) fn deserialize_optional_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -2227,8 +2251,7 @@ where
             if normalized.eq_ignore_ascii_case("root") {
                 return Ok(Some(Uuid::nil()));
             }
-            // 尝试解析UUID
-            Uuid::parse_str(normalized).map(Some).map_err(serde::de::Error::custom)
+            emby_id_to_uuid(normalized).map(Some).map_err(serde::de::Error::custom)
         }
         None => Ok(None),
     }
@@ -2239,7 +2262,7 @@ where
 pub struct GetSimilarItems {
     #[serde(skip)]
     pub id: Option<String>, // 从路径参数提取，不由查询字符串解析
-    #[serde(default, alias = "UserId", alias = "userId")]
+    #[serde(default, alias = "UserId", alias = "userId", deserialize_with = "deserialize_optional_uuid")]
     pub user_id: Option<Uuid>,
     #[serde(default, alias = "Limit")]
     pub limit: Option<i64>,
@@ -2260,7 +2283,7 @@ pub struct GetSimilarItems {
 pub struct PlaybackInfoDto {
     #[serde(default)]
     pub id: Option<String>,
-    #[serde(default, alias = "userId")]
+    #[serde(default, alias = "userId", deserialize_with = "deserialize_optional_uuid")]
     pub user_id: Option<Uuid>,
     #[serde(default, alias = "maxStreamingBitrate")]
     pub max_streaming_bitrate: Option<i64>,

@@ -1,4 +1,11 @@
-use crate::{auth, auth::AuthSession, error::AppError, models::QueryResult, repository, state::AppState};
+use crate::{
+    auth,
+    auth::AuthSession,
+    error::AppError,
+    models::{uuid_to_emby_guid, QueryResult},
+    repository,
+    state::AppState,
+};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -72,7 +79,7 @@ async fn get_devices(
                         .application_version
                         .clone()
                         .unwrap_or_else(|| "0.1.0".to_string()),
-                    last_user_id: session.user_id.to_string(),
+                    last_user_id: uuid_to_emby_guid(&session.user_id),
                     last_user_name: session.user_name,
                     date_last_activity: session.last_activity_at,
                 },

@@ -20,15 +20,23 @@ function ensureDeviceId(): string {
   const storageKey = 'deviceId';
   const val = globalThis.localStorage.getItem(storageKey);
 
+  const normalizeDeviceId = (id: string): string => id.replace(/-/g, '').toUpperCase();
+
   if (!val) {
-    const id = v4();
+    const id = normalizeDeviceId(v4());
 
     globalThis.localStorage.setItem(storageKey, id);
 
     return id;
   }
 
-  return val;
+  const normalized = normalizeDeviceId(val);
+
+  if (normalized !== val) {
+    globalThis.localStorage.setItem(storageKey, normalized);
+  }
+
+  return normalized;
 }
 
 const SDK = new Jellyfin({

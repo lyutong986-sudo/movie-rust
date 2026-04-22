@@ -12,7 +12,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header::CONTENT_TYPE, StatusCode},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
@@ -46,6 +46,11 @@ pub fn router() -> Router<AppState> {
         .route("/system/logs", get(server_logs))
         .route("/System/ActivityLog/Entries", get(activity_log_entries))
         .route("/system/activitylog/entries", get(activity_log_entries))
+        .route("/System/ReleaseNotes", get(release_notes))
+        .route("/System/ReleaseNotes/Versions", get(release_note_versions))
+        .route("/System/WakeOnLanInfo", get(wake_on_lan_info))
+        .route("/System/Restart", post(restart_server))
+        .route("/System/Shutdown", post(shutdown_server))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -95,6 +100,28 @@ async fn system_info(
         startup_wizard_completed,
         can_self_restart: false,
     }))
+}
+
+async fn release_notes(_session: AuthSession) -> impl IntoResponse {
+    ([(CONTENT_TYPE, "text/plain; charset=utf-8")], "")
+}
+
+async fn release_note_versions(_session: AuthSession) -> Json<Vec<Value>> {
+    Json(Vec::new())
+}
+
+async fn wake_on_lan_info(_session: AuthSession) -> Json<Vec<Value>> {
+    Json(Vec::new())
+}
+
+async fn restart_server(session: AuthSession) -> Result<StatusCode, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    Ok(StatusCode::NOT_IMPLEMENTED)
+}
+
+async fn shutdown_server(session: AuthSession) -> Result<StatusCode, crate::error::AppError> {
+    crate::auth::require_admin(&session)?;
+    Ok(StatusCode::NOT_IMPLEMENTED)
 }
 
 async fn endpoint_info(_session: AuthSession, State(state): State<AppState>) -> Json<EndpointInfo> {

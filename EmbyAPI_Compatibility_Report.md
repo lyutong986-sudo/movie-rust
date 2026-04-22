@@ -565,3 +565,46 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - 针对这个页面的 Emby 兼容坑，后端一并修正了媒体库选项保存的 ID 语义：[backend/src/models.rs] 中 `UpdateLibraryOptionsDto.Id` 不再按原始 `Uuid` 直接反序列化，而是按 Emby GUID 字符串接收，再由 [backend/src/routes/admin.rs] 转回内部 UUID；同时 `GET /Library/SelectableMediaFolders` 返回的 `Id/Guid` 也统一改为 Emby GUID，避免前端和 EmbySDK 继续混用两套 ID 语义。
 - 这轮仍以 EmbySDK 为准，没有强行让 frontend 去兼容后端旧行为；相反是把 backend 的媒体库管理 DTO 和 websocket 用户数据联动都往 EmbySDK/Jellyfin SDK 的使用习惯靠拢。
 - 验证情况：`cargo check --manifest-path backend\\Cargo.toml` 已通过。前端这轮没有跑完整构建检查，当前结论基于代码级审计与修复。
+
+## 2026-04-22 前后端 ID 语义适配补充（二十八）
+
+- 本轮按“项目对外使用和发送原始 UUID 的位置全部替换成 Emby GUID”的要求，先统一后端核心转换函数：`uuid_to_emby_guid(...)` 现在输出 Emby/Jellyfin 客户端常用的大写无横线 GUID，避免 DTO 的 `Id/UserId/Guid/ItemId` 等字段继续暴露原始带横线 UUID。
+- 入参侧同步放宽为 Emby GUID：`deserialize_optional_uuid(...)` 改为复用 `emby_id_to_uuid(...)`，并覆盖 `ItemsQuery.UserId/SeriesId`、`UserItemDataQuery.UserId`、`PlaybackReport.ItemId/UserId`、`SeasonsQuery`、`EpisodesQuery`、`GetSimilarItems.UserId`、`PlaybackInfoDto.UserId`、`UserViews.userId`、`DisplayPreferences.UserId`、`Genres.UserId` 等前端和 EmbySDK 高频查询/请求体字段。
+- 路径参数侧清理了会直接导致无横线 GUID 404/400 的 `Path<Uuid>`：用户视图、用户根目录、用户 Items、HomeSections、Suggestions、Latest、ItemFilters、UserItems/UserData、Favorite、Played、Resume、UserItemById、InstantMix、Intros、LocalTrailers、SpecialFeatures、HideFromResume、UserSimilar、Genres 用户路径、PlayingItems legacy 播放上报路径、admin library 删除路径等，现均先按字符串接收再按 Emby GUID 解析。
+- 对外响应侧补齐了几个裸 UUID 漏点：`DisplayPreferences.UserId`、`Devices.LastUserId`、`session_commands.Id`、Person 按 ID 访问和 similar item 排除列表解析均切到 Emby GUID 语义，避免前端/本地播放器在后续链路里混用两套 ID 格式。
+- 验证情况：`cargo check --manifest-path backend\Cargo.toml` 已通过；仍有既有 warning，未新增编译错误。- frontend 侧同步处理 SDK 设备标识：`sdk-utils.ensureDeviceId()` 现在生成并缓存大写无横线 Emby GUID，且会把已存在的带横线 `deviceId` 自动归一化，避免 `/socket?deviceId=...`、会话注册等链路继续发送原始 UUID 形态。
+
+## 2026-04-22 前后端 ID 语义适配补充（二十九）
+
+- 继续排查对外响应中仍可能发送原始带横线 UUID 的位置，并修正 `GET /Library/SelectableMediaFolders` 的 `SubFolders[].Id`：子文件夹 ID 现在使用媒体库 Emby GUID 作为前缀，不再直接拼接数据库 `library.id` 原始 UUID。
+- 修正 `POST /Metadata/Persons/Fetch` 返回体：`PersonId` 现在输出 Emby GUID 字符串，避免元数据人物抓取链路把内部 `uuid::Uuid` 直接序列化给前端或本地播放器。
+- frontend 路由校验同步收紧：`itemId` 路由参数现在只接受 32 位 Emby GUID，不再把带横线原始 UUID 当作合法项目 ID，从入口层避免继续传播旧 ID 形态。
+
+## 2026-04-22 媒体库添加功能适配（三十）
+
+- 对照 `模板项目/Emby.Web.Mobile-master/src/components/medialibrarycreator` 与 `libraryoptionseditor` 的原始媒体库添加流程，当前项目的 `settings/libraries` 简化表单已重做为 Emby 风格配置面板。新增/编辑媒体库现在覆盖原始模板会提交的关键 `LibraryOptions` 字段：`EnableArchiveMediaFiles`、`EnablePhotos`、`EnableRealtimeMonitor`、`EnableInternetProviders`、`DownloadImagesInAdvance`、`SaveLocalMetadata`、`ImportMissingEpisodes`、`EnableAutomaticSeriesGrouping`、`EnableChapterImageExtraction`、`ExtractChapterImagesDuringLibraryScan`、`PreferredMetadataLanguage`、`MetadataCountryCode`、`SeasonZeroDisplayName`、`MetadataSavers`、`LocalMetadataReaderOrder`、`DisabledLocalMetadataReaders`、`AutomaticRefreshIntervalDays`、`EnableEmbeddedTitles`、`EnableEmbeddedEpisodeInfos`。
+- 前端添加路径功能补齐 Emby 原始添加器的 `NetworkPath` 语义：创建媒体库时支持按 `Path | NetworkPath` 输入，编辑媒体库时新增路径也会通过 `PathInfo` 提交，避免只保存本地路径。
+- 后端 `LibraryOptionsDto` 和 `MediaPathInfoDto` 同步扩展，新增字段会被反序列化、持久化并在 `GET /Library/VirtualFolders`/`Query` 中原样返回；路径规范化现在会保留对应的 `NetworkPath`。
+- 后端 `POST /Library/VirtualFolders/Paths` 现在优先处理 SDK 风格的 `PathInfo` 请求体并保留 `NetworkPath`；旧的 `Path` 请求体仍继续兼容。
+- 按 Emby 原始添加器行为修正 `mixed` 类型：前端会把 `mixed` 作为空 `CollectionType` 提交，后端现在把空内容类型规范化为 `mixed`，不再误落成 `movies`。
+- 验证情况：后端 `cargo check --manifest-path backend\\Cargo.toml` 已通过。当前环境缺少 `node`、`pnpm`、`corepack` 命令，前端未能运行类型检查；本轮前端验证为代码级审计。
+
+## 2026-04-22 rg 模板对照审计补充（二十九）
+
+- 本轮按要求使用 `rg` 对 `frontend/packages/frontend/src`、`模板项目/本地播放器模板`、`模板项目/EmbySDK/SampleCode/RestApi/TypeScript/api.ts` 和 `backend/src/routes` 做交叉审计：先抽取 frontend 的 `newUserApi(...)`/`useApi(...)` 调用，再抽取本地播放器 Dart 侧 `fetchPlaybackInfo/fetchSeasons/fetchEpisodes/fetchItems/fetchItemDetail` 等真实调用，最后对照 EmbySDK `localVarPath` 与 backend `.route(...)`。
+- 已补齐低风险缺口：`POST /Sessions/Playing/Ping` 现在返回 204，用于 EmbySDK 播放心跳；`POST /Items/RemoteSearch/Game`、`POST /Items/RemoteSearch/Image` 复用当前兼容空结果逻辑，避免 SDK 识别/图片搜索扩展路径 404；`POST /Items/Metadata/Reset` 增加安全占位，当前返回 204，不删除本地元数据。
+- 已补齐用户配置标准路径：`GET/POST/PUT /Users/{Id}/Configuration` 与 `POST /Users/{Id}/Configuration/Partial` 现在直接读写 `UserConfigurationDto`，和已有 `UserSettings` 兼容路径共享同一份用户配置落库语义，前端或 EmbySDK 使用标准 UserService 路径时不再 404。
+- 已补齐系统探测路径：`GET /System/ReleaseNotes`、`GET /System/ReleaseNotes/Versions`、`GET /System/WakeOnLanInfo` 提供 EmbySDK 可解析的空/文本响应；`POST /System/Restart` 与 `POST /System/Shutdown` 已挂路由并要求管理员，但返回 501，明确表示当前后端不能真正重启/关机，避免误开放危险能力。
+- 本地播放器模板当前高频链路 `Users/AuthenticateByName`、`Users/Me`、`Items/{id}`、`Items/{id}/PlaybackInfo`、`Shows/{id}/Seasons`、`Shows/{id}/Episodes`、`Videos/{id}/stream`、`Audio/{id}/stream`、`UserItems/Resume`、`Items/Latest` 与播放上报链路在 backend 已有对应路由或本轮已补齐兼容缺口。
+- 后续仍建议分批审计但本轮未直接实现的 EmbySDK 全量能力：Playlist/Sync/LiveTV/Connect/Sharing/Subtitle remote search 与删除、Item Tags Add/Delete、ThemeMedia/ThemeSongs/ThemeVideos、AudioBooks/NextUp、Devices CameraUploads/Options/Info 等。这些要么 frontend/本地播放器当前未高频调用，要么需要真实业务模型支撑，不适合只做空实现。
+- 验证情况：`cargo check --manifest-path backend\Cargo.toml` 已通过；仍只有既有 warning。
+
+## 2026-04-22 rg 模板对照审计补充（三十一）
+
+- 继续使用 `rg` 顺着 EmbySDK `localVarPath`、frontend 已存在页面能力和本地播放器模板做差异对照，本轮优先处理会让媒体详情、编辑菜单或库管理动作出现 404/空结果异常的 Items 周边端点。
+- 后端新增 `GET /Items/Prefixes`，按 EmbySDK 形状返回空数组占位，避免客户端在筛选/索引前缀探测时命中 404。
+- 后端新增 `POST /Items/Delete` 批量删除路径，支持 Emby GUID 列表解析，复用现有媒体项删除逻辑，并在删除后广播 `LibraryChanged { ItemsRemoved: [...] }`，使前端列表和 Emby 客户端缓存能收到删除事件。
+- 后端新增 `GET /Items/{Id}/CriticReviews` 与 `GET /Items/{Id}/DeleteInfo`：前者返回标准 `QueryResult` 空集合，后者返回 `CanDelete/DeleteFromExternalProvider/DeleteFromFileSystem`，用于补齐详情页/操作菜单对删除能力和评论能力的标准探测。
+- 后端新增 `GET /Items/{Id}/ThemeMedia`、`GET /Items/{Id}/ThemeSongs`、`GET /Items/{Id}/ThemeVideos`，返回 Emby 风格的 `ThemeMediaResult` 载荷；当前基于已有子项查询能力按 `ThemeSong`/`ThemeVideo` 类型取数，没有真实主题媒体时稳定返回空集合而不是 404。
+- 后端新增 `POST /Items/{Id}/Tags/Add` 与 `POST /Items/{Id}/Tags/Delete`，请求体按 EmbySDK 常见的 `Tags: [{ Name|Id }]` 接收，实际更新 `media_items.tags` 并广播 `LibraryChanged { ItemsUpdated: [...] }`，使元数据编辑页的标签增删具备真实落库语义。
+- 本轮验证：`cargo check --manifest-path backend\Cargo.toml` 已通过；仍只有既有 warning，未新增编译错误。

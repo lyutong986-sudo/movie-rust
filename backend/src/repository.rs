@@ -1892,8 +1892,41 @@ pub async fn add_library_path(
     {
         options.path_infos.push(MediaPathInfoDto {
             path: path.to_string(),
+            network_path: None,
         });
     }
+    update_library_options(pool, library.id, options).await
+}
+
+pub async fn add_library_path_info(
+    pool: &sqlx::PgPool,
+    library_name: &str,
+    path_info: MediaPathInfoDto,
+) -> Result<DbLibrary, AppError> {
+    let library = get_library_by_name(pool, library_name)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
+    let mut options = library_options(&library);
+    let path = path_info.path.trim();
+    if path.is_empty() {
+        return Err(AppError::BadRequest("媒体路径不能为空".to_string()));
+    }
+    let network_path = path_info
+        .network_path
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if !options
+        .path_infos
+        .iter()
+        .any(|candidate| candidate.path.eq_ignore_ascii_case(path))
+    {
+        options.path_infos.push(MediaPathInfoDto {
+            path: path.to_string(),
+            network_path,
+        });
+    }
+
     update_library_options(pool, library.id, options).await
 }
 
@@ -1913,9 +1946,17 @@ pub async fn update_library_path(
     if options.path_infos.is_empty() {
         options.path_infos.push(MediaPathInfoDto {
             path: path.to_string(),
+            network_path: path_info
+                .network_path
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
         });
     } else {
         options.path_infos[0].path = path.to_string();
+        options.path_infos[0].network_path = path_info
+            .network_path
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
     }
     update_library_options(pool, library.id, options).await
 }
@@ -2014,6 +2055,7 @@ pub fn library_options(library: &DbLibrary) -> LibraryOptionsDto {
     if options.path_infos.is_empty() {
         options.path_infos.push(MediaPathInfoDto {
             path: library.path.clone(),
+            network_path: None,
         });
     }
     normalize_library_options(
@@ -2045,6 +2087,7 @@ pub fn library_to_virtual_folder_dto(library: &DbLibrary) -> VirtualFolderInfoDt
 
 fn normalize_collection_type(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
+        "" => "mixed".to_string(),
         "tvshows" | "series" | "shows" => "tvshows".to_string(),
         "music" | "audio" => "music".to_string(),
         "homevideos" | "homevideo" | "videos" => "homevideos".to_string(),
@@ -2087,7 +2130,17 @@ fn normalize_library_options(
 
     options.path_infos = paths
         .into_iter()
-        .map(|path| MediaPathInfoDto { path })
+        .map(|path| {
+            let network_path = options
+                .path_infos
+                .iter()
+                .find(|info| info.path.eq_ignore_ascii_case(&path))
+                .and_then(|info| info.network_path.clone())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+
+            MediaPathInfoDto { path, network_path }
+        })
         .collect();
 
     if options.season_zero_display_name.trim().is_empty() {
@@ -4619,7 +4672,7 @@ fn session_command_to_json(row: SessionCommandRow) -> Value {
         .unwrap_or_else(|| json!({}));
 
     json!({
-        "Id": row.id.to_string(),
+        "Id": uuid_to_emby_guid(&row.id),
         "Name": name,
         "Command": name,
         "Arguments": arguments,
@@ -8256,7 +8309,7 @@ pub async fn find_similar_items(
     if result.len() < limit as usize {
         let remaining_limit = limit - result.len() as i64;
         let exclude_ids: Vec<Uuid> = result.iter()
-            .filter_map(|dto| Uuid::parse_str(&dto.id).ok())
+            .filter_map(|dto| emby_id_to_uuid(&dto.id).ok())
             .collect();
         
         let additional_items = sqlx::query_as::<_, DbMediaItem>(

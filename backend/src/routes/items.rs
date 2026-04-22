@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Root", get(root_item))
         .route("/Users/{user_id}/Items/Root", get(root_item_for_user))
         .route("/Items/Counts", get(item_counts))
+        .route("/Items/Prefixes", get(item_prefixes))
         .route("/Users/{user_id}/Items/Counts", get(user_item_counts))
         .route("/Items/Filters", get(item_filters))
         .route("/Items/Latest", get(latest_items_by_query))
@@ -101,6 +102,8 @@ pub fn router() -> Router<AppState> {
         .route("/Items/RemoteSearch/Apply/{item_id}", post(apply_search_criteria))
         .route("/Items/RemoteSearch/Book", post(remote_search_results))
         .route("/Items/RemoteSearch/BoxSet", post(remote_search_results))
+        .route("/Items/RemoteSearch/Game", post(remote_search_results))
+        .route("/Items/RemoteSearch/Image", post(remote_search_results))
         .route("/Items/RemoteSearch/Movie", post(remote_search_results))
         .route("/Items/RemoteSearch/MusicAlbum", post(remote_search_results))
         .route("/Items/RemoteSearch/MusicArtist", post(remote_search_results))
@@ -108,11 +111,20 @@ pub fn router() -> Router<AppState> {
         .route("/Items/RemoteSearch/Person", post(remote_search_results))
         .route("/Items/RemoteSearch/Series", post(remote_search_results))
         .route("/Items/RemoteSearch/Trailer", post(remote_search_results))
+        .route("/Items/Metadata/Reset", post(reset_item_metadata))
+        .route("/Items/Delete", post(delete_items))
         .route("/Items/{item_id}", get(item_by_id).post(update_item).delete(delete_item))
         .route("/Items/{item_id}/MetadataEditor", get(metadata_editor_info))
         .route("/Items/{item_id}/ContentType", post(update_item_content_type))
         .route("/Items/{item_id}/ExternalIdInfos", get(external_id_infos))
         .route("/Items/{item_id}/Ancestors", get(item_ancestors))
+        .route("/Items/{item_id}/CriticReviews", get(critic_reviews))
+        .route("/Items/{item_id}/DeleteInfo", get(delete_info))
+        .route("/Items/{item_id}/ThemeMedia", get(theme_media))
+        .route("/Items/{item_id}/ThemeSongs", get(theme_songs))
+        .route("/Items/{item_id}/ThemeVideos", get(theme_videos))
+        .route("/Items/{item_id}/Tags/Add", post(add_item_tags))
+        .route("/Items/{item_id}/Tags/Delete", post(remove_item_tags))
         .route("/Items/{item_id}/Refresh", post(refresh_item_metadata))
         .route("/Items/{item_id}/Delete", post(delete_item))
         .route("/Items/{item_id}/Chapters", get(item_chapters))
@@ -139,7 +151,7 @@ pub fn router() -> Router<AppState> {
 async fn user_views(
     _session: AuthSession,
     State(state): State<AppState>,
-    Path(_user_id): Path<Uuid>,
+    Path(_user_id): Path<String>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     libraries_as_query_result(&state).await
 }
@@ -147,7 +159,11 @@ async fn user_views(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct UserViewsQuery {
-    #[serde(default, alias = "userId")]
+    #[serde(
+        default,
+        alias = "userId",
+        deserialize_with = "crate::models::deserialize_optional_uuid"
+    )]
     user_id: Option<Uuid>,
 }
 
@@ -196,7 +212,7 @@ async fn root_item(_session: AuthSession, State(state): State<AppState>) -> Json
 async fn root_item_for_user(
     _session: AuthSession,
     State(state): State<AppState>,
-    Path(_user_id): Path<Uuid>,
+    Path(_user_id): Path<String>,
 ) -> Json<BaseItemDto> {
     Json(repository::root_item_dto(state.config.server_id))
 }
@@ -208,11 +224,16 @@ async fn item_counts(
     Ok(Json(repository::item_counts(&state.pool).await?))
 }
 
+async fn item_prefixes(_session: AuthSession) -> Json<Vec<Value>> {
+    Json(Vec::new())
+}
+
 async fn user_item_counts(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
 ) -> Result<Json<ItemCountsDto>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     Ok(Json(repository::item_counts(&state.pool).await?))
 }
@@ -388,9 +409,10 @@ async fn items(
 async fn user_items(
     _session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     query.user_id = Some(user_id);
     list_items_for_user(&state, user_id, query).await
 }
@@ -507,8 +529,9 @@ async fn virtual_folder_items(
 async fn home_sections(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
 ) -> Result<Json<Vec<ContentSectionDto>>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     let libraries = repository::list_libraries(&state.pool).await?;
     let mut sections = Vec::with_capacity(libraries.len());
@@ -539,9 +562,10 @@ async fn home_sections(
 async fn user_suggestions(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
     query.recursive = Some(true);
@@ -557,9 +581,10 @@ async fn user_suggestions(
 async fn user_section_items(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, section_id)): Path<(Uuid, String)>,
+    Path((user_id, section_id)): Path<(String, String)>,
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     if let Ok(parent_id) = emby_id_to_uuid(&section_id) {
         query.parent_id = Some(parent_id);
@@ -573,9 +598,10 @@ async fn user_section_items(
 async fn latest_items(
     _session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     latest_items_for_user(&state, user_id, &mut query).await
 }
 
@@ -745,9 +771,10 @@ async fn item_filters(
 async fn user_item_filters(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<Value>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
     item_filters_for_query(&state, user_id, query).await
@@ -1076,9 +1103,10 @@ async fn media_items_to_dto_result(
 async fn user_item_data(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id): Path<String>,
     Query(query): Query<UserItemDataQuery>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let item_id = parse_emby_uuid_path(&item_id, "item id")?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     ensure_media_item_exists(&state, item_id).await?;
@@ -1090,8 +1118,10 @@ async fn user_item_data(
 async fn legacy_user_item_data(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Path((user_id, item_id)): Path<(String, String)>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
     ensure_user_access(&session, user_id)?;
     ensure_media_item_exists(&state, item_id).await?;
     Ok(Json(
@@ -1102,10 +1132,11 @@ async fn legacy_user_item_data(
 async fn update_user_item_data(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id): Path<String>,
     Query(query): Query<UserItemDataQuery>,
     Json(payload): Json<UpdateUserItemDataRequest>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let item_id = parse_emby_uuid_path(&item_id, "item id")?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     update_user_data_for_user(&state, &session, user_id, item_id, payload).await
 }
@@ -1113,18 +1144,21 @@ async fn update_user_item_data(
 async fn legacy_update_user_item_data(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Path((user_id, item_id)): Path<(String, String)>,
     Json(payload): Json<UpdateUserItemDataRequest>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
     update_user_data_for_user(&state, &session, user_id, item_id, payload).await
 }
 
 async fn mark_favorite(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id): Path<String>,
     Query(query): Query<UserItemDataQuery>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let item_id = parse_emby_uuid_path(&item_id, "item id")?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     set_favorite_for_user(&state, &session, user_id, item_id, true).await
 }
@@ -1132,9 +1166,10 @@ async fn mark_favorite(
 async fn unmark_favorite(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id): Path<String>,
     Query(query): Query<UserItemDataQuery>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let item_id = parse_emby_uuid_path(&item_id, "item id")?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     set_favorite_for_user(&state, &session, user_id, item_id, false).await
 }
@@ -1142,25 +1177,30 @@ async fn unmark_favorite(
 async fn legacy_mark_favorite(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Path((user_id, item_id)): Path<(String, String)>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
     set_favorite_for_user(&state, &session, user_id, item_id, true).await
 }
 
 async fn legacy_unmark_favorite(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Path((user_id, item_id)): Path<(String, String)>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
     set_favorite_for_user(&state, &session, user_id, item_id, false).await
 }
 
 async fn mark_played(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id): Path<String>,
     Query(query): Query<UserItemDataQuery>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let item_id = parse_emby_uuid_path(&item_id, "item id")?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     set_played_for_user(&state, &session, user_id, item_id, true, query.date_played).await
 }
@@ -1168,9 +1208,10 @@ async fn mark_played(
 async fn mark_unplayed(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id): Path<String>,
     Query(query): Query<UserItemDataQuery>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let item_id = parse_emby_uuid_path(&item_id, "item id")?;
     let user_id = query.user_id.unwrap_or(session.user_id);
     set_played_for_user(&state, &session, user_id, item_id, false, None).await
 }
@@ -1178,17 +1219,21 @@ async fn mark_unplayed(
 async fn legacy_mark_played(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Path((user_id, item_id)): Path<(String, String)>,
     Query(query): Query<UserItemDataQuery>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
     set_played_for_user(&state, &session, user_id, item_id, true, query.date_played).await
 }
 
 async fn legacy_mark_unplayed(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Path((user_id, item_id)): Path<(String, String)>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
     set_played_for_user(&state, &session, user_id, item_id, false, None).await
 }
 
@@ -1331,11 +1376,16 @@ async fn item_by_id(
 async fn user_item_by_id(
     _session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id_str)): Path<(Uuid, String)>,
+    Path((user_id, item_id_str)): Path<(String, String)>,
 ) -> Result<Json<BaseItemDto>, AppError> {
-    let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
+    let item_id = parse_emby_uuid_path(&item_id_str, "item id")?;
     item_dto(&state, user_id, item_id).await
+}
+
+fn parse_emby_uuid_path(value: &str, label: &str) -> Result<Uuid, AppError> {
+    emby_id_to_uuid(value)
+        .map_err(|_| AppError::BadRequest(format!("invalid {label} format: {value}")))
 }
 
 async fn instant_mix_from_item(
@@ -1350,9 +1400,10 @@ async fn instant_mix_from_item(
 async fn instant_mix_from_user_item(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id_or_name)): Path<(Uuid, String)>,
+    Path((user_id, item_id_or_name)): Path<(String, String)>,
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     instant_mix_for_seed(&state, user_id, &item_id_or_name, query).await
 }
@@ -1489,6 +1540,35 @@ struct ExternalIdInfoDto {
     url_format_string: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DeleteItemsQuery {
+    #[serde(default, alias = "ids")]
+    ids: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct TagMutationRequest {
+    #[serde(default)]
+    tags: Vec<NameIdInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct NameIdInput {
+    name: Option<String>,
+    id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct ThemeMediaResultDto {
+    owner_id: Option<i64>,
+    items: Vec<BaseItemDto>,
+    total_record_count: i64,
+}
+
 async fn metadata_editor_info(
     _session: AuthSession,
     State(state): State<AppState>,
@@ -1560,6 +1640,31 @@ async fn delete_item(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn delete_items(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<DeleteItemsQuery>,
+) -> Result<StatusCode, AppError> {
+    let item_ids = parse_emby_uuid_list(query.ids.as_deref());
+    let mut removed = Vec::with_capacity(item_ids.len());
+    for item_id in item_ids {
+        repository::delete_media_item(&state.pool, item_id).await?;
+        removed.push(uuid_to_emby_guid(&item_id));
+    }
+    if !removed.is_empty() {
+        crate::routes::websocket::broadcast_message(
+            &state,
+            "LibraryChanged",
+            json!({
+                "ItemsAdded": [],
+                "ItemsRemoved": removed,
+                "ItemsUpdated": []
+            }),
+        );
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn external_id_infos(
     _session: AuthSession,
     State(state): State<AppState>,
@@ -1602,11 +1707,98 @@ async fn item_ancestors(
     Ok(Json(ancestors))
 }
 
+async fn critic_reviews(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<QueryResult<Value>>, AppError> {
+    let item_id = parse_emby_uuid_path(&item_id_str, "item id")?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(Json(QueryResult {
+        items: Vec::new(),
+        total_record_count: 0,
+        start_index: Some(0),
+    }))
+}
+
+async fn delete_info(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let item_id = parse_emby_uuid_path(&item_id_str, "item id")?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(Json(json!({
+        "CanDelete": true,
+        "DeleteFromExternalProvider": false,
+        "DeleteFromFileSystem": false
+    })))
+}
+
+async fn theme_media(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let songs = theme_media_for_item(&session, &state, &item_id_str, &["ThemeSong"]).await?;
+    let videos = theme_media_for_item(&session, &state, &item_id_str, &["ThemeVideo"]).await?;
+    Ok(Json(json!({
+        "ThemeSongsResult": songs,
+        "ThemeVideosResult": videos,
+        "SoundtrackSongsResult": empty_theme_media_result()
+    })))
+}
+
+async fn theme_songs(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<ThemeMediaResultDto>, AppError> {
+    Ok(Json(
+        theme_media_for_item(&session, &state, &item_id_str, &["ThemeSong"]).await?,
+    ))
+}
+
+async fn theme_videos(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<ThemeMediaResultDto>, AppError> {
+    Ok(Json(
+        theme_media_for_item(&session, &state, &item_id_str, &["ThemeVideo"]).await?,
+    ))
+}
+
+async fn add_item_tags(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Json(payload): Json<TagMutationRequest>,
+) -> Result<StatusCode, AppError> {
+    mutate_item_tags(&state, &item_id_str, payload, true).await
+}
+
+async fn remove_item_tags(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Json(payload): Json<TagMutationRequest>,
+) -> Result<StatusCode, AppError> {
+    mutate_item_tags(&state, &item_id_str, payload, false).await
+}
+
 async fn remote_search_results(
     _session: AuthSession,
     Json(_query): Json<Value>,
 ) -> Json<Vec<Value>> {
     Json(Vec::new())
+}
+
+async fn reset_item_metadata(
+    _session: AuthSession,
+    Json(_payload): Json<Value>,
+) -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 async fn apply_search_criteria(
@@ -1692,8 +1884,9 @@ fn external_id_info_options() -> Vec<ExternalIdInfoDto> {
 async fn item_intros(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id_str)): Path<(Uuid, String)>,
+    Path((user_id, item_id_str)): Path<(String, String)>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     let items = related_child_items(
         &session,
         &state,
@@ -1712,8 +1905,9 @@ async fn item_intros(
 async fn local_trailers(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id_str)): Path<(Uuid, String)>,
+    Path((user_id, item_id_str)): Path<(String, String)>,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     let items = related_child_items(
         &session,
         &state,
@@ -1728,8 +1922,9 @@ async fn local_trailers(
 async fn special_features(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id_str)): Path<(Uuid, String)>,
+    Path((user_id, item_id_str)): Path<(String, String)>,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     let items = related_child_items(
         &session,
         &state,
@@ -1833,9 +2028,10 @@ fn should_hide_from_resume(query: &HideFromResumeQuery) -> bool {
 async fn hide_from_resume(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id_str)): Path<(Uuid, String)>,
+    Path((user_id, item_id_str)): Path<(String, String)>,
     Query(query): Query<HideFromResumeQuery>,
 ) -> Result<Json<UserItemDataDto>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
@@ -1883,6 +2079,72 @@ async fn additional_parts(
     )
     .await?;
     Ok(Json(result))
+}
+
+async fn theme_media_for_item(
+    session: &AuthSession,
+    state: &AppState,
+    item_id_str: &str,
+    include_types: &[&str],
+) -> Result<ThemeMediaResultDto, AppError> {
+    let items = related_child_items(session, state, session.user_id, item_id_str, include_types).await?;
+    let total_record_count = items.len() as i64;
+    Ok(ThemeMediaResultDto {
+        owner_id: None,
+        items,
+        total_record_count,
+    })
+}
+
+fn empty_theme_media_result() -> ThemeMediaResultDto {
+    ThemeMediaResultDto {
+        owner_id: None,
+        items: Vec::new(),
+        total_record_count: 0,
+    }
+}
+
+async fn mutate_item_tags(
+    state: &AppState,
+    item_id_str: &str,
+    payload: TagMutationRequest,
+    add: bool,
+) -> Result<StatusCode, AppError> {
+    let item_id = parse_emby_uuid_path(item_id_str, "item id")?;
+    ensure_media_item_exists(state, item_id).await?;
+    let tag_names = payload
+        .tags
+        .into_iter()
+        .filter_map(|tag| tag.name.or(tag.id))
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    if tag_names.is_empty() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let current_tags = sqlx::query_scalar::<_, Vec<String>>("SELECT tags FROM media_items WHERE id = $1")
+        .bind(item_id)
+        .fetch_one(&state.pool)
+        .await?;
+    let mut next = current_tags
+        .into_iter()
+        .filter(|tag| !tag.trim().is_empty())
+        .collect::<BTreeSet<_>>();
+    if add {
+        next.extend(tag_names);
+    } else {
+        let remove = tag_names.into_iter().collect::<BTreeSet<_>>();
+        next.retain(|tag| !remove.contains(tag));
+    }
+    let next = next.into_iter().collect::<Vec<_>>();
+    sqlx::query("UPDATE media_items SET tags = $2, date_modified = now() WHERE id = $1")
+        .bind(item_id)
+        .bind(&next)
+        .execute(&state.pool)
+        .await?;
+    broadcast_items_updated(state, vec![uuid_to_emby_guid(&item_id)]);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn broadcast_items_updated(state: &AppState, item_ids: Vec<String>) {
@@ -2979,9 +3241,10 @@ fn apply_requested_stream_selection(
 async fn user_resume_items(
     _session: AuthSession,
     State(state): State<AppState>,
-    Path(user_id): Path<Uuid>,
+    Path(user_id): Path<String>,
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     resume_items_for_user(&state, user_id, &mut query).await
 }
 
@@ -3074,9 +3337,10 @@ async fn get_similar_items(
 async fn get_user_similar_items(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id_str)): Path<(Uuid, String)>,
+    Path((user_id, item_id_str)): Path<(String, String)>,
     Query(mut query): Query<GetSimilarItems>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "user id")?;
     ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
     get_similar_items(session, State(state), Path(item_id_str), Query(query)).await

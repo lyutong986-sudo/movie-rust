@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthSession,
     error::AppError,
-    models::{BaseItemDto, PersonDto, QueryResult},
+    models::{emby_id_to_uuid, BaseItemDto, PersonDto, QueryResult},
     repository,
     state::AppState,
 };
@@ -65,7 +65,7 @@ pub async fn get_person(
     State(state): State<AppState>,
     Path(person_id_or_name): Path<String>,
 ) -> Result<Json<BaseItemDto>, AppError> {
-    if let Ok(uuid) = Uuid::parse_str(&person_id_or_name) {
+    if let Ok(uuid) = emby_id_to_uuid(&person_id_or_name) {
         if let Some(person) = repository::get_person_by_uuid(&state.pool, uuid).await? {
             return Ok(Json(person_to_base_item(person, state.config.server_id)));
         }

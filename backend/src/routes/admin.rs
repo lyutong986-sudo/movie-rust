@@ -2,7 +2,7 @@ use crate::{
     auth::{self, AuthSession},
     error::AppError,
     models::{
-        uuid_to_emby_guid, AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, LibraryMediaFolderDto,
+        emby_id_to_uuid, uuid_to_emby_guid, AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, LibraryMediaFolderDto,
         LibrarySubFolderDto, MediaPathDto, ScanSummary, UpdateLibraryOptionsDto,
         UpdateMediaPathRequestDto, VirtualFolderInfoDto,
         VirtualFolderQuery,
@@ -16,7 +16,6 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -103,9 +102,11 @@ async fn create_library(
 async fn delete_library(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(library_id): Path<Uuid>,
+    Path(library_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     auth::require_admin(&session)?;
+    let library_id = emby_id_to_uuid(&library_id)
+        .map_err(|_| AppError::BadRequest(format!("invalid library id format: {library_id}")))?;
     repository::delete_library(&state.pool, library_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -206,6 +207,10 @@ async fn add_media_path(
     Json(payload): Json<MediaPathDto>,
 ) -> Result<StatusCode, AppError> {
     auth::require_admin(&session)?;
+    if let Some(path_info) = payload.path_info.clone() {
+        repository::add_library_path_info(&state.pool, &payload.name, path_info).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let path = payload
         .path_info
         .map(|info| info.path)
@@ -352,7 +357,7 @@ async fn selectable_media_folders(
                 .enumerate()
                 .map(|(index, path)| LibrarySubFolderDto {
                     name: format!("{}-{}", library.name, index + 1),
-                    id: format!("{}:{index}", library.id),
+                    id: format!("{}:{index}", uuid_to_emby_guid(&library.id)),
                     path,
                     is_user_access_configurable: true,
                 })

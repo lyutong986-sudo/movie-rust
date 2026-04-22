@@ -1,7 +1,7 @@
 use crate::{
     auth::AuthSession,
     error::AppError,
-    models::{uuid_to_emby_guid, BaseItemDto, LegacyPlaybackQuery, PlaybackReport, QueryResult, SessionInfoDto},
+    models::{emby_id_to_uuid, uuid_to_emby_guid, BaseItemDto, LegacyPlaybackQuery, PlaybackReport, QueryResult, SessionInfoDto},
     repository,
     state::AppState,
 };
@@ -40,6 +40,7 @@ pub fn router() -> Router<AppState> {
         .route("/Sessions/Capabilities/Full", post(update_capabilities))
         .route("/Sessions/Logout", post(logout_session))
         .route("/Sessions/Playing", post(playback_started))
+        .route("/Sessions/Playing/Ping", post(playback_ping))
         .route("/Sessions/Playing/Progress", post(playback_progress))
         .route("/Sessions/Playing/Stopped", post(playback_stopped))
         .route(
@@ -430,6 +431,10 @@ async fn playback_started(
     record_report(&state, &session, "Started", report).await
 }
 
+async fn playback_ping(_session: AuthSession) -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
 async fn playback_progress(
     session: AuthSession,
     State(state): State<AppState>,
@@ -449,54 +454,63 @@ async fn playback_stopped(
 async fn legacy_started(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id): Path<String>,
     Query(query): Query<LegacyPlaybackQuery>,
 ) -> Result<StatusCode, AppError> {
+    let item_id = parse_emby_uuid_path(&item_id, "item id")?;
     record_legacy(&state, &session, item_id, "Started", query).await
 }
 
 async fn legacy_progress(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id): Path<String>,
     Query(query): Query<LegacyPlaybackQuery>,
 ) -> Result<StatusCode, AppError> {
+    let item_id = parse_emby_uuid_path(&item_id, "item id")?;
     record_legacy(&state, &session, item_id, "Progress", query).await
 }
 
 async fn legacy_stopped(
     session: AuthSession,
     State(state): State<AppState>,
-    Path(item_id): Path<Uuid>,
+    Path(item_id): Path<String>,
     Query(query): Query<LegacyPlaybackQuery>,
 ) -> Result<StatusCode, AppError> {
+    let item_id = parse_emby_uuid_path(&item_id, "item id")?;
     record_legacy(&state, &session, item_id, "Stopped", query).await
 }
 
 async fn legacy_user_started(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Path((user_id, item_id)): Path<(String, String)>,
     Query(query): Query<LegacyPlaybackQuery>,
 ) -> Result<StatusCode, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
     record_legacy_for_user(&state, &session, user_id, item_id, "Started", query).await
 }
 
 async fn legacy_user_progress(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Path((user_id, item_id)): Path<(String, String)>,
     Query(query): Query<LegacyPlaybackQuery>,
 ) -> Result<StatusCode, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
     record_legacy_for_user(&state, &session, user_id, item_id, "Progress", query).await
 }
 
 async fn legacy_user_stopped(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((user_id, item_id)): Path<(Uuid, Uuid)>,
+    Path((user_id, item_id)): Path<(String, String)>,
     Query(query): Query<LegacyPlaybackQuery>,
 ) -> Result<StatusCode, AppError> {
+    let user_id = parse_emby_uuid_path(&user_id, "用户ID")?;
+    let item_id = parse_emby_uuid_path(&item_id, "项目ID")?;
     record_legacy_for_user(&state, &session, user_id, item_id, "Stopped", query).await
 }
 
@@ -664,6 +678,11 @@ fn apply_session_capabilities(dto: &mut SessionInfoDto, capabilities: &Value) {
     ) {
         dto.supported_commands = supported_commands;
     }
+}
+
+fn parse_emby_uuid_path(value: &str, label: &str) -> Result<Uuid, AppError> {
+    emby_id_to_uuid(value)
+        .map_err(|_| AppError::BadRequest(format!("invalid {label} format: {value}")))
 }
 
 fn value_string_vec(value: Option<&Value>) -> Option<Vec<String>> {

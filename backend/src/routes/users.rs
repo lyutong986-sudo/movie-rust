@@ -3,7 +3,8 @@ use crate::{
     error::AppError,
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, AuthenticateByNameRequest, AuthenticationResult,
-        CreateUserByNameRequest, UpdateUserPasswordRequest, UserDto, UserPolicyDto,
+        CreateUserByNameRequest, UpdateUserPasswordRequest, UserConfigurationDto, UserDto,
+        UserPolicyDto,
     },
     repository, security,
     state::AppState,
@@ -59,6 +60,16 @@ pub fn router() -> Router<AppState> {
         .route("/Users/{user_id}/Policy", post(update_user_policy))
         .route("/Users/{user_id}/policy", post(update_user_policy))
         .route("/users/{user_id}/policy", post(update_user_policy))
+        .route(
+            "/Users/{user_id}/Configuration",
+            get(user_configuration)
+                .post(update_user_configuration)
+                .put(update_user_configuration),
+        )
+        .route(
+            "/Users/{user_id}/Configuration/Partial",
+            post(update_user_configuration_partial),
+        )
 }
 
 fn parse_user_id(user_id: &str) -> Result<Uuid, AppError> {
@@ -152,6 +163,71 @@ async fn update_user(
         .ok_or_else(|| AppError::BadRequest("缺少用户名".to_string()))?;
     repository::update_user_name(&state.pool, user_id, name).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn user_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+) -> Result<Json<UserConfigurationDto>, AppError> {
+    let user_id = parse_user_id(&user_id)?;
+    ensure_user_access(&session, user_id)?;
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+    let configuration =
+        serde_json::from_value::<UserConfigurationDto>(user.configuration).unwrap_or_default();
+    Ok(Json(configuration))
+}
+
+async fn update_user_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Json(configuration): Json<UserConfigurationDto>,
+) -> Result<Json<UserConfigurationDto>, AppError> {
+    let user_id = parse_user_id(&user_id)?;
+    ensure_user_access(&session, user_id)?;
+    repository::update_user_configuration(&state.pool, user_id, &configuration).await?;
+    Ok(Json(configuration))
+}
+
+async fn update_user_configuration_partial(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<String>,
+    Json(patch): Json<Value>,
+) -> Result<Json<UserConfigurationDto>, AppError> {
+    let user_id = parse_user_id(&user_id)?;
+    ensure_user_access(&session, user_id)?;
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+    let mut current = if user.configuration.is_object() {
+        user.configuration
+    } else {
+        serde_json::to_value(UserConfigurationDto::default())?
+    };
+    merge_json_object(&mut current, patch);
+    let configuration = serde_json::from_value::<UserConfigurationDto>(current)?;
+    repository::update_user_configuration(&state.pool, user_id, &configuration).await?;
+    Ok(Json(configuration))
+}
+
+fn ensure_user_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppError> {
+    if session.user_id == user_id || session.is_admin {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+fn merge_json_object(target: &mut Value, patch: Value) {
+    if let (Some(target), Some(patch)) = (target.as_object_mut(), patch.as_object()) {
+        for (key, value) in patch {
+            target.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 async fn authenticate_by_name(
