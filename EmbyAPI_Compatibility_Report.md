@@ -790,3 +790,11 @@ ode/pnpm，因此验证仍为代码级静态校对。
 - 前端 `frontend/packages/frontend/src/composables/use-settings-sdk.ts` 新增 `getLibrariesAvailableoptions()` 与对应类型；`frontend/packages/frontend/src/pages/settings/libraries.vue` 现在会在加载媒体库时同时请求 `/Libraries/AvailableOptions`，并用返回的 `DefaultLibraryOptions` 作为表单默认值、用 `MetadataSavers/MetadataReaders` 动态填充三个组合框，不再把选项硬编码死在页面里。
 - `libraries.vue` 的本地 `LibraryOptionsDto` 也改成以 `SettingsLibraryOptions` 为底，再叠加当前页面实际编辑字段。这样页面在保存已存在媒体库时，会连同后端回传的额外 EmbySDK 字段一起原样提交，保证“当前没在 UI 上编辑”的参数不会被页面意外擦除。
 - 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`npm.cmd exec vite build -- --configLoader runner` 在 `frontend/packages/frontend` 下通过。当前尚未把这版部署到 `test.emby.yun:4443`，线上要看到新的可选项接口与字段保留行为还需要发布新构建。
+
+## 2026-04-22 LibraryOptions 常见 Emby 字段显式建模补充（五十四）
+- 在上一轮“字段保留”基础上，继续把 `LibraryOptions` 里常见且前端值得真实放开的 EmbySDK 字段补成显式模型。后端 `backend/src/models.rs` 新增并序列化这些常用字段：`EnableMarkerDetection`、`EnableMarkerDetectionDuringLibraryScan`、`CacheImages`、`ExcludeFromSearch`、`IgnoreHiddenFiles`、`IgnoreFileExtensions`、`SaveMetadataHidden`、`SaveLocalThumbnailSets`、`ImportPlaylists`、`ShareEmbeddedMusicAlbumImages`、`EnableAudioResume`、`AutoGenerateChapters`、`MergeTopLevelFolders`、`PlaceholderMetadataRefreshIntervalDays`、`PreferredImageLanguage`、`DisabledLyricsFetchers`、`SaveLyricsWithMedia`、`DisabledSubtitleFetchers`、`SaveSubtitlesWithMedia`、`CollapseSingleItemFolders`、`ForceCollapseSingleItemFolders`、`ImportCollections`、`EnableMultiVersionByFiles`、`EnableMultiVersionByMetadata`、`EnableMultiPartItems`、`MinResumePct`、`MaxResumePct`、`MinResumeDurationSeconds`。
+- 前端 `frontend/packages/frontend/src/composables/use-settings-sdk.ts` 的 `SettingsLibraryOptions` 同步扩展到相同字段集，避免 settings 页继续把这些值当成弱类型 `Record<string, unknown>` 处理。
+- `frontend/packages/frontend/src/pages/settings/libraries.vue` 这次不只是“能保留”，而是已经把一批常见字段真实放开到 UI：缓存图片、从搜索中排除、忽略隐藏文件、隐藏保存元数据、保存本地缩略图集、片头片尾标记检测、自动生成章节、首选图片语言、占位元数据刷新间隔、合并顶层文件夹、单项目文件夹折叠、导入合集、多版本/多段媒体开关、音频续播、导入播放列表、歌词/字幕随媒体保存，以及续播百分比/最小时长等数值字段。
+- 媒体库页对集合类型做了基础分流：音乐库才显示播放列表/专辑图片/歌词相关项，影视类库显示片头片尾标记、字幕、多版本与合集相关项，避免把明显不适用的 Emby 选项全部平铺到所有库类型。
+- `frontend/packages/i18n/strings/en.json` 与 `zh-CN.json` 已补齐上述新字段对应的设置页文案，确保这些新放开的 Emby 参数在中英文界面下都不会回落成硬编码或空 key。
+- 验证情况：`cargo check --manifest-path backend/Cargo.toml` 通过；`npm.cmd exec vite build -- --configLoader runner` 通过。当前这仍是本地代码与构建验证，线上环境需要重新部署后才会看到这些新字段。

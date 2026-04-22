@@ -276,22 +276,53 @@ type EditableLibraryOptionsFields = Required<Pick<SettingsLibraryOptions,
   | 'EnableArchiveMediaFiles'
   | 'EnablePhotos'
   | 'EnableRealtimeMonitor'
+  | 'EnableMarkerDetection'
+  | 'EnableMarkerDetectionDuringLibraryScan'
   | 'EnableChapterImageExtraction'
   | 'ExtractChapterImagesDuringLibraryScan'
+  | 'CacheImages'
+  | 'ExcludeFromSearch'
+  | 'IgnoreHiddenFiles'
+  | 'IgnoreFileExtensions'
   | 'SaveLocalMetadata'
+  | 'SaveMetadataHidden'
+  | 'SaveLocalThumbnailSets'
   | 'EnableInternetProviders'
   | 'DownloadImagesInAdvance'
+  | 'ImportPlaylists'
   | 'ImportMissingEpisodes'
   | 'EnableAutomaticSeriesGrouping'
+  | 'ShareEmbeddedMusicAlbumImages'
   | 'EnableEmbeddedTitles'
+  | 'EnableAudioResume'
+  | 'AutoGenerateChapters'
+  | 'MergeTopLevelFolders'
   | 'EnableEmbeddedEpisodeInfos'
   | 'AutomaticRefreshIntervalDays'
+  | 'PlaceholderMetadataRefreshIntervalDays'
   | 'SeasonZeroDisplayName'
   | 'MetadataSavers'
   | 'DisabledLocalMetadataReaders'
   | 'LocalMetadataReaderOrder'
+  | 'DisabledLyricsFetchers'
+  | 'SaveLyricsWithMedia'
+  | 'DisabledSubtitleFetchers'
+  | 'SaveSubtitlesWithMedia'
+  | 'CollapseSingleItemFolders'
+  | 'ForceCollapseSingleItemFolders'
+  | 'ImportCollections'
+  | 'EnableMultiVersionByFiles'
+  | 'EnableMultiVersionByMetadata'
+  | 'EnableMultiPartItems'
   | 'PathInfos'
->> & Pick<SettingsLibraryOptions, 'PreferredMetadataLanguage' | 'MetadataCountryCode'>;
+>> & Pick<SettingsLibraryOptions,
+  'PreferredMetadataLanguage'
+  | 'PreferredImageLanguage'
+  | 'MetadataCountryCode'
+  | 'MinResumePct'
+  | 'MaxResumePct'
+  | 'MinResumeDurationSeconds'
+>;
 type LibraryOptionsDto = SettingsLibraryOptions & EditableLibraryOptionsFields;
 
 interface VirtualFolderInfoDto extends Omit<SettingsVirtualFolderInfo, 'LibraryOptions'> {
@@ -357,11 +388,27 @@ const LibraryOptionsFields = defineComponent({
     const showMetadata = !['homevideos', 'photos'].includes(props.collectionType);
     const showChapters = ['tvshows', 'movies', 'homevideos', 'musicvideos', 'mixed', ''].includes(props.collectionType);
     const showTv = props.collectionType === 'tvshows';
+    const showMovieLike = ['movies', 'tvshows', 'homevideos', 'musicvideos', 'mixed', ''].includes(props.collectionType);
+    const showMusic = props.collectionType === 'music';
     const metadataSaverItems = computed(() => libraryOptionNames(availableLibraryOptions.value.MetadataSavers, props.modelValue.MetadataSavers));
     const metadataReaderItems = computed(() => libraryOptionNames(availableLibraryOptions.value.MetadataReaders, [
       ...props.modelValue.LocalMetadataReaderOrder,
       ...props.modelValue.DisabledLocalMetadataReaders
     ]));
+    const subtitleFetcherItems = computed(() => libraryOptionNames(availableLibraryOptions.value.SubtitleFetchers, props.modelValue.DisabledSubtitleFetchers));
+    const lyricsFetcherItems = computed(() => libraryOptionNames(availableLibraryOptions.value.LyricsFetchers, props.modelValue.DisabledLyricsFetchers));
+    const optionalNumber = (key: keyof LibraryOptionsDto, label: string) => h(VTextField, {
+      modelValue: props.modelValue[key] ?? '',
+      label,
+      density: 'comfortable',
+      variant: 'outlined',
+      type: 'number',
+      min: 0,
+      'onUpdate:modelValue': (value: string) => {
+        const trimmed = value?.toString().trim() ?? '';
+        update(key, (trimmed === '' ? null : Number(trimmed)) as never);
+      }
+    });
 
     return () => h('div', { class: 'uno-mt-4' }, [
       h(VRow, {}, () => [
@@ -371,6 +418,13 @@ const LibraryOptionsFields = defineComponent({
           density: 'comfortable',
           variant: 'outlined',
           'onUpdate:modelValue': (value: string) => update('PreferredMetadataLanguage', value || null)
+        })),
+        showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
+          modelValue: props.modelValue.PreferredImageLanguage,
+          label: t('preferredImageLanguage'),
+          density: 'comfortable',
+          variant: 'outlined',
+          'onUpdate:modelValue': (value: string) => update('PreferredImageLanguage', value || null)
         })),
         showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
           modelValue: props.modelValue.MetadataCountryCode,
@@ -395,19 +449,48 @@ const LibraryOptionsFields = defineComponent({
           min: 0,
           'onUpdate:modelValue': (value: string) => update('AutomaticRefreshIntervalDays', Number(value) || 0)
         })),
+        showMetadata && h(VCol, { cols: '12', md: '6' }, () => h(VTextField, {
+          modelValue: props.modelValue.PlaceholderMetadataRefreshIntervalDays,
+          label: t('placeholderMetadataRefreshIntervalDays'),
+          density: 'comfortable',
+          variant: 'outlined',
+          type: 'number',
+          min: 0,
+          'onUpdate:modelValue': (value: string) => update('PlaceholderMetadataRefreshIntervalDays', Number(value) || 0)
+        })),
         h(VCol, { cols: '12', md: '4' }, () => field('Enabled', t('enabled'))),
         props.collectionType === 'homevideos' && h(VCol, { cols: '12', md: '4' }, () => field('EnablePhotos', t('enablePhotos'))),
         h(VCol, { cols: '12', md: '4' }, () => field('EnableRealtimeMonitor', t('realtimeMonitor'))),
+        h(VCol, { cols: '12', md: '4' }, () => field('CacheImages', t('cacheImages'))),
+        h(VCol, { cols: '12', md: '4' }, () => field('ExcludeFromSearch', t('excludeFromSearch'))),
+        h(VCol, { cols: '12', md: '4' }, () => field('IgnoreHiddenFiles', t('ignoreHiddenFiles'))),
         showMetadata && h(VCol, { cols: '12', md: '4' }, () => field('EnableInternetProviders', t('downloadInternetMetadata'))),
         showMetadata && h(VCol, { cols: '12', md: '4' }, () => field('DownloadImagesInAdvance', t('downloadImagesInAdvance'))),
         props.collectionType !== 'photos' && h(VCol, { cols: '12', md: '4' }, () => field('SaveLocalMetadata', t('saveLocalMetadata'))),
+        props.collectionType !== 'photos' && h(VCol, { cols: '12', md: '4' }, () => field('SaveMetadataHidden', t('saveMetadataHidden'))),
+        props.collectionType !== 'photos' && h(VCol, { cols: '12', md: '4' }, () => field('SaveLocalThumbnailSets', t('saveLocalThumbnailSets'))),
         showTv && h(VCol, { cols: '12', md: '4' }, () => field('ImportMissingEpisodes', t('importMissingEpisodes'))),
         showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableAutomaticSeriesGrouping', t('automaticallyGroupSeries'))),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMarkerDetection', t('enableMarkerDetection'))),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMarkerDetectionDuringLibraryScan', t('enableMarkerDetectionDuringLibraryScan'))),
         showChapters && h(VCol, { cols: '12', md: '4' }, () => field('EnableChapterImageExtraction', t('extractChapterImages'))),
         showChapters && h(VCol, { cols: '12', md: '4' }, () => field('ExtractChapterImagesDuringLibraryScan', t('extractChaptersDuringScan'))),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('AutoGenerateChapters', t('autoGenerateChapters'))),
         h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedTitles', t('useEmbeddedTitles'))),
         showTv && h(VCol, { cols: '12', md: '4' }, () => field('EnableEmbeddedEpisodeInfos', t('useEmbeddedEpisodeInfo'))),
         h(VCol, { cols: '12', md: '4' }, () => field('EnableArchiveMediaFiles', t('archiveMediaFiles'))),
+        showMusic && h(VCol, { cols: '12', md: '4' }, () => field('ImportPlaylists', t('importPlaylists'))),
+        showMusic && h(VCol, { cols: '12', md: '4' }, () => field('ShareEmbeddedMusicAlbumImages', t('shareEmbeddedMusicAlbumImages'))),
+        showMusic && h(VCol, { cols: '12', md: '4' }, () => field('EnableAudioResume', t('enableAudioResume'))),
+        showMusic && h(VCol, { cols: '12', md: '4' }, () => field('SaveLyricsWithMedia', t('saveLyricsWithMedia'))),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('SaveSubtitlesWithMedia', t('saveSubtitlesWithMedia'))),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('MergeTopLevelFolders', t('mergeTopLevelFolders'))),
+        h(VCol, { cols: '12', md: '4' }, () => field('CollapseSingleItemFolders', t('collapseSingleItemFolders'))),
+        h(VCol, { cols: '12', md: '4' }, () => field('ForceCollapseSingleItemFolders', t('forceCollapseSingleItemFolders'))),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('ImportCollections', t('importCollections'))),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMultiVersionByFiles', t('enableMultiVersionByFiles'))),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMultiVersionByMetadata', t('enableMultiVersionByMetadata'))),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => field('EnableMultiPartItems', t('enableMultiPartItems'))),
         h(VCol, { cols: '12', md: '4' }, () => h(VCombobox, {
           modelValue: props.modelValue.MetadataSavers,
           label: t('metadataSavers'),
@@ -437,7 +520,39 @@ const LibraryOptionsFields = defineComponent({
           chips: true,
           items: metadataReaderItems.value,
           'onUpdate:modelValue': (value: string[]) => update('DisabledLocalMetadataReaders', value)
-        }))
+        })),
+        h(VCol, { cols: '12', md: '6' }, () => h(VCombobox, {
+          modelValue: props.modelValue.IgnoreFileExtensions,
+          label: t('ignoreFileExtensions'),
+          density: 'comfortable',
+          variant: 'outlined',
+          multiple: true,
+          chips: true,
+          'onUpdate:modelValue': (value: string[]) => update('IgnoreFileExtensions', value)
+        })),
+        showMusic && h(VCol, { cols: '12', md: '6' }, () => h(VCombobox, {
+          modelValue: props.modelValue.DisabledLyricsFetchers,
+          label: t('disabledLyricsFetchers'),
+          density: 'comfortable',
+          variant: 'outlined',
+          multiple: true,
+          chips: true,
+          items: lyricsFetcherItems.value,
+          'onUpdate:modelValue': (value: string[]) => update('DisabledLyricsFetchers', value)
+        })),
+        showMovieLike && h(VCol, { cols: '12', md: '6' }, () => h(VCombobox, {
+          modelValue: props.modelValue.DisabledSubtitleFetchers,
+          label: t('disabledSubtitleFetchers'),
+          density: 'comfortable',
+          variant: 'outlined',
+          multiple: true,
+          chips: true,
+          items: subtitleFetcherItems.value,
+          'onUpdate:modelValue': (value: string[]) => update('DisabledSubtitleFetchers', value)
+        })),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => optionalNumber('MinResumePct', t('minResumePct'))),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => optionalNumber('MaxResumePct', t('maxResumePct'))),
+        showMovieLike && h(VCol, { cols: '12', md: '4' }, () => optionalNumber('MinResumeDurationSeconds', t('minResumeDurationSeconds')))
       ])
     ]);
   }
@@ -458,22 +573,50 @@ function defaultLibraryOptions(base?: Partial<SettingsLibraryOptions>): LibraryO
     EnableArchiveMediaFiles: false,
     EnablePhotos: true,
     EnableRealtimeMonitor: false,
+    EnableMarkerDetection: false,
+    EnableMarkerDetectionDuringLibraryScan: false,
     EnableChapterImageExtraction: false,
     ExtractChapterImagesDuringLibraryScan: false,
+    CacheImages: false,
+    ExcludeFromSearch: false,
+    IgnoreHiddenFiles: true,
+    IgnoreFileExtensions: [],
     SaveLocalMetadata: false,
+    SaveMetadataHidden: false,
+    SaveLocalThumbnailSets: false,
     EnableInternetProviders: true,
     DownloadImagesInAdvance: false,
+    ImportPlaylists: false,
     ImportMissingEpisodes: false,
     EnableAutomaticSeriesGrouping: true,
+    ShareEmbeddedMusicAlbumImages: false,
     EnableEmbeddedTitles: false,
+    EnableAudioResume: false,
+    AutoGenerateChapters: false,
+    MergeTopLevelFolders: false,
     EnableEmbeddedEpisodeInfos: false,
     AutomaticRefreshIntervalDays: 0,
+    PlaceholderMetadataRefreshIntervalDays: 0,
     PreferredMetadataLanguage: 'zh',
+    PreferredImageLanguage: null,
     MetadataCountryCode: 'CN',
     SeasonZeroDisplayName: 'Specials',
     MetadataSavers: ['Nfo'],
     DisabledLocalMetadataReaders: [],
     LocalMetadataReaderOrder: ['Nfo'],
+    DisabledLyricsFetchers: [],
+    SaveLyricsWithMedia: false,
+    DisabledSubtitleFetchers: [],
+    SaveSubtitlesWithMedia: false,
+    CollapseSingleItemFolders: false,
+    ForceCollapseSingleItemFolders: false,
+    ImportCollections: false,
+    EnableMultiVersionByFiles: false,
+    EnableMultiVersionByMetadata: false,
+    EnableMultiPartItems: false,
+    MinResumePct: null,
+    MaxResumePct: null,
+    MinResumeDurationSeconds: null,
     PathInfos: [],
     ...base
   };

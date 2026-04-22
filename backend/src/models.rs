@@ -1769,27 +1769,57 @@ pub struct LibraryOptionsDto {
     #[serde(default)]
     pub enable_realtime_monitor: bool,
     #[serde(default)]
+    pub enable_marker_detection: bool,
+    #[serde(default)]
+    pub enable_marker_detection_during_library_scan: bool,
+    #[serde(default)]
     pub enable_chapter_image_extraction: bool,
     #[serde(default)]
     pub extract_chapter_images_during_library_scan: bool,
     #[serde(default)]
+    pub cache_images: bool,
+    #[serde(default)]
+    pub exclude_from_search: bool,
+    #[serde(default = "default_true")]
+    pub ignore_hidden_files: bool,
+    #[serde(default)]
+    pub ignore_file_extensions: Vec<String>,
+    #[serde(default)]
     pub save_local_metadata: bool,
+    #[serde(default)]
+    pub save_metadata_hidden: bool,
+    #[serde(default)]
+    pub save_local_thumbnail_sets: bool,
     #[serde(default = "default_true")]
     pub enable_internet_providers: bool,
     #[serde(default)]
     pub download_images_in_advance: bool,
     #[serde(default)]
+    pub import_playlists: bool,
+    #[serde(default)]
     pub import_missing_episodes: bool,
     #[serde(default = "default_true")]
     pub enable_automatic_series_grouping: bool,
     #[serde(default)]
+    pub share_embedded_music_album_images: bool,
+    #[serde(default)]
     pub enable_embedded_titles: bool,
+    #[serde(default)]
+    pub enable_audio_resume: bool,
+    #[serde(default)]
+    pub auto_generate_chapters: bool,
+    #[serde(default)]
+    pub merge_top_level_folders: bool,
     #[serde(default)]
     pub enable_embedded_episode_infos: bool,
     #[serde(default)]
     pub automatic_refresh_interval_days: i32,
     #[serde(default)]
+    pub placeholder_metadata_refresh_interval_days: i32,
+    #[serde(default)]
     pub preferred_metadata_language: Option<String>,
+    #[serde(default)]
+    pub preferred_image_language: Option<String>,
     #[serde(default)]
     pub metadata_country_code: Option<String>,
     #[serde(default = "default_specials_name")]
@@ -1800,6 +1830,32 @@ pub struct LibraryOptionsDto {
     pub disabled_local_metadata_readers: Vec<String>,
     #[serde(default)]
     pub local_metadata_reader_order: Vec<String>,
+    #[serde(default)]
+    pub disabled_lyrics_fetchers: Vec<String>,
+    #[serde(default)]
+    pub save_lyrics_with_media: bool,
+    #[serde(default)]
+    pub disabled_subtitle_fetchers: Vec<String>,
+    #[serde(default)]
+    pub save_subtitles_with_media: bool,
+    #[serde(default)]
+    pub collapse_single_item_folders: bool,
+    #[serde(default)]
+    pub force_collapse_single_item_folders: bool,
+    #[serde(default)]
+    pub import_collections: bool,
+    #[serde(default)]
+    pub enable_multi_version_by_files: bool,
+    #[serde(default)]
+    pub enable_multi_version_by_metadata: bool,
+    #[serde(default)]
+    pub enable_multi_part_items: bool,
+    #[serde(default)]
+    pub min_resume_pct: Option<i32>,
+    #[serde(default)]
+    pub max_resume_pct: Option<i32>,
+    #[serde(default)]
+    pub min_resume_duration_seconds: Option<i32>,
     #[serde(default)]
     pub path_infos: Vec<MediaPathInfoDto>,
     #[serde(flatten)]
@@ -1813,22 +1869,50 @@ impl Default for LibraryOptionsDto {
             enable_archive_media_files: false,
             enable_photos: true,
             enable_realtime_monitor: false,
+            enable_marker_detection: false,
+            enable_marker_detection_during_library_scan: false,
             enable_chapter_image_extraction: false,
             extract_chapter_images_during_library_scan: false,
+            cache_images: false,
+            exclude_from_search: false,
+            ignore_hidden_files: true,
+            ignore_file_extensions: Vec::new(),
             save_local_metadata: false,
+            save_metadata_hidden: false,
+            save_local_thumbnail_sets: false,
             enable_internet_providers: true,
             download_images_in_advance: false,
+            import_playlists: false,
             import_missing_episodes: false,
             enable_automatic_series_grouping: true,
+            share_embedded_music_album_images: false,
             enable_embedded_titles: false,
+            enable_audio_resume: false,
+            auto_generate_chapters: false,
+            merge_top_level_folders: false,
             enable_embedded_episode_infos: false,
             automatic_refresh_interval_days: 0,
+            placeholder_metadata_refresh_interval_days: 0,
             preferred_metadata_language: Some("zh".to_string()),
+            preferred_image_language: None,
             metadata_country_code: Some("CN".to_string()),
             season_zero_display_name: default_specials_name(),
             metadata_savers: vec!["Nfo".to_string()],
             disabled_local_metadata_readers: Vec::new(),
             local_metadata_reader_order: vec!["Nfo".to_string()],
+            disabled_lyrics_fetchers: Vec::new(),
+            save_lyrics_with_media: false,
+            disabled_subtitle_fetchers: Vec::new(),
+            save_subtitles_with_media: false,
+            collapse_single_item_folders: false,
+            force_collapse_single_item_folders: false,
+            import_collections: false,
+            enable_multi_version_by_files: false,
+            enable_multi_version_by_metadata: false,
+            enable_multi_part_items: false,
+            min_resume_pct: None,
+            max_resume_pct: None,
+            min_resume_duration_seconds: None,
             path_infos: Vec::new(),
             extra_fields: std::collections::BTreeMap::new(),
         }
