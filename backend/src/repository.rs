@@ -8,7 +8,7 @@ use crate::{
         DbMediaStream, DbPerson, DbSeriesEpisodeCatalog, DbUser, DbUserItemData, ExternalUrlDto, GenreDto, ItemCountsDto,
         LibraryOptionsDto, LogFileDto, MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto,
         NameIdDto, NameLongIdDto, PersonDto,
-        QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
+        QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest, UpdateBaseItemDto,
         UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
         BrandingConfiguration,
     },
@@ -7139,6 +7139,145 @@ pub async fn update_media_item_metadata(
     save_media_streams(pool, item_id, analysis).await?;
 
     Ok(())
+}
+
+pub async fn update_media_item_from_emby(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    metadata: &UpdateBaseItemDto,
+) -> Result<(), AppError> {
+    let provider_ids = serde_json::to_value(&metadata.provider_ids).unwrap_or_else(|_| json!({}));
+    let premiere_date = metadata.premiere_date.map(|value| value.date_naive());
+    let end_date = metadata.end_date.map(|value| value.date_naive());
+
+    sqlx::query(
+        r#"
+        UPDATE media_items
+        SET name = COALESCE($2, name),
+            original_title = COALESCE($3, original_title),
+            sort_name = COALESCE($4, sort_name),
+            overview = COALESCE($5, overview),
+            community_rating = COALESCE($6, community_rating),
+            critic_rating = COALESCE($7, critic_rating),
+            index_number = COALESCE($8, index_number),
+            index_number_end = COALESCE($9, index_number_end),
+            parent_index_number = COALESCE($10, parent_index_number),
+            genres = COALESCE($11, genres),
+            tags = COALESCE($12, tags),
+            studios = COALESCE($13, studios),
+            premiere_date = COALESCE($14, premiere_date),
+            date_created = COALESCE($15, date_created),
+            end_date = COALESCE($16, end_date),
+            production_year = COALESCE($17, production_year),
+            official_rating = COALESCE($18, official_rating),
+            provider_ids = provider_ids || $19::jsonb,
+            taglines = COALESCE($20, taglines),
+            status = COALESCE($21, status),
+            air_days = COALESCE($22, air_days),
+            air_time = COALESCE($23, air_time),
+            date_modified = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(item_id)
+    .bind(metadata.name.as_deref())
+    .bind(metadata.original_title.as_deref())
+    .bind(metadata.forced_sort_name.as_deref())
+    .bind(metadata.overview.as_deref())
+    .bind(metadata.community_rating)
+    .bind(metadata.critic_rating)
+    .bind(metadata.index_number)
+    .bind(metadata.index_number_end)
+    .bind(metadata.parent_index_number)
+    .bind(metadata.genres.as_ref())
+    .bind(metadata.tags.as_ref())
+    .bind(metadata.studios.as_ref())
+    .bind(premiere_date)
+    .bind(metadata.date_created)
+    .bind(end_date)
+    .bind(metadata.production_year)
+    .bind(metadata.official_rating.as_deref())
+    .bind(provider_ids)
+    .bind(metadata.taglines.as_ref())
+    .bind(metadata.status.as_deref())
+    .bind(metadata.air_days.as_ref())
+    .bind(metadata.air_time.as_deref())
+    .execute(pool)
+    .await?;
+
+    if let Some(people) = &metadata.people {
+        replace_item_people_from_emby(pool, item_id, people).await?;
+    }
+
+    Ok(())
+}
+
+async fn replace_item_people_from_emby(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    people: &[crate::models::UpdateBaseItemPersonDto],
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM person_roles WHERE media_item_id = $1")
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+
+    for (index, person) in people.iter().enumerate() {
+        let Some(name) = person.name.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let provider_ids = serde_json::to_value(&person.provider_ids).unwrap_or_else(|_| json!({}));
+        let person_id = person
+            .id
+            .as_deref()
+            .and_then(|id| emby_id_to_uuid(id).ok())
+            .unwrap_or_else(|| Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("person:{}", name.to_lowercase()).as_bytes()));
+        let stored_person_id = if person.id.is_some() {
+            sqlx::query(
+                r#"
+                INSERT INTO persons (id, name, sort_name, provider_ids, external_url, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, now(), now())
+                ON CONFLICT (id)
+                DO UPDATE SET
+                    name = EXCLUDED.name,
+                    sort_name = EXCLUDED.sort_name,
+                    provider_ids = persons.provider_ids || EXCLUDED.provider_ids,
+                    external_url = COALESCE(persons.external_url, EXCLUDED.external_url),
+                    updated_at = now()
+                RETURNING id
+                "#,
+            )
+            .bind(person_id)
+            .bind(name)
+            .bind(name.to_lowercase())
+            .bind(provider_ids)
+            .bind(person.external_url.as_deref())
+            .fetch_one(pool)
+            .await?
+            .get::<Uuid, _>(0)
+        } else {
+            upsert_person_reference(pool, name, provider_ids, None, person.external_url.as_deref()).await?
+        };
+        let role_type = normalize_person_role_type(person.person_type.as_deref());
+        let sort_order = i32::try_from(index).unwrap_or(i32::MAX);
+
+        upsert_person_role(pool, stored_person_id, item_id, role_type, person.role.as_deref(), sort_order).await?;
+    }
+
+    Ok(())
+}
+
+fn normalize_person_role_type(value: Option<&str>) -> &'static str {
+    match value.unwrap_or("Actor") {
+        "Director" => "Director",
+        "Writer" => "Writer",
+        "Producer" => "Producer",
+        "Composer" => "Composer",
+        "Cinematographer" => "Cinematographer",
+        "Editor" => "Editor",
+        "Actor" => "Actor",
+        _ => "Other",
+    }
 }
 
 pub async fn update_media_item_series_metadata(

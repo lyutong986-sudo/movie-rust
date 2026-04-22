@@ -6,7 +6,7 @@ use crate::{
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, BaseItemDto, ContentSectionDto, GetSimilarItems, ItemCountsDto,
         ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult, TranscodingInfoDto,
-        UpdateUserItemDataRequest, UserItemDataDto, UserItemDataQuery,
+        UpdateBaseItemDto, UpdateUserItemDataRequest, UserItemDataDto, UserItemDataQuery,
     },
     naming,
     repository::{self, ItemListOptions, UpdateUserDataInput},
@@ -18,6 +18,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use uuid::Uuid;
@@ -93,7 +94,21 @@ pub fn router() -> Router<AppState> {
             "/Users/{user_id}/PlayedItems/{item_id}/Delete",
             post(legacy_mark_unplayed),
         )
-        .route("/Items/{item_id}", get(item_by_id))
+        .route("/Items/RemoteSearch/Apply/{item_id}", post(apply_search_criteria))
+        .route("/Items/RemoteSearch/Book", post(remote_search_results))
+        .route("/Items/RemoteSearch/BoxSet", post(remote_search_results))
+        .route("/Items/RemoteSearch/Movie", post(remote_search_results))
+        .route("/Items/RemoteSearch/MusicAlbum", post(remote_search_results))
+        .route("/Items/RemoteSearch/MusicArtist", post(remote_search_results))
+        .route("/Items/RemoteSearch/MusicVideo", post(remote_search_results))
+        .route("/Items/RemoteSearch/Person", post(remote_search_results))
+        .route("/Items/RemoteSearch/Series", post(remote_search_results))
+        .route("/Items/RemoteSearch/Trailer", post(remote_search_results))
+        .route("/Items/{item_id}", get(item_by_id).post(update_item))
+        .route("/Items/{item_id}/MetadataEditor", get(metadata_editor_info))
+        .route("/Items/{item_id}/ContentType", post(update_item_content_type))
+        .route("/Items/{item_id}/ExternalIdInfos", get(external_id_infos))
+        .route("/Items/{item_id}/Ancestors", get(item_ancestors))
         .route("/Items/{item_id}/Refresh", post(refresh_item_metadata))
         .route("/Items/{item_id}/Chapters", get(item_chapters))
         .route("/Items/{item_id}/IntroTimestamps", get(intro_timestamps))
@@ -1268,6 +1283,214 @@ async fn user_item_by_id(
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     item_dto(&state, user_id, item_id).await
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct MetadataEditorInfoDto {
+    content_type: String,
+    content_type_options: Vec<ContentTypeOptionDto>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct ContentTypeOptionDto {
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ContentTypeQuery {
+    #[serde(default, alias = "contentType")]
+    content_type: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct ExternalIdInfoDto {
+    name: String,
+    key: String,
+    #[serde(rename = "Type")]
+    id_type: String,
+    url_format_string: String,
+}
+
+async fn metadata_editor_info(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<MetadataEditorInfoDto>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    let item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+
+    Ok(Json(MetadataEditorInfoDto {
+        content_type: item.item_type,
+        content_type_options: content_type_options(),
+    }))
+}
+
+async fn update_item_content_type(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Query(query): Query<ContentTypeQuery>,
+) -> Result<StatusCode, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    let Some(content_type) = query.content_type.filter(|value| !value.trim().is_empty()) else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
+    sqlx::query("UPDATE media_items SET item_type = $2, date_modified = now() WHERE id = $1")
+        .bind(item_id)
+        .bind(content_type)
+        .execute(&state.pool)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_item(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Json(metadata): Json<UpdateBaseItemDto>,
+) -> Result<StatusCode, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    repository::update_media_item_from_emby(&state.pool, item_id, &metadata).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn external_id_infos(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Vec<ExternalIdInfoDto>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(Json(external_id_info_options()))
+}
+
+async fn item_ancestors(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    let mut ancestors = Vec::new();
+    let mut current = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?
+        .parent_id;
+
+    while let Some(parent_id) = current {
+        ancestors.push(item_dto(&state, session.user_id, parent_id).await?.0);
+        current = repository::get_media_item(&state.pool, parent_id)
+            .await?
+            .and_then(|item| item.parent_id);
+    }
+
+    let library_id: Uuid = sqlx::query_scalar("SELECT library_id FROM media_items WHERE id = $1")
+        .bind(item_id)
+        .fetch_one(&state.pool)
+        .await?;
+    if let Some(library) = repository::get_library(&state.pool, library_id).await? {
+        ancestors.push(repository::library_to_item_dto(&state.pool, &library, state.config.server_id).await?);
+    }
+
+    Ok(Json(ancestors))
+}
+
+async fn remote_search_results(
+    _session: AuthSession,
+    Json(_query): Json<Value>,
+) -> Json<Vec<Value>> {
+    Json(Vec::new())
+}
+
+async fn apply_search_criteria(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Json(result): Json<Value>,
+) -> Result<StatusCode, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    ensure_media_item_exists(&state, item_id).await?;
+
+    let mut provider_ids = serde_json::Map::new();
+    if let Some(ids) = result.get("ProviderIds").and_then(Value::as_object) {
+        provider_ids.extend(ids.clone());
+    }
+    let name = result.get("Name").and_then(Value::as_str);
+    let production_year = result
+        .get("ProductionYear")
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok());
+
+    sqlx::query(
+        r#"
+        UPDATE media_items
+        SET name = COALESCE($2, name),
+            production_year = COALESCE($3, production_year),
+            provider_ids = provider_ids || $4::jsonb,
+            date_modified = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(item_id)
+    .bind(name)
+    .bind(production_year)
+    .bind(Value::Object(provider_ids))
+    .execute(&state.pool)
+    .await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn content_type_options() -> Vec<ContentTypeOptionDto> {
+    [
+        ("Movie", "Movie"),
+        ("Series", "Series"),
+        ("Season", "Season"),
+        ("Episode", "Episode"),
+        ("MusicAlbum", "MusicAlbum"),
+        ("MusicArtist", "MusicArtist"),
+        ("MusicVideo", "MusicVideo"),
+        ("Trailer", "Trailer"),
+        ("BoxSet", "BoxSet"),
+        ("Book", "Book"),
+        ("Person", "Person"),
+    ]
+    .into_iter()
+    .map(|(name, value)| ContentTypeOptionDto {
+        name: name.to_string(),
+        value: value.to_string(),
+    })
+    .collect()
+}
+
+fn external_id_info_options() -> Vec<ExternalIdInfoDto> {
+    [
+        ("IMDb", "Imdb", "String", "https://www.imdb.com/title/{0}"),
+        ("TheMovieDb", "Tmdb", "String", "https://www.themoviedb.org/movie/{0}"),
+        ("TheTVDB", "Tvdb", "String", "https://thetvdb.com/dereferrer/series/{0}"),
+        ("Trakt", "Trakt", "String", "https://trakt.tv/search/trakt/{0}"),
+    ]
+    .into_iter()
+    .map(|(name, key, id_type, url_format_string)| ExternalIdInfoDto {
+        name: name.to_string(),
+        key: key.to_string(),
+        id_type: id_type.to_string(),
+        url_format_string: url_format_string.to_string(),
+    })
+    .collect()
 }
 
 async fn item_intros(

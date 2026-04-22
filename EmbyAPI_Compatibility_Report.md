@@ -449,3 +449,14 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - `backend/src/routes/compat.rs` 已将 `Localization/Options` 与 `Localization/Cultures` 调整为匿名可读，保证首次启动向导语言页、元数据语言页在未登录状态下也能加载选项。
 - `backend/src/routes/compat.rs` 新增 EmbySDK 路径 `GET /Localization/Countries` 与 `GET /Localization/ParentalRatings`，覆盖启动向导国家下拉和用户管理父母控制页实际依赖的 localization 端点。
 - 本轮已重新执行：`cargo check --manifest-path backend/Cargo.toml` 与 `cargo test --manifest-path backend/Cargo.toml api_router_builds_without_route_conflicts -- --nocapture`，结果均通过；仍只有既有 warning。前端类型检查仍受限于本地缺少可直接运行的 `pnpm`。
+## 2026-04-22 前端适配补充（十三）
+- 本轮按“前端实际 SDK 调用 → 后端现有路由/字段 → EmbySDK 标准”的顺序复核了元数据编辑与识别链路，优先处理会造成 404、空下拉和 Suspense 首屏长期 loading 的缺口。
+- `backend/src/routes/items.rs` 新增 EmbySDK 元数据编辑端点：`GET /Items/{itemId}/MetadataEditor`、`POST /Items/{itemId}`、`POST /Items/{itemId}/ContentType`、`GET /Items/{itemId}/ExternalIdInfos`、`GET /Items/{itemId}/Ancestors`。其中 MetadataEditor 返回 `ContentType/ContentTypeOptions`，ExternalIdInfos 返回常见 provider 列表，Ancestors 会返回父级条目与 `CollectionFolder`，避免编辑页类型下拉、识别弹窗和 genre 加载链路因 404 中断。
+- `backend/src/routes/items.rs` 新增 `POST /Items/RemoteSearch/{Book|BoxSet|Movie|MusicAlbum|MusicArtist|MusicVideo|Person|Series|Trailer}` 与 `POST /Items/RemoteSearch/Apply/{itemId}`。当前远程搜索在没有外部 provider 后端能力时按 EmbySDK 形状返回空数组，保证前端显示“无结果”而不是错误弹窗或卡住；Apply 会保存选中结果里的 `Name/ProductionYear/ProviderIds`。
+- `backend/src/models.rs` 与 `backend/src/repository.rs` 新增 Emby 风格 `UpdateBaseItemDto` 保存路径，`POST /Items/{itemId}` 现在会更新标题、排序名、简介、评分、集数序号、分级、年份、日期、Genres/Tags/Studios/Taglines/ProviderIds 和 People 关系，适配 `MetadataEditor.vue` 的 `updateItem({ baseItemDto })`。
+- `frontend/packages/frontend/src/composables/apis.ts` 增加首屏请求失败兜底：缓存未生成时会使用本次请求结果或上一次值，初始等待缓存最多 1.5 秒后释放 Suspense，避免 401/404/500 或后端缺字段时整页长时间 loading。
+- 本轮仍需后续深化：远程识别目前只提供兼容空结果与 Apply 基础写入，尚未接入 TMDB/TVDB/IMDb 的真实搜索结果映射；`POST /Items/{itemId}` 的 People 保存已可替换关系，但更复杂的 LockedFields、CustomRating、专辑艺人等字段仍需结合后续数据库模型继续补齐。
+
+## 2026-04-22 前端适配补充（十四）
+- 根据运行日志复核，frontend WebSocket 实际调用 `GET /socket?api_key=...&deviceId=...`，而 backend 仅暴露 `GET /embywebsocket`，导致前端持续重连并产生 404。
+- `backend/src/routes/mod.rs` 已新增 `GET /socket`，复用现有 `emby_websocket_handler`，该 handler 已兼容 `api_key/token/deviceId` 查询参数；根路径、`/emby/socket`、`/mediabrowser/socket` 会随现有 router nest 一起可用。

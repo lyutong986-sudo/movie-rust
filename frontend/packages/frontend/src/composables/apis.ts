@@ -95,6 +95,7 @@ const defaultOps: () => BaseItemComposableOps = () => ({
     request: false
   }
 });
+const initialCacheWaitMs = 1500;
 
 /**
  * Sets the state to loading and starts the global loading indicator
@@ -379,7 +380,7 @@ function _sharedInternalLogic<T extends Record<K, (...args: any[]) => any>, K ex
         ? cachedItems?.ref.value ?? previous ?? fetchResult.value
         : fetchResult.value;
     } else {
-      return cachedData.value;
+      return cachedData.value ?? previous ?? fetchResult.value;
     }
   });
   const isCached = computed(() =>
@@ -446,7 +447,10 @@ function _sharedInternalLogic<T extends Record<K, (...args: any[]) => any>, K ex
     };
     const returnablePromise = async (): Promise<ReturnPayload<T, K, typeof ofBaseItem>> => {
       await runNormally();
-      await until(() => isCached.value).toBeTruthy({ flush: 'pre' });
+      await Promise.race([
+        until(() => isCached.value).toBeTruthy({ flush: 'pre' }),
+        new Promise(resolve => setTimeout(resolve, initialCacheWaitMs))
+      ]);
 
       return { loading, data };
     };

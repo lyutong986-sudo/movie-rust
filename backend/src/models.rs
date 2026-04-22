@@ -872,6 +872,48 @@ pub struct BaseItemDto {
     pub extra_fields: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateBaseItemPersonDto {
+    pub name: Option<String>,
+    pub id: Option<String>,
+    pub role: Option<String>,
+    #[serde(rename = "Type")]
+    pub person_type: Option<String>,
+    #[serde(default)]
+    pub provider_ids: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub external_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateBaseItemDto {
+    pub name: Option<String>,
+    pub original_title: Option<String>,
+    pub forced_sort_name: Option<String>,
+    pub overview: Option<String>,
+    pub community_rating: Option<f64>,
+    pub critic_rating: Option<f64>,
+    pub index_number: Option<i32>,
+    pub index_number_end: Option<i32>,
+    pub parent_index_number: Option<i32>,
+    pub genres: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
+    pub studios: Option<Vec<String>>,
+    pub premiere_date: Option<DateTime<Utc>>,
+    pub date_created: Option<DateTime<Utc>>,
+    pub end_date: Option<DateTime<Utc>>,
+    pub production_year: Option<i32>,
+    pub official_rating: Option<String>,
+    pub provider_ids: Option<BTreeMap<String, String>>,
+    pub taglines: Option<Vec<String>>,
+    pub status: Option<String>,
+    pub air_days: Option<Vec<String>>,
+    pub air_time: Option<String>,
+    pub people: Option<Vec<UpdateBaseItemPersonDto>>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ExternalUrlDto {

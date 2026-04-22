@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
 fn api_router() -> Router<AppState> {
     Router::new()
         .route("/embywebsocket", axum::routing::get(websocket::emby_websocket_handler))
+        .route("/socket", axum::routing::get(websocket::emby_websocket_handler))
         .merge(system::router())
         .merge(startup::router())
         .merge(users::router())
