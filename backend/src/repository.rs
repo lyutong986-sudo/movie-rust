@@ -4564,13 +4564,14 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
     } else {
         UserConfigurationDto::default()
     };
+    let has_password = !security::verify_password(&user.password_hash, "");
     
     UserDto {
         name: user.name.clone(),
         server_id: uuid_to_emby_guid(&server_id),
         id: uuid_to_emby_guid(&user.id),
-        has_password: true,
-        has_configured_password: true,
+        has_password,
+        has_configured_password: has_password,
         has_configured_easy_password: false,
         policy,
         configuration,

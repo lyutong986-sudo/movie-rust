@@ -539,9 +539,9 @@ async fn latest_items(
     query.sort_order = Some("Descending".to_string());
     query.limit = query.limit.or(Some(20));
     
-    // 如果没有指定包含的类型，默认显示Movie和Series，不显示Episode
     if query.include_item_types.is_none() {
-        query.include_item_types = Some("Movie,Series".to_string());
+        query.include_item_types =
+            infer_latest_include_item_types(&state, query.parent_id).await?;
     }
 
     let result = list_items_for_user(&state, user_id, query).await?;

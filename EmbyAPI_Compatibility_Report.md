@@ -408,3 +408,15 @@ pnpm --filter @jellyfin-vue/frontend check:types
   已在成功创建首个管理员后同步刷新当前服务器的 `PublicUsers`，让后续登录页与首启后的服务器状态更一致。
 - 本轮未新增 backend 路由：
   因为当前 backend 已具备 `/Startup/Configuration`、`/Startup/User`、`/Startup/RemoteAccess`、`/Startup/Complete` 这组首启接口；这次暴露出来的是 frontend 与 EmbySDK 首启调用方式不一致，而不是 backend 缺少同名能力。
+
+## 2026-04-22 前端适配补充（九）
+- 本轮继续往“首启后的登录页与首页首屏”收口，优先处理 `UserDto` 密码状态字段、`Items/Latest` 默认行为，以及首页聚合请求的失败兜底。
+- `backend/src/repository.rs`
+  已修复 `UserDto.HasPassword / HasConfiguredPassword` 之前一律返回 `true` 的问题。现在会根据当前用户密码是否等价于“空密码”真实推导，和 Emby 客户端的无密码公共用户登录语义更一致。
+- `backend/src/routes/items.rs`
+  已把 `Users/{UserId}/Items/Latest` 的默认 `IncludeItemTypes` 改成复用前面补好的 Emby 风格推断逻辑，不再退回旧的固定 `Movie,Series` 默认值。
+- `frontend/packages/frontend/src/utils/items.ts`
+  已给首页 `fetchIndexPage()` 增加空结果兜底：`Views / Resume / Latest / NextUp` 中任意一个请求失败时，不再让整页 Promise 直接失败，而是对该分区回退为空数组，避免登录后首屏看起来像“又卡死”。
+- 本轮 backend 已重新执行：
+  `cargo check --manifest-path backend/Cargo.toml`
+  结果通过，仍只有既有 warning。

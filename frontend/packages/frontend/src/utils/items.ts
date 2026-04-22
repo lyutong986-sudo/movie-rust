@@ -14,6 +14,7 @@ import { getItemsApi } from '@jellyfin/sdk/lib/utils/api/items-api';
 import { getTvShowsApi } from '@jellyfin/sdk/lib/utils/api/tv-shows-api';
 import { getUserLibraryApi } from '@jellyfin/sdk/lib/utils/api/user-library-api';
 import { getUserViewsApi } from '@jellyfin/sdk/lib/utils/api/user-views-api';
+import { computed } from 'vue';
 import type { ComputedRef } from 'vue';
 import type { RouteNamedMap } from 'vue-router/auto-routes';
 import { isNil } from '@jellyfin-vue/shared/validation';
@@ -586,44 +587,70 @@ interface IndexPageQueries {
  */
 export async function fetchIndexPage(): Promise<IndexPageQueries> {
   const latestPerLibrary = new Map<BaseItemDto['Id'], ComputedRef<BaseItemDto[]>>();
-  const { data: views } = await useBaseItem(getUserViewsApi, 'getUserViews')();
+  const views = await safeBaseItemSection(async () => {
+    const { data } = await useBaseItem(getUserViewsApi, 'getUserViews')();
+    return data;
+  });
   const latestItems = views.value.map((view) => {
     return (async () => {
-      const { data } = await useBaseItem(getUserLibraryApi, 'getLatestMedia')(() => ({
-        parentId: view.Id,
-        includeItemTypes: getLatestIncludeItemTypesForLibrary(view.CollectionType),
-        sortBy: [ItemSortBy.DateCreated],
-        sortOrder: [SortOrder.Descending]
-      }));
+      const data = await safeBaseItemSection(async () => {
+        const { data } = await useBaseItem(getUserLibraryApi, 'getLatestMedia')(() => ({
+          parentId: view.Id,
+          includeItemTypes: getLatestIncludeItemTypesForLibrary(view.CollectionType),
+          sortBy: [ItemSortBy.DateCreated],
+          sortOrder: [SortOrder.Descending]
+        }));
+
+        return data;
+      });
 
       latestPerLibrary.set(view.Id, data);
     })();
   });
 
-  const itemPromises = [
-    useBaseItem(getItemsApi, 'getResumeItems')(() => ({
-      mediaTypes: ['Video']
-    })),
-    useBaseItem(getUserLibraryApi, 'getLatestMedia')(() => ({
-      includeItemTypes: [BaseItemKind.Movie, BaseItemKind.Episode],
-      sortBy: [ItemSortBy.DateCreated],
-      sortOrder: [SortOrder.Descending]
-    })),
-    useBaseItem(getTvShowsApi, 'getNextUp')()
-  ];
+  const [resumeVideo, carousel, nextUp] = await Promise.all([
+    safeBaseItemSection(async () => {
+      const { data } = await useBaseItem(getItemsApi, 'getResumeItems')(() => ({
+        mediaTypes: ['Video']
+      }));
 
-  const results = (await Promise.all([
-    Promise.all(itemPromises),
-    Promise.all(latestItems)
-  ]))[0];
+      return data;
+    }),
+    safeBaseItemSection(async () => {
+      const { data } = await useBaseItem(getUserLibraryApi, 'getLatestMedia')(() => ({
+        includeItemTypes: [BaseItemKind.Movie, BaseItemKind.Episode],
+        sortBy: [ItemSortBy.DateCreated],
+        sortOrder: [SortOrder.Descending]
+      }));
+
+      return data;
+    }),
+    safeBaseItemSection(async () => {
+      const { data } = await useBaseItem(getTvShowsApi, 'getNextUp')();
+
+      return data;
+    })
+  ]);
+
+  await Promise.all(latestItems);
 
   return {
     views,
-    resumeVideo: results[0]!.data,
-    carousel: results[1]!.data,
-    nextUp: results[2]!.data,
+    resumeVideo,
+    carousel,
+    nextUp,
     latestPerLibrary
   };
+}
+
+async function safeBaseItemSection(
+  loader: () => Promise<ComputedRef<BaseItemDto[]>>
+): Promise<ComputedRef<BaseItemDto[]>> {
+  try {
+    return await loader();
+  } catch {
+    return computed(() => []);
+  }
 }
 
 function getLatestIncludeItemTypesForLibrary(
