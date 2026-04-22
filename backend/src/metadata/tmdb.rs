@@ -434,6 +434,7 @@ impl MetadataProvider for TmdbProvider {
             name: details.name,
             original_title: details.original_name,
             overview: details.overview,
+            taglines: optional_tagline(details.tagline),
             premiere_date: first_air_date,
             status: details.status.and_then(|value| normalize_tmdb_series_status(&value)),
             end_date: last_air_date,
@@ -483,6 +484,7 @@ impl MetadataProvider for TmdbProvider {
             name: details.title,
             original_title: details.original_title,
             overview: details.overview,
+            taglines: optional_tagline(details.tagline),
             premiere_date,
             production_year: premiere_date.map(|date| date.year()),
             community_rating: details.vote_average,
@@ -732,6 +734,14 @@ fn normalize_tmdb_series_status(value: &str) -> Option<String> {
     Some(status.to_string())
 }
 
+fn optional_tagline(value: Option<String>) -> Vec<String> {
+    value
+        .map(|tagline| tagline.trim().to_string())
+        .filter(|tagline| !tagline.is_empty())
+        .into_iter()
+        .collect()
+}
+
 fn weekday_name(value: chrono::Weekday) -> String {
     match value {
         chrono::Weekday::Mon => "Monday",
@@ -876,6 +886,7 @@ struct TmdbTvDetails {
     name: Option<String>,
     original_name: Option<String>,
     overview: Option<String>,
+    tagline: Option<String>,
     first_air_date: Option<String>,
     last_air_date: Option<String>,
     status: Option<String>,
@@ -904,6 +915,7 @@ struct TmdbMovieDetails {
     title: Option<String>,
     original_title: Option<String>,
     overview: Option<String>,
+    tagline: Option<String>,
     release_date: Option<String>,
     runtime: Option<i32>,
     vote_average: Option<f64>,

@@ -5,6 +5,7 @@ import {
   BaseItemKind,
   ItemFields,
   ItemSortBy,
+  SortOrder,
   type BaseItemDto,
   type BaseItemPerson,
   type MediaStream
@@ -589,7 +590,10 @@ export async function fetchIndexPage(): Promise<IndexPageQueries> {
   const latestItems = views.value.map((view) => {
     return (async () => {
       const { data } = await useBaseItem(getUserLibraryApi, 'getLatestMedia')(() => ({
-        parentId: view.Id
+        parentId: view.Id,
+        includeItemTypes: getLatestIncludeItemTypesForLibrary(view.CollectionType),
+        sortBy: [ItemSortBy.DateCreated],
+        sortOrder: [SortOrder.Descending]
       }));
 
       latestPerLibrary.set(view.Id, data);
@@ -600,7 +604,11 @@ export async function fetchIndexPage(): Promise<IndexPageQueries> {
     useBaseItem(getItemsApi, 'getResumeItems')(() => ({
       mediaTypes: ['Video']
     })),
-    useBaseItem(getUserLibraryApi, 'getLatestMedia')(),
+    useBaseItem(getUserLibraryApi, 'getLatestMedia')(() => ({
+      includeItemTypes: [BaseItemKind.Movie, BaseItemKind.Episode],
+      sortBy: [ItemSortBy.DateCreated],
+      sortOrder: [SortOrder.Descending]
+    })),
     useBaseItem(getTvShowsApi, 'getNextUp')()
   ];
 
@@ -616,4 +624,27 @@ export async function fetchIndexPage(): Promise<IndexPageQueries> {
     nextUp: results[2]!.data,
     latestPerLibrary
   };
+}
+
+function getLatestIncludeItemTypesForLibrary(
+  collectionType: string | null | undefined
+): BaseItemKind[] | undefined {
+  switch (collectionType?.toLowerCase()) {
+    case 'tvshows':
+      return [BaseItemKind.Episode];
+    case 'movies':
+      return [BaseItemKind.Movie];
+    case 'books':
+      return [BaseItemKind.Book];
+    case 'music':
+      return [BaseItemKind.MusicAlbum, BaseItemKind.Audio];
+    case 'musicvideos':
+      return [BaseItemKind.MusicVideo];
+    case 'homevideos':
+      return [BaseItemKind.Video];
+    case 'boxsets':
+      return [BaseItemKind.BoxSet];
+    default:
+      return undefined;
+  }
 }

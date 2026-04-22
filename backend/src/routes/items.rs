@@ -548,6 +548,32 @@ async fn latest_items(
     Ok(Json(result.0.items))
 }
 
+async fn infer_latest_include_item_types(
+    state: &AppState,
+    parent_id: Option<Uuid>,
+) -> Result<Option<String>, AppError> {
+    let Some(parent_id) = parent_id else {
+        return Ok(Some("Movie,Episode".to_string()));
+    };
+
+    let Some(library) = repository::get_library(&state.pool, parent_id).await? else {
+        return Ok(Some("Movie,Episode".to_string()));
+    };
+
+    let include_item_types = match library.collection_type.to_ascii_lowercase().as_str() {
+        "tvshows" => Some("Episode"),
+        "movies" => Some("Movie"),
+        "books" => Some("Book"),
+        "music" => Some("MusicAlbum,Audio"),
+        "musicvideos" => Some("MusicVideo"),
+        "homevideos" => Some("Video"),
+        "boxsets" => Some("BoxSet"),
+        _ => None,
+    };
+
+    Ok(include_item_types.map(str::to_string))
+}
+
 async fn list_items_for_user(
     state: &AppState,
     user_id: Uuid,

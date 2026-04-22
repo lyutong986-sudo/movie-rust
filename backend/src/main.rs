@@ -166,6 +166,10 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             ADD COLUMN IF NOT EXISTS critic_rating DOUBLE PRECISION
         "#,
         r#"
+        ALTER TABLE media_items
+            ADD COLUMN IF NOT EXISTS taglines TEXT[] NOT NULL DEFAULT ARRAY[]::text[]
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS series_episode_catalog (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             series_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,

@@ -2004,7 +2004,7 @@ pub async fn list_media_items(
             overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
             premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
-            studios, tags, production_locations,
+            studios, tags, taglines, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, remote_trailers,
             date_created, date_modified, COUNT(*) OVER() AS total_count
@@ -2842,7 +2842,7 @@ pub async fn get_next_up_episodes(
             official_rating, community_rating, runtime_ticks, premiere_date,
             status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids,
-            genres, studios, tags, production_locations, width, height,
+            genres, studios, tags, taglines, production_locations, width, height,
             bit_rate, video_codec, audio_codec, image_primary_path,
             backdrop_path, logo_path, thumb_path, remote_trailers,
             date_created, date_modified
@@ -2915,7 +2915,7 @@ pub async fn get_upcoming_episodes(
             mi.official_rating, mi.community_rating, mi.runtime_ticks, mi.premiere_date,
             mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
             mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
-            mi.genres, mi.studios, mi.tags, mi.production_locations, mi.width, mi.height,
+            mi.genres, mi.studios, mi.tags, mi.taglines, mi.production_locations, mi.width, mi.height,
             mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path,
             mi.backdrop_path, mi.logo_path, mi.thumb_path, mi.remote_trailers,
             mi.date_created, mi.date_modified
@@ -3478,7 +3478,7 @@ pub async fn get_media_item(
             overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
             premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
-            studios, tags, production_locations,
+            studios, tags, taglines, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, remote_trailers,
             date_created, date_modified
@@ -3509,7 +3509,7 @@ pub async fn find_items_for_external_person_credit(
             overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
             premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
-            studios, tags, production_locations,
+            studios, tags, taglines, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, remote_trailers,
             date_created, date_modified
@@ -3878,7 +3878,7 @@ pub async fn session_play_queue(
             mi.premiere_date, mi.status, mi.end_date, mi.air_days, mi.air_time,
             mi.series_name, mi.season_name,
             mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
-            mi.genres, mi.studios, mi.tags, mi.production_locations,
+            mi.genres, mi.studios, mi.tags, mi.taglines, mi.production_locations,
             mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
             mi.remote_trailers, mi.date_created, mi.date_modified
@@ -3929,7 +3929,7 @@ pub async fn session_runtime_state(
             mi.premiere_date, mi.status, mi.end_date, mi.air_days, mi.air_time,
             mi.series_name, mi.season_name,
             mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
-            mi.genres, mi.studios, mi.tags, mi.production_locations,
+            mi.genres, mi.studios, mi.tags, mi.taglines, mi.production_locations,
             mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
             mi.remote_trailers, mi.date_created, mi.date_modified
@@ -4377,6 +4377,7 @@ pub struct UpsertMediaItem<'a> {
     pub container: Option<&'a str>,
     pub original_title: Option<&'a str>,
     pub overview: Option<&'a str>,
+    pub taglines: &'a [String],
     pub production_year: Option<i32>,
     pub official_rating: Option<&'a str>,
     pub community_rating: Option<f64>,
@@ -4433,7 +4434,7 @@ pub async fn upsert_media_item(
         INSERT INTO media_items
             (
                 id, library_id, parent_id, name, original_title, sort_name, item_type, media_type, path,
-                container, overview, production_year, official_rating, community_rating, critic_rating,
+                container, overview, taglines, production_year, official_rating, community_rating, critic_rating,
                 runtime_ticks, premiere_date, status, end_date, air_days, air_time,
                 provider_ids, genres, studios, tags, production_locations,
                 image_primary_path, backdrop_path, logo_path, thumb_path, remote_trailers,
@@ -4449,7 +4450,7 @@ pub async fn upsert_media_item(
                 $21, $22, $23, $24, $25,
                 $26, $27, $28, $29, $30,
                 $31, $32, $33, $34, $35, $36,
-                $37, $38, $39, $40,
+                $37, $38, $39, $40, $41,
                 now()
             )
         ON CONFLICT (library_id, path)
@@ -4462,11 +4463,12 @@ pub async fn upsert_media_item(
             media_type = EXCLUDED.media_type,
             container = EXCLUDED.container,
             overview = EXCLUDED.overview,
-              production_year = EXCLUDED.production_year,
-              official_rating = EXCLUDED.official_rating,
-              community_rating = EXCLUDED.community_rating,
-              critic_rating = EXCLUDED.critic_rating,
-              runtime_ticks = EXCLUDED.runtime_ticks,
+            taglines = EXCLUDED.taglines,
+            production_year = EXCLUDED.production_year,
+            official_rating = EXCLUDED.official_rating,
+            community_rating = EXCLUDED.community_rating,
+            critic_rating = EXCLUDED.critic_rating,
+            runtime_ticks = EXCLUDED.runtime_ticks,
             premiere_date = EXCLUDED.premiere_date,
             status = EXCLUDED.status,
             end_date = EXCLUDED.end_date,
@@ -4505,11 +4507,12 @@ pub async fn upsert_media_item(
     .bind(path_text)
     .bind(input.container)
     .bind(input.overview)
-      .bind(input.production_year)
-      .bind(input.official_rating)
-      .bind(input.community_rating)
-      .bind(input.critic_rating)
-      .bind(input.runtime_ticks)
+    .bind(input.taglines)
+    .bind(input.production_year)
+    .bind(input.official_rating)
+    .bind(input.community_rating)
+    .bind(input.critic_rating)
+    .bind(input.runtime_ticks)
     .bind(input.premiere_date)
     .bind(input.status)
     .bind(input.end_date)
@@ -5097,7 +5100,7 @@ pub async fn media_item_to_dto(
           official_rating: item.official_rating.clone(),
           community_rating: item.community_rating,
           critic_rating: item.critic_rating,
-          taglines: Vec::new(),
+          taglines: item.taglines.clone(),
         remote_trailers: remote_trailers_from_urls(&item.remote_trailers),
         people,
         studios: name_long_id_items_from_names(&item.studios),
@@ -5747,7 +5750,7 @@ async fn version_group_items_for_item(
                 overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
                 premiere_date, status, end_date, air_days, air_time, series_name, season_name,
                 index_number, index_number_end, parent_index_number, provider_ids, genres,
-                studios, tags, production_locations,
+                studios, tags, taglines, production_locations,
                 width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, remote_trailers,
                 date_created, date_modified
@@ -5804,7 +5807,7 @@ async fn version_group_items_for_item(
                 overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
                 premiere_date, status, end_date, air_days, air_time, series_name, season_name,
                 index_number, index_number_end, parent_index_number, provider_ids, genres,
-                studios, tags, production_locations,
+                studios, tags, taglines, production_locations,
                 width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, remote_trailers,
                 date_created, date_modified
@@ -6976,29 +6979,33 @@ pub async fn update_media_item_series_metadata(
         SET name = COALESCE($2, name),
             original_title = COALESCE($3, original_title),
             overview = COALESCE($4, overview),
-            premiere_date = COALESCE($5, premiere_date),
-            status = COALESCE($6, status),
-            end_date = COALESCE($7, end_date),
+            taglines = CASE
+                WHEN cardinality($5::text[]) > 0 THEN $5
+                ELSE taglines
+            END,
+            premiere_date = COALESCE($6, premiere_date),
+            status = COALESCE($7, status),
+            end_date = COALESCE($8, end_date),
             air_days = CASE
-                WHEN cardinality($8::text[]) > 0 THEN $8
+                WHEN cardinality($9::text[]) > 0 THEN $9
                 ELSE air_days
             END,
-            air_time = COALESCE($9, air_time),
-            production_year = COALESCE($10, production_year),
-            community_rating = COALESCE($11, community_rating),
+            air_time = COALESCE($10, air_time),
+            production_year = COALESCE($11, production_year),
+            community_rating = COALESCE($12, community_rating),
             genres = CASE
-                WHEN cardinality($12::text[]) > 0 THEN $12
+                WHEN cardinality($13::text[]) > 0 THEN $13
                 ELSE genres
             END,
             studios = CASE
-                WHEN cardinality($13::text[]) > 0 THEN $13
+                WHEN cardinality($14::text[]) > 0 THEN $14
                 ELSE studios
             END,
             production_locations = CASE
-                WHEN cardinality($14::text[]) > 0 THEN $14
+                WHEN cardinality($15::text[]) > 0 THEN $15
                 ELSE production_locations
             END,
-            provider_ids = provider_ids || $15::jsonb,
+            provider_ids = provider_ids || $16::jsonb,
             date_modified = now()
         WHERE id = $1
         "#,
@@ -7007,6 +7014,7 @@ pub async fn update_media_item_series_metadata(
     .bind(metadata.name.as_deref())
     .bind(metadata.original_title.as_deref())
     .bind(metadata.overview.as_deref())
+    .bind(&metadata.taglines)
     .bind(metadata.premiere_date)
     .bind(metadata.status.as_deref())
     .bind(metadata.end_date)
@@ -7037,35 +7045,39 @@ pub async fn update_media_item_movie_metadata(
         SET name = COALESCE($2, name),
             original_title = COALESCE($3, original_title),
             overview = COALESCE($4, overview),
-            premiere_date = COALESCE($5, premiere_date),
-            production_year = COALESCE($6, production_year),
-            community_rating = COALESCE($7, community_rating),
-            critic_rating = COALESCE($8, critic_rating),
-            official_rating = COALESCE($9, official_rating),
-            runtime_ticks = COALESCE($10, runtime_ticks),
+            taglines = CASE
+                WHEN cardinality($5::text[]) > 0 THEN $5
+                ELSE taglines
+            END,
+            premiere_date = COALESCE($6, premiere_date),
+            production_year = COALESCE($7, production_year),
+            community_rating = COALESCE($8, community_rating),
+            critic_rating = COALESCE($9, critic_rating),
+            official_rating = COALESCE($10, official_rating),
+            runtime_ticks = COALESCE($11, runtime_ticks),
             genres = CASE
-                WHEN cardinality($11::text[]) > 0 THEN $11
+                WHEN cardinality($12::text[]) > 0 THEN $12
                 ELSE genres
             END,
             studios = CASE
-                WHEN cardinality($12::text[]) > 0 THEN $12
+                WHEN cardinality($13::text[]) > 0 THEN $13
                 ELSE studios
             END,
             production_locations = CASE
-                WHEN cardinality($13::text[]) > 0 THEN $13
+                WHEN cardinality($14::text[]) > 0 THEN $14
                 ELSE production_locations
             END,
-            provider_ids = provider_ids || $14::jsonb,
+            provider_ids = provider_ids || $15::jsonb,
             image_primary_path = CASE
-                WHEN image_primary_path IS NULL OR image_primary_path = '' THEN COALESCE($15, image_primary_path)
+                WHEN image_primary_path IS NULL OR image_primary_path = '' THEN COALESCE($16, image_primary_path)
                 ELSE image_primary_path
             END,
             backdrop_path = CASE
-                WHEN backdrop_path IS NULL OR backdrop_path = '' THEN COALESCE($16, backdrop_path)
+                WHEN backdrop_path IS NULL OR backdrop_path = '' THEN COALESCE($17, backdrop_path)
                 ELSE backdrop_path
             END,
             remote_trailers = CASE
-                WHEN cardinality($17::text[]) > 0 THEN $17
+                WHEN cardinality($18::text[]) > 0 THEN $18
                 ELSE remote_trailers
             END,
             date_modified = now()
@@ -7076,6 +7088,7 @@ pub async fn update_media_item_movie_metadata(
     .bind(metadata.name.as_deref())
     .bind(metadata.original_title.as_deref())
     .bind(metadata.overview.as_deref())
+    .bind(&metadata.taglines)
     .bind(metadata.premiere_date)
     .bind(metadata.production_year)
     .bind(metadata.community_rating)

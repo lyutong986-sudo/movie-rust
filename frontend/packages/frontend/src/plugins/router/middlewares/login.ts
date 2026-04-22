@@ -25,7 +25,14 @@ async function _getBestServerPage(): Promise<Nullish<keyof RouteNamedMap>> {
   const defaultServerURLs = getDefaultServerURLs();
 
   if (defaultServerURLs.length && isNil(remote.auth.currentServer.value)) {
-    await until(remote.auth.currentServer).toBeTruthy({ flush: 'pre' });
+    try {
+      await until(remote.auth.currentServer).toBeTruthy({
+        flush: 'pre',
+        timeout: 3000
+      });
+    } catch {
+      // Let the guard fall back to the best available page instead of hanging on "/".
+    }
   }
 
   if (!remote.auth.addedServers.value) {
@@ -49,9 +56,11 @@ export const loginGuard = async (
 
   /**
    * Do not allow the server selection pages if `allowServerSelection` is false in config.json,
-   * but do allow the login page.
+   * but do allow the login and startup wizard pages.
    */
-  if (!jsonConfig.allowServerSelection && (toServerPages && to.name !== serverLoginUrl)) {
+  if (!jsonConfig.allowServerSelection && (
+    to.name === serverAddUrl || to.name === serverSelectUrl
+  )) {
     return false;
   }
 

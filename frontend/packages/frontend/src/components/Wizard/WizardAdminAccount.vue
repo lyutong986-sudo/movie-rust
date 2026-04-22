@@ -92,16 +92,18 @@ const RequiredRule = [
 async function createAdminAccount(): Promise<void> {
   loading.value = true;
 
-  const api = remote.sdk.api;
-
-  if (!api) {
-    return;
-  }
+  const api = remote.sdk.oneTimeSetup(
+    remote.auth.currentServer.value?.PublicAddress ?? ''
+  );
 
   try {
-    await getStartupApi(api).updateStartupUser({
+    const { data: user } = await getStartupApi(api).updateStartupUser({
       startupUserDto: admin.value
     });
+
+    if (remote.auth.currentServer.value) {
+      remote.auth.currentServer.value.PublicUsers = [user];
+    }
 
     emit('step-complete');
   } catch (error) {

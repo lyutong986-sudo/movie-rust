@@ -119,6 +119,11 @@ async function completeWizard(): Promise<void> {
     );
 
     await getStartupApi(api).completeWizard();
+
+    if (remote.auth.currentServer.value) {
+      remote.auth.currentServer.value.StartupWizardCompleted = true;
+    }
+
     // Redirect to setup complete page
     await router.replace('/server/login');
   } catch (error) {

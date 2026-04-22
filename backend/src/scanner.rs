@@ -24,6 +24,7 @@ struct NfoMetadata {
     title: Option<String>,
     original_title: Option<String>,
     overview: Option<String>,
+    taglines: Vec<String>,
     production_year: Option<i32>,
     official_rating: Option<String>,
     community_rating: Option<f64>,
@@ -172,6 +173,7 @@ async fn import_movie_file(
             container: container.as_deref(),
             original_title: nfo.original_title.as_deref(),
             overview: nfo.overview.as_deref(),
+            taglines: &nfo.taglines,
             production_year: nfo.production_year.or(parsed.production_year),
             official_rating: nfo.official_rating.as_deref(),
             community_rating: nfo.community_rating,
@@ -298,6 +300,7 @@ async fn import_tv_file(
             container: None,
             original_title: series_nfo.original_title.as_deref(),
             overview: series_nfo.overview.as_deref(),
+            taglines: &series_nfo.taglines,
               production_year: series_nfo.production_year.or(parsed.production_year),
               official_rating: series_nfo.official_rating.as_deref(),
               community_rating: series_nfo.community_rating,
@@ -354,6 +357,11 @@ async fn import_tv_file(
             container: None,
             original_title: season_nfo.original_title.as_deref(),
             overview: season_nfo.overview.as_deref(),
+            taglines: if season_nfo.taglines.is_empty() {
+                &series_nfo.taglines
+            } else {
+                &season_nfo.taglines
+            },
             production_year: season_nfo.production_year.or(series_nfo.production_year),
               official_rating: season_nfo
                   .official_rating
@@ -452,6 +460,11 @@ async fn import_tv_file(
             container: container.as_deref(),
             original_title: episode_nfo.original_title.as_deref(),
             overview: episode_nfo.overview.as_deref(),
+            taglines: if episode_nfo.taglines.is_empty() {
+                &series_nfo.taglines
+            } else {
+                &episode_nfo.taglines
+            },
             production_year: episode_nfo
                 .production_year
                 .or(parsed.production_year)
@@ -814,6 +827,11 @@ fn read_nfo_file(path: &Path) -> Option<NfoMetadata> {
         title: first_tag(&xml, &["title", "localtitle", "name"]),
         original_title: first_tag(&xml, &["originaltitle", "original_title"]),
         overview: first_tag(&xml, &["plot", "outline", "review", "biography", "overview"]),
+        taglines: repeated_tags(&xml, "tagline")
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect(),
         production_year: first_tag(&xml, &["year", "productionyear", "production_year"])
             .and_then(|value| parse_i32(&value)),
         official_rating: first_tag(&xml, &["mpaa", "certification", "officialrating"]),

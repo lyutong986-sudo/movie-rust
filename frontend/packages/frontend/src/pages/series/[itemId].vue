@@ -191,7 +191,6 @@ import { getUserLibraryApi } from '@jellyfin/sdk/lib/utils/api/user-library-api'
 import { computed } from 'vue';
 import { useRoute } from 'vue-router';
 import { getTvShowsApi } from '@jellyfin/sdk/lib/utils/api/tv-shows-api';
-import { getItemsApi } from '@jellyfin/sdk/lib/utils/api/items-api';
 import { getItemDetailsLink } from '#/utils/items.ts';
 import { useBaseItem } from '#/composables/apis.ts';
 import { useItemBackdrop } from '#/composables/backdrop.ts';
@@ -212,9 +211,12 @@ const [{ data: item }, { data: relatedItems }, { data: seasons }] = await Promis
   }))
 ]);
 
-const seasonsData = await Promise.all(seasons.value.map(s =>
-  useBaseItem(getItemsApi, 'getItems')(() => ({
-    parentId: s.Id
+const seasonsData = await Promise.all(seasons.value.map(season =>
+  useBaseItem(getTvShowsApi, 'getEpisodes')(() => ({
+    seriesId: route.params.itemId,
+    seasonId: season.Id,
+    sortBy: ['IndexNumber'],
+    sortOrder: ['Ascending']
   }))
 ));
 

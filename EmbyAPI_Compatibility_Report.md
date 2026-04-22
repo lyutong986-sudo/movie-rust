@@ -363,3 +363,48 @@ pnpm --filter @jellyfin-vue/frontend check:types
   已把登录守卫改为基于运行时默认服务器列表判断流程，避免在 `defaultServerURLs` 为空时把用户重定向到 `#/server/add`；并在禁用服务器选择时直接停留登录页，不再回落到“添加服务器”流程。
 - `frontend/packages/frontend/public/config.json`
   已将 `allowServerSelection` 设为 `false`，关闭手动选择/添加服务器入口，使单后端部署默认走当前 backend。
+
+## 2026-04-22 前端适配补充（六）
+- 本轮继续按 EmbySDK 真实链路清首页和系列详情页，优先核对 `Views / Resume / Latest / NextUp` 以及详情页依赖的 `Seasons / Episodes` 调用方式。
+- `模板项目/Emby模板/MediaBrowser.Api/UserLibrary/UserLibraryService.cs`
+  已复核 Emby 模板里首页“最近加入”走的是 `Users/{UserId}/Items/Latest`，且支持 `ParentId` 与 `IncludeItemTypes`。
+- `backend/src/routes/items.rs`
+  已把 `Items/Latest` 的默认类型从固定 `Movie,Series` 调整为更接近 Emby 客户端首页期望的行为：
+  根首页默认取 `Movie,Episode`；
+  电视剧库默认取 `Episode`；
+  电影库默认取 `Movie`；
+  其余库按各自集合类型映射常见媒体类型。
+- `frontend/packages/frontend/src/utils/items.ts`
+  首页聚合请求现在会按库 `CollectionType` 主动传递更贴近 Emby 语义的 `includeItemTypes` 给 `getLatestMedia`，并显式按 `DateCreated Descending` 取数，减少前后端默认值分歧。
+- `frontend/packages/frontend/src/pages/series/[itemId].vue`
+  系列详情页已从泛用 `getItems(parentId=seasonId)` 切换为 EmbySDK 标准 `getEpisodes(seriesId, seasonId)`，并显式按 `IndexNumber Ascending` 获取每季剧集，后续补字段时可直接沿 `Shows/{seriesId}/Episodes` 标准链路继续适配。
+
+## 2026-04-22 前端适配补充（七）
+- 本轮继续按“若 frontend / backend / EmbySDK 冲突，以 EmbySDK 为准”的规则核对详情页字段，确认 `Taglines` 是 EmbySDK `BaseItemDto` 的标准字段，不应由前端回避。
+- `模板项目/EmbySDK/SampleCode/RestApi/TypeScript/api.ts`
+  已再次复核 `BaseItemDto` 与相关查询字段定义，`Taglines`、`People`、`GenreItems`、`MediaStreams`、`MediaSources` 都属于标准返回字段。
+- `模板项目/EmbySDK/SampleCode/RestApi/Emby.ApiClient/Emby.ApiClient/Model/BaseItemDto.cs`
+  已复核服务端 DTO 模型，确认 `Taglines` 是与 `People`、`GenreItems`、`MediaStreams` 同级的标准属性。
+- `backend/src/scanner.rs`
+  已为本地 NFO 扫描补充 `tagline` 读取，并在电影、剧集、季度、剧集导入时一起写入条目，避免本地元数据中的标语被丢弃。
+- `backend/src/metadata/models.rs` 与 `backend/src/metadata/tmdb.rs`
+  已把 TMDB 详情里的 `tagline` 接入外部元数据模型；后端刷新电影/剧集远程元数据时会把 TMDB `tagline` 规范化为 Emby 风格的 `Taglines: string[]`。
+- `backend/src/models.rs`、`backend/src/repository.rs`、`backend/migrations/0013_emby_taglines.sql`
+  已为 `media_items` 增加持久化 `taglines` 字段，并打通扫描入库、远程元数据刷新、`DbMediaItem -> BaseItemDto` 输出链路；详情页现在会返回真实 `Taglines`，而不是固定空数组。
+- 本轮未额外修改 frontend 详情页调用代码：
+  因为现有前端读取 `item.Taglines[0]` 的方式本身就符合 EmbySDK 语义，真正缺口在 backend 字段未落库。
+
+## 2026-04-22 前端适配补充（八）
+- 已对照 frontend 首启向导流程与 EmbySDK 启动阶段 API，确认新部署卡在 `/#/` 的核心原因不是首页数据，而是首启路由守卫与向导 API 的前端状态处理不一致。
+- `frontend/packages/frontend/src/plugins/router/middlewares/login.ts`
+  已修复单后端部署下的首启路由死锁：此前我们关闭了 `allowServerSelection`，但守卫把 `/wizard` 也一起拦掉，导致未完成首启时从根页尝试跳向导却被取消，页面就停在 `/#/`。现在仅继续拦截 `/server/add` 与 `/server/select`，保留 `/wizard` 与 `/server/login`。
+- `frontend/packages/frontend/src/plugins/router/middlewares/login.ts`
+  还为默认服务器等待补了超时兜底，避免当前端启动时默认服务器探测失败或过慢，守卫长期等待 `currentServer` 导致首屏挂起。
+- `frontend/packages/frontend/src/components/Wizard/WizardAdminAccount.vue`
+  已把管理员创建从错误的 `remote.sdk.api` 切回 EmbySDK 首启专用 `oneTimeSetup(...) + StartupApi.updateStartupUser(...)`。这一步在首启阶段本来就不应依赖已登录用户，否则新部署时会因为没有认证 API 实例而卡住。
+- `frontend/packages/frontend/src/pages/wizard.vue`
+  已在 `completeWizard()` 成功后同步更新当前服务器的 `StartupWizardCompleted` 本地状态，再跳转到登录页，避免前端因为缓存的旧状态把已完成向导的实例继续判定为“必须回向导”。
+- `frontend/packages/frontend/src/components/Wizard/WizardAdminAccount.vue`
+  已在成功创建首个管理员后同步刷新当前服务器的 `PublicUsers`，让后续登录页与首启后的服务器状态更一致。
+- 本轮未新增 backend 路由：
+  因为当前 backend 已具备 `/Startup/Configuration`、`/Startup/User`、`/Startup/RemoteAccess`、`/Startup/Complete` 这组首启接口；这次暴露出来的是 frontend 与 EmbySDK 首启调用方式不一致，而不是 backend 缺少同名能力。
