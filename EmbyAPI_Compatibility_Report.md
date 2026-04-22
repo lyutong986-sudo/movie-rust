@@ -449,3 +449,22 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 ### 仍待继续
 - 继续按 WebDashboard 页面把 `System/Info`、`System/Configuration/*` 的细节字段补深，尤其是 dashboard 首页、编码页、插件页和高级设置页。
 - 继续补 WebDashboard 会探测但当前仍较弱的系统任务、插件安装、Connect 邀请、活动日志与媒体编码相关接口细节。
+
+## 2026-04-23 WebDashboard 适配进展（七）
+
+### 本轮完成
+- 扩展 `SystemInfo`，补齐 dashboard 首页实际读取的字段：`WanAddress`、`CachePath`、`LogPath`、`InternalMetadataPath`、`TranscodingTempPath`、`CompletedInstallations`、`IsShuttingDown`。
+- `System/Info` 现在会结合 `System/Configuration` 与命名配置 `encoding` 返回 dashboard 首页、编码页所需的缓存路径、元数据路径、转码临时路径等信息。
+- 新增 `POST /System/MediaEncoder/Path`，兼容编码设置页保存自定义 FFmpeg/编码器路径的动作，并把结果写回命名配置 `encoding`。
+- 为 `encoding` 增加默认命名配置结构：`EncoderAppPath`、`TranscodingTempPath`、`HardwareAccelerationType`、`HardwareDecodingCodecs`、`EnableHardwareEncoding`、`EnableSubtitleExtraction` 等字段。
+- 新增 `POST /Connect/Invite`，兼容 guest inviter 组件邀请 Emby Connect 用户的最小流程返回。
+- 新增 `GET /System/Logs/Log?name=...`，兼容日志页直接按查询参数打开日志文件内容。
+- 扩展活动日志条目字段，补上 `Overview`、`UserId`、`UserPrimaryImageTag`，提升 dashboard 活动组件显示完整度。
+- 扩展 `Startup/User`：支持 WebDashboard 启动向导使用 `application/x-www-form-urlencoded` 提交，支持 `ConnectUserName`，并在返回中附带 `UserLinkResult`，兼容 `wizarduserpage.js` 的向导流。
+
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+
+### 仍待继续
+- 继续补 dashboard 首页的插件更新/应用更新链路细节，尤其是 `Packages/Updates` 不同分类对象的字段形状。
+- 继续核对活动日志、计划任务、插件安装和 Connect 相关消息流与 WebSocket 推送细节。

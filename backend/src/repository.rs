@@ -33,7 +33,9 @@ struct ActivityLogRow {
     is_paused: Option<bool>,
     played_to_completion: Option<bool>,
     created_at: DateTime<Utc>,
+    user_id: Uuid,
     user_name: String,
+    primary_image_path: Option<String>,
     item_name: Option<String>,
 }
 
@@ -1552,7 +1554,9 @@ pub async fn list_activity_logs(
             e.is_paused,
             e.played_to_completion,
             e.created_at,
+            u.id AS user_id,
             u.name AS user_name,
+            u.primary_image_path,
             m.name AS item_name
         FROM playback_events e
         INNER JOIN users u ON u.id = e.user_id
@@ -1584,8 +1588,17 @@ pub async fn list_activity_logs(
                 name: format!("{} · {}", row.user_name, item_name),
                 entry_type,
                 short_overview,
+                overview: Some(format!(
+                    "{} 对 {} 执行了 {}",
+                    row.user_name, item_name, row.event_type
+                )),
                 severity: "Info".to_string(),
                 date: row.created_at,
+                user_id: Some(uuid_to_emby_guid(&row.user_id)),
+                user_primary_image_tag: row
+                    .primary_image_path
+                    .as_ref()
+                    .map(|_| row.created_at.timestamp().to_string()),
             }
         })
         .collect())

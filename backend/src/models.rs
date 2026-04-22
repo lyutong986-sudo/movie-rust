@@ -641,8 +641,17 @@ pub struct SystemInfo {
     pub can_launch_web_browser: bool,
     pub supports_https: bool,
     pub has_pending_restart: bool,
+    pub is_shutting_down: bool,
     pub http_server_port_number: u16,
     pub https_port_number: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wan_address: Option<String>,
+    pub cache_path: String,
+    pub log_path: String,
+    pub internal_metadata_path: String,
+    pub transcoding_temp_path: String,
+    #[serde(default)]
+    pub completed_installations: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -665,8 +674,14 @@ pub struct ActivityLogEntryDto {
     #[serde(rename = "Type")]
     pub entry_type: String,
     pub short_overview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
     pub severity: String,
     pub date: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_primary_image_tag: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

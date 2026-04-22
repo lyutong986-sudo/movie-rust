@@ -5,7 +5,7 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Form, Path, Query, State},
     http::StatusCode,
     routing::{delete, get, post},
     Json, Router,
@@ -22,6 +22,7 @@ pub fn router() -> Router<AppState> {
             get(plugin_configuration).post(update_plugin_configuration),
         )
         .route("/Connect/Pending", get(connect_pending).delete(delete_connect_pending))
+        .route("/Connect/Invite", post(connect_invite))
         .route("/News/Product", get(product_news))
         .route("/Packages/{id}/Reviews", get(package_reviews))
         .route("/Packages/Reviews/{id}", post(create_package_review))
@@ -37,6 +38,15 @@ pub fn router() -> Router<AppState> {
 struct PendingQuery {
     #[serde(default)]
     id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ConnectInviteRequest {
+    connect_username: Option<String>,
+    enabled_libraries: Option<String>,
+    sending_user_id: Option<String>,
+    enable_live_tv: Option<bool>,
 }
 
 async fn plugins(_session: AuthSession) -> Json<Vec<Value>> {
@@ -103,6 +113,26 @@ async fn delete_connect_pending(
     Query(_query): Query<PendingQuery>,
 ) -> StatusCode {
     StatusCode::NO_CONTENT
+}
+
+async fn connect_invite(
+    _session: AuthSession,
+    Form(payload): Form<ConnectInviteRequest>,
+) -> Json<Value> {
+    let guest_display_name = payload
+        .connect_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Guest");
+    Json(json!({
+        "IsPending": false,
+        "IsNewUserInvitation": false,
+        "GuestDisplayName": guest_display_name,
+        "EnabledLibraries": payload.enabled_libraries.unwrap_or_default(),
+        "SendingUserId": payload.sending_user_id,
+        "EnableLiveTv": payload.enable_live_tv.unwrap_or(false)
+    }))
 }
 
 async fn product_news(_session: AuthSession) -> Json<Value> {

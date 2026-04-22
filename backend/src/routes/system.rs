@@ -8,7 +8,7 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Form, Path, Query, State},
     http::{header::CONTENT_TYPE, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -51,6 +51,8 @@ pub fn router() -> Router<AppState> {
         .route("/system/restart", post(system_restart))
         .route("/System/Shutdown", post(system_shutdown))
         .route("/system/shutdown", post(system_shutdown))
+        .route("/System/MediaEncoder/Path", post(update_media_encoder_path))
+        .route("/system/mediaencoder/path", post(update_media_encoder_path))
         .route("/Branding/Configuration", get(branding_configuration))
         .route("/branding/configuration", get(branding_configuration))
         .route("/Branding/Css", get(branding_css))
@@ -59,6 +61,7 @@ pub fn router() -> Router<AppState> {
         .route("/branding/css.css", get(branding_css))
         .route("/System/Logs", get(server_logs))
         .route("/System/Logs/Query", get(server_logs_query))
+        .route("/System/Logs/Log", get(server_log_content_by_query))
         .route("/System/Logs/{name}", get(server_log_content))
         .route("/System/Logs/{name}/Lines", get(server_log_lines))
         .route("/system/logs", get(server_logs))
@@ -77,6 +80,8 @@ struct LogQuery {
     limit: Option<i64>,
     #[serde(default, alias = "searchTerm")]
     search_term: Option<String>,
+    #[serde(default, alias = "name")]
+    name: Option<String>,
 }
 
 async fn public_info(
@@ -97,12 +102,45 @@ async fn public_info(
     }))
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct MediaEncoderPathRequest {
+    path: Option<String>,
+    path_type: Option<String>,
+}
+
 async fn system_info(
     _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<SystemInfo>, crate::error::AppError> {
     let startup_wizard_completed = repository::startup_wizard_completed(&state.pool).await?;
     let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+    let system_config = repository::system_configuration(&state.pool, &state.config).await?;
+    let encoding_config = repository::named_system_configuration(&state.pool, "encoding")
+        .await?
+        .unwrap_or_else(|| default_named_configuration("encoding"));
+    let cache_path = system_config
+        .get("CachePath")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let transcoding_temp_path = encoding_config
+        .get("TranscodingTempPath")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let log_path = state.config.log_dir.to_string_lossy().to_string();
+    let internal_metadata_path = system_config
+        .get("MetadataPath")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let wan_address = state
+        .config
+        .public_url
+        .as_ref()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty());
 
     Ok(Json(SystemInfo {
         local_address: format!("http://{}:{}", state.config.host, state.config.port),
@@ -118,8 +156,15 @@ async fn system_info(
         can_launch_web_browser: false,
         supports_https: false,
         has_pending_restart: false,
+        is_shutting_down: false,
         http_server_port_number: state.config.port,
         https_port_number: 0,
+        wan_address,
+        cache_path,
+        log_path,
+        internal_metadata_path,
+        transcoding_temp_path,
+        completed_installations: Vec::new(),
         package_name: None,
         system_update_level: Some("Release".to_string()),
         encoder_location_type: "Internal".to_string(),
@@ -290,6 +335,22 @@ async fn server_log_content(
     Ok(([(CONTENT_TYPE, "text/plain; charset=utf-8")], content))
 }
 
+async fn server_log_content_by_query(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<LogQuery>,
+) -> Result<impl IntoResponse, crate::error::AppError> {
+    let name = query
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| crate::error::AppError::BadRequest("缺少日志文件名".to_string()))?;
+    let path = log_file_path(&state.config.log_dir, name)?;
+    let content = tokio::fs::read_to_string(path).await?;
+    Ok(([(CONTENT_TYPE, "text/plain; charset=utf-8")], content))
+}
+
 async fn server_log_lines(
     _session: AuthSession,
     State(state): State<AppState>,
@@ -356,8 +417,45 @@ async fn system_shutdown(_session: AuthSession) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+async fn update_media_encoder_path(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Form(payload): Form<MediaEncoderPathRequest>,
+) -> Result<StatusCode, crate::error::AppError> {
+    let mut encoding = repository::named_system_configuration(&state.pool, "encoding")
+        .await?
+        .unwrap_or_else(|| default_named_configuration("encoding"));
+
+    if !matches!(
+        payload.path_type.as_deref(),
+        None | Some("Custom") | Some("custom")
+    ) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    if let Some(path) = payload.path {
+        encoding["EncoderAppPath"] = Value::String(path.trim().to_string());
+    }
+
+    repository::update_named_system_configuration(&state.pool, "encoding", &encoding).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn default_named_configuration(name: &str) -> Value {
     match name.to_ascii_lowercase().as_str() {
+        "encoding" => json!({
+            "EnableHardwareEncoding": false,
+            "HardwareAccelerationType": "",
+            "EncodingThreadCount": 0,
+            "DownMixAudioBoost": 2,
+            "EncoderAppPath": "",
+            "TranscodingTempPath": "",
+            "VaapiDevice": "",
+            "H264Preset": "",
+            "H264Crf": 23,
+            "EnableSubtitleExtraction": false,
+            "HardwareDecodingCodecs": []
+        }),
         "livetv" => json!({
             "TunerHosts": [],
             "ListingProviders": [],
