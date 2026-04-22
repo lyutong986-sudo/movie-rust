@@ -131,6 +131,137 @@ pub async fn update_startup_configuration(
     set_system_setting(pool, "startup_configuration", json!(configuration)).await
 }
 
+pub async fn system_configuration(
+    pool: &sqlx::PgPool,
+    config: &Config,
+) -> Result<Value, AppError> {
+    if let Some(value) = get_system_setting(pool, "system_configuration").await? {
+        return Ok(value);
+    }
+
+    let startup = startup_configuration(pool, config).await?;
+    let remote_access = startup_remote_access(pool, config).await?;
+    let mut value = serde_json::Map::new();
+    value.insert("ServerName".to_string(), json!(startup.server_name));
+    value.insert("UICulture".to_string(), json!(startup.ui_culture));
+    value.insert(
+        "MetadataCountryCode".to_string(),
+        json!(startup.metadata_country_code),
+    );
+    value.insert(
+        "PreferredMetadataLanguage".to_string(),
+        json!(startup.preferred_metadata_language),
+    );
+    value.insert(
+        "EnableRemoteAccess".to_string(),
+        json!(remote_access.enable_remote_access),
+    );
+    value.insert(
+        "EnableAutomaticPortMapping".to_string(),
+        json!(remote_access.enable_automatic_port_mapping.unwrap_or(false)),
+    );
+    value.insert(
+        "EnableUPnP".to_string(),
+        json!(remote_access.enable_automatic_port_mapping.unwrap_or(false)),
+    );
+    value.insert(
+        "IsStartupWizardCompleted".to_string(),
+        json!(startup_wizard_completed(pool).await?),
+    );
+    value.insert("LibraryMonitorDelay".to_string(), json!(60));
+    value.insert("ImageSavingConvention".to_string(), json!("Compatible"));
+    value.insert("MetadataOptions".to_string(), json!([]));
+    value.insert("CachePath".to_string(), json!(""));
+    value.insert("RunAtStartup".to_string(), json!(false));
+    value.insert("AutoRunWebApp".to_string(), json!(false));
+    value.insert("EnableAutoUpdate".to_string(), json!(false));
+    value.insert("EnableAutomaticRestart".to_string(), json!(false));
+    value.insert("EnableAnonymousUsageReporting".to_string(), json!(false));
+    value.insert("HttpServerPortNumber".to_string(), json!(config.port));
+    value.insert("HttpsPortNumber".to_string(), json!(0));
+    value.insert("PublicPort".to_string(), json!(config.port));
+    value.insert("PublicHttpsPort".to_string(), json!(0));
+    value.insert("EnableHttps".to_string(), json!(false));
+    value.insert("RequireHttps".to_string(), json!(false));
+    value.insert("IsBehindProxy".to_string(), json!(false));
+    value.insert("WanDdns".to_string(), json!(""));
+    value.insert("CertificatePath".to_string(), Value::Null);
+    value.insert("CertificatePassword".to_string(), Value::Null);
+    value.insert("LocalNetworkAddresses".to_string(), json!([]));
+    value.insert("LocalNetworkSubnets".to_string(), json!([]));
+    value.insert("RemoteIPFilter".to_string(), json!([]));
+    value.insert("IsRemoteIPFilterBlacklist".to_string(), json!(false));
+    value.insert("RemoteClientBitrateLimit".to_string(), json!(0));
+    value.insert("TranscodingTempPath".to_string(), json!(""));
+    value.insert("MetadataPath".to_string(), json!(""));
+    value.insert("MetadataNetworkPath".to_string(), json!(""));
+    value.insert("SaveMetadataHidden".to_string(), json!(false));
+    value.insert("EnableTvDbUpdates".to_string(), json!(true));
+    value.insert("EnableTmdbUpdates".to_string(), json!(true));
+    value.insert("EnableFanArtUpdates".to_string(), json!(true));
+    value.insert("FanartApiKey".to_string(), json!(""));
+    value.insert("EnableCaseSensitiveItemIds".to_string(), json!(false));
+    value.insert(
+        "SkipDeserializationForBasicTypes".to_string(),
+        json!(true),
+    );
+
+    Ok(Value::Object(value))
+}
+
+pub async fn update_system_configuration(
+    pool: &sqlx::PgPool,
+    configuration: &Value,
+) -> Result<(), AppError> {
+    set_system_setting(pool, "system_configuration", configuration.clone()).await
+}
+
+pub async fn named_system_configuration(
+    pool: &sqlx::PgPool,
+    name: &str,
+) -> Result<Option<Value>, AppError> {
+    get_system_setting(pool, &format!("system_configuration:{}", name.to_ascii_lowercase())).await
+}
+
+pub async fn update_named_system_configuration(
+    pool: &sqlx::PgPool,
+    name: &str,
+    configuration: &Value,
+) -> Result<(), AppError> {
+    set_system_setting(
+        pool,
+        &format!("system_configuration:{}", name.to_ascii_lowercase()),
+        configuration.clone(),
+    )
+    .await
+}
+
+pub async fn get_user_connect_link(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<Option<Value>, AppError> {
+    get_system_setting(pool, &format!("user_connect_link:{user_id}")).await
+}
+
+pub async fn set_user_connect_link(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    value: &Value,
+) -> Result<(), AppError> {
+    set_system_setting(pool, &format!("user_connect_link:{user_id}"), value.clone()).await
+}
+
+pub async fn delete_user_connect_link(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM system_settings WHERE key = $1")
+        .bind(format!("user_connect_link:{user_id}"))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn branding_configuration(
     pool: &sqlx::PgPool,
     config: &Config,
@@ -1034,6 +1165,27 @@ pub async fn create_user(pool: &sqlx::PgPool, name: &str) -> Result<DbUser, AppE
         .ok_or_else(|| AppError::Internal("创建用户后无法读取用户".to_string()))
 }
 
+pub async fn update_user_name(pool: &sqlx::PgPool, user_id: Uuid, name: &str) -> Result<(), AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("用户名不能为空".to_string()));
+    }
+
+    if let Some(existing) = get_user_by_name(pool, name).await? {
+        if existing.id != user_id {
+            return Err(AppError::BadRequest("用户已存在".to_string()));
+        }
+    }
+
+    sqlx::query("UPDATE users SET name = $1, date_modified = now() WHERE id = $2")
+        .bind(name)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
 pub async fn delete_user(pool: &sqlx::PgPool, user_id: Uuid) -> Result<(), AppError> {
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(user_id)
@@ -1054,6 +1206,17 @@ pub async fn change_user_password(
 
     let password_hash = security::hash_password(password)?;
     sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(password_hash)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+pub async fn reset_user_password(pool: &sqlx::PgPool, user_id: Uuid) -> Result<(), AppError> {
+    let password_hash = security::hash_password("")?;
+    sqlx::query("UPDATE users SET password_hash = $1, date_modified = now() WHERE id = $2")
         .bind(password_hash)
         .bind(user_id)
         .execute(pool)
@@ -4553,9 +4716,55 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
         has_password: true,
         has_configured_password: true,
         has_configured_easy_password: false,
+        connect_user_name: None,
+        connect_user_id: None,
+        connect_link_type: None,
+        primary_image_tag: user
+            .primary_image_path
+            .as_ref()
+            .map(|_| user.date_modified.timestamp().to_string()),
+        last_activity_date: None,
         policy,
         configuration,
     }
+}
+
+pub async fn user_to_dto_with_context(
+    pool: &sqlx::PgPool,
+    user: &DbUser,
+    server_id: Uuid,
+) -> Result<UserDto, AppError> {
+    let mut dto = user_to_dto(user, server_id);
+
+    if let Some(connect) = get_user_connect_link(pool, user.id).await? {
+        dto.connect_user_name = connect
+            .get("ConnectUserName")
+            .and_then(Value::as_str)
+            .map(|value| value.to_string())
+            .or_else(|| {
+                connect
+                    .get("ConnectUsername")
+                    .and_then(Value::as_str)
+                    .map(|value| value.to_string())
+            });
+        dto.connect_user_id = connect
+            .get("ConnectUserId")
+            .and_then(Value::as_str)
+            .map(|value| value.to_string());
+        dto.connect_link_type = connect
+            .get("ConnectLinkType")
+            .and_then(Value::as_str)
+            .map(|value| value.to_string());
+    }
+
+    dto.last_activity_date = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+        "SELECT MAX(last_activity_at) FROM sessions WHERE user_id = $1",
+    )
+    .bind(user.id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(dto)
 }
 
 pub fn session_to_dto(session: &AuthSessionRow) -> SessionInfoDto {

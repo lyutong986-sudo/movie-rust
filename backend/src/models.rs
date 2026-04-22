@@ -385,6 +385,16 @@ pub struct UserDto {
     pub has_password: bool,
     pub has_configured_password: bool,
     pub has_configured_easy_password: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect_user_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect_link_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_image_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_date: Option<DateTime<Utc>>,
     pub policy: UserPolicyDto,
     pub configuration: UserConfigurationDto,
 }
@@ -427,6 +437,7 @@ pub struct UserPolicyDto {
     pub login_attempts_before_lockout: i32,
     pub remote_client_bitrate_limit: i32,
     pub blocked_tags: Vec<String>,
+    pub block_unrated_items: Vec<String>,
     pub allowed_tags: Vec<String>,
     pub enabled_folders: Vec<Uuid>,
     pub enable_all_folders: bool,
@@ -436,6 +447,8 @@ pub struct UserPolicyDto {
     pub enable_all_devices: bool,
     pub blocked_media_folders: Vec<Uuid>,
     pub blocked_channels: Vec<Uuid>,
+    pub enable_content_deletion_from_folders: Vec<String>,
+    pub access_schedules: Vec<Value>,
     pub authentication_provider_id: String,
     pub password_reset_provider_id: String,
     pub sync_play_access: String,
@@ -471,6 +484,7 @@ impl Default for UserPolicyDto {
             login_attempts_before_lockout: -1,
             remote_client_bitrate_limit: 0,
             blocked_tags: Vec::new(),
+            block_unrated_items: Vec::new(),
             allowed_tags: Vec::new(),
             enabled_folders: Vec::new(),
             enable_all_folders: true,
@@ -480,6 +494,8 @@ impl Default for UserPolicyDto {
             enable_all_devices: true,
             blocked_media_folders: Vec::new(),
             blocked_channels: Vec::new(),
+            enable_content_deletion_from_folders: Vec::new(),
+            access_schedules: Vec::new(),
             authentication_provider_id: "Default".to_string(),
             password_reset_provider_id: "Default".to_string(),
             sync_play_access: "CreateAndJoinGroups".to_string(),
@@ -605,6 +621,8 @@ pub struct PublicSystemInfo {
     pub operating_system: String,
     pub id: String,
     pub startup_wizard_completed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -618,6 +636,18 @@ pub struct SystemInfo {
     pub id: String,
     pub startup_wizard_completed: bool,
     pub can_self_restart: bool,
+    pub can_self_update: bool,
+    pub supports_auto_run_at_startup: bool,
+    pub can_launch_web_browser: bool,
+    pub supports_https: bool,
+    pub has_pending_restart: bool,
+    pub http_server_port_number: u16,
+    pub https_port_number: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_update_level: Option<String>,
+    pub encoder_location_type: String,
 }
 
 #[derive(Debug, Serialize)]

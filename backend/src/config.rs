@@ -76,7 +76,7 @@ impl Config {
                 .unwrap_or(false),
             static_dir: env::var("APP_STATIC_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("frontend/dist")),
+                .unwrap_or_else(|_| PathBuf::from("frontend")),
             log_dir: env::var("LOG_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("logs")),

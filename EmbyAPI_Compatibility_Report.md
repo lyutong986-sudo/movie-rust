@@ -297,3 +297,155 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 ```
 
 当前仍存在一批既有 Rust warning，主要是未使用 import、未使用字段、未使用辅助函数和部分未来扩展模型；它们不阻塞构建，但建议后续在功能稳定后统一清理。
+
+## 2026-04-23 WebDashboard 基线切换
+
+- 已把 `frontend` 原有 Vue SPA 内容整体移除，并将 `模板项目/Emby模板/MediaBrowser.WebDashboard` 复制到 `frontend/`，后续前端兼容性改为以 Emby WebDashboard 为基线。
+- `APP_STATIC_DIR` 默认值已从 `frontend/dist` 改为 `frontend`，以适配新的 dashboard 目录结构。
+- 新增 `backend/src/routes/dashboard.rs`，先接通最小可用的 dashboard 托管层。
+- 已接通 `GET /`、`GET /web`、`GET /favicon.ico`、`GET /robots.txt`、`GET /web/*`、`GET /web/ConfigurationPages` 和 `GET /web/ConfigurationPage?Name=...` 的首轮路由。
+- `GET /web/ConfigurationPages` 当前暂返回空数组，`GET /web/ConfigurationPage?Name=...` 暂返回 404，属于启动保底 stub，后续再按 WebDashboard 实际需求补齐。
+- 已通过 `cargo check --manifest-path backend/Cargo.toml`。
+
+### 新基线的当前缺口
+
+- P0: 还没有按 `dashboard-ui/scripts/site.js` 和其他页面脚本的实际 API 调用做全量缺口审计。
+- P0: `ConfigurationPages` / `ConfigurationPage` 目前只是启动保底 stub，不是 Emby 真实 dashboard plugin/page 模型。
+- P1: 后续需要以 WebDashboard 的真实请求为准，重新截取并补齐 `System`、`Users`、`Library`、`Items`、`DisplayPreferences`、`Sessions`、`Devices`、`ScheduledTasks` 等端点。
+- P1: 后续 `EmbyAPI_Compatibility_Report.md` 应以 WebDashboard 基线缺口为主，不再以已删除的 Vue SPA 前端行为为主。
+
+## 2026-04-23 WebDashboard 适配进展（二）
+
+### 本轮已补齐的管理接口
+- `GET/POST /System/Configuration`
+  - 已接入数据库持久化，默认返回服务器名、UI 语言、元数据国家/语言、远程访问开关等基础配置。
+- `GET/POST /System/Configuration/{name}`
+  - 已支持按名称读取与保存命名配置，先作为 WebDashboard 配置页的通用存储层。
+- `GET /System/Configuration/devices`
+  - 已返回设备配置占位结构，避免设备设置页直接报错。
+- `GET /System/WakeOnLanInfo`
+  - 已返回空数组兼容响应。
+- `GET /Localization/Countries`
+  - 已返回国家列表对象，包含 `DisplayName`、`TwoLetterISORegionName`、`ThreeLetterISORegionName`。
+- `GET /Localization/ParentalRatings`
+  - 已返回基础分级列表，支撑用户家长控制页面加载。
+- `GET /Environment/DefaultDirectoryBrowser`
+- `GET /Environment/Drives`
+- `GET /Environment/DirectoryContents`
+- `GET /Environment/ParentPath`
+- `GET /Environment/NetworkDevices`
+- `POST /Environment/ValidatePath`
+  - 已实现目录浏览、父路径、驱动器、路径校验等文件系统浏览能力，供目录选择器与媒体库路径编辑器使用。
+- `GET /Devices`
+- `DELETE /Devices/{id}`
+- `POST /Devices/{id}/Delete`
+- `GET /Devices/CameraUploads`
+  - 已提供基于会话聚合的设备列表和空的相机上传历史响应。
+- `GET /Channels`
+  - 已返回空的 `Items` 列表兼容结构。
+- `GET /ScheduledTasks`
+- `POST /ScheduledTasks/Running/{id}`
+- `DELETE /ScheduledTasks/Running/{id}`
+- `POST /ScheduledTasks/Running/{id}/Delete`
+- `POST /ScheduledTasks/{id}/Triggers`
+  - 已提供可展示的任务列表和可保存触发器的兼容接口。
+- `POST /Users/{id}`
+  - 已支持管理员更新用户基础资料中的 `Name`。
+- `POST /Users/{id}/Configuration`
+  - 已补齐用户配置写入接口。
+- `POST /Users/{id}/EasyPassword`
+  - 已补齐简单密码接口，内部先复用普通密码逻辑。
+- `POST /Users/{id}/Password`
+  - 已支持 `ResetPassword=true` 的重置流程，不再直接拒绝。
+
+### 涉及文件
+- `backend/src/repository.rs`
+- `backend/src/routes/system.rs`
+- `backend/src/routes/compat.rs`
+- `backend/src/routes/users.rs`
+- `backend/src/routes/management.rs`
+- `backend/src/routes/mod.rs`
+
+### 当前验证
+- `cargo check --manifest-path backend/Cargo.toml` 已通过。
+
+### 下一批优先缺口
+- 继续按 WebDashboard 页面真实调用补 `Plugins/*`、`LiveTv/*`、`Connect/*`、更多系统配置页命名配置。
+- 实测 `useredit`、`userlibraryaccess`、`userparentalcontrol`、目录浏览器、任务页、设备页对应调用，继续修正字段细节。
+
+### 2026-04-23 WebDashboard 适配进展（三）
+- 新增 `backend/src/routes/integrations.rs`，补齐以下外围兼容接口：
+  - `GET /Plugins`
+  - `GET/POST /Plugins/SecurityInfo`
+  - `GET/POST /Plugins/{id}/Configuration`
+  - `GET/DELETE /Connect/Pending`
+  - `GET /News/Product`
+  - `GET /Packages/{id}/Reviews`
+- `Users` 路由已补 `DELETE /Users/{id}`，兼容 WebDashboard 用户页直接删除用户的调用方式。
+- `cargo check --manifest-path backend/Cargo.toml` 再次通过。
+
+### 2026-04-23 WebDashboard 适配进展（四）
+- 修正 `GET /Environment/ParentPath` 为纯文本响应，匹配目录浏览器实际读取方式，不再返回 JSON。
+- 新增 `GET /Environment/NetworkShares` 空兼容响应。
+- 新增 `backend/src/routes/livetv.rs`，补齐一整组 LiveTV 兼容路由：
+  - `LiveTv/Info`
+  - `LiveTv/GuideInfo`
+  - `LiveTv/Channels/*`
+  - `LiveTv/Programs*`
+  - `LiveTv/Recordings*`
+  - `LiveTv/Timers*`
+  - `LiveTv/SeriesTimers*`
+  - `LiveTv/Tuners/{id}/Reset`
+  - `LiveTv/TunerHosts`
+  - `LiveTv/ListingProviders`
+- `System/Configuration/livetv` 默认命名配置已提供基础结构，支持 `TunerHosts` 与 `ListingProviders` 持久化更新。
+- 新增系统/插件外围兼容接口：
+  - `GET /Packages/{name}`
+  - `GET /Packages/Updates`
+  - `POST /Packages/Installed/{name}`
+  - `DELETE /Packages/Installing/{id}`
+  - `GET /Registrations/{feature}`
+  - `POST /System/Restart`
+  - `POST /System/Shutdown`
+- `ScheduledTasks` 已补 `RefreshGuide` 任务键，兼容 LiveTV 状态页任务按钮。
+- `cargo check --manifest-path backend/Cargo.toml` 已再次通过。
+
+### 2026-04-23 WebDashboard 适配进展（五）
+- 新增 `backend/src/routes/client_compat.rs`，补齐客户端/播放器兼容接口：
+  - `Notifications/Types`
+  - `Notifications/Services`
+  - `Notifications/{userId}`
+  - `Notifications/{userId}/Summary`
+  - `Notifications/{userId}/Read`
+  - `Notifications/{userId}/Unread`
+  - `Search/Hints`
+  - `Playback/BitrateTest`
+  - `LiveStreams/MediaInfo`
+  - `Sync/OfflineActions`
+  - `Sync/Data`
+  - `Sync/Items/Ready`
+  - `Sync/JobItems/{id}/Transferred`
+  - `DELETE /Sync/{targetId}/Items`
+- 新增用户 Emby Connect 兼容路由：
+  - `POST /Users/{id}/Connect/Link`
+  - `DELETE /Users/{id}/Connect/Link`
+  - 先用本地持久化方式保存 `ConnectUsername` / `ConnectUserName` / `ConnectUserId` / `ConnectLinkType`。
+- 新增 `POST /Packages/Reviews/{id}` 兼容响应。
+- `cargo check --manifest-path backend/Cargo.toml` 已再次通过。
+
+## 2026-04-23 WebDashboard 适配进展（六）
+
+### 本轮完成
+- 扩展 `UserDto`，补齐 WebDashboard 用户页真实依赖的字段：`ConnectUserName`、`ConnectUserId`、`ConnectLinkType`、`PrimaryImageTag`、`LastActivityDate`。
+- 扩展 `UserPolicyDto`，补齐用户编辑与家长控制页会读取/提交的字段：`EnableContentDeletionFromFolders`、`BlockUnratedItems`、`AccessSchedules`。
+- 新增 `repository::user_to_dto_with_context`，统一从用户 Connect 关联配置、用户头像路径、会话最后活动时间装配增强版 `UserDto`。
+- `Users/Public`、`Users`、`Users/{id}`、`Users/Me`、`Users/New`、`Users/AuthenticateByName`、`Users/{id}` 更新返回、`Startup/User`、`UserSettings` 等入口改为返回增强版 `UserDto`，减少 WebDashboard 用户管理页和登录后页面的字段缺失。
+- 扩展 `System/Info` 与 `System/Info/Public`，补齐 dashboard/general、dashboardpage、encoding settings 常读字段：`CanSelfUpdate`、`SupportsAutoRunAtStartup`、`CanLaunchWebBrowser`、`SupportsHttps`、`HasPendingRestart`、`HttpServerPortNumber`、`HttpsPortNumber`、`PackageName`、`SystemUpdateLevel`、`EncoderLocationType`。
+- 扩展默认 `System/Configuration` 结构，补齐 hosting/general/library/metadata/streaming 设置页常见字段：端口、HTTPS、UPnP、远程访问、缓存路径、自动更新、匿名统计、远端码率、转码临时目录、元数据路径等，避免页面读取后保存时把字段洗掉。
+
+### 验证
+- `cargo check --manifest-path backend/Cargo.toml` 通过。
+
+### 仍待继续
+- 继续按 WebDashboard 页面把 `System/Info`、`System/Configuration/*` 的细节字段补深，尤其是 dashboard 首页、编码页、插件页和高级设置页。
+- 继续补 WebDashboard 会探测但当前仍较弱的系统任务、插件安装、Connect 邀请、活动日志与媒体编码相关接口细节。

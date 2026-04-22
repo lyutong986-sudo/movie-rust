@@ -11,7 +11,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header::CONTENT_TYPE, StatusCode},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
@@ -23,12 +23,34 @@ pub fn router() -> Router<AppState> {
         .route("/system/info/public", get(public_info))
         .route("/System/Info", get(system_info))
         .route("/system/info", get(system_info))
+        .route("/System/Configuration", get(system_configuration).post(update_system_configuration))
+        .route("/system/configuration", get(system_configuration).post(update_system_configuration))
+        .route(
+            "/System/Configuration/devices",
+            get(device_configuration),
+        )
+        .route(
+            "/system/configuration/devices",
+            get(device_configuration),
+        )
+        .route(
+            "/System/Configuration/{name}",
+            get(named_system_configuration).post(update_named_system_configuration),
+        )
+        .route(
+            "/system/configuration/{name}",
+            get(named_system_configuration).post(update_named_system_configuration),
+        )
         .route("/System/Endpoint", get(endpoint_info))
         .route("/system/endpoint", get(endpoint_info))
         .route("/System/Ext/ServerDomains", get(server_domains))
         .route("/system/ext/serverdomains", get(server_domains))
         .route("/System/Ping", get(ping).post(ping))
         .route("/system/ping", get(ping).post(ping))
+        .route("/System/Restart", post(system_restart))
+        .route("/system/restart", post(system_restart))
+        .route("/System/Shutdown", post(system_shutdown))
+        .route("/system/shutdown", post(system_shutdown))
         .route("/Branding/Configuration", get(branding_configuration))
         .route("/branding/configuration", get(branding_configuration))
         .route("/Branding/Css", get(branding_css))
@@ -42,6 +64,8 @@ pub fn router() -> Router<AppState> {
         .route("/system/logs", get(server_logs))
         .route("/System/ActivityLog/Entries", get(activity_log_entries))
         .route("/system/activitylog/entries", get(activity_log_entries))
+        .route("/System/WakeOnLanInfo", get(wake_on_lan_info))
+        .route("/system/wakeonlaninfo", get(wake_on_lan_info))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -69,6 +93,7 @@ async fn public_info(
         operating_system: std::env::consts::OS.to_string(),
         id: uuid_to_emby_guid(&state.config.server_id),
         startup_wizard_completed,
+        package_name: None,
     }))
 }
 
@@ -88,6 +113,65 @@ async fn system_info(
         id: uuid_to_emby_guid(&state.config.server_id),
         startup_wizard_completed,
         can_self_restart: false,
+        can_self_update: false,
+        supports_auto_run_at_startup: false,
+        can_launch_web_browser: false,
+        supports_https: false,
+        has_pending_restart: false,
+        http_server_port_number: state.config.port,
+        https_port_number: 0,
+        package_name: None,
+        system_update_level: Some("Release".to_string()),
+        encoder_location_type: "Internal".to_string(),
+    }))
+}
+
+async fn system_configuration(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    Ok(Json(
+        repository::system_configuration(&state.pool, &state.config).await?,
+    ))
+}
+
+async fn update_system_configuration(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> Result<StatusCode, crate::error::AppError> {
+    repository::update_system_configuration(&state.pool, &payload).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn named_system_configuration(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    let value = repository::named_system_configuration(&state.pool, &name)
+        .await?
+        .unwrap_or_else(|| default_named_configuration(&name));
+    Ok(Json(value))
+}
+
+async fn update_named_system_configuration(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<StatusCode, crate::error::AppError> {
+    repository::update_named_system_configuration(&state.pool, &name, &payload).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn device_configuration(
+    _session: AuthSession,
+) -> Json<Value> {
+    Json(json!({
+        "EnableCameraUpload": false,
+        "CameraUploadServers": [],
+        "EnableContentDeletion": true
     }))
 }
 
@@ -258,6 +342,33 @@ async fn activity_log_entries(
 
 async fn ping() -> StatusCode {
     StatusCode::NO_CONTENT
+}
+
+async fn wake_on_lan_info(_session: AuthSession) -> Json<Vec<Value>> {
+    Json(Vec::new())
+}
+
+async fn system_restart(_session: AuthSession) -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+async fn system_shutdown(_session: AuthSession) -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+fn default_named_configuration(name: &str) -> Value {
+    match name.to_ascii_lowercase().as_str() {
+        "livetv" => json!({
+            "TunerHosts": [],
+            "ListingProviders": [],
+            "GuideDays": 7,
+            "EnableMovieInfo": true,
+            "MetadataRefreshDays": 7,
+            "EnableRecordingSubfolders": true,
+            "EnableOriginalAudioWithEncodedRecordings": true
+        }),
+        _ => json!({}),
+    }
 }
 
 fn is_private_or_link_local(ip: IpAddr) -> bool {

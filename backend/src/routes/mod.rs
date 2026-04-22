@@ -2,10 +2,15 @@ use crate::state::AppState;
 use axum::Router;
 
 pub mod admin;
+pub mod client_compat;
 pub mod compat;
+pub mod dashboard;
 pub mod genres;
 pub mod images;
+pub mod integrations;
 pub mod items;
+pub mod livetv;
+pub mod management;
 pub mod metadata_routes;
 pub mod persons;
 pub mod sessions;
@@ -18,8 +23,10 @@ pub mod websocket;
 
 pub fn router(state: AppState) -> Router {
     let api = api_router();
+    let dashboard = dashboard::router(state.config.static_dir.clone());
 
     Router::new()
+        .merge(dashboard)
         .merge(api.clone())
         .nest("/emby", api.clone())
         .nest("/mediabrowser", api)
@@ -29,10 +36,14 @@ pub fn router(state: AppState) -> Router {
 fn api_router() -> Router<AppState> {
     Router::new()
         .route("/embywebsocket", axum::routing::get(websocket::emby_websocket_handler))
+        .merge(client_compat::router())
         .merge(system::router())
         .merge(startup::router())
         .merge(users::router())
         .merge(items::router())
+        .merge(livetv::router())
+        .merge(integrations::router())
+        .merge(management::router())
         .merge(images::router())
         .merge(videos::router())
         .merge(shows::router())

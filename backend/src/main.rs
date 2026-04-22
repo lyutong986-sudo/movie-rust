@@ -13,6 +13,7 @@ mod state;
 mod transcoder;
 
 use anyhow::{Context, Result};
+use axum::routing::get;
 use sqlx::postgres::PgPoolOptions;
 use state::AppState;
 use std::sync::Arc;
@@ -20,7 +21,6 @@ use std::sync::Arc;
 use crate::transcoder::Transcoder;
 use tower_http::{
     cors::CorsLayer,
-    services::{ServeDir, ServeFile},
     trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -51,7 +51,6 @@ async fn main() -> Result<()> {
         .init();
 
     let config = bootstrap_config;
-    let static_dir = config.static_dir.clone();
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
         .connect(&config.database_url)
@@ -79,16 +78,13 @@ async fn main() -> Result<()> {
         transcoder,
     };
 
-    let spa =
-        ServeDir::new(&static_dir).not_found_service(ServeFile::new(static_dir.join("index.html")));
-
     let http_trace = TraceLayer::new_for_http()
         .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
         .on_response(DefaultOnResponse::new().level(Level::INFO))
         .on_failure(DefaultOnFailure::new().level(Level::ERROR));
 
     let app = routes::router(state.clone())
-        .fallback_service(spa)
+        .route("/health", get(|| async { "ok" }))
         .layer(http_trace)
         .layer(CorsLayer::permissive());
 

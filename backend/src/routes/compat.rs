@@ -24,6 +24,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Localization/Options", get(localization_options))
         .route("/Localization/Cultures", get(localization_cultures))
+        .route("/Localization/Countries", get(localization_countries))
+        .route("/Localization/ParentalRatings", get(localization_parental_ratings))
         .route("/UserSettings/{user_id}", get(user_settings).post(update_user_settings))
         .route("/UserSettings/{user_id}/Partial", post(update_user_settings_partial))
         .route("/Users/{user_id}/Settings", get(user_settings).post(update_user_settings))
@@ -253,6 +255,40 @@ async fn localization_cultures(
         .collect::<Vec<_>>();
     Ok(Json(json!(cultures)))
 }
+
+async fn localization_countries(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+    let current = startup.metadata_country_code.to_ascii_uppercase();
+    let mut ordered = vec![current, "CN".to_string(), "US".to_string(), "GB".to_string()];
+    ordered.dedup();
+    let countries = ordered
+        .into_iter()
+        .map(|code| {
+            json!({
+                "Name": code,
+                "DisplayName": country_display_name(&code),
+                "TwoLetterISORegionName": code,
+                "ThreeLetterISORegionName": to_three_letter_country(&code)
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!(countries)))
+}
+
+async fn localization_parental_ratings(
+    _session: AuthSession,
+) -> Json<Value> {
+    Json(json!([
+        { "Name": "G", "Value": 1 },
+        { "Name": "PG", "Value": 5 },
+        { "Name": "PG-13", "Value": 8 },
+        { "Name": "R", "Value": 12 },
+        { "Name": "NC-17", "Value": 16 }
+    ]))
+}
 async fn user_settings(
     session: AuthSession,
     State(state): State<AppState>,
@@ -263,7 +299,7 @@ async fn user_settings(
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
-    let dto = repository::user_to_dto(&user, state.config.server_id);
+    let dto = repository::user_to_dto_with_context(&state.pool, &user, state.config.server_id).await?;
     let startup = repository::startup_configuration(&state.pool, &state.config).await?;
 
     Ok(Json(json!({
@@ -296,7 +332,7 @@ async fn update_user_settings_partial(
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
-    let dto = repository::user_to_dto(&user, state.config.server_id);
+    let dto = repository::user_to_dto_with_context(&state.pool, &user, state.config.server_id).await?;
     let mut current = serde_json::to_value(dto.configuration)?;
     merge_json(&mut current, payload);
     let next = serde_json::from_value::<UserConfigurationDto>(current.clone())
@@ -351,6 +387,24 @@ fn to_three_letter_language(language: &str) -> String {
     match language.to_ascii_lowercase().as_str() {
         "zh" => "zho".to_string(),
         "en" => "eng".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn country_display_name(code: &str) -> String {
+    match code.to_ascii_uppercase().as_str() {
+        "CN" => "China".to_string(),
+        "US" => "United States".to_string(),
+        "GB" => "United Kingdom".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn to_three_letter_country(code: &str) -> String {
+    match code.to_ascii_uppercase().as_str() {
+        "CN" => "CHN".to_string(),
+        "US" => "USA".to_string(),
+        "GB" => "GBR".to_string(),
         other => other.to_string(),
     }
 }

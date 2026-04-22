@@ -39,9 +39,13 @@ async fn update_configuration(
 
 async fn first_user(State(state): State<AppState>) -> Result<Json<Option<UserDto>>, AppError> {
     let users = repository::list_users(&state.pool, false).await?;
-    let user = users
-        .first()
-        .map(|user| repository::user_to_dto(user, state.config.server_id));
+    let user = match users.first() {
+        Some(user) => Some(
+            repository::user_to_dto_with_context(&state.pool, user, state.config.server_id)
+                .await?,
+        ),
+        None => None,
+    };
     Ok(Json(user))
 }
 
@@ -51,7 +55,9 @@ async fn create_first_user(
 ) -> Result<Json<UserDto>, AppError> {
     let user =
         repository::create_initial_admin(&state.pool, &payload.name, &payload.password).await?;
-    Ok(Json(repository::user_to_dto(&user, state.config.server_id)))
+    Ok(Json(
+        repository::user_to_dto_with_context(&state.pool, &user, state.config.server_id).await?,
+    ))
 }
 
 async fn remote_access(
