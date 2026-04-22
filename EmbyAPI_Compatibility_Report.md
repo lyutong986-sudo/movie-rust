@@ -471,3 +471,17 @@ pnpm --filter @jellyfin-vue/frontend check:types
 - `backend/src/routes/items.rs` 已新增 `GET /UserViews`，解析 Emby/Jellyfin 常见的 `UserId/userId` 查询参数，并复用现有媒体库视图 DTO 输出；带 `userId` 时会继续执行用户访问校验，响应仍为 `QueryResult<BaseItemDto>`。
 - 运行日志还显示 websocket 已成功升级到 101，但服务端推送会话命令时旧数据库缺少 `session_commands` 表会每秒输出 WARN；`backend/src/repository.rs` 现在对 `session_commands` 缺表或缺 `consumed_at` 字段做兼容兜底，返回空命令队列，避免迁移未补齐时拖累 websocket 心跳和日志。
 - 后续仍建议对线上/本地 PG 执行最新迁移，确保 `0018_session_play_queue.sql` 和 `0020_session_command_consumption.sql` 已应用；本轮代码兜底只保证 Emby 客户端链路不中断，不替代真实会话命令队列表能力。
+
+## 2026-04-22 前端适配补充（十七）
+- 本轮按“初始化自带，而不是只依赖数据库迁移”的要求审计启动链路，确认 frontend 首屏/向导/设置页会读取 `System/Info/Public`、`Branding/Configuration`、`Startup/Configuration`、`System/Configuration`、`DisplayPreferences`、websocket session commands 等基础表和值；旧库迁移历史不完整时，这些缺口会表现为 401/404、空配置、用户设置同步失败或 websocket WARN。
+- `backend/src/main.rs` 的 `ensure_schema_compatibility()` 已扩展为启动自检初始化层：启动时会确保 `system_settings`、`display_preferences`、`session_play_queue`、`session_commands` 等前端必需表存在，并补齐 `users.policy/configuration`、`sessions.expires_at`、`libraries.library_options`、`media_items` 的 Emby 常用字段。
+- `backend/src/main.rs` 新增默认系统设置种子：`startup_configuration`、`startup_remote_access`、`branding_configuration`、`server_configuration`、`display_preferences_defaults:vue`、`display_preferences_defaults:emby`。这些值只在缺失时写入，不覆盖管理页已保存配置，保证新库和迁移不完整的旧库启动后仍能给 EmbySDK 前端返回基础配置。
+- 本轮未修改 frontend：前端读取这些值的方式符合 EmbySDK/Jellyfin SDK 习惯，真正问题是 backend 初始化层没有把前端必需的基础表和值视为启动自带能力。
+
+## 2026-04-22 前端适配补充（十八）
+- 本轮继续按“frontend + 本地播放器模板 + EmbySDK 标准字段”审计数据库自建层，范围扩大到后端尚未完全调用、但 Emby 客户端/SDK 后续会自然需要落库的字段和表，避免未来每补一个 API 都再依赖迁移补结构。
+- `backend/src/main.rs` 已把 `media_streams`、`persons`、`person_roles` 从“仅迁移创建”提升为“启动自建”。这些表是 `BaseItemDto.People`、`BaseItemDto.MediaStreams`、播放信息和筛选接口的基础结构，旧库缺表时不应等迁移才能恢复。
+- `media_items` 初始化预留已扩展到 Emby 常见字段：`BitRate/Size/HomePageUrl/Budget/Revenue/CustomRating/LockedFields/IsLocked/IsVirtualItem/IsPlaceHolder/LocationType/PathProtocol/DisplayOrder/PresentationUniqueKey/AlbumId/SeriesId/SeasonId/ExternalUrls/TrailerUrls/ImageTags/BackdropImageTags/ProviderMetadata/EmbyExtra` 等。当前后端可继续只使用已实现字段，未用字段先安全留空。
+- `user_item_data` 初始化预留已补齐 `Rating/PlayedPercentage/UnplayedItemCount/Likes/AudioStreamIndex/SubtitleStreamIndex/HideFromResume/CustomData`，对应 EmbySDK `UserItemDataDto` 的标准形状，避免用户设置、播放轨道选择、隐藏继续观看等功能后续无字段可写。
+- 新增预留表 `media_sources`、`item_images`、`device_registry`、`api_keys`、`activity_log`、`scheduled_tasks`，对应 EmbySDK 的 `MediaSourceInfo`、多图槽位、设备管理、API Key 管理、活动日志和计划任务 websocket/设置页能力。当前部分路由仍可从现有 sessions/playback_events 推导响应，但数据库已经具备真实实现的落库位置。
+- 本轮依旧不改 frontend：前端和本地播放器按 SDK 标准消费字段；backend 初始化层负责把这些标准字段和基础表预先建好。
