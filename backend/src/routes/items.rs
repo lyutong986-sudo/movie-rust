@@ -33,8 +33,10 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Filters", get(item_filters))
         .route("/Items/Filters2", get(item_filters))
         .route("/Artists", get(artists))
+        .route("/Artists/AlbumArtists", get(artists))
         .route("/Artists/{name}", get(artist))
         .route("/Artists/{name}/Items", get(artist_items))
+        .route("/Games/SystemSummaries", get(game_system_summaries))
         .route("/Studios", get(studios))
         .route("/Studios/{name}", get(studio))
         .route("/Studios/{name}/Items", get(studio_items))
@@ -94,8 +96,21 @@ pub fn router() -> Router<AppState> {
             "/Users/{user_id}/PlayedItems/{item_id}/Delete",
             post(legacy_mark_unplayed),
         )
-        .route("/Items/{item_id}", get(item_by_id))
+        .route(
+            "/Items/{item_id}",
+            get(item_by_id).post(update_item).delete(delete_item),
+        )
+        .route("/Items/{item_id}/Delete", post(delete_item_post))
+        .route("/Items/{item_id}/Ancestors", get(item_ancestors))
+        .route("/Items/{item_id}/MetadataEditor", get(metadata_editor))
+        .route("/Items/{item_id}/ExternalIdInfos", get(external_id_infos))
+        .route("/Items/{item_id}/ThemeMedia", get(theme_media))
+        .route("/Items/{item_id}/CriticReviews", get(critic_reviews))
         .route("/Items/{item_id}/Refresh", post(refresh_item_metadata))
+        .route(
+            "/Items/{item_id}/RemoteSearch/Subtitles/{search_id}",
+            get(remote_subtitle_search).post(download_remote_subtitle),
+        )
         .route("/Items/{item_id}/Chapters", get(item_chapters))
         .route("/Items/{item_id}/IntroTimestamps", get(intro_timestamps))
         .route("/Videos/{item_id}/IntroTimestamps", get(intro_timestamps))
@@ -228,6 +243,14 @@ async fn artist_items(
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
     virtual_folder_items(&state, &session, query, VirtualFilter::Artist(name)).await
+}
+
+async fn game_system_summaries(_session: AuthSession) -> Json<Value> {
+    Json(json!({
+        "Items": [],
+        "TotalRecordCount": 0,
+        "StartIndex": 0
+    }))
 }
 
 async fn studio(
@@ -1245,6 +1268,54 @@ async fn user_item_by_id(
     item_dto(&state, user_id, item_id).await
 }
 
+async fn item_ancestors(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("Invalid item id: {}", item_id_str)))?;
+
+    if repository::get_library(&state.pool, item_id).await?.is_some() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let mut current = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Media item not found".to_string()))?;
+    let mut ancestors = Vec::new();
+
+    while let Some(parent_id) = current.parent_id {
+        if let Some(parent) = repository::get_media_item(&state.pool, parent_id).await? {
+            ancestors.push(
+                repository::media_item_to_dto(
+                    &state.pool,
+                    &parent,
+                    Some(user_id),
+                    state.config.server_id,
+                )
+                .await?,
+            );
+            current = parent;
+            continue;
+        }
+
+        if let Some(library) = repository::get_library(&state.pool, parent_id).await? {
+            ancestors.push(
+                repository::library_to_item_dto(&state.pool, &library, state.config.server_id)
+                    .await?,
+            );
+        }
+        break;
+    }
+
+    ancestors.reverse();
+    Ok(Json(ancestors))
+}
+
 async fn item_intros(
     session: AuthSession,
     State(state): State<AppState>,
@@ -1295,6 +1366,323 @@ async fn special_features(
     )
     .await?;
     Ok(Json(items))
+}
+
+async fn metadata_editor(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("Invalid item id: {}", item_id_str)))?;
+    let item_type = metadata_item_type(&state, item_id).await?;
+    let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+
+    Ok(Json(json!({
+        "ParentalRatingOptions": parental_rating_options(),
+        "Countries": country_options(&startup.metadata_country_code),
+        "Cultures": culture_options(&startup.ui_culture, &startup.preferred_metadata_language),
+        "ExternalIdInfos": external_id_infos_for_type(item_type.as_deref()),
+        "PersonExternalIdInfos": person_external_id_infos(),
+        "ContentTypeOptions": content_type_options(item_type.as_deref()),
+        "MetadataLanguage": startup.preferred_metadata_language,
+        "MetadataCountryCode": startup.metadata_country_code
+    })))
+}
+
+async fn external_id_infos(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("Invalid item id: {}", item_id_str)))?;
+    let item_type = metadata_item_type(&state, item_id).await?;
+    Ok(Json(external_id_infos_for_type(item_type.as_deref())))
+}
+
+async fn theme_media(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<Value>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("Invalid item id: {}", item_id_str)))?;
+    ensure_media_item_exists(&state, item_id).await?;
+
+    let result = repository::list_media_items(
+        &state.pool,
+        ItemListOptions {
+            parent_id: Some(item_id),
+            include_types: vec!["ThemeSong".to_string(), "ThemeVideo".to_string()],
+            user_id: Some(user_id),
+            recursive: false,
+            sort_by: Some("SortName".to_string()),
+            sort_order: Some("Ascending".to_string()),
+            start_index: 0,
+            limit: 100,
+            ..ItemListOptions::default()
+        },
+    )
+    .await?;
+
+    let mut items = Vec::with_capacity(result.items.len());
+    for item in result.items {
+        items.push(
+            repository::media_item_to_dto(&state.pool, &item, Some(user_id), state.config.server_id)
+                .await?,
+        );
+    }
+
+    Ok(Json(json!({
+        "OwnerId": item_id_str,
+        "Items": items,
+        "TotalRecordCount": items.len()
+    })))
+}
+
+async fn metadata_item_type(state: &AppState, item_id: Uuid) -> Result<Option<String>, AppError> {
+    if repository::get_library(&state.pool, item_id).await?.is_some() {
+        return Ok(Some("CollectionFolder".to_string()));
+    }
+
+    let item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Media item not found".to_string()))?;
+    Ok(Some(item.item_type))
+}
+
+fn parental_rating_options() -> Vec<Value> {
+    vec![
+        json!({ "Name": "G", "Value": 1 }),
+        json!({ "Name": "PG", "Value": 5 }),
+        json!({ "Name": "PG-13", "Value": 8 }),
+        json!({ "Name": "R", "Value": 12 }),
+        json!({ "Name": "NC-17", "Value": 16 }),
+        json!({ "Name": "TV-Y", "Value": 1 }),
+        json!({ "Name": "TV-PG", "Value": 5 }),
+        json!({ "Name": "TV-14", "Value": 8 }),
+        json!({ "Name": "TV-MA", "Value": 12 }),
+    ]
+}
+
+fn country_options(configured_country: &str) -> Vec<Value> {
+    let mut countries = vec![
+        configured_country.trim().to_ascii_uppercase(),
+        "CN".to_string(),
+        "US".to_string(),
+        "GB".to_string(),
+        "JP".to_string(),
+        "KR".to_string(),
+    ];
+    countries.retain(|value| !value.is_empty());
+    countries.dedup();
+    countries
+        .into_iter()
+        .map(|code| {
+            json!({
+                "Name": code,
+                "DisplayName": country_display_name_for_metadata(&code),
+                "TwoLetterISORegionName": code,
+                "ThreeLetterISORegionName": three_letter_country_for_metadata(&code)
+            })
+        })
+        .collect()
+}
+
+fn culture_options(configured_culture: &str, metadata_language: &str) -> Vec<Value> {
+    let mut cultures = vec![
+        configured_culture.trim().to_string(),
+        metadata_language.trim().to_string(),
+        "zh-CN".to_string(),
+        "en-US".to_string(),
+        "ja-JP".to_string(),
+        "ko-KR".to_string(),
+    ];
+    cultures.retain(|value| !value.is_empty());
+    cultures.dedup();
+    cultures
+        .into_iter()
+        .map(|culture| {
+            let language = culture
+                .split(['-', '_'])
+                .next()
+                .filter(|value| !value.is_empty())
+                .unwrap_or("en")
+                .to_ascii_lowercase();
+            json!({
+                "DisplayName": culture_display_name_for_metadata(&culture),
+                "Name": culture,
+                "ThreeLetterISOLanguageName": three_letter_language_for_metadata(&language),
+                "TwoLetterISOLanguageName": language
+            })
+        })
+        .collect()
+}
+
+fn external_id_infos_for_type(item_type: Option<&str>) -> Vec<Value> {
+    let normalized = item_type.unwrap_or_default().to_ascii_lowercase();
+    let mut infos = Vec::new();
+
+    if matches!(
+        normalized.as_str(),
+        "movie" | "series" | "season" | "episode" | "trailer" | "boxset"
+    ) {
+        infos.push(external_id_info(
+            "TheMovieDb",
+            "Tmdb",
+            "https://www.themoviedb.org/",
+            "https://www.themoviedb.org/{0}/{1}",
+        ));
+        infos.push(external_id_info(
+            "IMDb",
+            "Imdb",
+            "https://www.imdb.com/",
+            "https://www.imdb.com/title/{0}",
+        ));
+    }
+
+    if matches!(normalized.as_str(), "series" | "season" | "episode") {
+        infos.push(external_id_info(
+            "TheTVDB",
+            "Tvdb",
+            "https://thetvdb.com/",
+            "https://thetvdb.com/?id={0}",
+        ));
+    }
+
+    if matches!(
+        normalized.as_str(),
+        "audio" | "musicartist" | "musicalbum" | "album" | "song"
+    ) {
+        infos.push(external_id_info(
+            "MusicBrainz",
+            "MusicBrainz",
+            "https://musicbrainz.org/",
+            "https://musicbrainz.org/{0}",
+        ));
+    }
+
+    if infos.is_empty() {
+        infos.push(external_id_info(
+            "TheMovieDb",
+            "Tmdb",
+            "https://www.themoviedb.org/",
+            "https://www.themoviedb.org/{0}/{1}",
+        ));
+        infos.push(external_id_info(
+            "IMDb",
+            "Imdb",
+            "https://www.imdb.com/",
+            "https://www.imdb.com/title/{0}",
+        ));
+    }
+
+    infos
+}
+
+fn person_external_id_infos() -> Vec<Value> {
+    vec![
+        external_id_info(
+            "TheMovieDb",
+            "Tmdb",
+            "https://www.themoviedb.org/",
+            "https://www.themoviedb.org/person/{0}",
+        ),
+        external_id_info(
+            "IMDb",
+            "Imdb",
+            "https://www.imdb.com/",
+            "https://www.imdb.com/name/{0}",
+        ),
+    ]
+}
+
+fn external_id_info(name: &str, key: &str, website: &str, url_format: &str) -> Value {
+    json!({
+        "Name": name,
+        "Key": key,
+        "Website": website,
+        "UrlFormatString": url_format,
+        "IsSupportedAsIdentifier": true
+    })
+}
+
+fn content_type_options(item_type: Option<&str>) -> Vec<Value> {
+    let normalized = item_type.unwrap_or_default().to_ascii_lowercase();
+    let values: &[(&str, &str)] = if matches!(normalized.as_str(), "series" | "season" | "episode") {
+        &[
+            ("Series", "Series"),
+            ("Season", "Season"),
+            ("Episode", "Episode"),
+            ("Movie", "Movie"),
+        ]
+    } else if matches!(normalized.as_str(), "audio" | "musicartist" | "musicalbum" | "album" | "song") {
+        &[
+            ("MusicArtist", "Music Artist"),
+            ("MusicAlbum", "Music Album"),
+            ("Audio", "Song"),
+            ("MusicVideo", "Music Video"),
+        ]
+    } else {
+        &[
+            ("Movie", "Movie"),
+            ("Series", "Series"),
+            ("Episode", "Episode"),
+            ("Trailer", "Trailer"),
+            ("BoxSet", "Box Set"),
+        ]
+    };
+
+    values
+        .iter()
+        .map(|(value, name)| json!({ "Value": value, "Name": name }))
+        .collect()
+}
+
+fn country_display_name_for_metadata(code: &str) -> &'static str {
+    match code.to_ascii_uppercase().as_str() {
+        "CN" => "China",
+        "US" => "United States",
+        "GB" => "United Kingdom",
+        "JP" => "Japan",
+        "KR" => "Korea",
+        _ => "Unknown",
+    }
+}
+
+fn culture_display_name_for_metadata(culture: &str) -> String {
+    match culture.to_ascii_lowercase().as_str() {
+        "zh-cn" => "Chinese (Simplified, China)".to_string(),
+        "en-us" => "English (United States)".to_string(),
+        "ja-jp" => "Japanese (Japan)".to_string(),
+        "ko-kr" => "Korean (Korea)".to_string(),
+        _ => culture.to_string(),
+    }
+}
+
+fn three_letter_country_for_metadata(code: &str) -> &'static str {
+    match code.to_ascii_uppercase().as_str() {
+        "CN" => "CHN",
+        "US" => "USA",
+        "GB" => "GBR",
+        "JP" => "JPN",
+        "KR" => "KOR",
+        _ => "UNK",
+    }
+}
+
+fn three_letter_language_for_metadata(language: &str) -> &'static str {
+    match language.to_ascii_lowercase().as_str() {
+        "zh" => "zho",
+        "en" => "eng",
+        "ja" => "jpn",
+        "ko" => "kor",
+        _ => "und",
+    }
 }
 
 async fn intro_timestamps(
@@ -1523,6 +1911,92 @@ async fn refresh_item_metadata(
         .await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_item(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<Json<BaseItemDto>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+    repository::update_media_item_from_emby_payload(&state.pool, item_id, &payload).await?;
+    item_dto(&state, session.user_id, item_id).await
+}
+
+async fn delete_item(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("Invalid item id: {}", item_id_str)))?;
+    repository::delete_media_item(&state.pool, item_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_item_post(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<StatusCode, AppError> {
+    delete_item(session, State(state), Path(item_id_str)).await
+}
+
+async fn critic_reviews(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<QueryResult<Value>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("Invalid item id: {}", item_id_str)))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(Json(QueryResult {
+        items: Vec::new(),
+        total_record_count: 0,
+        start_index: Some(0),
+    }))
+}
+
+async fn remote_subtitle_search(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path((item_id_str, language)): Path<(String, String)>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("Invalid item id: {}", item_id_str)))?;
+    repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Media item not found".to_string()))?;
+
+    tracing::debug!(
+        item_id = %item_id,
+        language = %language,
+        "Remote subtitle providers are not configured; returning an empty Emby-compatible result"
+    );
+    Ok(Json(Vec::new()))
+}
+
+async fn download_remote_subtitle(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path((item_id_str, subtitle_id)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("Invalid item id: {}", item_id_str)))?;
+    repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Media item not found".to_string()))?;
+    tracing::debug!(
+        item_id = %item_id,
+        subtitle_id = %subtitle_id,
+        "Remote subtitle download requested but no subtitle provider is configured"
+    );
+    Ok(StatusCode::ACCEPTED)
 }
 
 fn tmdb_id_from_provider_ids(value: &serde_json::Value) -> Option<String> {

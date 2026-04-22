@@ -73,6 +73,10 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
         .route("/Items/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
         .route("/items/{item_id}/Subtitles/{index}/Stream.{_format}", get(subtitle_stream_legacy).head(subtitle_stream_legacy))
+        .route("/Videos/{item_id}/Subtitles/{index}", delete(delete_subtitle))
+        .route("/videos/{item_id}/Subtitles/{index}", delete(delete_subtitle))
+        .route("/Items/{item_id}/Subtitles/{index}", delete(delete_subtitle))
+        .route("/items/{item_id}/Subtitles/{index}", delete(delete_subtitle))
         .route("/Videos/{item_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start_legacy).head(subtitle_stream_with_start_legacy))
         .route("/videos/{item_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start_legacy).head(subtitle_stream_with_start_legacy))
         .route("/Items/{item_id}/Subtitles/{index}/{_start_position_ticks}/Stream.{_format}", get(subtitle_stream_with_start_legacy).head(subtitle_stream_with_start_legacy))
@@ -128,6 +132,27 @@ async fn active_encodings_delete(
     request: Request<Body>,
 ) -> Result<StatusCode, AppError> {
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_subtitle(
+    State(state): State<AppState>,
+    Path(path): Path<LegacySubtitlePath>,
+    request: Request<Body>,
+) -> Result<StatusCode, AppError> {
+    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let item_id = emby_id_to_uuid(&path.item_id)
+        .map_err(|_| AppError::BadRequest(format!("Invalid item id: {}", path.item_id)))?;
+    let item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Media item not found".to_string()))?;
+
+    if let Some(subtitle_path) = repository::subtitle_path_for_stream_index(&item, path.index) {
+        if subtitle_path.exists() {
+            tokio::fs::remove_file(&subtitle_path).await?;
+        }
+    }
+    repository::delete_media_stream_by_index(&state.pool, item_id, path.index, "Subtitle").await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

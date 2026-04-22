@@ -488,10 +488,25 @@ async fn upload_item_image(
 async fn upload_item_image_with_tail(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((item_id_str, image_type, _image_tail)): Path<(String, String, String)>,
+    Path((item_id_str, image_type, image_tail)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
+    if image_tail
+        .split('/')
+        .last()
+        .is_some_and(|segment| segment.eq_ignore_ascii_case("Index"))
+    {
+        if !session.is_admin {
+            return Err(AppError::Forbidden);
+        }
+        let item_id = emby_id_to_uuid(&item_id_str)
+            .map_err(|_| AppError::BadRequest(format!("Invalid item id: {item_id_str}")))?;
+        repository::get_media_item(&state.pool, item_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Media item not found".to_string()))?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     upload_item_image_impl(session, state, item_id_str, image_type, headers, body).await
 }
 

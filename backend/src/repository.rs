@@ -3834,6 +3834,21 @@ pub async fn delete_collection_item(
     Ok(())
 }
 
+pub async fn delete_media_item(pool: &sqlx::PgPool, item_id: Uuid) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM collection_items WHERE collection_id = $1 OR item_id = $1")
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    let result = sqlx::query("DELETE FROM media_items WHERE id = $1")
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Media item not found".to_string()));
+    }
+    Ok(())
+}
+
 pub async fn remove_items_from_collection(
     pool: &sqlx::PgPool,
     collection_id: Uuid,
@@ -7418,6 +7433,264 @@ pub async fn update_media_item_metadata(
     Ok(())
 }
 
+pub async fn update_media_item_from_emby_payload(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    payload: &Value,
+) -> Result<(), AppError> {
+    let Some(object) = payload.as_object() else {
+        return Err(AppError::BadRequest("Item payload must be a JSON object".to_string()));
+    };
+    if get_media_item(pool, item_id).await?.is_none() {
+        return Err(AppError::NotFound("Media item not found".to_string()));
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new("UPDATE media_items SET ");
+    let mut separated = builder.separated(", ");
+    let mut changed = false;
+
+    macro_rules! set_string {
+        ($column:literal, $($field:literal),+ $(,)?) => {
+            if let Some(value) = optional_payload_string(object, &[$($field),+]) {
+                separated.push($column).push(" = ").push_bind(value);
+                changed = true;
+            }
+        };
+    }
+
+    macro_rules! set_i32 {
+        ($column:literal, $($field:literal),+ $(,)?) => {
+            if let Some(value) = optional_payload_i32(object, &[$($field),+]) {
+                separated.push($column).push(" = ").push_bind(value);
+                changed = true;
+            }
+        };
+    }
+
+    macro_rules! set_i64 {
+        ($column:literal, $($field:literal),+ $(,)?) => {
+            if let Some(value) = optional_payload_i64(object, &[$($field),+]) {
+                separated.push($column).push(" = ").push_bind(value);
+                changed = true;
+            }
+        };
+    }
+
+    macro_rules! set_f64 {
+        ($column:literal, $($field:literal),+ $(,)?) => {
+            if let Some(value) = optional_payload_f64(object, &[$($field),+]) {
+                separated.push($column).push(" = ").push_bind(value);
+                changed = true;
+            }
+        };
+    }
+
+    macro_rules! set_date {
+        ($column:literal, $($field:literal),+ $(,)?) => {
+            if let Some(value) = optional_payload_date(object, &[$($field),+]) {
+                separated.push($column).push(" = ").push_bind(value);
+                changed = true;
+            }
+        };
+    }
+
+    if let Some(Some(name)) = optional_payload_string(object, &["Name", "name"]) {
+        separated.push("name = ").push_bind(name.clone());
+        separated.push("sort_name = ").push_bind(name.to_lowercase());
+        changed = true;
+    } else if let Some(Some(sort_name)) = optional_payload_string(object, &["SortName", "sortName"]) {
+        separated.push("sort_name = ").push_bind(sort_name.to_lowercase());
+        changed = true;
+    }
+    set_string!("original_title", "OriginalTitle", "originalTitle");
+    set_string!("overview", "Overview", "overview");
+    set_string!("official_rating", "OfficialRating", "officialRating");
+    set_string!("status", "Status", "status");
+    set_string!("air_time", "AirTime", "airTime");
+    set_string!("series_name", "SeriesName", "seriesName");
+    set_string!("season_name", "SeasonName", "seasonName");
+    set_i32!("production_year", "ProductionYear", "productionYear");
+    set_i32!("index_number", "IndexNumber", "indexNumber");
+    set_i32!("index_number_end", "IndexNumberEnd", "indexNumberEnd");
+    set_i32!("parent_index_number", "ParentIndexNumber", "parentIndexNumber");
+    set_i64!("runtime_ticks", "RunTimeTicks", "RuntimeTicks", "runTimeTicks");
+    set_f64!("community_rating", "CommunityRating", "communityRating");
+    set_f64!("critic_rating", "CriticRating", "criticRating");
+    set_date!("premiere_date", "PremiereDate", "premiereDate");
+    set_date!("end_date", "EndDate", "endDate");
+
+    if let Some(values) = optional_payload_string_array(object, &["Genres", "genres"]) {
+        separated.push("genres = ").push_bind(values);
+        changed = true;
+    }
+    if let Some(values) = optional_payload_string_array(object, &["Tags", "tags"]) {
+        separated.push("tags = ").push_bind(values);
+        changed = true;
+    }
+    if let Some(values) = optional_payload_string_array(object, &["Studios", "studios"]) {
+        separated.push("studios = ").push_bind(values);
+        changed = true;
+    }
+    if let Some(values) = optional_payload_string_array(object, &["ProductionLocations", "productionLocations"]) {
+        separated.push("production_locations = ").push_bind(values);
+        changed = true;
+    }
+    if let Some(values) = optional_payload_string_array(object, &["AirDays", "airDays"]) {
+        separated.push("air_days = ").push_bind(values);
+        changed = true;
+    }
+    if let Some(values) = optional_payload_string_array(object, &["RemoteTrailers", "remoteTrailers"]) {
+        separated.push("remote_trailers = ").push_bind(values);
+        changed = true;
+    }
+    if let Some(provider_ids) = payload_value(object, &["ProviderIds", "providerIds"]) {
+        separated.push("provider_ids = ").push_bind(normalize_provider_ids(provider_ids));
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(());
+    }
+
+    separated.push("date_modified = now()");
+    builder.push(" WHERE id = ").push_bind(item_id);
+    builder.build().execute(pool).await?;
+    Ok(())
+}
+
+fn payload_value<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    fields: &[&str],
+) -> Option<&'a Value> {
+    fields.iter().find_map(|field| object.get(*field))
+}
+
+fn optional_payload_string(
+    object: &serde_json::Map<String, Value>,
+    fields: &[&str],
+) -> Option<Option<String>> {
+    let value = payload_value(object, fields)?;
+    if value.is_null() {
+        return Some(None);
+    }
+    value
+        .as_str()
+        .map(|text| Some(text.trim().to_string()))
+        .or_else(|| Some(Some(value.to_string())))
+}
+
+fn optional_payload_i32(
+    object: &serde_json::Map<String, Value>,
+    fields: &[&str],
+) -> Option<Option<i32>> {
+    let value = payload_value(object, fields)?;
+    if value.is_null() {
+        return Some(None);
+    }
+    value
+        .as_i64()
+        .and_then(|number| i32::try_from(number).ok())
+        .or_else(|| value.as_str()?.trim().parse::<i32>().ok())
+        .map(Some)
+}
+
+fn optional_payload_i64(
+    object: &serde_json::Map<String, Value>,
+    fields: &[&str],
+) -> Option<Option<i64>> {
+    let value = payload_value(object, fields)?;
+    if value.is_null() {
+        return Some(None);
+    }
+    value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+        .map(Some)
+}
+
+fn optional_payload_f64(
+    object: &serde_json::Map<String, Value>,
+    fields: &[&str],
+) -> Option<Option<f64>> {
+    let value = payload_value(object, fields)?;
+    if value.is_null() {
+        return Some(None);
+    }
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+        .map(Some)
+}
+
+fn optional_payload_date(
+    object: &serde_json::Map<String, Value>,
+    fields: &[&str],
+) -> Option<Option<NaiveDate>> {
+    let value = payload_value(object, fields)?;
+    if value.is_null() {
+        return Some(None);
+    }
+    value.as_str().and_then(parse_emby_date).map(Some)
+}
+
+fn optional_payload_string_array(
+    object: &serde_json::Map<String, Value>,
+    fields: &[&str],
+) -> Option<Vec<String>> {
+    let value = payload_value(object, fields)?;
+    if value.is_null() {
+        return Some(Vec::new());
+    }
+    if let Some(items) = value.as_array() {
+        return Some(
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .or_else(|| item.get("Name").and_then(Value::as_str).map(str::to_string))
+                        .or_else(|| item.get("name").and_then(Value::as_str).map(str::to_string))
+                })
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .collect(),
+        );
+    }
+    value.as_str().map(|text| {
+        text.split(',')
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+fn normalize_provider_ids(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return json!({});
+    };
+    let provider_ids = object
+        .iter()
+        .filter_map(|(key, value)| {
+            let text = value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.as_i64().map(|number| number.to_string()))
+                .or_else(|| value.as_u64().map(|number| number.to_string()))?;
+            (!text.trim().is_empty()).then(|| (key.clone(), json!(text)))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    Value::Object(provider_ids)
+}
+
+fn parse_emby_date(text: &str) -> Option<NaiveDate> {
+    let date = text.trim();
+    if date.is_empty() {
+        return None;
+    }
+    NaiveDate::parse_from_str(date.get(..10).unwrap_or(date), "%Y-%m-%d").ok()
+}
+
 pub async fn update_media_item_series_metadata(
     pool: &sqlx::PgPool,
     item_id: Uuid,
@@ -7597,6 +7870,28 @@ pub async fn get_media_chapters(
     .await?;
 
     Ok(chapters)
+}
+
+pub async fn delete_media_stream_by_index(
+    pool: &sqlx::PgPool,
+    media_item_id: Uuid,
+    stream_index: i32,
+    stream_type: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        DELETE FROM media_streams
+        WHERE media_item_id = $1
+          AND index = $2
+          AND lower(stream_type) = lower($3)
+        "#,
+    )
+    .bind(media_item_id)
+    .bind(stream_index)
+    .bind(stream_type)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn get_media_source_with_streams(

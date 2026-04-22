@@ -612,3 +612,42 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 ### 仍待继续
 - `Sync` 当前是配置持久化任务队列，下一步需要接入真实离线文件准备/转码/传输状态，而不仅是 WebDashboard 管理状态。
 - 合集/播放列表还可继续补成员排序、移动、封面刷新、按用户权限过滤等 Emby 细节。
+
+## 2026-04-23 WebDashboard 适配进展（十三）
+### 本轮完成
+- 按 WebDashboard `editorsidebar.js` 与 Emby ApiClient 的真实调用补齐 `GET /Items/{itemId}/Ancestors`，现在元数据编辑器左侧树会按真实 `parent_id` 回溯父级并返回标准 `BaseItemDto`，不再因缺少祖先接口导致编辑页初始化失败。
+- 按 EmbySDK `MetadataEditorInfo` 模型补齐 `GET /Items/{itemId}/MetadataEditor`，返回 `ParentalRatingOptions`、`Countries`、`Cultures`、`ExternalIdInfos`、`PersonExternalIdInfos` 与内容类型选项，支撑 WebDashboard 元数据编辑页下拉框和外部 ID 区域渲染。
+- 新增 `GET /Items/{itemId}/ExternalIdInfos`，按媒体类型返回 TMDb、IMDb、TVDB、MusicBrainz 等 Emby 风格 `ExternalIdInfo` 字段：`Name`、`Key`、`Website`、`UrlFormatString`、`IsSupportedAsIdentifier`。
+- 新增 `GET /Items/{itemId}/ThemeMedia`，按 EmbySDK `ThemeMediaResult` 返回 `OwnerId`、`Items`、`TotalRecordCount`，并真实查询当前条目下的 `ThemeSong` / `ThemeVideo` 子项；未配置主题媒体时返回空集合而不是 404。
+### 验证
+- `cargo check --manifest-path backend\Cargo.toml` 通过。
+- `cargo test --manifest-path backend\Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过，新增路由没有 Axum 冲突。
+### 仍待继续
+- 继续沿 WebDashboard 元数据编辑器补齐图片管理、外部图片搜索、人员编辑、锁定字段、删除条目等管理端点。
+- 继续对照 `bower_components/emby-apiclient/apiclient.js` 抽取剩余实际调用，优先修复会造成页面白屏、按钮无响应或保存失败的接口。
+
+## 2026-04-23 WebDashboard 适配进展（十四）
+### 本轮完成
+- 新增 `DELETE /Items/{itemId}` 与 `POST /Items/{itemId}/Delete`，对齐 WebDashboard `deletehelper.js` / Emby ApiClient 的删除入口；删除时同步清理 `collection_items` 中该条目作为合集/播放列表本体或成员的关系，避免遗留孤儿关系。
+- 新增 repository 通用删除能力 `delete_media_item`，当前先做数据库真实删除并依赖外键级联清理相关子表，后续可继续补文件系统删除策略。
+- 新增 `GET /Items/{itemId}/CriticReviews`，返回 Emby `QueryResult` 形状的空评论集合，避免详情页或编辑页探测影评时 404。
+- 修复图片重排端点兼容：`POST /Items/{itemId}/Images/{type}/{index}/Index?newIndex=...` 现在会校验管理员和条目存在后返回 `204`，不再被通配上传路由误判成空图片上传。
+### 验证
+- `cargo check --manifest-path backend\Cargo.toml` 通过。
+- `cargo test --manifest-path backend\Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。
+### 仍待继续
+- 通用删除目前只删除数据库记录，后续需要按 Emby 删除策略补可选文件删除、回收站/删除确认、库刷新事件和 WebSocket 通知。
+- 图片管理还可继续补多 Backdrop 排序、按 index 删除/替换、多图元数据持久化等完整 Emby 细节。
+
+## 2026-04-23 WebDashboard 适配进展（十五）
+### 本轮完成
+- 对照 Emby ApiClient 与音乐/电视分类页面，确认 `Genres` / `MusicGenres` / `GameGenres` 已由现有 `backend/src/routes/genres.rs` 提供，避免在 `items.rs` 重复注册造成 Axum 路由冲突。
+- 新增 `GET /Artists/AlbumArtists`，复用当前真实艺术家聚合结果，兼容音乐页 `TabAlbumArtists` 通过 Emby ApiClient 探测专辑艺术家入口。
+- 新增 `GET /Games/SystemSummaries`，按 Emby 查询结果形状返回空集合，避免客户端在无游戏库实现时访问游戏系统汇总直接 404。
+- 修复一次新增分类路由导致的 `/GameGenres/{genreName}/Items` 与 `/GameGenres/{name}/Items` 冲突，保留已有 `genres.rs` 路由作为唯一实现。
+### 验证
+- `cargo check --manifest-path backend\Cargo.toml` 通过。
+- `cargo test --manifest-path backend\Cargo.toml api_router_builds_without_route_conflicts -- --nocapture` 通过。
+### 仍待继续
+- `Games/SystemSummaries` 当前是兼容空结果，后续若引入游戏库模型，需要接入真实游戏系统统计。
+- `Artists/AlbumArtists` 当前复用艺术家聚合，后续需要区分 AlbumArtist / Artist 角色来源。
