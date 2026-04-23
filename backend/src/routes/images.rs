@@ -1,8 +1,11 @@
 use crate::{
     auth::{AuthSession, OptionalAuthSession},
     error::AppError,
-    metadata::provider::ExternalRemoteImage,
-    models::{emby_id_to_uuid, ImageInfoDto},
+    metadata::{
+        provider::{ExternalRemoteImage, MetadataProvider, MetadataProviderManager},
+        tmdb::TmdbProvider,
+    },
+    models::{emby_id_to_uuid, ImageInfoDto, LibraryOptionsDto},
     repository,
     state::AppState,
 };
@@ -329,13 +332,30 @@ async fn remote_images_for_item(
     push_existing_remote_image(&mut images, item.logo_path.as_deref(), "Logo");
     push_existing_remote_image(&mut images, item.thumb_path.as_deref(), "Thumb");
 
-    if let (Some(manager), Some(tmdb_id)) = (state.metadata_manager.as_ref(), tmdb_id_for_item(item)) {
-        if let Some(provider) = manager.get_provider("tmdb") {
-            let mut provider_images = provider
-                .get_remote_images(&item.item_type, &tmdb_id)
-                .await
-                .unwrap_or_default();
-            images.append(&mut provider_images);
+    if tmdb_remote_images_supported(item) {
+        let library_options = item_library_options(state, item.id).await?;
+        if let (Some(manager), Some((tmdb_id, season_number, episode_number, remote_media_type))) =
+            (state.metadata_manager.as_ref(), tmdb_remote_image_context(state, item).await)
+        {
+            if let Some(provider) = item_tmdb_provider(state, manager, &library_options) {
+                let mut provider_images = if season_number.is_some() || episode_number.is_some() {
+                    provider
+                        .get_remote_images_for_child(
+                            remote_media_type,
+                            &tmdb_id,
+                            season_number,
+                            episode_number,
+                        )
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    provider
+                        .get_remote_images(remote_media_type, &tmdb_id)
+                        .await
+                        .unwrap_or_default()
+                };
+                images.append(&mut provider_images);
+            }
         }
     }
 
@@ -441,8 +461,8 @@ fn remote_image_provider_names(state: &AppState, item: &crate::models::DbMediaIt
     {
         providers.push("LocalMetadata".to_string());
     }
-    if state.metadata_manager.as_ref().and_then(|manager| manager.get_provider("tmdb")).is_some()
-        && tmdb_id_for_item(item).is_some()
+    if tmdb_remote_images_supported(item)
+        && state.metadata_manager.as_ref().and_then(|manager| manager.get_provider("tmdb")).is_some()
     {
         providers.push("TheMovieDb".to_string());
     }
@@ -456,6 +476,240 @@ fn tmdb_id_for_item(item: &crate::models::DbMediaItem) -> Option<String> {
             .find_map(|key| providers.get(*key).and_then(Value::as_str))
             .map(ToOwned::to_owned)
     })
+}
+
+async fn tmdb_remote_image_context(
+    state: &AppState,
+    item: &crate::models::DbMediaItem,
+) -> Option<(String, Option<i32>, Option<i32>, &'static str)> {
+    if item.item_type.eq_ignore_ascii_case("Movie") {
+        return tmdb_id_for_item(item).map(|id| (id, None, None, "Movie"));
+    }
+    if item.item_type.eq_ignore_ascii_case("Series") {
+        return tmdb_id_for_item(item).map(|id| (id, None, None, "Series"));
+    }
+    if item.item_type.eq_ignore_ascii_case("Season") {
+        let tmdb_id = if let Some(id) = tmdb_id_for_item(item) {
+            Some(id)
+        } else {
+            let parent_id = item.parent_id?;
+            let parent = repository::get_media_item(&state.pool, parent_id).await.ok().flatten()?;
+            tmdb_id_for_item(&parent)
+        };
+        return tmdb_id.map(|id| (id, item.index_number, None, "Season"));
+    }
+    if item.item_type.eq_ignore_ascii_case("Episode") {
+        let season_number = item.parent_index_number;
+        let episode_number = item.index_number;
+        let parent_id = item.parent_id?;
+        let season = repository::get_media_item(&state.pool, parent_id).await.ok().flatten()?;
+        let tmdb_id = if let Some(id) = tmdb_id_for_item(&season) {
+            Some(id)
+        } else {
+            let series_id = season.parent_id?;
+            let series = repository::get_media_item(&state.pool, series_id).await.ok().flatten()?;
+            tmdb_id_for_item(&series)
+        };
+        return tmdb_id.map(|id| (id, season_number, episode_number, "Episode"));
+    }
+    None
+}
+
+fn tmdb_remote_images_supported(item: &crate::models::DbMediaItem) -> bool {
+    item.item_type.eq_ignore_ascii_case("Movie")
+        || item.item_type.eq_ignore_ascii_case("Series")
+        || item.item_type.eq_ignore_ascii_case("Season")
+        || item.item_type.eq_ignore_ascii_case("Episode")
+}
+
+async fn item_library_options(
+    state: &AppState,
+    item_id: uuid::Uuid,
+) -> Result<LibraryOptionsDto, AppError> {
+    Ok(
+        repository::get_library_for_media_item(&state.pool, item_id)
+            .await?
+            .map(|library| repository::library_options(&library))
+            .unwrap_or_default(),
+    )
+}
+
+fn item_tmdb_provider<'a>(
+    state: &'a AppState,
+    metadata_manager: &'a MetadataProviderManager,
+    library_options: &'a LibraryOptionsDto,
+) -> Option<Box<dyn MetadataProvider + 'a>> {
+    if let Some(api_key) = &state.config.tmdb_api_key {
+        let preferred_metadata_language = library_options
+            .preferred_metadata_language
+            .as_deref()
+            .unwrap_or(&state.config.preferred_metadata_language);
+        let metadata_country_code = library_options
+            .metadata_country_code
+            .as_deref()
+            .unwrap_or(&state.config.metadata_country_code);
+        return Some(Box::new(TmdbProvider::new_with_preferences(
+            api_key.clone(),
+            preferred_metadata_language,
+            metadata_country_code,
+        )));
+    }
+
+    metadata_manager
+        .get_provider("tmdb")
+        .map(|provider| Box::new(RouteProviderRef { inner: provider }) as Box<dyn MetadataProvider>)
+}
+
+fn item_image_storage_path(
+    state: &AppState,
+    item: &crate::models::DbMediaItem,
+    library_options: &LibraryOptionsDto,
+    image_type: &str,
+    extension: &str,
+) -> PathBuf {
+    if library_options.save_local_metadata {
+        let item_path = PathBuf::from(&item.path);
+        if let Some(path) = item_image_target_path(item, &item_path, image_type, extension) {
+            return path;
+        }
+    }
+
+    state.config.static_dir.join("item-images").join(format!(
+        "{}-{}.{}",
+        item.id,
+        image_type.to_ascii_lowercase(),
+        extension
+    ))
+}
+
+fn item_image_target_path(
+    item: &crate::models::DbMediaItem,
+    item_path: &PathBuf,
+    image_type: &str,
+    extension: &str,
+) -> Option<PathBuf> {
+    let folder = item_path.parent().unwrap_or(item_path.as_path());
+    let stem = item_path.file_stem()?.to_string_lossy();
+    let normalized = image_type.to_ascii_lowercase();
+
+    if item.item_type.eq_ignore_ascii_case("Episode") {
+        return match normalized.as_str() {
+            "primary" | "thumb" => Some(folder.join(format!("{stem}-thumb.{extension}"))),
+            _ => None,
+        };
+    }
+
+    if item.item_type.eq_ignore_ascii_case("Season") {
+        let season_number = item.index_number.unwrap_or_default();
+        let marker = if season_number == 0 {
+            "-specials".to_string()
+        } else {
+            format!("{season_number:02}")
+        };
+        let prefix = format!("season{marker}");
+        return match normalized.as_str() {
+            "primary" => Some(folder.join(format!("{prefix}-poster.{extension}"))),
+            "backdrop" => Some(folder.join(format!("{prefix}-fanart.{extension}"))),
+            "logo" => Some(folder.join(format!("{prefix}-logo.{extension}"))),
+            "thumb" => Some(folder.join(format!("{prefix}-landscape.{extension}"))),
+            _ => None,
+        };
+    }
+
+    let filename = match normalized.as_str() {
+        "primary" => "poster",
+        "backdrop" => "fanart",
+        "logo" => "logo",
+        "thumb" => "landscape",
+        _ => return None,
+    };
+
+    if item_path.is_dir() {
+        Some(folder.join(format!("{filename}.{extension}")))
+    } else {
+        Some(folder.join(format!("{stem}-{filename}.{extension}")))
+    }
+}
+
+struct RouteProviderRef<'a> {
+    inner: &'a dyn MetadataProvider,
+}
+
+#[async_trait::async_trait]
+impl MetadataProvider for RouteProviderRef<'_> {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn search_person(
+        &self,
+        name: &str,
+    ) -> Result<Vec<crate::metadata::models::ExternalPersonSearchResult>, AppError> {
+        self.inner.search_person(name).await
+    }
+
+    async fn get_person_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::metadata::models::ExternalPerson, AppError> {
+        self.inner.get_person_details(provider_id).await
+    }
+
+    async fn get_person_credits(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalPersonCredit>, AppError> {
+        self.inner.get_person_credits(provider_id).await
+    }
+
+    async fn get_series_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::metadata::models::ExternalSeriesMetadata, AppError> {
+        self.inner.get_series_details(provider_id).await
+    }
+
+    async fn get_movie_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::metadata::models::ExternalMovieMetadata, AppError> {
+        self.inner.get_movie_details(provider_id).await
+    }
+
+    async fn get_item_people(
+        &self,
+        media_type: &str,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalItemPerson>, AppError> {
+        self.inner.get_item_people(media_type, provider_id).await
+    }
+
+    async fn get_series_episode_catalog(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalEpisodeCatalogItem>, AppError> {
+        self.inner.get_series_episode_catalog(provider_id).await
+    }
+
+    async fn get_remote_images(
+        &self,
+        media_type: &str,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalRemoteImage>, AppError> {
+        self.inner.get_remote_images(media_type, provider_id).await
+    }
+
+    async fn get_remote_images_for_child(
+        &self,
+        media_type: &str,
+        series_provider_id: &str,
+        season_number: Option<i32>,
+        episode_number: Option<i32>,
+    ) -> Result<Vec<crate::metadata::provider::ExternalRemoteImage>, AppError> {
+        self.inner
+            .get_remote_images_for_child(media_type, series_provider_id, season_number, episode_number)
+            .await
+    }
 }
 
 async fn get_item_image(
@@ -615,21 +869,17 @@ async fn upload_item_image_impl(
     }
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
-    repository::get_media_item(&state.pool, item_id)
+    let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
     let image_type = normalized_item_image_type(&image_type);
     let extension = image_extension_from_headers(&headers);
-    let dir = state.config.static_dir.join("item-images");
-    fs::create_dir_all(&dir).await.map_err(AppError::Io)?;
-    let filename = format!(
-        "{}-{}.{}",
-        item_id,
-        image_type.to_ascii_lowercase(),
-        extension
-    );
-    let path = dir.join(filename);
+    let library_options = item_library_options(&state, item_id).await?;
+    let path = item_image_storage_path(&state, &item, &library_options, &image_type, &extension);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await.map_err(AppError::Io)?;
+    }
     fs::write(&path, &body).await.map_err(AppError::Io)?;
 
     repository::update_media_item_image_path(

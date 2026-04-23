@@ -2,11 +2,16 @@ use crate::{
     auth::AuthSession,
     error::AppError,
     media_analyzer,
-    metadata::person_service::PersonService,
+    metadata::{
+        person_service::PersonService,
+        provider::{MetadataProvider, MetadataProviderManager},
+        tmdb::TmdbProvider,
+    },
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, BaseItemDto, ContentSectionDto, GetSimilarItems,
-        ItemCountsDto, ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult,
-        TranscodingInfoDto, UpdateUserItemDataRequest, UserItemDataDto, UserItemDataQuery,
+        ItemCountsDto, ItemsQuery, LibraryOptionsDto, PlaybackInfoDto, PlaybackInfoResponse,
+        QueryResult, TranscodingInfoDto, UpdateUserItemDataRequest, UserItemDataDto,
+        UserItemDataQuery,
     },
     naming,
     repository::{self, ItemListOptions, UpdateUserDataInput},
@@ -1558,8 +1563,8 @@ async fn refresh_item_metadata(
         .metadata_manager
         .as_ref()
         .ok_or_else(|| AppError::BadRequest("未配置远程元数据提供者".to_string()))?;
-    let provider = metadata_manager
-        .get_provider("tmdb")
+    let library_options = item_library_options(&state, item.id).await?;
+    let provider = item_tmdb_provider(&state, metadata_manager, &library_options)
         .ok_or_else(|| AppError::BadRequest("未配置 TMDb 元数据提供者".to_string()))?;
 
     if item.item_type.eq_ignore_ascii_case("Series") {
@@ -1577,12 +1582,144 @@ async fn refresh_item_metadata(
     } else {
         "movie"
     };
+    let people = provider.get_item_people(media_type, &tmdb_id).await?;
+    let tmdb_person_ids = people
+        .iter()
+        .filter_map(|person| {
+            person
+                .provider_ids
+                .get("Tmdb")
+                .or_else(|| person.provider_ids.get("TMDb"))
+                .or_else(|| person.provider_ids.get("tmdb"))
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    repository::delete_tmdb_person_roles_except(&state.pool, item.id, &tmdb_person_ids).await?;
     let person_service = PersonService::new(state.pool.clone(), metadata_manager.clone());
-    person_service
-        .fetch_persons_for_item(item.id, "tmdb", &tmdb_id, media_type)
-        .await?;
+    for person in people {
+        person_service.upsert_item_person(item.id, person).await?;
+    }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn item_library_options(
+    state: &AppState,
+    item_id: Uuid,
+) -> Result<LibraryOptionsDto, AppError> {
+    Ok(
+        repository::get_library_for_media_item(&state.pool, item_id)
+            .await?
+            .map(|library| repository::library_options(&library))
+            .unwrap_or_default(),
+    )
+}
+
+fn item_tmdb_provider<'a>(
+    state: &'a AppState,
+    metadata_manager: &'a MetadataProviderManager,
+    library_options: &'a LibraryOptionsDto,
+) -> Option<Box<dyn MetadataProvider + 'a>> {
+    if let Some(api_key) = &state.config.tmdb_api_key {
+        let preferred_metadata_language = library_options
+            .preferred_metadata_language
+            .as_deref()
+            .unwrap_or(&state.config.preferred_metadata_language);
+        let metadata_country_code = library_options
+            .metadata_country_code
+            .as_deref()
+            .unwrap_or(&state.config.metadata_country_code);
+        return Some(Box::new(TmdbProvider::new_with_preferences(
+            api_key.clone(),
+            preferred_metadata_language,
+            metadata_country_code,
+        )));
+    }
+
+    metadata_manager
+        .get_provider("tmdb")
+        .map(|provider| Box::new(RouteProviderRef { inner: provider }) as Box<dyn MetadataProvider>)
+}
+
+struct RouteProviderRef<'a> {
+    inner: &'a dyn MetadataProvider,
+}
+
+#[async_trait::async_trait]
+impl MetadataProvider for RouteProviderRef<'_> {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn search_person(
+        &self,
+        name: &str,
+    ) -> Result<Vec<crate::metadata::models::ExternalPersonSearchResult>, AppError> {
+        self.inner.search_person(name).await
+    }
+
+    async fn get_person_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::metadata::models::ExternalPerson, AppError> {
+        self.inner.get_person_details(provider_id).await
+    }
+
+    async fn get_person_credits(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalPersonCredit>, AppError> {
+        self.inner.get_person_credits(provider_id).await
+    }
+
+    async fn get_series_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::metadata::models::ExternalSeriesMetadata, AppError> {
+        self.inner.get_series_details(provider_id).await
+    }
+
+    async fn get_movie_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::metadata::models::ExternalMovieMetadata, AppError> {
+        self.inner.get_movie_details(provider_id).await
+    }
+
+    async fn get_item_people(
+        &self,
+        media_type: &str,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalItemPerson>, AppError> {
+        self.inner.get_item_people(media_type, provider_id).await
+    }
+
+    async fn get_series_episode_catalog(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalEpisodeCatalogItem>, AppError> {
+        self.inner.get_series_episode_catalog(provider_id).await
+    }
+
+    async fn get_remote_images(
+        &self,
+        media_type: &str,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalRemoteImage>, AppError> {
+        self.inner.get_remote_images(media_type, provider_id).await
+    }
+
+    async fn get_remote_images_for_child(
+        &self,
+        media_type: &str,
+        series_provider_id: &str,
+        season_number: Option<i32>,
+        episode_number: Option<i32>,
+    ) -> Result<Vec<crate::metadata::provider::ExternalRemoteImage>, AppError> {
+        self.inner
+            .get_remote_images_for_child(media_type, series_provider_id, season_number, episode_number)
+            .await
+    }
 }
 
 fn tmdb_id_from_provider_ids(value: &serde_json::Value) -> Option<String> {

@@ -780,6 +780,27 @@ async fn refresh_remote_people(
     };
     match provider.get_item_people(media_type, &tmdb_id).await {
         Ok(people) => {
+            let tmdb_person_ids = people
+                .iter()
+                .filter_map(|person| {
+                    person
+                        .provider_ids
+                        .get("Tmdb")
+                        .or_else(|| person.provider_ids.get("TMDb"))
+                        .or_else(|| person.provider_ids.get("tmdb"))
+                        .cloned()
+                })
+                .collect::<Vec<_>>();
+            if let Err(error) =
+                repository::delete_tmdb_person_roles_except(pool, media_item_id, &tmdb_person_ids).await
+            {
+                tracing::warn!(
+                    media_item_id = %media_item_id,
+                    tmdb_id = %tmdb_id,
+                    error = %error,
+                    "清理过期 TMDb 人物角色失败"
+                );
+            }
             for person in people {
                 let provider_ids = serde_json::to_value(&person.provider_ids).unwrap_or_default();
                 match repository::upsert_person_reference(
@@ -981,6 +1002,18 @@ impl MetadataProvider for ProviderRef<'_> {
     ) -> Result<Vec<crate::metadata::provider::ExternalRemoteImage>, AppError> {
         self.inner.get_remote_images(media_type, provider_id).await
     }
+
+    async fn get_remote_images_for_child(
+        &self,
+        media_type: &str,
+        series_provider_id: &str,
+        season_number: Option<i32>,
+        episode_number: Option<i32>,
+    ) -> Result<Vec<crate::metadata::provider::ExternalRemoteImage>, AppError> {
+        self.inner
+            .get_remote_images_for_child(media_type, series_provider_id, season_number, episode_number)
+            .await
+    }
 }
 
 async fn cache_remote_images_for_item(
@@ -991,7 +1024,7 @@ async fn cache_remote_images_for_item(
     item_id: uuid::Uuid,
     item_path: &Path,
     item_folder: Option<&Path>,
-    media_type: &str,
+    _media_type: &str,
 ) {
     let Some(item) = repository::get_media_item(pool, item_id)
         .await
@@ -1022,9 +1055,23 @@ async fn cache_remote_images_for_item(
         });
     }
 
-    if let Some(tmdb_id) = tmdb_id_from_provider_ids(&item.provider_ids) {
+    if let Some((tmdb_id, season_number, episode_number, remote_media_type)) =
+        tmdb_remote_image_context(pool, &item).await
+    {
         if let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) {
-            if let Ok(mut remote_images) = provider.get_remote_images(media_type, &tmdb_id).await {
+            let remote_result = if season_number.is_some() || episode_number.is_some() {
+                provider
+                    .get_remote_images_for_child(
+                        remote_media_type,
+                        &tmdb_id,
+                        season_number,
+                        episode_number,
+                    )
+                    .await
+            } else {
+                provider.get_remote_images(remote_media_type, &tmdb_id).await
+            };
+            if let Ok(mut remote_images) = remote_result {
                 images.append(&mut remote_images);
             }
         }
@@ -1084,6 +1131,53 @@ async fn cache_person_image(
     }
     let local_path_text = local_path.to_string_lossy().to_string();
     let _ = repository::update_person_image_path(pool, person_id, image_type, Some(&local_path_text)).await;
+}
+
+async fn tmdb_remote_image_context(
+    pool: &sqlx::PgPool,
+    item: &crate::models::DbMediaItem,
+) -> Option<(String, Option<i32>, Option<i32>, &'static str)> {
+    if item.item_type.eq_ignore_ascii_case("Movie") {
+        return tmdb_id_from_provider_ids(&item.provider_ids).map(|id| (id, None, None, "Movie"));
+    }
+
+    if item.item_type.eq_ignore_ascii_case("Series") {
+        return tmdb_id_from_provider_ids(&item.provider_ids).map(|id| (id, None, None, "Series"));
+    }
+
+    if item.item_type.eq_ignore_ascii_case("Season") {
+        let tmdb_id = if let Some(id) = tmdb_id_from_provider_ids(&item.provider_ids) {
+            Some(id)
+        } else {
+            let parent_id = item.parent_id?;
+            let parent = repository::get_media_item(pool, parent_id).await.ok().flatten()?;
+            tmdb_id_from_provider_ids(&parent.provider_ids)
+        };
+        return tmdb_id.map(|id| (id, item.index_number, None, "Season"));
+    }
+
+    if item.item_type.eq_ignore_ascii_case("Episode") {
+        let season_number = item.parent_index_number;
+        let episode_number = item.index_number;
+        let tmdb_id = if let Some(parent_id) = item.parent_id {
+            if let Some(season) = repository::get_media_item(pool, parent_id).await.ok().flatten() {
+                if let Some(id) = tmdb_id_from_provider_ids(&season.provider_ids) {
+                    Some(id)
+                } else {
+                    let series_id = season.parent_id?;
+                    let series = repository::get_media_item(pool, series_id).await.ok().flatten()?;
+                    tmdb_id_from_provider_ids(&series.provider_ids)
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        return tmdb_id.map(|id| (id, season_number, episode_number, "Episode"));
+    }
+
+    None
 }
 
 fn image_target_path(

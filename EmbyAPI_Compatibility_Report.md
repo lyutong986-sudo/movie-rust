@@ -319,6 +319,20 @@
   - 这样 `DownloadImagesInAdvance + SaveLocalMetadata` 写回磁盘后的图片，在后续重扫时能稳定重新识别并回填数据库
 - 已增加季图命名识别单测，验证 `season01-poster.jpg` 与 `season-specials-fanart.jpg` 两类路径均可命中。
 
+### 2026-04-23 TMDB 链路审计修复
+
+- 修复 `combined_credits` 反序列化兼容性：TMDB 人物作品里的电影 credit 可能只有 `title` 没有 `name`，现在人物作品模型已兼容 movie/tv 混合返回，避免人物作品合集因字段缺失整段失败。
+- 修正季/集远程图片行为：当前 provider 在缺少 season/episode 独立 provider id 的前提下，不再错误复用整部剧的 series poster/backdrop 作为季图/集图；`RemoteImages`、预下载和手动下载不会再把剧集图误写到季/集对象。
+- 进一步补齐季/集独立取图：
+  - Season 现在会使用 `series TMDb id + season number` 调 TMDB season details，提取季海报作为远程图来源
+  - Episode 现在会使用 `series TMDb id + season/episode number` 从 TMDB season catalog 中提取 `still_path`，并作为 `Primary/Thumb` 远程图来源
+  - `RemoteImages`、扫描预下载、手动下载远程图片三条路径已统一复用这套 child-item 图源逻辑
+- 远程人物同步改为“替换式”清理当前条目的 TMDb 人物关系后再重建，减少演员/导演更新后旧角色长期残留的问题。
+- 手动“刷新元数据”和“下载远程图片”已对齐扫描链路：
+  - 刷新时会按条目所属媒体库的 `PreferredMetadataLanguage` / `MetadataCountryCode` 创建 TMDB provider
+  - 下载图片时会遵守 `SaveLocalMetadata`，优先写回媒体目录 sidecar；否则回退到 `static_dir/item-images`
+- 统一了人物详情链路中 TMDb/IMDb provider id 的写法与查找兼容，避免手动从外部 provider 拉取人物时因为 key 大小写不一致而无法复用已有记录。
+
 ### 2026-04-23 初始化管理员数据库修复
 
 - 初始化用户表 `0001_init.sql` 已直接包含 Emby 用户运行所需字段: `policy`、`configuration`、`primary_image_path`、`backdrop_image_path`、`logo_image_path`、`date_modified`，新项目初始化后可直接创建管理员。

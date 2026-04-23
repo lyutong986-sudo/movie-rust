@@ -97,6 +97,29 @@ impl PersonService {
             .ok_or_else(|| AppError::BadRequest(format!("Provider '{provider_name}' not found")))?;
 
         let people = provider.get_item_people(media_type, external_item_id).await?;
+        let tmdb_person_ids = if provider_name.eq_ignore_ascii_case("tmdb")
+            || provider_name.eq_ignore_ascii_case("themoviedb")
+        {
+            people
+                .iter()
+                .filter_map(|person| {
+                    person
+                        .provider_ids
+                        .get("Tmdb")
+                        .or_else(|| person.provider_ids.get("TMDb"))
+                        .or_else(|| person.provider_ids.get("tmdb"))
+                        .cloned()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if !tmdb_person_ids.is_empty()
+            || provider_name.eq_ignore_ascii_case("tmdb")
+            || provider_name.eq_ignore_ascii_case("themoviedb")
+        {
+            repository::delete_tmdb_person_roles_except(&self.pool, item_id, &tmdb_person_ids).await?;
+        }
         for person in people {
             self.upsert_item_person(item_id, person).await?;
         }
@@ -104,7 +127,7 @@ impl PersonService {
         Ok(())
     }
 
-    async fn upsert_item_person(
+    pub(crate) async fn upsert_item_person(
         &self,
         item_id: Uuid,
         person: ExternalItemPerson,

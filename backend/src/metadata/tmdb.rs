@@ -322,10 +322,10 @@ impl MetadataProvider for TmdbProvider {
         let person_details = self.get_person_details_internal(provider_id).await?;
         
         let mut provider_ids = HashMap::new();
-        provider_ids.insert("tmdb".to_string(), person_details.id.to_string());
+        provider_ids.insert("Tmdb".to_string(), person_details.id.to_string());
         
         if let Some(imdb_id) = &person_details.imdb_id {
-            provider_ids.insert("imdb".to_string(), imdb_id.clone());
+            provider_ids.insert("Imdb".to_string(), imdb_id.clone());
         }
 
         let birth_date = person_details.birthday.clone().and_then(|date| {
@@ -381,7 +381,10 @@ impl MetadataProvider for TmdbProvider {
 
             results.push(ExternalPersonCredit {
                 external_id: cast.id.to_string(),
-                title: cast.title.unwrap_or(cast.name),
+                title: cast
+                    .title
+                    .or(cast.name)
+                    .unwrap_or_else(|| format!("TMDb {}", cast.id)),
                 role_type: role_type.clone(),
                 role: cast.character,
                 is_featured,
@@ -415,7 +418,10 @@ impl MetadataProvider for TmdbProvider {
 
             results.push(ExternalPersonCredit {
                 external_id: crew.id.to_string(),
-                title: crew.title.unwrap_or(crew.name),
+                title: crew
+                    .title
+                    .or(crew.name)
+                    .unwrap_or_else(|| format!("TMDb {}", crew.id)),
                 role_type,
                 role: Some(crew.job),
                 is_featured: false,
@@ -644,10 +650,14 @@ impl MetadataProvider for TmdbProvider {
         provider_id: &str,
     ) -> Result<Vec<ExternalRemoteImage>, AppError> {
         let mut images = Vec::new();
+        if media_type.eq_ignore_ascii_case("season")
+            || media_type.eq_ignore_ascii_case("episode")
+        {
+            return Ok(images);
+        }
+
         if media_type.eq_ignore_ascii_case("series")
             || media_type.eq_ignore_ascii_case("tv")
-            || media_type.eq_ignore_ascii_case("season")
-            || media_type.eq_ignore_ascii_case("episode")
         {
             let details = self.get_tv_details_internal(provider_id).await?;
             push_tmdb_remote_image(&mut images, details.poster_path, "Primary", &self.config.image_base_url);
@@ -665,6 +675,60 @@ impl MetadataProvider for TmdbProvider {
         }
 
         Ok(images)
+    }
+
+    async fn get_remote_images_for_child(
+        &self,
+        media_type: &str,
+        series_provider_id: &str,
+        season_number: Option<i32>,
+        episode_number: Option<i32>,
+    ) -> Result<Vec<ExternalRemoteImage>, AppError> {
+        if media_type.eq_ignore_ascii_case("season") {
+            let Some(season_number) = season_number else {
+                return Ok(Vec::new());
+            };
+            let details = self
+                .get_tv_season_details_internal(series_provider_id, season_number)
+                .await?;
+            let mut images = Vec::new();
+            push_tmdb_remote_image(&mut images, details.poster_path, "Primary", &self.config.image_base_url);
+            return Ok(images);
+        }
+
+        if media_type.eq_ignore_ascii_case("episode") {
+            let Some(season_number) = season_number else {
+                return Ok(Vec::new());
+            };
+            let Some(episode_number) = episode_number else {
+                return Ok(Vec::new());
+            };
+            let details = self
+                .get_tv_season_details_internal(series_provider_id, season_number)
+                .await?;
+            let mut images = Vec::new();
+            if let Some(episode) = details
+                .episodes
+                .into_iter()
+                .find(|episode| episode.episode_number == episode_number)
+            {
+                push_tmdb_remote_image(
+                    &mut images,
+                    episode.still_path.clone(),
+                    "Primary",
+                    &self.config.image_base_url,
+                );
+                push_tmdb_remote_image(
+                    &mut images,
+                    episode.still_path,
+                    "Thumb",
+                    &self.config.image_base_url,
+                );
+            }
+            return Ok(images);
+        }
+
+        self.get_remote_images(media_type, series_provider_id).await
     }
 }
 
@@ -846,7 +910,7 @@ struct TmdbPersonCredits {
 #[derive(Debug, Deserialize)]
 struct TmdbCastCredit {
     id: i32,
-    name: String,
+    name: Option<String>,
     title: Option<String>,
     character: Option<String>,
     order: Option<i32>,
@@ -859,7 +923,7 @@ struct TmdbCastCredit {
 #[derive(Debug, Deserialize)]
 struct TmdbCrewCredit {
     id: i32,
-    name: String,
+    name: Option<String>,
     title: Option<String>,
     job: String,
     department: String,
@@ -1025,6 +1089,7 @@ struct TmdbSeasonStub {
 struct TmdbSeasonDetails {
     id: Option<i32>,
     season_number: i32,
+    poster_path: Option<String>,
     #[serde(default)]
     episodes: Vec<TmdbSeasonEpisode>,
 }

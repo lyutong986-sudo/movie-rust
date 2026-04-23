@@ -730,15 +730,46 @@ pub async fn get_person_by_external_id(
     provider: &str,
     external_id: &str,
 ) -> Result<Option<DbPerson>, AppError> {
+    let aliases: &[&str] = if provider.eq_ignore_ascii_case("tmdb")
+        || provider.eq_ignore_ascii_case("themoviedb")
+    {
+        &["Tmdb", "TMDb", "tmdb", "TheMovieDb"]
+    } else if provider.eq_ignore_ascii_case("imdb") {
+        &["Imdb", "IMDb", "imdb", "Imdb"]
+    } else {
+        &[]
+    };
+
+    if aliases.is_empty() {
+        return Ok(sqlx::query_as::<_, DbPerson>(
+            r#"
+            SELECT *
+            FROM persons
+            WHERE provider_ids->>$1 = $2
+            LIMIT 1
+            "#,
+        )
+        .bind(provider)
+        .bind(external_id)
+        .fetch_optional(pool)
+        .await?);
+    }
+
     Ok(sqlx::query_as::<_, DbPerson>(
         r#"
         SELECT *
         FROM persons
-        WHERE provider_ids->>$1 = $2
+        WHERE provider_ids->>$1 = $5
+           OR provider_ids->>$2 = $5
+           OR provider_ids->>$3 = $5
+           OR provider_ids->>$4 = $5
         LIMIT 1
         "#,
     )
-    .bind(provider)
+    .bind(aliases[0])
+    .bind(aliases[1])
+    .bind(aliases[2])
+    .bind(aliases[3])
     .bind(external_id)
     .fetch_optional(pool)
     .await?)
@@ -1192,6 +1223,40 @@ pub async fn update_user_image_path(
     Ok(())
 }
 
+pub async fn delete_tmdb_person_roles_except(
+    pool: &sqlx::PgPool,
+    media_item_id: Uuid,
+    tmdb_person_ids: &[String],
+) -> Result<u64, AppError> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM person_roles pr
+        USING persons p
+        WHERE pr.person_id = p.id
+          AND pr.media_item_id = $1
+          AND (
+              p.provider_ids ? 'Tmdb'
+              OR p.provider_ids ? 'TMDb'
+              OR p.provider_ids ? 'tmdb'
+          )
+          AND (
+              cardinality($2::text[]) = 0
+              OR COALESCE(
+                    p.provider_ids->>'Tmdb',
+                    p.provider_ids->>'TMDb',
+                    p.provider_ids->>'tmdb'
+                 ) <> ALL($2::text[])
+          )
+        "#,
+    )
+    .bind(media_item_id)
+    .bind(tmdb_person_ids)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 pub async fn update_person_image_path(
     pool: &sqlx::PgPool,
     person_id: Uuid,
@@ -1513,6 +1578,24 @@ pub async fn get_library(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbLibra
         "#,
     )
     .bind(id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn get_library_for_media_item(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+) -> Result<Option<DbLibrary>, AppError> {
+    Ok(sqlx::query_as::<_, DbLibrary>(
+        r#"
+        SELECT l.id, l.name, l.collection_type, l.path, l.library_options, l.created_at
+        FROM media_items mi
+        INNER JOIN libraries l ON l.id = mi.library_id
+        WHERE mi.id = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(item_id)
     .fetch_optional(pool)
     .await?)
 }

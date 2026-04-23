@@ -45,6 +45,18 @@ pub trait MetadataProvider: Send + Sync {
     ) -> Result<Vec<ExternalRemoteImage>, AppError> {
         Ok(Vec::new())
     }
+
+    async fn get_remote_images_for_child(
+        &self,
+        media_type: &str,
+        series_provider_id: &str,
+        season_number: Option<i32>,
+        episode_number: Option<i32>,
+    ) -> Result<Vec<ExternalRemoteImage>, AppError> {
+        let _ = season_number;
+        let _ = episode_number;
+        self.get_remote_images(media_type, series_provider_id).await
+    }
 }
 
 /// 外部人物作品信息
