@@ -1903,28 +1903,65 @@ async fn playback_info(
         .unwrap_or_default();
     let force_transcoding = !transcode_reasons.is_empty();
 
+    let playback_item_id = crate::models::uuid_to_emby_guid(&item.id);
     let playback_user_id = info.user_id.unwrap_or(session.user_id);
     let playback_user_id = uuid_to_emby_guid(&playback_user_id);
     for media_source in &mut media_sources {
         let media_source_id = media_source.id.clone();
-        if let Some(url) = media_source.direct_stream_url.as_mut() {
-            *url = decorate_playback_url(
-                url,
-                &media_source_id,
-                &play_session_id,
-                &session.access_token,
-                &playback_user_id,
-                request_device_id.as_deref(),
-            );
+        media_source.direct_stream_url = Some(build_direct_stream_url(
+            &playback_item_id,
+            &media_source_id,
+            media_source.container.as_str(),
+            &play_session_id,
+            &session.access_token,
+            request_device_id.as_deref(),
+        ));
+        media_source.add_api_key_to_direct_stream_url = Some(false);
+        media_source.media_streams.retain(|stream| {
+            !(stream.stream_type.eq_ignore_ascii_case("Video")
+                && stream
+                    .codec
+                    .as_deref()
+                    .is_some_and(|codec| codec.eq_ignore_ascii_case("mjpeg")))
+        });
+        for stream in &mut media_source.media_streams {
+            if stream.stream_type.eq_ignore_ascii_case("Subtitle")
+                && stream
+                    .codec
+                    .as_deref()
+                    .is_some_and(|codec| codec.eq_ignore_ascii_case("hdmv_pgs_subtitle"))
+            {
+                stream.codec = Some("PGSSUB".to_string());
+                stream.mime_type = None;
+            }
         }
-        media_source
-            .required_http_headers
-            .insert("X-Emby-Token".to_string(), session.access_token.clone());
-        media_source.required_http_headers.insert(
-            "X-MediaBrowser-Token".to_string(),
-            session.access_token.clone(),
-        );
-        media_source.add_api_key_to_direct_stream_url = Some(true);
+        media_source.default_subtitle_stream_index = media_source
+            .media_streams
+            .iter()
+            .find(|stream| stream.stream_type.eq_ignore_ascii_case("Subtitle") && stream.is_default)
+            .map(|stream| stream.index)
+            .or_else(|| {
+                media_source
+                    .media_streams
+                    .iter()
+                    .find(|stream| stream.stream_type.eq_ignore_ascii_case("Subtitle"))
+                    .map(|stream| stream.index)
+            });
+        media_source.default_audio_stream_index = media_source
+            .media_streams
+            .iter()
+            .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio") && stream.is_default)
+            .map(|stream| stream.index)
+            .or_else(|| {
+                media_source
+                    .media_streams
+                    .iter()
+                    .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"))
+                    .map(|stream| stream.index)
+            });
+        media_source.required_http_headers.retain(|key, _| {
+            key.eq_ignore_ascii_case("Accept-Ranges") || key.eq_ignore_ascii_case("Range")
+        });
     }
 
     // 设备配置文件处理
@@ -1973,22 +2010,11 @@ async fn playback_info(
 
     let encoding_options = repository::encoding_options(&state.pool, &state.config).await?;
     if force_transcoding && !encoding_options.enable_transcoding {
-        for media_source in &mut media_sources {
-            media_source.supports_transcoding = false;
-            media_source.transcoding_url = None;
-            media_source.transcoding_container = None;
-            media_source.transcoding_sub_protocol = None;
-        }
-
-        return Ok(Json(PlaybackInfoResponse {
-            media_sources,
-            play_session_id,
-            error_code: Some("TranscodingDisabled".to_string()),
-            ..Default::default()
-        }));
-    }
-
-    if force_transcoding {
+        tracing::warn!(
+            item_id = %item.id,
+            "播放请求需要转码，但转码功能已禁用；保留 Emby 直连媒体源供客户端尝试播放"
+        );
+    } else if force_transcoding {
         let item_emby_id = crate::models::uuid_to_emby_guid(&item.id);
         let selected_media_source_id = media_sources
             .get(selected_media_source_index)
@@ -2719,93 +2745,34 @@ fn build_transcoding_url(
     }
 }
 
-fn decorate_playback_url(
-    url: &str,
+fn build_direct_stream_url(
+    item_emby_id: &str,
     media_source_id: &str,
+    container: &str,
     play_session_id: &str,
     access_token: &str,
-    user_id: &str,
     device_id: Option<&str>,
 ) -> String {
-    let url = ensure_emby_api_prefix(url);
-    let mut pairs = vec![
-        ("MediaSourceId", media_source_id),
-        ("mediaSourceId", media_source_id),
-        ("PlaySessionId", play_session_id),
-        ("api_key", access_token),
-        ("X-Emby-Token", access_token),
-        ("X-MediaBrowser-Token", access_token),
-        ("UserId", user_id),
-    ];
-    if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
-        pairs.push(("DeviceId", device_id));
-    }
-    append_query_pairs_if_missing(&url, &pairs)
-}
-
-fn ensure_emby_api_prefix(url: &str) -> String {
-    let trimmed = url.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("/emby/")
-        || lower.starts_with("/mediabrowser/")
-    {
-        return trimmed.to_string();
-    }
-    if trimmed.starts_with('/') {
-        format!("/emby{trimmed}")
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn append_query_pairs_if_missing(url: &str, pairs: &[(&str, &str)]) -> String {
-    let (without_fragment, fragment) = url
-        .split_once('#')
-        .map(|(base, fragment)| (base, Some(fragment)))
-        .unwrap_or((url, None));
-    let (base, existing_query) = without_fragment
-        .split_once('?')
-        .map(|(base, query)| (base, Some(query)))
-        .unwrap_or((without_fragment, None));
-
-    let mut existing_pairs: Vec<(String, String)> = existing_query
-        .map(|query| {
-            url::form_urlencoded::parse(query.as_bytes())
-                .map(|(key, value)| (key.into_owned(), value.into_owned()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut existing_keys: BTreeSet<String> = existing_pairs
-        .iter()
-        .map(|(key, _)| key.to_ascii_lowercase())
-        .collect();
-
-    for (key, value) in pairs {
-        if value.trim().is_empty() {
-            continue;
-        }
-        if existing_keys.insert(key.to_ascii_lowercase()) {
-            existing_pairs.push(((*key).to_string(), (*value).to_string()));
-        }
-    }
+    let container = container
+        .trim()
+        .trim_start_matches('.')
+        .split(',')
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or("mkv");
 
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (key, value) in existing_pairs {
-        serializer.append_pair(&key, &value);
+    if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
+        serializer.append_pair("DeviceId", device_id);
     }
-    let query = serializer.finish();
-    let mut output = if query.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}?{query}")
-    };
-    if let Some(fragment) = fragment {
-        output.push('#');
-        output.push_str(fragment);
-    }
-    output
+    serializer.append_pair("MediaSourceId", media_source_id);
+    serializer.append_pair("PlaySessionId", play_session_id);
+    serializer.append_pair("api_key", access_token);
+
+    format!(
+        "/videos/{item_emby_id}/original.{container}?{}",
+        serializer.finish()
+    )
 }
 
 fn query_value(query: Option<&str>, keys: &[&str]) -> Option<String> {
@@ -3069,25 +3036,22 @@ mod tests {
     }
 
     #[test]
-    fn playback_info_decorates_direct_stream_urls_for_local_player() {
-        let url = decorate_playback_url(
-            "/Videos/ITEMID/stream.mkv?Static=true&MediaSourceId=mediasource_ITEMID",
+    fn playback_info_builds_emby_original_direct_stream_urls_for_local_player() {
+        let url = build_direct_stream_url(
+            "ITEMID",
             "mediasource_ITEMID",
+            "mkv",
             "PLAYSESSION",
             "TOKEN",
-            "USERID",
             Some("DEVICEID"),
         );
 
-        assert!(url.starts_with("/emby/Videos/ITEMID/stream.mkv?"));
-        assert!(url.contains("Static=true"));
+        assert!(url.starts_with("/videos/ITEMID/original.mkv?"));
         assert!(url.contains("MediaSourceId=mediasource_ITEMID"));
         assert!(url.contains("PlaySessionId=PLAYSESSION"));
         assert!(url.contains("api_key=TOKEN"));
-        assert!(url.contains("X-Emby-Token=TOKEN"));
-        assert!(url.contains("X-MediaBrowser-Token=TOKEN"));
-        assert!(url.contains("UserId=USERID"));
         assert!(url.contains("DeviceId=DEVICEID"));
+        assert!(!url.contains("X-Emby-Token"));
     }
 
     #[test]

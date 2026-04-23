@@ -460,3 +460,16 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
   - `cargo check --manifest-path backend\Cargo.toml`
   - `cargo test --manifest-path backend\Cargo.toml api_router_builds_without_route_conflicts -- --nocapture`
   - `npm.cmd run build`
+
+### 2026-04-23 Hills 本地播放器 PlaybackInfo 播放修复
+
+- 对照本地播放器模板 `PlaybackSourceBuilder` 与 UHD/Emby-like adapter 后确认：播放器优先使用 `MediaSources[].DirectStreamUrl`，原生 Emby 响应使用 `/videos/{播放项}/original.{container}?MediaSourceId=...&PlaySessionId=...&api_key=...`，而不是项目此前返回的 `/emby/Videos/{版本项}/stream.{container}`。
+- `PlaybackInfo` 的直连 URL 已改为 Emby 原生 `original` 形式，并固定使用本次请求的播放项 ID 作为 URL 路径；多版本媒体通过 `MediaSourceId` 指向实际版本，避免客户端选中版本后 URL 跳到另一个 ItemId 导致播放链路不一致。
+- `AddApiKeyToDirectStreamUrl` 改回 `false`，直连 URL 仅携带 Emby 原生常见的 `DeviceId`、`MediaSourceId`、`PlaySessionId`、`api_key`，不再额外塞入 `X-Emby-Token` / `X-MediaBrowser-Token` 查询参数。
+- 新增 `/Videos|videos|Video|video/{itemId}/original.{container}` 和带 `{mediaSourceId}` 的 `original.{container}` 路由，复用现有 `MediaSourceId -> 实际媒体版本` 解析与字节流响应，适配 Hills/EmbySDK 的原生播放入口。
+- `PlaybackInfo.MediaStreams` 现在会过滤 ffprobe 识别出的内嵌 MJPEG 封面流，避免播放器把附件图当作可选视频轨；PGS 字幕 codec 在响应中归一为 Emby 常见的 `PGSSUB`。
+- 当服务端关闭转码但设备 profile 触发转码条件时，`PlaybackInfo` 不再返回 `TranscodingDisabled` 错误响应，而是保留直连媒体源供客户端继续尝试播放，避免本地播放器拿到 200 但误判播放信息异常。
+- 验证通过：
+  - `cargo check --manifest-path backend\Cargo.toml`
+  - `cargo test --manifest-path backend\Cargo.toml playback_info -- --nocapture`
+  - `cargo test --manifest-path backend\Cargo.toml api_router_builds_without_route_conflicts -- --nocapture`

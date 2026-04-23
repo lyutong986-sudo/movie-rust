@@ -99,6 +99,10 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/stream.{container}", get(stream_video_with_container).head(stream_video_with_container))
         .route("/Video/{item_id}/stream.{container}", get(stream_video_with_container).head(stream_video_with_container))
         .route("/video/{item_id}/stream.{container}", get(stream_video_with_container).head(stream_video_with_container))
+        .route("/Videos/{item_id}/original.{container}", get(stream_video_with_container).head(stream_video_with_container))
+        .route("/videos/{item_id}/original.{container}", get(stream_video_with_container).head(stream_video_with_container))
+        .route("/Video/{item_id}/original.{container}", get(stream_video_with_container).head(stream_video_with_container))
+        .route("/video/{item_id}/original.{container}", get(stream_video_with_container).head(stream_video_with_container))
         .route("/Videos/{item_id}/{stream_file_name}", get(stream_video_by_file_name).head(stream_video_by_file_name))
         .route("/videos/{item_id}/{stream_file_name}", get(stream_video_by_file_name).head(stream_video_by_file_name))
         .route("/Video/{item_id}/{stream_file_name}", get(stream_video_by_file_name).head(stream_video_by_file_name))
@@ -111,6 +115,10 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/{_media_source_id}/stream.{container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
         .route("/Video/{item_id}/{_media_source_id}/stream.{container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
         .route("/video/{item_id}/{_media_source_id}/stream.{container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
+        .route("/Videos/{item_id}/{_media_source_id}/original.{container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
+        .route("/videos/{item_id}/{_media_source_id}/original.{container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
+        .route("/Video/{item_id}/{_media_source_id}/original.{container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
+        .route("/video/{item_id}/{_media_source_id}/original.{container}", get(stream_video_for_media_source_with_container).head(stream_video_for_media_source_with_container))
 }
 
 async fn active_encodings(
