@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive } from 'vue';
-import { createLibrary, defaultLibraryOptions, state } from '../store/app';
-import type { CreateLibraryPayload, LibraryOptions } from '../api/emby';
+import { api, createLibrary, defaultLibraryOptions, state } from '../store/app';
+import type { CreateLibraryPayload, FileSystemEntryInfo, LibraryOptions } from '../api/emby';
 
 const emit = defineEmits<{
   close: [];
@@ -10,7 +10,7 @@ const emit = defineEmits<{
 const form = reactive({
   name: '电影',
   collectionType: 'movies',
-  paths: ['/media/movies'],
+  paths: [] as string[],
   preferredMetadataLanguage: state.metadataLanguage || 'zh',
   metadataCountryCode: state.metadataCountry || 'CN',
   seasonZeroDisplayName: 'Specials',
@@ -26,18 +26,86 @@ const form = reactive({
   enableEmbeddedEpisodeInfos: true
 });
 
-const cleanPaths = computed(() => form.paths.map((path) => path.trim()).filter(Boolean));
+const browser = reactive({
+  open: false,
+  loading: false,
+  error: '',
+  currentPath: '',
+  entries: [] as FileSystemEntryInfo[]
+});
 
-function addPath() {
-  form.paths.push('');
+const cleanPaths = computed(() => form.paths.map((path) => path.trim()).filter(Boolean));
+const canUseCurrentPath = computed(() => Boolean(browser.currentPath.trim()));
+
+async function openBrowser() {
+  browser.open = true;
+  browser.error = '';
+  browser.currentPath = '';
+  await loadDrives();
 }
 
-function removePath(index: number) {
-  if (form.paths.length === 1) {
-    form.paths[0] = '';
+async function loadDrives() {
+  browser.loading = true;
+  browser.error = '';
+  try {
+    browser.entries = await api.environmentDrives();
+    browser.currentPath = '';
+  } catch (error) {
+    browser.error = error instanceof Error ? error.message : '无法读取服务器目录';
+  } finally {
+    browser.loading = false;
+  }
+}
+
+async function browse(path: string) {
+  browser.loading = true;
+  browser.error = '';
+  try {
+    browser.entries = await api.directoryContents(path, false, true);
+    browser.currentPath = path;
+  } catch (error) {
+    browser.error = error instanceof Error ? error.message : '无法打开目录';
+  } finally {
+    browser.loading = false;
+  }
+}
+
+async function goUp() {
+  if (!browser.currentPath) {
     return;
   }
 
+  browser.loading = true;
+  browser.error = '';
+  try {
+    const parent = await api.parentPath(browser.currentPath);
+    if (parent) {
+      await browse(parent);
+    } else {
+      await loadDrives();
+    }
+  } catch (error) {
+    browser.error = error instanceof Error ? error.message : '无法返回上级目录';
+    browser.loading = false;
+  }
+}
+
+function useCurrentPath() {
+  addSelectedPath(browser.currentPath);
+}
+
+function addSelectedPath(path: string) {
+  const value = path.trim();
+  if (!value) {
+    return;
+  }
+  if (!form.paths.some((item) => item.toLowerCase() === value.toLowerCase())) {
+    form.paths.push(value);
+  }
+  browser.open = false;
+}
+
+function removePath(index: number) {
   form.paths.splice(index, 1);
 }
 
@@ -109,13 +177,16 @@ async function submit() {
         <div class="path-editor">
           <div class="section-heading compact">
             <h3>文件夹</h3>
-            <button class="secondary" type="button" @click="addPath">添加路径</button>
+            <button class="secondary" type="button" @click="openBrowser">选择文件夹</button>
           </div>
 
-          <div v-for="(_, index) in form.paths" :key="index" class="path-row">
-            <input v-model="form.paths[index]" required placeholder="/media/movies" />
-            <button class="secondary icon-button" type="button" title="移除路径" @click="removePath(index)">×</button>
+          <div v-if="cleanPaths.length" class="selected-path-list">
+            <div v-for="(path, index) in cleanPaths" :key="path" class="path-row selected">
+              <span>{{ path }}</span>
+              <button class="secondary icon-button" type="button" title="移除路径" @click="removePath(index)">×</button>
+            </div>
           </div>
+          <div v-else class="path-empty">还没有选择媒体文件夹</div>
         </div>
 
         <div class="form-grid three">
@@ -157,6 +228,42 @@ async function submit() {
           <button :disabled="state.busy || !cleanPaths.length" type="submit">创建</button>
         </div>
       </form>
+    </section>
+
+    <section v-if="browser.open" class="folder-picker-backdrop" @click.self="browser.open = false">
+      <div class="folder-picker">
+        <div class="folder-picker-head">
+          <div>
+            <p>服务器目录</p>
+            <h3>{{ browser.currentPath || '选择驱动器' }}</h3>
+          </div>
+          <button class="close" type="button" aria-label="关闭" @click="browser.open = false">×</button>
+        </div>
+
+        <div class="folder-picker-toolbar">
+          <button class="secondary" type="button" :disabled="browser.loading" @click="loadDrives">驱动器</button>
+          <button class="secondary" type="button" :disabled="browser.loading || !browser.currentPath" @click="goUp">上一级</button>
+          <button type="button" :disabled="browser.loading || !canUseCurrentPath" @click="useCurrentPath">使用此文件夹</button>
+        </div>
+
+        <p v-if="browser.error" class="form-error">{{ browser.error }}</p>
+        <div class="folder-list" :aria-busy="browser.loading">
+          <button
+            v-for="entry in browser.entries"
+            :key="entry.Path"
+            class="folder-entry"
+            type="button"
+            :disabled="browser.loading"
+            @click="browse(entry.Path)"
+          >
+            <span class="folder-entry-icon">▸</span>
+            <span>{{ entry.Name }}</span>
+            <small>{{ entry.Path }}</small>
+          </button>
+          <div v-if="browser.loading" class="folder-empty">正在读取目录...</div>
+          <div v-else-if="!browser.entries.length" class="folder-empty">此目录没有可选择的子文件夹</div>
+        </div>
+      </div>
     </section>
   </div>
 </template>

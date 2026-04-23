@@ -10,6 +10,7 @@ export default defineConfig({
       '/Users': 'http://127.0.0.1:8096',
       '/Items': 'http://127.0.0.1:8096',
       '/Library': 'http://127.0.0.1:8096',
+      '/Environment': 'http://127.0.0.1:8096',
       '/Videos': 'http://127.0.0.1:8096',
       '/Sessions': 'http://127.0.0.1:8096',
       '/PlayingItems': 'http://127.0.0.1:8096',

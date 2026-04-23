@@ -287,6 +287,12 @@
 
 ## 验证记录
 
+### 2026-04-23 媒体库目录选择器
+
+- 参考 EmbySDK `EnvironmentService` 补齐管理员目录浏览端点: `/Environment/Drives`、`/Environment/DirectoryContents`、`/Environment/ParentPath`，响应 `FileSystemEntryInfo` 的 `Name`、`Path`、`Type` 字段。
+- 添加媒体库弹窗的 `path-editor` 改为可视化目录选择器，支持查看服务器驱动器、逐级进入目录、返回上级并将当前文件夹加入媒体库路径，不再要求手动输入路径。
+- 验证通过: `cargo check --manifest-path backend/Cargo.toml`、`npm.cmd run build`。
+
 ### 2026-04-23 初始化管理员数据库修复
 
 - 初始化用户表 `0001_init.sql` 已直接包含 Emby 用户运行所需字段: `policy`、`configuration`、`primary_image_path`、`backdrop_image_path`、`logo_image_path`、`date_modified`，新项目初始化后可直接创建管理员。

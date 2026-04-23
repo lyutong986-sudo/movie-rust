@@ -4,8 +4,7 @@ use crate::{
     models::{
         AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, LibraryMediaFolderDto,
         LibrarySubFolderDto, MediaPathDto, ScanSummary, UpdateLibraryOptionsDto,
-        UpdateMediaPathRequestDto, VirtualFolderInfoDto,
-        VirtualFolderQuery,
+        UpdateMediaPathRequestDto, VirtualFolderInfoDto, VirtualFolderQuery,
     },
     repository, scanner,
     state::AppState,
@@ -16,6 +15,8 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use serde::{Deserialize, Serialize};
+use std::path::{Path as StdPath, PathBuf};
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -47,7 +48,16 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Library/Refresh", post(refresh_libraries))
         .route("/Library/PhysicalPaths", get(physical_paths))
-        .route("/Library/SelectableMediaFolders", get(selectable_media_folders))
+        .route(
+            "/Library/SelectableMediaFolders",
+            get(selectable_media_folders),
+        )
+        .route("/Environment/Drives", get(environment_drives))
+        .route(
+            "/Environment/DirectoryContents",
+            get(environment_directory_contents).post(environment_directory_contents),
+        )
+        .route("/Environment/ParentPath", get(environment_parent_path))
         .route("/api/admin/scan", post(scan_libraries))
 }
 
@@ -311,6 +321,132 @@ async fn selectable_media_folders(
         })
         .collect();
     Ok(Json(items))
+}
+
+#[derive(Debug, Deserialize)]
+struct DirectoryContentsQuery {
+    #[serde(default, rename = "Path", alias = "path")]
+    path: Option<String>,
+    #[serde(default, rename = "IncludeFiles", alias = "includeFiles")]
+    include_files: Option<bool>,
+    #[serde(default, rename = "IncludeDirectories", alias = "includeDirectories")]
+    include_directories: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ParentPathQuery {
+    #[serde(default, rename = "Path", alias = "path")]
+    path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct FileSystemEntryInfo {
+    name: String,
+    path: String,
+    #[serde(rename = "Type")]
+    entry_type: String,
+}
+
+async fn environment_drives(
+    session: AuthSession,
+) -> Result<Json<Vec<FileSystemEntryInfo>>, AppError> {
+    auth::require_admin(&session)?;
+    Ok(Json(list_root_entries()))
+}
+
+async fn environment_directory_contents(
+    session: AuthSession,
+    Query(query): Query<DirectoryContentsQuery>,
+) -> Result<Json<Vec<FileSystemEntryInfo>>, AppError> {
+    auth::require_admin(&session)?;
+    let path = query
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| AppError::BadRequest("缺少 Path 参数".to_string()))?;
+    let include_files = query.include_files.unwrap_or(false);
+    let include_directories = query.include_directories.unwrap_or(true);
+
+    let mut entries = Vec::new();
+    let dir = PathBuf::from(path);
+    if !dir.is_dir() {
+        return Err(AppError::NotFound("目录不存在".to_string()));
+    }
+
+    for entry in std::fs::read_dir(&dir)? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let is_dir = file_type.is_dir();
+        let is_file = file_type.is_file();
+        if (is_dir && !include_directories) || (is_file && !include_files) || (!is_dir && !is_file)
+        {
+            continue;
+        }
+
+        entries.push(FileSystemEntryInfo {
+            name: entry.file_name().to_string_lossy().to_string(),
+            path: entry.path().to_string_lossy().to_string(),
+            entry_type: if is_dir { "Directory" } else { "File" }.to_string(),
+        });
+    }
+
+    entries.sort_by(|left, right| {
+        left.entry_type
+            .cmp(&right.entry_type)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    Ok(Json(entries))
+}
+
+async fn environment_parent_path(
+    session: AuthSession,
+    Query(query): Query<ParentPathQuery>,
+) -> Result<Json<String>, AppError> {
+    auth::require_admin(&session)?;
+    let path = query
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| AppError::BadRequest("缺少 Path 参数".to_string()))?;
+    let parent = StdPath::new(path)
+        .parent()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    Ok(Json(parent))
+}
+
+fn list_root_entries() -> Vec<FileSystemEntryInfo> {
+    #[cfg(windows)]
+    {
+        let mut entries = Vec::new();
+        for letter in b'A'..=b'Z' {
+            let path = format!("{}:\\", letter as char);
+            if StdPath::new(&path).is_dir() {
+                entries.push(FileSystemEntryInfo {
+                    name: path.clone(),
+                    path,
+                    entry_type: "Directory".to_string(),
+                });
+            }
+        }
+        entries
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![FileSystemEntryInfo {
+            name: "/".to_string(),
+            path: "/".to_string(),
+            entry_type: "Directory".to_string(),
+        }]
+    }
 }
 
 fn split_query_paths(value: Option<&str>) -> Vec<String> {

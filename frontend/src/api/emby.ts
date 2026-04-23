@@ -188,6 +188,12 @@ export interface VirtualFolderInfo {
   LibraryOptions: LibraryOptions;
 }
 
+export interface FileSystemEntryInfo {
+  Name: string;
+  Path: string;
+  Type: 'File' | 'Directory' | 'NetworkComputer' | 'NetworkShare' | string;
+}
+
 export interface CreateLibraryPayload {
   Name: string;
   CollectionType: string;
@@ -413,6 +419,24 @@ export class EmbyApi {
 
   async virtualFolders() {
     return this.request<VirtualFolderInfo[]>('/Library/VirtualFolders');
+  }
+
+  async environmentDrives() {
+    return this.request<FileSystemEntryInfo[]>('/Environment/Drives');
+  }
+
+  async directoryContents(path: string, includeFiles = false, includeDirectories = true) {
+    const params = new URLSearchParams({
+      Path: path,
+      IncludeFiles: includeFiles ? 'true' : 'false',
+      IncludeDirectories: includeDirectories ? 'true' : 'false'
+    });
+    return this.request<FileSystemEntryInfo[]>(`/Environment/DirectoryContents?${params}`);
+  }
+
+  async parentPath(path: string) {
+    const params = new URLSearchParams({ Path: path });
+    return this.request<string>(`/Environment/ParentPath?${params}`);
   }
 
   async createLibrary(payload: CreateLibraryPayload) {

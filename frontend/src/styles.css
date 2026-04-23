@@ -877,6 +877,121 @@ button.danger {
   gap: 8px;
 }
 
+.path-row.selected {
+  align-items: center;
+  min-height: 42px;
+  border: 1px solid #2b323e;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #171c25;
+}
+
+.path-row.selected span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #d9e4ee;
+}
+
+.selected-path-list {
+  display: grid;
+  gap: 8px;
+}
+
+.path-empty,
+.folder-empty {
+  border: 1px dashed #3b4657;
+  border-radius: 8px;
+  padding: 14px;
+  color: #91a0b6;
+  background: #141922;
+}
+
+.folder-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(3, 4, 6, 0.62);
+}
+
+.folder-picker {
+  position: relative;
+  display: grid;
+  gap: 16px;
+  width: min(760px, 100%);
+  max-height: min(82vh, 760px);
+  border: 1px solid #2b323e;
+  border-radius: 8px;
+  padding: 20px;
+  overflow: hidden;
+  background: #11151c;
+}
+
+.folder-picker-head,
+.folder-picker-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.folder-picker-head h3 {
+  max-width: min(560px, 72vw);
+  overflow-wrap: anywhere;
+}
+
+.folder-picker-toolbar {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.folder-list {
+  display: grid;
+  gap: 8px;
+  min-height: 180px;
+  max-height: min(52vh, 460px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.folder-entry {
+  display: grid;
+  grid-template-columns: auto minmax(0, 0.45fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid #2b323e;
+  border-radius: 8px;
+  padding: 9px 11px;
+  color: #d9e4ee;
+  text-align: left;
+  background: #171c25;
+}
+
+.folder-entry:hover:not(:disabled) {
+  border-color: #77d7b4;
+  background: #1d2530;
+}
+
+.folder-entry span,
+.folder-entry small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-entry small {
+  color: #91a0b6;
+}
+
+.folder-entry-icon {
+  color: #77d7b4;
+}
+
 .switch-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
