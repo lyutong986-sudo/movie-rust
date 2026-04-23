@@ -309,6 +309,7 @@ pub struct AuthSessionRow {
     pub user_id: Uuid,
     pub user_name: String,
     pub is_admin: bool,
+    pub session_type: String,
     pub device_id: Option<String>,
     pub device_name: Option<String>,
     pub client: Option<String>,
@@ -387,12 +388,29 @@ pub struct UserDto {
     pub configuration: UserConfigurationDto,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PublicUserDto {
+    pub name: String,
+    pub server_id: String,
+    pub id: String,
+    pub has_password: bool,
+    pub has_configured_password: bool,
+    pub has_configured_easy_password: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct CreateUserByNameRequest {
     pub name: String,
     #[serde(default)]
     pub copy_from_user_id: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub new_pw: Option<String>,
+    #[serde(default)]
+    pub new_password: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -415,6 +433,7 @@ pub struct UserPolicyDto {
     pub enable_audio_playback_transcoding: bool,
     pub enable_video_playback_transcoding: bool,
     pub enable_playback_remuxing: bool,
+    pub force_remote_source_transcoding: bool,
     pub enable_remote_control_of_other_users: bool,
     pub enable_shared_device_control: bool,
     pub enable_public_sharing: bool,
@@ -422,10 +441,13 @@ pub struct UserPolicyDto {
     pub max_parental_rating: Option<i32>,
     pub max_parental_sub_rating: Option<i32>,
     pub max_active_sessions: i32,
+    pub invalid_login_attempt_count: i32,
     pub login_attempts_before_lockout: i32,
     pub remote_client_bitrate_limit: i32,
     pub blocked_tags: Vec<String>,
     pub allowed_tags: Vec<String>,
+    pub block_unrated_items: Vec<String>,
+    pub access_schedules: Vec<AccessScheduleDto>,
     pub enabled_folders: Vec<Uuid>,
     pub enable_all_folders: bool,
     pub enabled_channels: Vec<Uuid>,
@@ -437,6 +459,14 @@ pub struct UserPolicyDto {
     pub authentication_provider_id: String,
     pub password_reset_provider_id: String,
     pub sync_play_access: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct AccessScheduleDto {
+    pub day_of_week: String,
+    pub start_hour: f64,
+    pub end_hour: f64,
 }
 
 impl Default for UserPolicyDto {
@@ -459,6 +489,7 @@ impl Default for UserPolicyDto {
             enable_audio_playback_transcoding: true,
             enable_video_playback_transcoding: true,
             enable_playback_remuxing: true,
+            force_remote_source_transcoding: false,
             enable_remote_control_of_other_users: false,
             enable_shared_device_control: false,
             enable_public_sharing: true,
@@ -466,10 +497,13 @@ impl Default for UserPolicyDto {
             max_parental_rating: None,
             max_parental_sub_rating: None,
             max_active_sessions: 0,
+            invalid_login_attempt_count: 0,
             login_attempts_before_lockout: -1,
             remote_client_bitrate_limit: 0,
             blocked_tags: Vec::new(),
             allowed_tags: Vec::new(),
+            block_unrated_items: Vec::new(),
+            access_schedules: Vec::new(),
             enabled_folders: Vec::new(),
             enable_all_folders: true,
             enabled_channels: Vec::new(),

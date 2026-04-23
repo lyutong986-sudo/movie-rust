@@ -1,5 +1,5 @@
 use crate::{
-    auth::{self, AuthSession},
+    auth::{self, AuthSession, MediaAccessKind},
     error::AppError,
     media_analyzer,
     metadata::{
@@ -547,7 +547,7 @@ async fn home_sections(
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<Vec<ContentSectionDto>>, AppError> {
     ensure_user_access(&session, user_id)?;
-    let libraries = repository::list_libraries(&state.pool).await?;
+    let libraries = repository::visible_libraries_for_user(&state.pool, user_id).await?;
     let mut sections = Vec::with_capacity(libraries.len());
     for library in libraries {
         let parent_item =
@@ -1823,6 +1823,8 @@ async fn playback_info(
 ) -> Result<Json<PlaybackInfoResponse>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    let user_policy =
+        auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
     let request_headers = request.headers().clone();
     let request_query = request.uri().query().map(ToOwned::to_owned);
     let request_device_id = auth::client_value(&request_headers, "DeviceId")
@@ -1978,11 +1980,19 @@ async fn playback_info(
         );
     }
 
-    let effective_max_bitrate = info.max_streaming_bitrate.or_else(|| {
+    let mut effective_max_bitrate = info.max_streaming_bitrate.or_else(|| {
         info.device_profile
             .as_ref()
             .and_then(|profile| profile.max_streaming_bitrate)
     });
+    if user_policy.remote_client_bitrate_limit > 0 {
+        let policy_limit = i64::from(user_policy.remote_client_bitrate_limit);
+        effective_max_bitrate = Some(
+            effective_max_bitrate
+                .map(|value| value.min(policy_limit))
+                .unwrap_or(policy_limit),
+        );
+    }
 
     let transcode_reasons = media_sources
         .get(selected_media_source_index)
@@ -2100,6 +2110,37 @@ async fn playback_info(
         tracing::warn!(
             item_id = %item.id,
             "播放请求需要转码，但转码功能已禁用；保留 Emby 直连媒体源供客户端尝试播放"
+        );
+    } else if force_transcoding
+        && !user_policy.enable_video_playback_transcoding
+        && transcode_reasons.iter().any(|reason| {
+            reason.contains("Video")
+                || reason.contains("Container")
+                || reason.contains("Bitrate")
+                || reason.contains("Subtitle")
+        })
+    {
+        tracing::warn!(
+            item_id = %item.id,
+            user_id = %session.user_id,
+            "播放请求需要视频转码，但用户策略禁止视频转码；保留直连媒体源"
+        );
+    } else if force_transcoding
+        && !user_policy.enable_audio_playback_transcoding
+        && transcode_reasons
+            .iter()
+            .any(|reason| reason.contains("Audio"))
+    {
+        tracing::warn!(
+            item_id = %item.id,
+            user_id = %session.user_id,
+            "播放请求需要音频转码，但用户策略禁止音频转码；保留直连媒体源"
+        );
+    } else if force_transcoding && !user_policy.enable_playback_remuxing {
+        tracing::warn!(
+            item_id = %item.id,
+            user_id = %session.user_id,
+            "播放请求需要封装/转码链路，但用户策略禁止 remux；保留直连媒体源"
         );
     } else if force_transcoding {
         let item_emby_id = crate::models::uuid_to_emby_guid(&item.id);

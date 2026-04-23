@@ -589,14 +589,13 @@ export async function search() {
 export function logout() {
   api.logout();
   clearClientState(true);
+  void refreshPublicUsersAfterLogout();
 }
 
 function clearClientState(keepInitialized: boolean) {
   user.value = null;
   systemInfo.value = null;
-  if (!keepInitialized) {
-    publicUsers.value = [];
-  }
+  publicUsers.value = [];
   libraries.value = [];
   items.value = [];
   homeItems.value = [];
@@ -617,6 +616,14 @@ function clearClientState(keepInitialized: boolean) {
   state.error = '';
   state.loginAsOther = false;
   state.initialized = keepInitialized;
+}
+
+async function refreshPublicUsersAfterLogout() {
+  if (!state.startupWizardCompleted) {
+    return;
+  }
+
+  publicUsers.value = await safePublicUsers();
 }
 
 export function openItem(item: BaseItemDto) {

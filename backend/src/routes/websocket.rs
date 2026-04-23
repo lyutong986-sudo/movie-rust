@@ -52,6 +52,12 @@ pub async fn emby_websocket_handler(
             Some(state.config.server_id)
         } else {
             let auth_session = crate::repository::get_session(&state.pool, token).await?;
+            if auth_session
+                .as_ref()
+                .is_some_and(|session| session.session_type.eq_ignore_ascii_case("ApiKey"))
+            {
+                return Err(AppError::Forbidden);
+            }
             if auth_session.is_some() {
                 access_token = Some(token.to_string());
             }
@@ -129,6 +135,23 @@ async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: 
         }
 
         if let (Some(access_token), Some(user_id)) = (&session.access_token, session.user_id) {
+            match crate::repository::get_session(&state.pool, access_token).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    close_reason = Some("session invalidated".to_string());
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %error,
+                        "failed to revalidate websocket session"
+                    );
+                    close_reason = Some("session revalidation failed".to_string());
+                    break;
+                }
+            }
+
             match crate::repository::list_session_commands(
                 &state.pool,
                 access_token,

@@ -8,9 +8,9 @@ use crate::{
         BrandingConfiguration, DbLibrary, DbMediaChapter, DbMediaItem, DbMediaStream, DbPerson,
         DbSeriesEpisodeCatalog, DbUser, DbUserItemData, EncodingOptionsDto, ExternalUrlDto,
         GenreDto, ItemCountsDto, LibraryOptionsDto, LogFileDto, MediaItemRow, MediaPathInfoDto,
-        MediaSourceDto, MediaStreamDto, NameIdDto, NameLongIdDto, PersonDto, QueryResult,
-        SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest, UserConfigurationDto,
-        UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
+        MediaSourceDto, MediaStreamDto, NameIdDto, NameLongIdDto, PersonDto, PublicUserDto,
+        QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
+        UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
     },
     naming, security,
 };
@@ -108,6 +108,27 @@ pub async fn visible_library_ids_for_user(
         .filter(|library| visible.contains(&library.id))
         .map(|library| library.id)
         .collect())
+}
+
+pub async fn item_library_id(pool: &sqlx::PgPool, item_id: Uuid) -> Result<Option<Uuid>, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT library_id FROM media_items WHERE id = $1")
+            .bind(item_id)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+pub async fn user_can_access_item(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    item_id: Uuid,
+) -> Result<bool, AppError> {
+    let Some(library_id) = item_library_id(pool, item_id).await? else {
+        return Ok(false);
+    };
+    let visible_ids = visible_library_ids_for_user(pool, user_id).await?;
+    Ok(visible_ids.contains(&library_id))
 }
 
 pub async fn visible_libraries_for_user(
@@ -1220,7 +1241,12 @@ pub async fn get_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbUs
     .await?)
 }
 
-pub async fn create_user(pool: &sqlx::PgPool, name: &str) -> Result<DbUser, AppError> {
+pub async fn create_user(
+    pool: &sqlx::PgPool,
+    name: &str,
+    password: Option<&str>,
+    copy_from_user_id: Option<Uuid>,
+) -> Result<DbUser, AppError> {
     let name = name.trim();
     if name.is_empty() {
         return Err(AppError::BadRequest("用户名不能为空".to_string()));
@@ -1231,9 +1257,30 @@ pub async fn create_user(pool: &sqlx::PgPool, name: &str) -> Result<DbUser, AppE
     }
 
     let id = Uuid::new_v4();
-    let password_hash = security::hash_password("")?;
-    let policy = serde_json::to_value(UserPolicyDto::default())?;
-    let configuration = serde_json::to_value(UserConfigurationDto::default())?;
+    let password_hash = security::hash_password(password.map(str::trim).unwrap_or_default())?;
+    let (policy, configuration) = if let Some(copy_from_user_id) = copy_from_user_id {
+        let source = get_user_by_id(pool, copy_from_user_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("瑕佸复制的用户不存在".to_string()))?;
+        let mut policy = user_policy_from_value(&source.policy);
+        policy.is_administrator = false;
+        policy.is_hidden = false;
+        policy.is_disabled = false;
+        policy.invalid_login_attempt_count = 0;
+        (
+            serde_json::to_value(policy)?,
+            if source.configuration.is_null() {
+                serde_json::to_value(UserConfigurationDto::default())?
+            } else {
+                source.configuration
+            },
+        )
+    } else {
+        (
+            serde_json::to_value(UserPolicyDto::default())?,
+            serde_json::to_value(UserConfigurationDto::default())?,
+        )
+    };
 
     sqlx::query(
         r#"
@@ -1327,6 +1374,21 @@ pub async fn update_user_policy(
     .await?;
 
     Ok(())
+}
+
+pub async fn record_failed_login(pool: &sqlx::PgPool, user: &DbUser) -> Result<(), AppError> {
+    let mut policy = user_policy_from_value(&user.policy);
+    policy.invalid_login_attempt_count = policy.invalid_login_attempt_count.saturating_add(1);
+    update_user_policy(pool, user.id, &policy).await
+}
+
+pub async fn clear_failed_login_count(pool: &sqlx::PgPool, user: &DbUser) -> Result<(), AppError> {
+    let mut policy = user_policy_from_value(&user.policy);
+    if policy.invalid_login_attempt_count == 0 {
+        return Ok(());
+    }
+    policy.invalid_login_attempt_count = 0;
+    update_user_policy(pool, user.id, &policy).await
 }
 
 pub async fn update_user_configuration(
@@ -1482,12 +1544,44 @@ pub async fn create_session(
     application_version: Option<String>,
     expires_at: Option<DateTime<Utc>>,
 ) -> Result<AuthSessionRow, AppError> {
+    create_session_with_type(
+        pool,
+        user_id,
+        device_id,
+        device_name,
+        client,
+        application_version,
+        expires_at,
+        "Interactive",
+    )
+    .await
+}
+
+pub async fn create_session_with_type(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    device_id: Option<String>,
+    device_name: Option<String>,
+    client: Option<String>,
+    application_version: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    session_type: &str,
+) -> Result<AuthSessionRow, AppError> {
     let token = Uuid::new_v4().simple().to_string();
 
     sqlx::query(
         r#"
-        INSERT INTO sessions (access_token, user_id, device_id, device_name, client, application_version, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO sessions (
+            access_token,
+            user_id,
+            device_id,
+            device_name,
+            client,
+            application_version,
+            expires_at,
+            session_type
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(&token)
@@ -1497,6 +1591,7 @@ pub async fn create_session(
     .bind(client)
     .bind(application_version)
     .bind(expires_at)
+    .bind(session_type)
     .execute(pool)
     .await?;
 
@@ -1516,6 +1611,7 @@ pub async fn get_session(
             s.user_id,
             u.name AS user_name,
             u.is_admin,
+            s.session_type,
             s.device_id,
             s.device_name,
             s.client,
@@ -1551,6 +1647,7 @@ pub async fn list_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, A
             s.user_id,
             u.name AS user_name,
             u.is_admin,
+            s.session_type,
             s.device_id,
             s.device_name,
             s.client,
@@ -1559,11 +1656,73 @@ pub async fn list_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, A
             s.expires_at
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
-        WHERE s.expires_at IS NULL OR s.expires_at > now()
+        WHERE s.session_type = 'Interactive'
+          AND (s.expires_at IS NULL OR s.expires_at > now())
         ORDER BY s.last_activity_at DESC
         "#,
     )
     .fetch_all(pool)
+    .await?)
+}
+
+pub async fn list_sessions_for_user(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<Vec<AuthSessionRow>, AppError> {
+    Ok(sqlx::query_as::<_, AuthSessionRow>(
+        r#"
+        SELECT
+            s.access_token,
+            s.user_id,
+            u.name AS user_name,
+            u.is_admin,
+            s.session_type,
+            s.device_id,
+            s.device_name,
+            s.client,
+            s.application_version,
+            s.last_activity_at,
+            s.expires_at
+        FROM sessions s
+        INNER JOIN users u ON u.id = s.user_id
+        WHERE s.user_id = $1
+          AND s.session_type = 'Interactive'
+          AND (s.expires_at IS NULL OR s.expires_at > now())
+        ORDER BY s.last_activity_at DESC
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn find_active_session(
+    pool: &sqlx::PgPool,
+    token: &str,
+) -> Result<Option<AuthSessionRow>, AppError> {
+    Ok(sqlx::query_as::<_, AuthSessionRow>(
+        r#"
+        SELECT
+            s.access_token,
+            s.user_id,
+            u.name AS user_name,
+            u.is_admin,
+            s.session_type,
+            s.device_id,
+            s.device_name,
+            s.client,
+            s.application_version,
+            s.last_activity_at,
+            s.expires_at
+        FROM sessions s
+        INNER JOIN users u ON u.id = s.user_id
+        WHERE s.access_token = $1
+          AND u.is_disabled = false
+          AND (s.expires_at IS NULL OR s.expires_at > now())
+        "#,
+    )
+    .bind(token)
+    .fetch_optional(pool)
     .await?)
 }
 
@@ -1575,6 +1734,7 @@ pub async fn list_all_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow
             s.user_id,
             u.name AS user_name,
             u.is_admin,
+            s.session_type,
             s.device_id,
             s.device_name,
             s.client,
@@ -1590,6 +1750,77 @@ pub async fn list_all_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow
     .await?)
 }
 
+pub async fn list_api_key_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, AppError> {
+    Ok(sqlx::query_as::<_, AuthSessionRow>(
+        r#"
+        SELECT
+            s.access_token,
+            s.user_id,
+            u.name AS user_name,
+            u.is_admin,
+            s.session_type,
+            s.device_id,
+            s.device_name,
+            s.client,
+            s.application_version,
+            s.last_activity_at,
+            s.expires_at
+        FROM sessions s
+        INNER JOIN users u ON u.id = s.user_id
+        WHERE s.session_type = 'ApiKey'
+        ORDER BY s.last_activity_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn get_api_key_session(
+    pool: &sqlx::PgPool,
+    token: &str,
+) -> Result<Option<AuthSessionRow>, AppError> {
+    Ok(sqlx::query_as::<_, AuthSessionRow>(
+        r#"
+        SELECT
+            s.access_token,
+            s.user_id,
+            u.name AS user_name,
+            u.is_admin,
+            s.session_type,
+            s.device_id,
+            s.device_name,
+            s.client,
+            s.application_version,
+            s.last_activity_at,
+            s.expires_at
+        FROM sessions s
+        INNER JOIN users u ON u.id = s.user_id
+        WHERE s.access_token = $1
+          AND s.session_type = 'ApiKey'
+        "#,
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn active_session_count_for_user(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<i64, AppError> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM sessions
+        WHERE user_id = $1
+          AND (expires_at IS NULL OR expires_at > now())
+        "#,
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?)
+}
+
 pub async fn delete_session(pool: &sqlx::PgPool, access_token: &str) -> Result<(), AppError> {
     sqlx::query("DELETE FROM sessions WHERE access_token = $1")
         .bind(access_token)
@@ -1598,6 +1829,25 @@ pub async fn delete_session(pool: &sqlx::PgPool, access_token: &str) -> Result<(
     delete_session_capabilities(pool, access_token).await?;
     delete_session_viewing(pool, access_token).await?;
     delete_session_state_summary(pool, access_token).await?;
+    Ok(())
+}
+
+pub async fn delete_sessions_for_user(pool: &sqlx::PgPool, user_id: Uuid) -> Result<(), AppError> {
+    let tokens = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT access_token
+        FROM sessions
+        WHERE user_id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    for token in tokens {
+        delete_session(pool, &token).await?;
+    }
+
     Ok(())
 }
 
@@ -4968,15 +5218,30 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
         UserConfigurationDto::default()
     };
 
+    let has_password = !security::verify_password(&user.password_hash, "");
+
     UserDto {
         name: user.name.clone(),
         server_id: uuid_to_emby_guid(&server_id),
         id: uuid_to_emby_guid(&user.id),
-        has_password: true,
-        has_configured_password: true,
+        has_password,
+        has_configured_password: has_password,
         has_configured_easy_password: false,
         policy,
         configuration,
+    }
+}
+
+pub fn user_to_public_dto(user: &DbUser, server_id: Uuid) -> PublicUserDto {
+    let has_password = !security::verify_password(&user.password_hash, "");
+
+    PublicUserDto {
+        name: user.name.clone(),
+        server_id: uuid_to_emby_guid(&server_id),
+        id: uuid_to_emby_guid(&user.id),
+        has_password,
+        has_configured_password: has_password,
+        has_configured_easy_password: false,
     }
 }
 

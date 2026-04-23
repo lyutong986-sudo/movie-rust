@@ -891,21 +891,21 @@ async fn get_genre_image_with_tail(
 }
 
 async fn get_user_image(
-    _session: OptionalAuthSession,
+    session: OptionalAuthSession,
     State(state): State<AppState>,
     Path((user_id, image_type)): Path<(String, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    serve_user_image(state, user_id, image_type, request).await
+    serve_user_image(session.0, state, user_id, image_type, request).await
 }
 
 async fn get_user_image_with_tail(
-    _session: OptionalAuthSession,
+    session: OptionalAuthSession,
     State(state): State<AppState>,
     Path((user_id, image_type, _image_tail)): Path<(String, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    serve_user_image(state, user_id, image_type, request).await
+    serve_user_image(session.0, state, user_id, image_type, request).await
 }
 
 async fn serve_person_image(
@@ -1089,6 +1089,7 @@ async fn get_item_thumbnail_set(
 }
 
 async fn serve_user_image(
+    session: Option<AuthSession>,
     state: AppState,
     user_id: String,
     image_type: String,
@@ -1096,6 +1097,18 @@ async fn serve_user_image(
 ) -> Result<Response, AppError> {
     let user_id = emby_id_to_uuid(&user_id)
         .map_err(|_| AppError::BadRequest("无效的用户ID格式".to_string()))?;
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+    let can_view = match session {
+        Some(session) => {
+            session.is_admin || session.user_id == user_id || (!user.is_hidden && !user.is_disabled)
+        }
+        None => !user.is_hidden && !user.is_disabled,
+    };
+    if !can_view {
+        return Err(AppError::NotFound("图片不存在".to_string()));
+    }
     let path = repository::get_user_image_path(&state.pool, user_id, &image_type)
         .await?
         .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;

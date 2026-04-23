@@ -1,5 +1,5 @@
 use crate::{
-    auth::AuthSession,
+    auth::{self, AuthSession},
     error::AppError,
     models::{BaseItemDto, LegacyPlaybackQuery, PlaybackReport, QueryResult, SessionInfoDto},
     repository,
@@ -116,10 +116,15 @@ struct SessionCommandQuery {
 }
 
 async fn list_sessions(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<SessionInfoDto>>, AppError> {
-    let sessions = repository::list_sessions(&state.pool).await?;
+    auth::require_interactive_session(&session)?;
+    let sessions = if session.is_admin {
+        repository::list_sessions(&state.pool).await?
+    } else {
+        repository::list_sessions_for_user(&state.pool, session.user_id).await?
+    };
     let mut items = Vec::with_capacity(sessions.len());
     for session in sessions {
         let mut dto = repository::session_to_dto(&session);
@@ -163,7 +168,7 @@ async fn list_auth_keys(
         return Err(AppError::Unauthorized);
     }
 
-    let all_sessions = repository::list_all_sessions(&state.pool).await?;
+    let all_sessions = repository::list_api_key_sessions(&state.pool).await?;
     let start_index = query.start_index.unwrap_or(0).max(0) as usize;
     let limit = query.limit.unwrap_or(100).clamp(1, 500) as usize;
     let total_record_count = all_sessions.len() as i64;
@@ -208,7 +213,7 @@ async fn create_auth_key(
         .expires_in_days
         .filter(|days| *days > 0)
         .map(|days| Utc::now() + Duration::days(days));
-    let created = repository::create_session(
+    let created = repository::create_session_with_type(
         &state.pool,
         session.user_id,
         None,
@@ -216,6 +221,7 @@ async fn create_auth_key(
         Some(app),
         None,
         expires_at,
+        "ApiKey",
     )
     .await?;
     Ok(Json(json!({
@@ -238,17 +244,25 @@ async fn delete_auth_key(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    if !session.is_admin && session.access_token != key {
+    if !session.is_admin {
         return Err(AppError::Unauthorized);
+    }
+    let existing = repository::get_api_key_session(&state.pool, &key).await?;
+    if existing.is_none() {
+        return Err(AppError::NotFound("API Key 不存在".to_string()));
     }
     repository::delete_session(&state.pool, &key).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn auth_providers(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Value>>, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+
     let users = repository::list_users(&state.pool, false).await?;
     let mut provider_ids = std::collections::BTreeSet::new();
     for user in users {
@@ -290,6 +304,7 @@ async fn play_queue(
     State(state): State<AppState>,
     Query(query): Query<PlayQueueQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    auth::require_interactive_session(&session)?;
     let result = repository::session_play_queue(
         &state.pool,
         query.id.as_deref(),
@@ -307,6 +322,8 @@ async fn session_play_queue(
     Path(id): Path<String>,
     Query(query): Query<PlayQueueQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    auth::require_interactive_session(&session)?;
+    ensure_session_control_access(&state, &session, &id).await?;
     let result = repository::session_play_queue(
         &state.pool,
         Some(&id),
@@ -324,6 +341,8 @@ async fn session_commands(
     Path(id): Path<String>,
     Query(query): Query<SessionCommandQuery>,
 ) -> Result<Json<QueryResult<Value>>, AppError> {
+    auth::require_interactive_session(&session)?;
+    ensure_session_control_access(&state, &session, &id).await?;
     let result = repository::list_session_commands(
         &state.pool,
         &id,
@@ -342,6 +361,7 @@ async fn update_capabilities(
     State(state): State<AppState>,
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    auth::require_interactive_session(&session)?;
     let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
     repository::set_session_capabilities(&state.pool, &session.access_token, payload).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -351,16 +371,19 @@ async fn logout_session(
     session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<StatusCode, AppError> {
+    auth::require_interactive_session(&session)?;
     repository::delete_session(&state.pool, &session.access_token).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn no_content_for_session(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    auth::require_interactive_session(&session)?;
+    ensure_session_control_access(&state, &session, &id).await?;
     let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
     let command_name = payload
         .get("Name")
@@ -376,22 +399,26 @@ async fn no_content_for_session(
 }
 
 async fn update_session_viewing(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    auth::require_interactive_session(&session)?;
+    ensure_session_control_access(&state, &session, &id).await?;
     let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
     repository::set_session_viewing(&state.pool, &id, payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn message_for_session(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(id): Path<String>,
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    auth::require_interactive_session(&session)?;
+    ensure_session_control_access(&state, &session, &id).await?;
     let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
     repository::record_session_command(&state.pool, &id, "DisplayMessage", payload.clone()).await?;
     repository::apply_session_command_state(&state.pool, &id, "DisplayMessage", &payload).await?;
@@ -399,11 +426,13 @@ async fn message_for_session(
 }
 
 async fn no_content_for_session_command(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path((id, command)): Path<(String, String)>,
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    auth::require_interactive_session(&session)?;
+    ensure_session_control_access(&state, &session, &id).await?;
     let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
     repository::record_session_command(&state.pool, &id, &command, payload.clone()).await?;
     repository::apply_session_command_state(&state.pool, &id, &command, &payload).await?;
@@ -411,10 +440,11 @@ async fn no_content_for_session_command(
 }
 
 async fn no_content_for_session_user(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path((id, user_id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
+    ensure_session_control_access(&state, &session, &id).await?;
     let payload = json!({ "UserId": user_id });
     repository::record_session_command(&state.pool, &id, "SetAdditionalUser", payload.clone())
         .await?;
@@ -507,6 +537,7 @@ async fn record_report(
     event_type: &str,
     report: PlaybackReport,
 ) -> Result<StatusCode, AppError> {
+    auth::require_interactive_session(session)?;
     let user_id = report.user_id.unwrap_or(session.user_id);
     ensure_user_access(session, user_id)?;
     repository::record_playback_event(
@@ -534,6 +565,30 @@ fn ensure_user_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppErr
     }
 }
 
+async fn ensure_session_control_access(
+    state: &AppState,
+    session: &AuthSession,
+    target_session_id: &str,
+) -> Result<(), AppError> {
+    let target = repository::find_active_session(&state.pool, target_session_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("会话不存在".to_string()))?;
+
+    if session.is_admin || target.user_id == session.user_id {
+        return Ok(());
+    }
+
+    let user = repository::get_user_by_id(&state.pool, session.user_id)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    let policy = repository::user_policy_from_value(&user.policy);
+    if policy.enable_remote_control_of_other_users {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
 async fn record_legacy(
     state: &AppState,
     session: &AuthSession,
@@ -541,6 +596,7 @@ async fn record_legacy(
     event_type: &str,
     query: LegacyPlaybackQuery,
 ) -> Result<StatusCode, AppError> {
+    auth::require_interactive_session(session)?;
     record_legacy_for_user(state, session, session.user_id, item_id, event_type, query).await
 }
 

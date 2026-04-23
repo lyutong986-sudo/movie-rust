@@ -3,7 +3,8 @@ use crate::{
     error::AppError,
     models::{
         uuid_to_emby_guid, AuthenticateByNameRequest, AuthenticationResult,
-        CreateUserByNameRequest, UpdateUserPasswordRequest, UserDto, UserPolicyDto,
+        CreateUserByNameRequest, PublicUserDto, UpdateUserPasswordRequest, UserConfigurationDto,
+        UserDto, UserPolicyDto,
     },
     repository, security,
     state::AppState,
@@ -12,9 +13,10 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
-    routing::{get, post, put},
+    routing::{get, post},
     Json, Router,
 };
+use serde_json::Value;
 use url::form_urlencoded;
 use uuid::Uuid;
 
@@ -46,20 +48,21 @@ pub fn router() -> Router<AppState> {
         .route("/users/{user_id}/policy", post(update_user_policy))
 }
 
-async fn public_users(State(state): State<AppState>) -> Result<Json<Vec<UserDto>>, AppError> {
+async fn public_users(State(state): State<AppState>) -> Result<Json<Vec<PublicUserDto>>, AppError> {
     let users = repository::list_users(&state.pool, true).await?;
     Ok(Json(
         users
             .iter()
-            .map(|user| repository::user_to_dto(user, state.config.server_id))
+            .map(|user| repository::user_to_public_dto(user, state.config.server_id))
             .collect(),
     ))
 }
 
 async fn users(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<UserDto>>, AppError> {
+    auth::require_admin(&session)?;
     let users = repository::list_users(&state.pool, false).await?;
     Ok(Json(
         users
@@ -70,10 +73,11 @@ async fn users(
 }
 
 async fn user_by_id(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<UserDto>, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
@@ -86,7 +90,7 @@ async fn me(
 ) -> Result<Json<UserDto>, AppError> {
     let user = repository::get_user_by_id(&state.pool, session.user_id)
         .await?
-        .ok_or_else(|| AppError::Unauthorized)?;
+        .ok_or(AppError::Unauthorized)?;
     Ok(Json(repository::user_to_dto(&user, state.config.server_id)))
 }
 
@@ -96,7 +100,19 @@ async fn create_user(
     Json(payload): Json<CreateUserByNameRequest>,
 ) -> Result<Json<UserDto>, AppError> {
     auth::require_admin(&session)?;
-    let user = repository::create_user(&state.pool, &payload.name).await?;
+    let copy_from_user_id = payload
+        .copy_from_user_id
+        .as_deref()
+        .map(Uuid::parse_str)
+        .transpose()
+        .map_err(|_| AppError::BadRequest("无效的 CopyFromUserId".to_string()))?;
+    let password = payload
+        .new_pw
+        .as_deref()
+        .or(payload.new_password.as_deref())
+        .or(payload.password.as_deref());
+    let user =
+        repository::create_user(&state.pool, &payload.name, password, copy_from_user_id).await?;
     Ok(Json(repository::user_to_dto(&user, state.config.server_id)))
 }
 
@@ -131,7 +147,7 @@ async fn authenticate_by_id(
     let mut payload = parse_authenticate_request(&headers, &body)?;
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
-        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+        .ok_or(AppError::Unauthorized)?;
     payload.username = Some(user.name);
     authenticate(&state, headers, payload).await
 }
@@ -157,7 +173,23 @@ async fn authenticate(
         .await?
         .ok_or(AppError::Unauthorized)?;
 
-    if user.is_disabled || !security::verify_password(&user.password_hash, password) {
+    if user.is_disabled {
+        return Err(AppError::Unauthorized);
+    }
+
+    let configuration = if user.configuration.is_null() {
+        UserConfigurationDto::default()
+    } else {
+        serde_json::from_value::<UserConfigurationDto>(user.configuration.clone())
+            .unwrap_or_default()
+    };
+
+    if !security::verify_password(&user.password_hash, password) {
+        repository::record_failed_login(&state.pool, &user).await?;
+        return Err(AppError::Unauthorized);
+    }
+
+    if !configuration.enable_local_password {
         return Err(AppError::Unauthorized);
     }
 
@@ -165,6 +197,9 @@ async fn authenticate(
     let device_name = auth::client_value(&headers, "Device").or(payload.device_name);
     let client = auth::client_value(&headers, "Client").or(payload.client);
     let application_version = auth::client_value(&headers, "Version");
+
+    auth::ensure_login_policy(state, &headers, &user, device_id.as_deref()).await?;
+    repository::clear_failed_login_count(&state.pool, &user).await?;
 
     let session = repository::create_session(
         &state.pool,
@@ -226,6 +261,7 @@ async fn update_password(
     }
 
     repository::change_user_password(&state.pool, user_id, new_password).await?;
+    repository::delete_sessions_for_user(&state.pool, user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -294,18 +330,25 @@ async fn update_user_policy(
     session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
-    Json(policy): Json<UserPolicyDto>,
+    Json(payload): Json<Value>,
 ) -> Result<StatusCode, AppError> {
-    // 只有管理员可以更新用户策略
     if !session.is_admin {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Unauthorized);
     }
 
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
 
-    // 如果移除管理员权限，检查是否至少还有一个管理员
+    let mut merged_policy = if user.policy.is_null() {
+        serde_json::to_value(UserPolicyDto::default())?
+    } else {
+        user.policy.clone()
+    };
+    merge_json(&mut merged_policy, payload);
+    let policy: UserPolicyDto = serde_json::from_value(merged_policy)
+        .map_err(|error| AppError::BadRequest(format!("用户策略格式无效: {error}")))?;
+
     if !policy.is_administrator && user.is_admin {
         let admin_count = repository::count_admin_users(&state.pool).await?;
         if admin_count <= 1 {
@@ -315,12 +358,10 @@ async fn update_user_policy(
         }
     }
 
-    // 管理员不能被禁用
-    if policy.is_disabled && user.is_admin {
+    if policy.is_disabled && (user.is_admin || policy.is_administrator) {
         return Err(AppError::BadRequest("管理员用户不能被禁用".to_string()));
     }
 
-    // 如果禁用用户，检查是否至少还有一个启用用户
     if policy.is_disabled && !user.is_disabled {
         let enabled_count = repository::count_enabled_users(&state.pool).await?;
         if enabled_count <= 1 {
@@ -330,8 +371,23 @@ async fn update_user_policy(
         }
     }
 
-    // 更新用户策略
     repository::update_user_policy(&state.pool, user_id, &policy).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn merge_json(target: &mut Value, patch: Value) {
+    match (target, patch) {
+        (Value::Object(target_map), Value::Object(patch_map)) => {
+            for (key, value) in patch_map {
+                match target_map.get_mut(&key) {
+                    Some(existing) => merge_json(existing, value),
+                    None => {
+                        target_map.insert(key, value);
+                    }
+                }
+            }
+        }
+        (slot, value) => *slot = value,
+    }
 }

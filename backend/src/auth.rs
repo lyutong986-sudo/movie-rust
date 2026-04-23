@@ -1,16 +1,24 @@
-use crate::{error::AppError, models::AuthSessionRow, repository, state::AppState};
+use crate::{
+    error::AppError,
+    models::{AuthSessionRow, DbUser, UserPolicyDto},
+    repository,
+    state::AppState,
+};
 use axum::{
     extract::FromRequestParts,
     http::{header::AUTHORIZATION, request::Parts, HeaderMap},
 };
-use chrono::Utc;
+use chrono::{Datelike, Timelike};
+use std::net::IpAddr;
 use url::form_urlencoded;
+use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct AuthSession {
     pub access_token: String,
     pub user_id: uuid::Uuid,
     pub is_admin: bool,
+    pub is_api_key: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +30,7 @@ impl From<AuthSessionRow> for AuthSession {
             access_token: value.access_token,
             user_id: value.user_id,
             is_admin: value.is_admin,
+            is_api_key: value.session_type.eq_ignore_ascii_case("ApiKey"),
         }
     }
 }
@@ -64,6 +73,7 @@ pub async fn require_auth(
                 access_token: token,
                 user_id: state.config.server_id,
                 is_admin: true,
+                is_api_key: false,
             });
         }
     }
@@ -94,6 +104,262 @@ pub fn require_admin(session: &AuthSession) -> Result<(), AppError> {
     }
 }
 
+pub fn require_interactive_session(session: &AuthSession) -> Result<(), AppError> {
+    if session.is_api_key {
+        Err(AppError::Forbidden)
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum MediaAccessKind {
+    Playback,
+    Download,
+    VideoTranscode,
+    AudioTranscode,
+    Remux,
+}
+
+pub fn ensure_user_access(session: &AuthSession, user_id: uuid::Uuid) -> Result<(), AppError> {
+    if session.user_id == user_id || session.is_admin {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+pub async fn ensure_item_access(
+    state: &AppState,
+    session: &AuthSession,
+    item_id: uuid::Uuid,
+    kind: MediaAccessKind,
+) -> Result<UserPolicyDto, AppError> {
+    let user = repository::get_user_by_id(&state.pool, session.user_id)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    let policy = repository::user_policy_from_value(&user.policy);
+    ensure_policy_allows_media_action(&policy, kind)?;
+
+    if session.is_admin {
+        return Ok(policy);
+    }
+
+    if !repository::user_can_access_item(&state.pool, session.user_id, item_id).await? {
+        return Err(AppError::Forbidden);
+    }
+
+    Ok(policy)
+}
+
+pub async fn ensure_login_policy(
+    state: &AppState,
+    headers: &HeaderMap,
+    user: &DbUser,
+    device_id: Option<&str>,
+) -> Result<(), AppError> {
+    let policy = repository::user_policy_from_value(&user.policy);
+    if policy.is_disabled || user.is_disabled {
+        return Err(AppError::Unauthorized);
+    }
+    if policy.login_attempts_before_lockout > 0
+        && policy.invalid_login_attempt_count >= policy.login_attempts_before_lockout
+    {
+        return Err(AppError::Forbidden);
+    }
+    if !policy.enable_remote_access && is_remote_login_request(state, headers) {
+        return Err(AppError::Forbidden);
+    }
+    if !policy.enable_all_devices {
+        let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) else {
+            return Err(AppError::Forbidden);
+        };
+        if !policy
+            .enabled_devices
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(device_id))
+        {
+            return Err(AppError::Forbidden);
+        }
+    }
+    if !access_schedule_allows_now(&policy) {
+        return Err(AppError::Forbidden);
+    }
+    if policy.max_active_sessions > 0 {
+        let active = repository::active_session_count_for_user(&state.pool, user.id).await?;
+        if active >= i64::from(policy.max_active_sessions) {
+            return Err(AppError::Forbidden);
+        }
+    }
+    Ok(())
+}
+
+fn is_remote_login_request(state: &AppState, headers: &HeaderMap) -> bool {
+    if let Some(ip) = forwarded_client_ip(headers) {
+        return !is_local_ip(ip);
+    }
+
+    if let Some(host) = request_host(headers) {
+        if is_local_host(&host, &state.config.host) {
+            return false;
+        }
+
+        if let Some(public_host) = configured_public_host(state) {
+            if host.eq_ignore_ascii_case(&public_host) {
+                return true;
+            }
+        }
+
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return !is_local_ip(ip);
+        }
+
+        return false;
+    }
+
+    false
+}
+
+fn forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    for header_name in ["X-Forwarded-For", "X-Real-IP"] {
+        let value = headers.get(header_name)?.to_str().ok()?;
+        let candidate = value.split(',').next()?.trim();
+        if let Ok(ip) = candidate.parse::<IpAddr>() {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+fn request_host(headers: &HeaderMap) -> Option<String> {
+    for header_name in ["X-Forwarded-Host", "Host"] {
+        let value = headers.get(header_name)?.to_str().ok()?.trim();
+        if value.is_empty() {
+            continue;
+        }
+        return Some(strip_port(value).to_string());
+    }
+    None
+}
+
+fn configured_public_host(state: &AppState) -> Option<String> {
+    let public_url = state.config.public_url.as_ref()?.trim();
+    if public_url.is_empty() {
+        return None;
+    }
+
+    Url::parse(public_url)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+}
+
+fn strip_port(host: &str) -> &str {
+    let trimmed = host.trim().trim_matches('[').trim_matches(']');
+    if let Some((name, _)) = trimmed.rsplit_once(':') {
+        if !name.contains(':') {
+            return name;
+        }
+    }
+    trimmed
+}
+
+fn is_local_host(host: &str, configured_host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case(configured_host)
+        || host.parse::<IpAddr>().ok().is_some_and(is_local_ip)
+}
+
+fn is_local_ip(ip: IpAddr) -> bool {
+    ip.is_loopback() || is_private_or_link_local(ip)
+}
+
+fn is_private_or_link_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => ipv4.is_private() || ipv4.is_link_local() || ipv4.octets()[0] == 127,
+        IpAddr::V6(ipv6) => {
+            ipv6.is_loopback()
+                || ipv6.is_unique_local()
+                || ipv6.is_unicast_link_local()
+                || ipv6.is_unspecified()
+        }
+    }
+}
+
+fn ensure_policy_allows_media_action(
+    policy: &UserPolicyDto,
+    kind: MediaAccessKind,
+) -> Result<(), AppError> {
+    if policy.is_disabled {
+        return Err(AppError::Forbidden);
+    }
+
+    match kind {
+        MediaAccessKind::Playback => {
+            if policy.enable_media_playback {
+                Ok(())
+            } else {
+                Err(AppError::Forbidden)
+            }
+        }
+        MediaAccessKind::Download => {
+            if policy.enable_media_playback && policy.enable_content_downloading {
+                Ok(())
+            } else {
+                Err(AppError::Forbidden)
+            }
+        }
+        MediaAccessKind::VideoTranscode => {
+            if policy.enable_media_playback && policy.enable_video_playback_transcoding {
+                Ok(())
+            } else {
+                Err(AppError::Forbidden)
+            }
+        }
+        MediaAccessKind::AudioTranscode => {
+            if policy.enable_media_playback && policy.enable_audio_playback_transcoding {
+                Ok(())
+            } else {
+                Err(AppError::Forbidden)
+            }
+        }
+        MediaAccessKind::Remux => {
+            if policy.enable_media_playback && policy.enable_playback_remuxing {
+                Ok(())
+            } else {
+                Err(AppError::Forbidden)
+            }
+        }
+    }
+}
+
+fn access_schedule_allows_now(policy: &UserPolicyDto) -> bool {
+    if policy.access_schedules.is_empty() {
+        return true;
+    }
+
+    let now = chrono::Local::now();
+    let day = match now.weekday() {
+        chrono::Weekday::Mon => "Monday",
+        chrono::Weekday::Tue => "Tuesday",
+        chrono::Weekday::Wed => "Wednesday",
+        chrono::Weekday::Thu => "Thursday",
+        chrono::Weekday::Fri => "Friday",
+        chrono::Weekday::Sat => "Saturday",
+        chrono::Weekday::Sun => "Sunday",
+    };
+    let hour = f64::from(now.hour()) + f64::from(now.minute()) / 60.0;
+    policy.access_schedules.iter().any(|schedule| {
+        if !schedule.day_of_week.eq_ignore_ascii_case(day) {
+            return false;
+        }
+        if schedule.start_hour <= schedule.end_hour {
+            hour >= schedule.start_hour && hour < schedule.end_hour
+        } else {
+            hour >= schedule.start_hour || hour < schedule.end_hour
+        }
+    })
+}
+
 impl FromRequestParts<AppState> for OptionalAuthSession {
     type Rejection = AppError;
 
@@ -114,6 +380,7 @@ impl FromRequestParts<AppState> for OptionalAuthSession {
                                 access_token: token,
                                 user_id: state.config.server_id,
                                 is_admin: true,
+                                is_api_key: false,
                             })));
                         }
                     }

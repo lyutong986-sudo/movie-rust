@@ -1,5 +1,5 @@
 use crate::{
-    auth::{self, AuthSession},
+    auth::{self, AuthSession, MediaAccessKind},
     error::AppError,
     models::{emby_id_to_uuid, VideoStreamQuery},
     naming, repository,
@@ -10,7 +10,7 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{header, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get},
     Router,
 };
 use reqwest::Client;
@@ -355,7 +355,17 @@ async fn stream_file(
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
     let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     let device_id = request_device_id(&request);
-    serve_media_item(&state, item_id, request, None, &session, device_id).await
+    let kind = if request
+        .uri()
+        .path()
+        .to_ascii_lowercase()
+        .contains("download")
+    {
+        MediaAccessKind::Download
+    } else {
+        MediaAccessKind::Playback
+    };
+    serve_media_item(&state, item_id, request, None, &session, device_id, kind).await
 }
 
 async fn master_playlist(
@@ -393,7 +403,8 @@ async fn subtitles_playlist(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
 
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
@@ -429,7 +440,9 @@ async fn serve_media_item(
     query: Option<VideoStreamQuery>,
     session: &AuthSession,
     device_id: Option<String>,
+    kind: MediaAccessKind,
 ) -> Result<Response, AppError> {
+    let user_policy = auth::ensure_item_access(state, session, item_id, kind).await?;
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
@@ -468,9 +481,40 @@ async fn serve_media_item(
             || q.break_on_non_key_frames.is_some()
             || q.video_stream_index.is_some();
         if has_transcoding_params {
+            if q.video_codec.is_some()
+                || effective_max_video_bitrate(q).is_some()
+                || q.max_width.is_some()
+                || q.max_height.is_some()
+                || q.max_framerate.is_some()
+                || q.video_stream_index.is_some()
+            {
+                auth::ensure_item_access(state, session, item_id, MediaAccessKind::VideoTranscode)
+                    .await?;
+            }
+            if q.audio_codec.is_some() || q.max_audio_channels.is_some() {
+                auth::ensure_item_access(state, session, item_id, MediaAccessKind::AudioTranscode)
+                    .await?;
+            }
+            if q.transcoding_protocol.is_some()
+                || q.segment_container.is_some()
+                || q.segment_length.is_some()
+                || q.min_segments.is_some()
+                || q.break_on_non_key_frames.is_some()
+            {
+                auth::ensure_item_access(state, session, item_id, MediaAccessKind::Remux).await?;
+            }
             let mut transcoding_query = q.clone();
             if transcoding_query.max_video_bitrate.is_none() {
                 transcoding_query.max_video_bitrate = q.max_streaming_bitrate.or(q.video_bitrate);
+            }
+            if user_policy.remote_client_bitrate_limit > 0 {
+                let policy_limit = i64::from(user_policy.remote_client_bitrate_limit);
+                transcoding_query.max_video_bitrate = Some(
+                    transcoding_query
+                        .max_video_bitrate
+                        .map(|value| value.min(policy_limit))
+                        .unwrap_or(policy_limit),
+                );
             }
             let user_id = session.user_id;
             let device_id = device_id
@@ -552,7 +596,8 @@ async fn video_hls_segment(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
     serve_hls_segment(
         &state,
         item_id,
@@ -589,7 +634,8 @@ async fn subtitle_stream(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
     serve_subtitle(&state, item_id, path.index, request).await
 }
 
@@ -600,7 +646,8 @@ async fn subtitle_stream_legacy(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
         .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩?ID 鏍煎紡: {}", path.item_id)))?;
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
     serve_subtitle(&state, item_id, path.index, request).await
 }
 
@@ -611,7 +658,8 @@ async fn subtitle_stream_with_start(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
     serve_subtitle(&state, item_id, path.index, request).await
 }
 
@@ -622,7 +670,8 @@ async fn subtitle_stream_with_start_legacy(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
         .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩?ID 鏍煎紡: {}", path.item_id)))?;
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
     serve_subtitle(&state, item_id, path.index, request).await
 }
 
@@ -633,7 +682,8 @@ async fn attachment_stream(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
         .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩?ID 鏍煎紡: {}", path.item_id)))?;
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
     serve_attachment(&state, item_id, path.index, request).await
 }
 
@@ -647,6 +697,13 @@ async fn hls_playlist_response(
     let requested_item_id = emby_id_to_uuid(item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
     let session = auth::require_auth(state, request.headers(), request.uri().query()).await?;
+    auth::ensure_item_access(
+        state,
+        &session,
+        requested_item_id,
+        MediaAccessKind::Playback,
+    )
+    .await?;
     let device_id = request_device_id(&request);
     if use_transcoded_hls_playlist() {
         return transcoded_hls_playlist_response(
@@ -1054,7 +1111,16 @@ async fn stream_video_request(
         "视频流请求参数"
     );
 
-    serve_media_item(state, item_id, request, Some(query), &session, device_id).await
+    serve_media_item(
+        state,
+        item_id,
+        request,
+        Some(query),
+        &session,
+        device_id,
+        MediaAccessKind::Playback,
+    )
+    .await
 }
 
 fn resolve_stream_item_id(

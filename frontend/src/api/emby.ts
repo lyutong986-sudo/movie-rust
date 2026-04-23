@@ -2,9 +2,43 @@ export interface UserDto {
   Id: string;
   Name: string;
   ServerId: string;
-  Policy: {
-    IsAdministrator: boolean;
-  };
+  HasPassword?: boolean;
+  HasConfiguredPassword?: boolean;
+  Policy: UserPolicy;
+  Configuration?: Record<string, unknown>;
+}
+
+export interface AccessSchedule {
+  DayOfWeek: string;
+  StartHour: number;
+  EndHour: number;
+}
+
+export interface UserPolicy {
+  IsAdministrator: boolean;
+  IsHidden?: boolean;
+  IsDisabled?: boolean;
+  EnableRemoteAccess?: boolean;
+  EnableMediaPlayback?: boolean;
+  EnableContentDeletion?: boolean;
+  EnableContentDownloading?: boolean;
+  EnableAudioPlaybackTranscoding?: boolean;
+  EnableVideoPlaybackTranscoding?: boolean;
+  EnablePlaybackRemuxing?: boolean;
+  EnableUserPreferenceAccess?: boolean;
+  MaxParentalRating?: number | null;
+  MaxActiveSessions?: number;
+  LoginAttemptsBeforeLockout?: number;
+  RemoteClientBitrateLimit?: number;
+  BlockedTags?: string[];
+  AllowedTags?: string[];
+  BlockUnratedItems?: string[];
+  AccessSchedules?: AccessSchedule[];
+  EnabledFolders?: string[];
+  EnableAllFolders?: boolean;
+  EnabledDevices?: string[];
+  EnableAllDevices?: boolean;
+  EnableContentDeletionFromFolders?: string[];
 }
 
 export interface AuthResult {
@@ -316,6 +350,30 @@ export class EmbyApi {
 
   async users() {
     return this.request<UserDto[]>('/Users');
+  }
+
+  async createUser(name: string, options?: { password?: string; copyFromUserId?: string }) {
+    return this.request<UserDto>('/Users/New', {
+      method: 'POST',
+      body: {
+        Name: name,
+        ...(options?.password ? { Password: options.password } : {}),
+        ...(options?.copyFromUserId ? { CopyFromUserId: options.copyFromUserId } : {})
+      }
+    });
+  }
+
+  async deleteUser(userId: string) {
+    return this.request<void>(`/Users/${userId}/Delete`, {
+      method: 'POST'
+    });
+  }
+
+  async updateUserPolicy(userId: string, policy: UserPolicy) {
+    return this.request<void>(`/Users/${userId}/Policy`, {
+      method: 'POST',
+      body: policy
+    });
   }
 
   async me() {
@@ -689,6 +747,9 @@ export class EmbyApi {
 
     if (!response.ok) {
       const text = await response.text();
+      if (options.auth !== false && (response.status === 401 || response.status === 403)) {
+        this.logout();
+      }
       throw new Error(text || `HTTP ${response.status}`);
     }
 

@@ -56,7 +56,7 @@ async fn display_preferences(
     Query(query): Query<DisplayPreferencesQuery>,
 ) -> Result<Json<Value>, AppError> {
     let user_id = query.user_id.unwrap_or(session.user_id);
-    ensure_settings_access(&session, user_id)?;
+    ensure_settings_access(&state, &session, user_id).await?;
     let client = normalized_display_preferences_client(query.client.as_deref());
     if let Some(saved) =
         repository::get_display_preferences(&state.pool, user_id, &display_preferences_id, &client)
@@ -85,7 +85,7 @@ async fn user_display_preferences(
     Path((user_id, display_preferences_id)): Path<(Uuid, String)>,
     Query(query): Query<DisplayPreferencesQuery>,
 ) -> Result<Json<Value>, AppError> {
-    ensure_settings_access(&session, user_id)?;
+    ensure_settings_access(&state, &session, user_id).await?;
     let client = normalized_display_preferences_client(query.client.as_deref());
     if let Some(saved) =
         repository::get_display_preferences(&state.pool, user_id, &display_preferences_id, &client)
@@ -153,7 +153,7 @@ async fn update_display_preferences_for_user(
     client: Option<&str>,
     payload: &mut Value,
 ) -> Result<Json<Value>, AppError> {
-    ensure_settings_access(session, user_id)?;
+    ensure_settings_access(state, session, user_id).await?;
     let client = normalized_display_preferences_client(client);
     if let Some(object) = payload.as_object_mut() {
         object
@@ -275,7 +275,7 @@ async fn user_settings(
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<Value>, AppError> {
-    ensure_settings_access(&session, user_id)?;
+    ensure_settings_access(&state, &session, user_id).await?;
 
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
@@ -296,9 +296,10 @@ async fn update_user_settings(
     session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
-    Json(configuration): Json<UserConfigurationDto>,
+    Json(mut configuration): Json<UserConfigurationDto>,
 ) -> Result<Json<Value>, AppError> {
-    ensure_settings_access(&session, user_id)?;
+    ensure_settings_access(&state, &session, user_id).await?;
+    preserve_protected_user_configuration(&state, &session, user_id, &mut configuration).await?;
     repository::update_user_configuration(&state.pool, user_id, &configuration).await?;
     Ok(Json(json!(configuration)))
 }
@@ -309,24 +310,64 @@ async fn update_user_settings_partial(
     Path(user_id): Path<Uuid>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
-    ensure_settings_access(&session, user_id)?;
+    ensure_settings_access(&state, &session, user_id).await?;
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
     let dto = repository::user_to_dto(&user, state.config.server_id);
     let mut current = serde_json::to_value(dto.configuration)?;
     merge_json(&mut current, payload);
-    let next = serde_json::from_value::<UserConfigurationDto>(current.clone())
+    let mut next = serde_json::from_value::<UserConfigurationDto>(current.clone())
         .map_err(|error| AppError::BadRequest(format!("无效的 UserSettings 请求: {error}")))?;
+    preserve_protected_user_configuration(&state, &session, user_id, &mut next).await?;
+    current = serde_json::to_value(&next)?;
     repository::update_user_configuration(&state.pool, user_id, &next).await?;
     Ok(Json(current))
 }
 
-fn ensure_settings_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppError> {
-    if session.user_id != user_id && !session.is_admin {
-        Err(AppError::Forbidden)
+async fn preserve_protected_user_configuration(
+    state: &AppState,
+    session: &AuthSession,
+    user_id: Uuid,
+    next: &mut UserConfigurationDto,
+) -> Result<(), AppError> {
+    if session.is_admin {
+        return Ok(());
+    }
+
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    let current = if user.configuration.is_null() {
+        UserConfigurationDto::default()
     } else {
+        serde_json::from_value::<UserConfigurationDto>(user.configuration).unwrap_or_default()
+    };
+    next.enable_local_password = current.enable_local_password;
+    Ok(())
+}
+
+async fn ensure_settings_access(
+    state: &AppState,
+    session: &AuthSession,
+    user_id: Uuid,
+) -> Result<(), AppError> {
+    if session.is_admin {
+        return Ok(());
+    }
+
+    if session.user_id != user_id {
+        return Err(AppError::Forbidden);
+    }
+
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    let policy = repository::user_policy_from_value(&user.policy);
+    if policy.enable_user_preference_access {
         Ok(())
+    } else {
+        Err(AppError::Forbidden)
     }
 }
 
