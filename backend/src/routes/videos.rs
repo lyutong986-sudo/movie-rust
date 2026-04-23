@@ -15,7 +15,10 @@ use axum::{
 };
 use reqwest::Client;
 use serde::Deserialize;
-use std::{path::{Path as StdPath, PathBuf}, time::Duration};
+use std::{
+    path::{Path as StdPath, PathBuf},
+    time::Duration,
+};
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 use uuid::Uuid;
@@ -217,7 +220,15 @@ async fn stream_video_with_container(
     Query(query): Query<VideoStreamQuery>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    stream_video_request(&state, &path.item_id, None, Some(path.container), query, request).await
+    stream_video_request(
+        &state,
+        &path.item_id,
+        None,
+        Some(path.container),
+        query,
+        request,
+    )
+    .await
 }
 
 async fn stream_video_by_file_name(
@@ -239,8 +250,15 @@ async fn stream_video_for_media_source(
     Query(query): Query<VideoStreamQuery>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    stream_video_request(&state, &path.item_id, Some(path._media_source_id), None, query, request)
-        .await
+    stream_video_request(
+        &state,
+        &path.item_id,
+        Some(path._media_source_id),
+        None,
+        query,
+        request,
+    )
+    .await
 }
 
 async fn stream_video_for_media_source_with_container(
@@ -331,9 +349,8 @@ async fn subtitles_playlist(
         &passthrough,
     );
 
-    let playlist = format!(
-        "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{subtitle_url}\n#EXT-X-ENDLIST\n"
-    );
+    let playlist =
+        format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{subtitle_url}\n#EXT-X-ENDLIST\n");
     playlist_response(request.method(), playlist)
 }
 
@@ -460,7 +477,14 @@ async fn video_hls_segment(
     let item_id = emby_id_to_uuid(&path.item_id)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-    serve_hls_segment(&state, item_id, &path._playlist_id, &path.segment_file, request).await
+    serve_hls_segment(
+        &state,
+        item_id,
+        &path._playlist_id,
+        &path.segment_file,
+        request,
+    )
+    .await
 }
 
 async fn audio_hls_segment(
@@ -472,7 +496,14 @@ async fn audio_hls_segment(
     let item_id = emby_id_to_uuid(&path.item_id)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-    serve_hls_segment(&state, item_id, &path._playlist_id, &path.segment_file, request).await
+    serve_hls_segment(
+        &state,
+        item_id,
+        &path._playlist_id,
+        &path.segment_file,
+        request,
+    )
+    .await
 }
 
 async fn subtitle_stream(
@@ -559,7 +590,8 @@ async fn hls_playlist_response(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
     let media_source =
-        repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id).await?;
+        repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id)
+            .await?;
 
     let passthrough = auth_passthrough_query(request.uri().query());
     let item_emby_id = crate::models::uuid_to_emby_guid(&item.id);
@@ -594,14 +626,9 @@ async fn hls_playlist_response(
     } else {
         let segment_url = append_query_pairs(
             &format!("/Videos/{item_emby_id}/hls1/main/0.ts"),
-            &extend_query_pairs(
-                passthrough,
-                video_query_pairs(&query, &media_source_id),
-            ),
+            &extend_query_pairs(passthrough, video_query_pairs(&query, &media_source_id)),
         );
-        format!(
-            "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{segment_url}\n#EXT-X-ENDLIST\n"
-        )
+        format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{segment_url}\n#EXT-X-ENDLIST\n")
     };
 
     playlist_response(request.method(), playlist)
@@ -635,7 +662,8 @@ async fn hls_audio_playlist_response(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
     let media_source =
-        repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id).await?;
+        repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id)
+            .await?;
     let passthrough = auth_passthrough_query(request.uri().query());
     let item_emby_id = crate::models::uuid_to_emby_guid(&item.id);
     let media_source_id = query
@@ -644,15 +672,11 @@ async fn hls_audio_playlist_response(
         .unwrap_or_else(|| media_source.id.clone());
     let segment_url = append_query_pairs(
         &format!("/Audio/{item_emby_id}/hls1/main/0.ts"),
-        &extend_query_pairs(
-            passthrough,
-            video_query_pairs(&query, &media_source_id),
-        ),
+        &extend_query_pairs(passthrough, video_query_pairs(&query, &media_source_id)),
     );
 
-    let playlist = format!(
-        "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{segment_url}\n#EXT-X-ENDLIST\n"
-    );
+    let playlist =
+        format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{segment_url}\n#EXT-X-ENDLIST\n");
     playlist_response(request.method(), playlist)
 }
 
@@ -671,7 +695,9 @@ async fn transcoded_hls_playlist_response(
     is_audio: bool,
 ) -> Result<Response, AppError> {
     if !state.config.enable_transcoding {
-        return Err(AppError::BadRequest("HLS 播放需要启用真实转码输出".to_string()));
+        return Err(AppError::BadRequest(
+            "HLS 播放需要启用真实转码输出".to_string(),
+        ));
     }
 
     let item = repository::get_media_item(&state.pool, item_id)
@@ -682,7 +708,9 @@ async fn transcoded_hls_playlist_response(
         return Err(AppError::NotFound("媒体文件不存在".to_string()));
     }
     if naming::is_strm(&path) {
-        return Err(AppError::BadRequest("STRM 远程流不支持服务端 HLS 分片转码".to_string()));
+        return Err(AppError::BadRequest(
+            "STRM 远程流不支持服务端 HLS 分片转码".to_string(),
+        ));
     }
 
     query.transcoding_protocol = Some("hls".to_string());
@@ -752,7 +780,9 @@ async fn wait_for_file(path: &StdPath, timeout: Duration) -> Result<(), AppError
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    Err(AppError::Internal("HLS 转码播放列表尚未生成，请稍后重试".to_string()))
+    Err(AppError::Internal(
+        "HLS 转码播放列表尚未生成，请稍后重试".to_string(),
+    ))
 }
 
 fn rewrite_hls_playlist(
@@ -882,7 +912,10 @@ async fn serve_attachment(
     let streams = repository::get_media_streams(&state.pool, item_id).await?;
     let attachment_exists = streams.iter().any(|stream| {
         stream.index == stream_index
-            && matches!(stream.stream_type.as_str(), "attachment" | "EmbeddedImage" | "embeddedimage")
+            && matches!(
+                stream.stream_type.as_str(),
+                "attachment" | "EmbeddedImage" | "embeddedimage"
+            )
     });
 
     if !attachment_exists {
@@ -946,7 +979,10 @@ async fn stream_video_request(
     serve_media_item(state, item_id, request, Some(query), &session, device_id).await
 }
 
-fn resolve_stream_item_id(default_item_id: Uuid, media_source_id: Option<&str>) -> Result<Uuid, AppError> {
+fn resolve_stream_item_id(
+    default_item_id: Uuid,
+    media_source_id: Option<&str>,
+) -> Result<Uuid, AppError> {
     let Some(media_source_id) = media_source_id else {
         return Ok(default_item_id);
     };
@@ -1001,7 +1037,10 @@ fn playlist_response(method: &Method, playlist: String) -> Result<Response, AppE
 fn query_value(query: Option<&str>, keys: &[&str]) -> Option<String> {
     let query = query?;
     url::form_urlencoded::parse(query.as_bytes()).find_map(|(key, value)| {
-        if keys.iter().any(|candidate| key.eq_ignore_ascii_case(candidate)) {
+        if keys
+            .iter()
+            .any(|candidate| key.eq_ignore_ascii_case(candidate))
+        {
             Some(value.into_owned()).filter(|value| !value.trim().is_empty())
         } else {
             None
@@ -1036,9 +1075,7 @@ fn auth_passthrough_query(query: Option<&str>) -> Vec<(String, String)> {
                 | "SubtitleStreamIndex"
                 | "subtitleStreamIndex"
                 | "AudioStreamIndex"
-                | "audioStreamIndex" => {
-                    Some((key.into_owned(), value.into_owned()))
-                }
+                | "audioStreamIndex" => Some((key.into_owned(), value.into_owned())),
                 _ => None,
             }
         })
@@ -1068,10 +1105,7 @@ fn extend_query_pairs(
     base
 }
 
-fn video_query_pairs(
-    query: &VideoStreamQuery,
-    media_source_id: &str,
-) -> Vec<(String, String)> {
+fn video_query_pairs(query: &VideoStreamQuery, media_source_id: &str) -> Vec<(String, String)> {
     let effective_max_bitrate = effective_max_video_bitrate(query);
     let mut pairs = vec![
         ("MediaSourceId".to_string(), media_source_id.to_string()),

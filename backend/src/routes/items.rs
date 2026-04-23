@@ -4,9 +4,9 @@ use crate::{
     media_analyzer,
     metadata::person_service::PersonService,
     models::{
-        emby_id_to_uuid, uuid_to_emby_guid, BaseItemDto, ContentSectionDto, GetSimilarItems, ItemCountsDto,
-        ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult, TranscodingInfoDto,
-        UpdateUserItemDataRequest, UserItemDataDto, UserItemDataQuery,
+        emby_id_to_uuid, uuid_to_emby_guid, BaseItemDto, ContentSectionDto, GetSimilarItems,
+        ItemCountsDto, ItemsQuery, PlaybackInfoDto, PlaybackInfoResponse, QueryResult,
+        TranscodingInfoDto, UpdateUserItemDataRequest, UserItemDataDto, UserItemDataQuery,
     },
     naming,
     repository::{self, ItemListOptions, UpdateUserDataInput},
@@ -100,11 +100,23 @@ pub fn router() -> Router<AppState> {
         .route("/Videos/{item_id}/IntroTimestamps", get(intro_timestamps))
         .route("/Episodes/{item_id}/IntroTimestamps", get(intro_timestamps))
         .route("/Users/{user_id}/Items/{item_id}", get(user_item_by_id))
-        .route("/Users/{user_id}/Items/{item_id}/Similar", get(get_user_similar_items))
+        .route(
+            "/Users/{user_id}/Items/{item_id}/Similar",
+            get(get_user_similar_items),
+        )
         .route("/Users/{user_id}/Items/{item_id}/Intros", get(item_intros))
-        .route("/Users/{user_id}/Items/{item_id}/LocalTrailers", get(local_trailers))
-        .route("/Users/{user_id}/Items/{item_id}/SpecialFeatures", get(special_features))
-        .route("/Users/{user_id}/Items/{item_id}/HideFromResume", post(hide_from_resume))
+        .route(
+            "/Users/{user_id}/Items/{item_id}/LocalTrailers",
+            get(local_trailers),
+        )
+        .route(
+            "/Users/{user_id}/Items/{item_id}/SpecialFeatures",
+            get(special_features),
+        )
+        .route(
+            "/Users/{user_id}/Items/{item_id}/HideFromResume",
+            post(hide_from_resume),
+        )
         .route("/Videos/{item_id}/AdditionalParts", get(additional_parts))
         .route("/Items/{item_id}/Similar", get(get_similar_items))
         .route("/Movies/{item_id}/Similar", get(get_similar_items))
@@ -217,7 +229,11 @@ async fn artist(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Json<BaseItemDto> {
-    Json(virtual_folder_item(&name, "MusicArtist", state.config.server_id))
+    Json(virtual_folder_item(
+        &name,
+        "MusicArtist",
+        state.config.server_id,
+    ))
 }
 
 async fn artist_items(
@@ -283,35 +299,45 @@ async fn official_ratings(
     _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(string_list_result(repository::aggregate_text_values(&state.pool, "official_rating").await?)))
+    Ok(Json(string_list_result(
+        repository::aggregate_text_values(&state.pool, "official_rating").await?,
+    )))
 }
 
 async fn containers(
     _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(string_list_result(repository::aggregate_text_values(&state.pool, "container").await?)))
+    Ok(Json(string_list_result(
+        repository::aggregate_text_values(&state.pool, "container").await?,
+    )))
 }
 
 async fn audio_codecs(
     _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(string_list_result(repository::aggregate_stream_codecs(&state.pool, "Audio").await?)))
+    Ok(Json(string_list_result(
+        repository::aggregate_stream_codecs(&state.pool, "Audio").await?,
+    )))
 }
 
 async fn video_codecs(
     _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(string_list_result(repository::aggregate_stream_codecs(&state.pool, "Video").await?)))
+    Ok(Json(string_list_result(
+        repository::aggregate_stream_codecs(&state.pool, "Video").await?,
+    )))
 }
 
 async fn subtitle_codecs(
     _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(string_list_result(repository::aggregate_stream_codecs(&state.pool, "Subtitle").await?)))
+    Ok(Json(string_list_result(
+        repository::aggregate_stream_codecs(&state.pool, "Subtitle").await?,
+    )))
 }
 
 async fn years(
@@ -421,7 +447,11 @@ async fn virtual_folder_items(
 
     let mut include_types = parse_include_types(query.include_item_types.as_deref());
     if include_types.is_empty() {
-        include_types = vec!["Movie".to_string(), "Series".to_string(), "Episode".to_string()];
+        include_types = vec![
+            "Movie".to_string(),
+            "Series".to_string(),
+            "Episode".to_string(),
+        ];
     }
 
     let mut requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
@@ -455,8 +485,13 @@ async fn virtual_folder_items(
     let mut items = Vec::with_capacity(result.items.len());
     for item in result.items {
         items.push(
-            repository::media_item_to_dto(&state.pool, &item, Some(user_id), state.config.server_id)
-                .await?,
+            repository::media_item_to_dto(
+                &state.pool,
+                &item,
+                Some(user_id),
+                state.config.server_id,
+            )
+            .await?,
         );
     }
     Ok(Json(items))
@@ -540,7 +575,7 @@ async fn latest_items(
     query.sort_by = Some("DateCreated".to_string());
     query.sort_order = Some("Descending".to_string());
     query.limit = query.limit.or(Some(20));
-    
+
     // 如果没有指定包含的类型，默认显示Movie和Series，不显示Episode
     if query.include_item_types.is_none() {
         query.include_item_types = Some("Movie,Series".to_string());
@@ -609,7 +644,7 @@ async fn list_items_for_user(
             if include_types.is_empty() && library.collection_type.eq_ignore_ascii_case("tvshows") {
                 include_types = vec!["Series".to_string()];
             }
-            
+
             let result = repository::list_media_items(
                 &state.pool,
                 item_list_options_from_query(
@@ -739,26 +774,48 @@ async fn item_filters_for_query(
                 tags.insert(tag.clone());
             }
         }
-        if let Some(rating) = item.official_rating.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(rating) = item
+            .official_rating
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             official_ratings.insert(rating.clone());
         }
-        if let Some(container) = item.container.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(container) = item
+            .container
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             containers.insert(container.clone());
         }
-        if let Some(codec) = item.audio_codec.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(codec) = item
+            .audio_codec
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             audio_codecs.insert(codec.clone());
         }
-        if let Some(codec) = item.video_codec.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(codec) = item
+            .video_codec
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             video_codecs.insert(codec.clone());
         }
         if let Some(year) = item.production_year {
             years.insert(year);
         }
-        if let Some(status) = item.status.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(status) = item
+            .status
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             series_statuses.insert(status.clone());
         }
     }
-    for (stream_type, codec) in repository::media_stream_codecs_for_items(&state.pool, &item_ids).await? {
+    for (stream_type, codec) in
+        repository::media_stream_codecs_for_items(&state.pool, &item_ids).await?
+    {
         match stream_type.as_str() {
             "Audio" => {
                 audio_codecs.insert(codec);
@@ -831,12 +888,20 @@ fn item_list_options_from_query(
             is_played.get_or_insert(false);
         }
     }
-    if query.is_movie == Some(true) && !include_types.iter().any(|value| value.eq_ignore_ascii_case("Movie")) {
+    if query.is_movie == Some(true)
+        && !include_types
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("Movie"))
+    {
         include_types.push("Movie".to_string());
     } else if query.is_movie == Some(false) {
         exclude_types.push("Movie".to_string());
     }
-    if query.is_series == Some(true) && !include_types.iter().any(|value| value.eq_ignore_ascii_case("Series")) {
+    if query.is_series == Some(true)
+        && !include_types
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("Series"))
+    {
         include_types.push("Series".to_string());
     } else if query.is_series == Some(false) {
         exclude_types.push("Series".to_string());
@@ -928,9 +993,7 @@ fn is_top_level_items_request(
     requested_item_ids: &[Uuid],
     requested_include_types: &[String],
 ) -> bool {
-    let parent_is_root = query
-        .parent_id
-        .is_none_or(|parent_id| parent_id.is_nil());
+    let parent_is_root = query.parent_id.is_none_or(|parent_id| parent_id.is_nil());
     parent_is_root
         && !query.recursive.unwrap_or(false)
         && requested_item_ids.is_empty()
@@ -1172,7 +1235,10 @@ async fn set_played_for_user(
 }
 
 async fn ensure_media_item_exists(state: &AppState, item_id: Uuid) -> Result<(), AppError> {
-    if repository::get_media_item(&state.pool, item_id).await?.is_some() {
+    if repository::get_media_item(&state.pool, item_id)
+        .await?
+        .is_some()
+    {
         return Ok(());
     }
     if repository::get_missing_episode_dto(
@@ -1252,14 +1318,7 @@ async fn item_intros(
     State(state): State<AppState>,
     Path((user_id, item_id_str)): Path<(Uuid, String)>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    let items = related_child_items(
-        &session,
-        &state,
-        user_id,
-        &item_id_str,
-        &["Intro"],
-    )
-    .await?;
+    let items = related_child_items(&session, &state, user_id, &item_id_str, &["Intro"]).await?;
     Ok(Json(QueryResult {
         total_record_count: items.len() as i64,
         items,
@@ -1272,14 +1331,7 @@ async fn local_trailers(
     State(state): State<AppState>,
     Path((user_id, item_id_str)): Path<(Uuid, String)>,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
-    let items = related_child_items(
-        &session,
-        &state,
-        user_id,
-        &item_id_str,
-        &["Trailer"],
-    )
-    .await?;
+    let items = related_child_items(&session, &state, user_id, &item_id_str, &["Trailer"]).await?;
     Ok(Json(items))
 }
 
@@ -1338,7 +1390,10 @@ async fn related_child_items(
             library_id: None,
             parent_id: Some(item_id),
             item_ids: vec![],
-            include_types: include_types.iter().map(|value| (*value).to_string()).collect(),
+            include_types: include_types
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
             genres: vec![],
             user_id: Some(user_id),
             recursive: false,
@@ -1357,8 +1412,13 @@ async fn related_child_items(
     let mut items = Vec::with_capacity(result.items.len());
     for item in result.items {
         items.push(
-            repository::media_item_to_dto(&state.pool, &item, Some(user_id), state.config.server_id)
-                .await?,
+            repository::media_item_to_dto(
+                &state.pool,
+                &item,
+                Some(user_id),
+                state.config.server_id,
+            )
+            .await?,
         );
     }
 
@@ -1447,13 +1507,9 @@ async fn item_dto(
     user_id: Uuid,
     item_id: Uuid,
 ) -> Result<Json<BaseItemDto>, AppError> {
-    if let Some(item) = repository::get_missing_episode_dto(
-        &state.pool,
-        item_id,
-        user_id,
-        state.config.server_id,
-    )
-    .await?
+    if let Some(item) =
+        repository::get_missing_episode_dto(&state.pool, item_id, user_id, state.config.server_id)
+            .await?
     {
         return Ok(Json(item));
     }
@@ -1484,7 +1540,9 @@ async fn refresh_item_metadata(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
-    if !item.item_type.eq_ignore_ascii_case("Series") && !item.item_type.eq_ignore_ascii_case("Movie") {
+    if !item.item_type.eq_ignore_ascii_case("Series")
+        && !item.item_type.eq_ignore_ascii_case("Movie")
+    {
         return Ok(StatusCode::NO_CONTENT);
     }
 
@@ -1533,7 +1591,11 @@ fn tmdb_id_from_provider_ids(value: &serde_json::Value) -> Option<String> {
         object
             .get(*key)
             .and_then(|value| value.as_str().map(ToOwned::to_owned))
-            .or_else(|| object.get(*key).and_then(|value| value.as_i64().map(|id| id.to_string())))
+            .or_else(|| {
+                object
+                    .get(*key)
+                    .and_then(|value| value.as_i64().map(|id| id.to_string()))
+            })
     })
 }
 
@@ -1552,7 +1614,7 @@ async fn playback_info(
         let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024) // 10MB限制
             .await
             .map_err(|e| AppError::BadRequest(format!("无法读取请求体: {}", e)))?;
-        
+
         if body_bytes.is_empty() {
             // 空请求体，使用查询参数
             query_info
@@ -1563,7 +1625,9 @@ async fn playback_info(
                     if body_info.user_id.is_none() && query_info.user_id.is_some() {
                         body_info.user_id = query_info.user_id;
                     }
-                    if body_info.max_streaming_bitrate.is_none() && query_info.max_streaming_bitrate.is_some() {
+                    if body_info.max_streaming_bitrate.is_none()
+                        && query_info.max_streaming_bitrate.is_some()
+                    {
                         body_info.max_streaming_bitrate = query_info.max_streaming_bitrate;
                     }
                     body_info
@@ -1579,7 +1643,7 @@ async fn playback_info(
         // GET请求：只使用查询参数
         query_info
     };
-    
+
     let mut item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
@@ -1587,7 +1651,8 @@ async fn playback_info(
         return Err(AppError::BadRequest("目录条目没有播放源".to_string()));
     }
 
-    let needs_metadata = item.video_codec.is_none() || item.audio_codec.is_none() || item.runtime_ticks.is_none();
+    let needs_metadata =
+        item.video_codec.is_none() || item.audio_codec.is_none() || item.runtime_ticks.is_none();
     if needs_metadata {
         let item_path = item.path.clone();
         let path = std::path::Path::new(&item_path);
@@ -1600,11 +1665,21 @@ async fn playback_info(
                             tracing::debug!("分析.strm文件远程URL: {}", target_url);
                             match media_analyzer::analyze_remote_media(&target_url).await {
                                 Ok(analysis) => {
-                                    repository::update_media_item_metadata(&state.pool, item_id, &analysis).await?;
+                                    repository::update_media_item_metadata(
+                                        &state.pool,
+                                        item_id,
+                                        &analysis,
+                                    )
+                                    .await?;
                                     item = repository::get_media_item(&state.pool, item_id)
                                         .await?
-                                        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-                                    tracing::info!("已更新.strm文件远程媒体元数据: {}", path.display());
+                                        .ok_or_else(|| {
+                                            AppError::NotFound("媒体条目不存在".to_string())
+                                        })?;
+                                    tracing::info!(
+                                        "已更新.strm文件远程媒体元数据: {}",
+                                        path.display()
+                                    );
                                 }
                                 Err(e) => {
                                     tracing::warn!("无法分析.strm远程媒体 {}: {}", target_url, e);
@@ -1622,7 +1697,8 @@ async fn playback_info(
                 // 对于普通文件，进行本地分析
                 match media_analyzer::analyze_media_file(path).await {
                     Ok(analysis) => {
-                        repository::update_media_item_metadata(&state.pool, item_id, &analysis).await?;
+                        repository::update_media_item_metadata(&state.pool, item_id, &analysis)
+                            .await?;
                         item = repository::get_media_item(&state.pool, item_id)
                             .await?
                             .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
@@ -1674,9 +1750,11 @@ async fn playback_info(
         );
     }
 
-    let effective_max_bitrate = info
-        .max_streaming_bitrate
-        .or_else(|| info.device_profile.as_ref().and_then(|profile| profile.max_streaming_bitrate));
+    let effective_max_bitrate = info.max_streaming_bitrate.or_else(|| {
+        info.device_profile
+            .as_ref()
+            .and_then(|profile| profile.max_streaming_bitrate)
+    });
 
     let transcode_reasons = media_sources
         .get(selected_media_source_index)
@@ -1694,12 +1772,13 @@ async fn playback_info(
         media_source
             .required_http_headers
             .insert("X-Emby-Token".to_string(), session.access_token.clone());
-        media_source
-            .required_http_headers
-            .insert("X-MediaBrowser-Token".to_string(), session.access_token.clone());
+        media_source.required_http_headers.insert(
+            "X-MediaBrowser-Token".to_string(),
+            session.access_token.clone(),
+        );
         media_source.add_api_key_to_direct_stream_url = Some(true);
     }
-    
+
     // 设备配置文件处理
     if let Some(device_profile) = &info.device_profile {
         for media_source in &mut media_sources {
@@ -1752,7 +1831,8 @@ async fn playback_info(
             .unwrap_or_else(|| format!("mediasource_{item_emby_id}"));
 
         let transcoding_container = preferred_transcoding_container(&info);
-        let transcoding_sub_protocol = preferred_transcoding_sub_protocol(&info, &transcoding_container);
+        let transcoding_sub_protocol =
+            preferred_transcoding_sub_protocol(&info, &transcoding_container);
         let transcoding_url = build_transcoding_url(
             &item_emby_id,
             &selected_media_source_id,
@@ -1817,7 +1897,9 @@ fn build_transcoding_info(
         .iter()
         .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"));
     let source_bitrate = source.bitrate;
-    let video_bitrate = video_stream.and_then(|stream| stream.bit_rate).or(source_bitrate);
+    let video_bitrate = video_stream
+        .and_then(|stream| stream.bit_rate)
+        .or(source_bitrate);
     let audio_bitrate = audio_stream.and_then(|stream| stream.bit_rate);
     let start_ticks = info.start_time_ticks.filter(|value| *value > 0);
 
@@ -1831,7 +1913,8 @@ fn build_transcoding_info(
         bitrate: source_bitrate,
         audio_bitrate,
         video_bitrate,
-        framerate: video_stream.and_then(|stream| stream.real_frame_rate.or(stream.average_frame_rate)),
+        framerate: video_stream
+            .and_then(|stream| stream.real_frame_rate.or(stream.average_frame_rate)),
         completion_percentage: Some(0.0),
         transcoding_position_ticks: start_ticks,
         transcoding_start_position_ticks: start_ticks,
@@ -1873,24 +1956,32 @@ fn device_profile_supports_transcoding(
         return false;
     }
 
-    profile.transcoding_profiles.iter().any(|transcoding_profile| {
-        transcoding_profile
-            .r#type
-            .as_deref()
-            .is_none_or(|value| value.eq_ignore_ascii_case("Video"))
-            && transcoding_profile
-                .container
+    profile
+        .transcoding_profiles
+        .iter()
+        .any(|transcoding_profile| {
+            transcoding_profile
+                .r#type
                 .as_deref()
-                .is_none_or(|value| !value.trim().is_empty())
-            && codec_profile_matches(transcoding_profile.video_codec.as_deref(), source, "Video")
-            && codec_profile_matches(transcoding_profile.audio_codec.as_deref(), source, "Audio")
-    })
+                .is_none_or(|value| value.eq_ignore_ascii_case("Video"))
+                && transcoding_profile
+                    .container
+                    .as_deref()
+                    .is_none_or(|value| !value.trim().is_empty())
+                && codec_profile_matches(
+                    transcoding_profile.video_codec.as_deref(),
+                    source,
+                    "Video",
+                )
+                && codec_profile_matches(
+                    transcoding_profile.audio_codec.as_deref(),
+                    source,
+                    "Audio",
+                )
+        })
 }
 
-fn container_profiles_match(
-    profiles: &[Value],
-    source: &crate::models::MediaSourceDto,
-) -> bool {
+fn container_profiles_match(profiles: &[Value], source: &crate::models::MediaSourceDto) -> bool {
     profiles.iter().all(|profile| {
         if !profile_type_matches(profile, "Video") {
             return true;
@@ -1899,10 +1990,7 @@ fn container_profiles_match(
     })
 }
 
-fn codec_profiles_match(
-    profiles: &[Value],
-    source: &crate::models::MediaSourceDto,
-) -> bool {
+fn codec_profiles_match(profiles: &[Value], source: &crate::models::MediaSourceDto) -> bool {
     profiles.iter().all(|profile| {
         if !profile_type_matches(profile, "Video") {
             return true;
@@ -1939,7 +2027,10 @@ fn codec_profiles_match(
                 let Some(codec) = stream.codec.as_deref() else {
                     return true;
                 };
-                if !codec_filter.iter().any(|candidate| candidate.eq_ignore_ascii_case(codec)) {
+                if !codec_filter
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(codec))
+                {
                     return true;
                 }
             }
@@ -1969,7 +2060,9 @@ fn profile_conditions_match(
         return true;
     };
 
-    conditions.iter().all(|condition| profile_condition_matches(condition, stream, source))
+    conditions
+        .iter()
+        .all(|condition| profile_condition_matches(condition, stream, source))
 }
 
 fn profile_condition_matches(
@@ -1987,9 +2080,7 @@ fn profile_condition_matches(
         .or_else(|| condition.get("condition"))
         .and_then(Value::as_str)
         .unwrap_or("Equals");
-    let target = condition
-        .get("Value")
-        .or_else(|| condition.get("value"));
+    let target = condition.get("Value").or_else(|| condition.get("value"));
 
     let Some(actual) = profile_property_value(property, stream, source) else {
         return !condition
@@ -2009,7 +2100,11 @@ fn profile_condition_matches(
             .is_none_or(|target| compare_profile_text(&actual, target, condition_name)),
         (ProfileValue::Bool(actual), Some(target)) => target
             .as_bool()
-            .or_else(|| target.as_str().map(|value| value.eq_ignore_ascii_case("true")))
+            .or_else(|| {
+                target
+                    .as_str()
+                    .map(|value| value.eq_ignore_ascii_case("true"))
+            })
             .is_none_or(|target| compare_profile_bool(actual, target, condition_name)),
         _ => true,
     }
@@ -2036,24 +2131,52 @@ fn profile_property_value(
         })
     });
     match normalized.as_str() {
-        "width" => stream.and_then(|stream| stream.width).map(|value| ProfileValue::Number(f64::from(value))),
-        "height" => stream.and_then(|stream| stream.height).map(|value| ProfileValue::Number(f64::from(value))),
+        "width" => stream
+            .and_then(|stream| stream.width)
+            .map(|value| ProfileValue::Number(f64::from(value))),
+        "height" => stream
+            .and_then(|stream| stream.height)
+            .map(|value| ProfileValue::Number(f64::from(value))),
         "videobitrate" | "bitrate" => stream
             .and_then(|stream| stream.bit_rate)
             .or_else(|| source.and_then(|source| source.bitrate))
             .map(|value| ProfileValue::Number(f64::from(value))),
-        "videobitdepth" | "bitdepth" => stream.and_then(|stream| stream.bit_depth).map(|value| ProfileValue::Number(f64::from(value))),
-        "videolevel" | "level" => stream.and_then(|stream| stream.level).map(|value| ProfileValue::Number(f64::from(value))),
-        "videorefframes" | "refframes" => stream.and_then(|stream| stream.ref_frames).map(|value| ProfileValue::Number(f64::from(value))),
-        "videoprofile" | "profile" => stream.and_then(|stream| stream.profile.clone()).map(ProfileValue::Text),
-        "videorange" => stream.and_then(|stream| stream.video_range.clone()).map(ProfileValue::Text),
-        "videorangetype" | "extendedvideotype" => stream.and_then(|stream| stream.extended_video_type.clone()).map(ProfileValue::Text),
-        "extendedvideosubtype" | "videoprofilesubtype" => stream.and_then(|stream| stream.extended_video_sub_type.clone()).map(ProfileValue::Text),
-        "videocolorspace" | "colorspace" => stream.and_then(|stream| stream.color_space.clone()).map(ProfileValue::Text),
-        "videocolortransfer" | "colortransfer" => stream.and_then(|stream| stream.color_transfer.clone()).map(ProfileValue::Text),
-        "videocolorprimaries" | "colorprimaries" => stream.and_then(|stream| stream.color_primaries.clone()).map(ProfileValue::Text),
-        "pixelformat" => stream.and_then(|stream| stream.pixel_format.clone()).map(ProfileValue::Text),
-        "videocodec" | "codec" => stream.and_then(|stream| stream.codec.clone()).map(ProfileValue::Text),
+        "videobitdepth" | "bitdepth" => stream
+            .and_then(|stream| stream.bit_depth)
+            .map(|value| ProfileValue::Number(f64::from(value))),
+        "videolevel" | "level" => stream
+            .and_then(|stream| stream.level)
+            .map(|value| ProfileValue::Number(f64::from(value))),
+        "videorefframes" | "refframes" => stream
+            .and_then(|stream| stream.ref_frames)
+            .map(|value| ProfileValue::Number(f64::from(value))),
+        "videoprofile" | "profile" => stream
+            .and_then(|stream| stream.profile.clone())
+            .map(ProfileValue::Text),
+        "videorange" => stream
+            .and_then(|stream| stream.video_range.clone())
+            .map(ProfileValue::Text),
+        "videorangetype" | "extendedvideotype" => stream
+            .and_then(|stream| stream.extended_video_type.clone())
+            .map(ProfileValue::Text),
+        "extendedvideosubtype" | "videoprofilesubtype" => stream
+            .and_then(|stream| stream.extended_video_sub_type.clone())
+            .map(ProfileValue::Text),
+        "videocolorspace" | "colorspace" => stream
+            .and_then(|stream| stream.color_space.clone())
+            .map(ProfileValue::Text),
+        "videocolortransfer" | "colortransfer" => stream
+            .and_then(|stream| stream.color_transfer.clone())
+            .map(ProfileValue::Text),
+        "videocolorprimaries" | "colorprimaries" => stream
+            .and_then(|stream| stream.color_primaries.clone())
+            .map(ProfileValue::Text),
+        "pixelformat" => stream
+            .and_then(|stream| stream.pixel_format.clone())
+            .map(ProfileValue::Text),
+        "videocodec" | "codec" => stream
+            .and_then(|stream| stream.codec.clone())
+            .map(ProfileValue::Text),
         "audiocodec" => source
             .and_then(|source| {
                 source
@@ -2108,9 +2231,15 @@ fn profile_property_value(
                     .and_then(|stream| stream.codec.clone())
             })
             .map(ProfileValue::Text),
-        "isinterlaced" => stream.and_then(|stream| stream.is_interlaced).map(ProfileValue::Bool),
-        "isanamorphic" => stream.and_then(|stream| stream.is_anamorphic).map(ProfileValue::Bool),
-        "isavc" => stream.and_then(|stream| stream.is_avc).map(ProfileValue::Bool),
+        "isinterlaced" => stream
+            .and_then(|stream| stream.is_interlaced)
+            .map(ProfileValue::Bool),
+        "isanamorphic" => stream
+            .and_then(|stream| stream.is_anamorphic)
+            .map(ProfileValue::Bool),
+        "isavc" => stream
+            .and_then(|stream| stream.is_avc)
+            .map(ProfileValue::Bool),
         _ => None,
     }
 }
@@ -2165,7 +2294,11 @@ fn codec_profile_matches(
         .iter()
         .filter(|stream| stream.stream_type.eq_ignore_ascii_case(stream_type))
         .filter_map(|stream| stream.codec.as_deref())
-        .all(|codec| allowed.iter().any(|allowed_codec| allowed_codec.eq_ignore_ascii_case(codec)))
+        .all(|codec| {
+            allowed
+                .iter()
+                .any(|allowed_codec| allowed_codec.eq_ignore_ascii_case(codec))
+        })
 }
 
 fn csv_option_contains(csv: Option<&str>, value: &str) -> bool {
@@ -2205,7 +2338,9 @@ fn transcoding_reasons(
     if let Some(max_audio_channels) = info.max_audio_channels {
         if media_source.media_streams.iter().any(|stream| {
             stream.stream_type.eq_ignore_ascii_case("Audio")
-                && stream.channels.is_some_and(|channels| channels > max_audio_channels)
+                && stream
+                    .channels
+                    .is_some_and(|channels| channels > max_audio_channels)
         }) {
             push_reason(&mut reasons, "AudioChannelsNotSupported");
         }
@@ -2269,18 +2404,25 @@ fn selected_subtitle_stream<'a>(
     if index < 0 {
         return None;
     }
-    media_source.media_streams.iter().find(|stream| {
-        stream.stream_type.eq_ignore_ascii_case("Subtitle") && stream.index == index
-    })
+    media_source
+        .media_streams
+        .iter()
+        .find(|stream| stream.stream_type.eq_ignore_ascii_case("Subtitle") && stream.index == index)
 }
 
-fn preferred_transcoding_profile(info: &PlaybackInfoDto) -> Option<&crate::models::TranscodingProfile> {
-    info.device_profile.as_ref()?.transcoding_profiles.iter().find(|profile| {
-        profile
-            .r#type
-            .as_deref()
-            .is_none_or(|value| value.eq_ignore_ascii_case("Video"))
-    })
+fn preferred_transcoding_profile(
+    info: &PlaybackInfoDto,
+) -> Option<&crate::models::TranscodingProfile> {
+    info.device_profile
+        .as_ref()?
+        .transcoding_profiles
+        .iter()
+        .find(|profile| {
+            profile
+                .r#type
+                .as_deref()
+                .is_none_or(|value| value.eq_ignore_ascii_case("Video"))
+        })
 }
 
 fn preferred_transcoding_container(info: &PlaybackInfoDto) -> String {
@@ -2461,10 +2603,7 @@ async fn user_resume_items(
     options.sort_order = query.sort_order.or_else(|| Some("Descending".to_string()));
     options.limit = query.limit.unwrap_or(50);
 
-    let result = repository::list_media_items(
-        &state.pool,
-        options,
-    ).await?;
+    let result = repository::list_media_items(&state.pool, options).await?;
 
     media_items_to_dto_result(&state, user_id, result).await
 }
@@ -2481,7 +2620,7 @@ async fn get_similar_items(
     let target_item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-    
+
     // 简单的相似性算法：基于类型和标签查找相似项目
     let user_id = query.user_id.unwrap_or(session.user_id);
     let similar_items = repository::find_similar_items(
@@ -2490,8 +2629,9 @@ async fn get_similar_items(
         query.limit.unwrap_or(20),
         Some(user_id),
         state.config.server_id,
-    ).await?;
-    
+    )
+    .await?;
+
     let total_record_count = similar_items.len() as i64;
     Ok(Json(QueryResult {
         items: similar_items,
@@ -2703,7 +2843,11 @@ mod tests {
             "Value": "1920",
             "IsRequired": true
         });
-        assert!(!profile_condition_matches(&failing_condition, Some(&stream), None));
+        assert!(!profile_condition_matches(
+            &failing_condition,
+            Some(&stream),
+            None
+        ));
     }
 
     #[test]
@@ -2887,4 +3031,3 @@ mod tests {
         assert_eq!(transcoding.transcoding_start_position_ticks, Some(12345));
     }
 }
-

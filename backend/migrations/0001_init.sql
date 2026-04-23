@@ -5,6 +5,12 @@ CREATE TABLE IF NOT EXISTS users (
     is_admin boolean NOT NULL DEFAULT false,
     is_hidden boolean NOT NULL DEFAULT false,
     is_disabled boolean NOT NULL DEFAULT false,
+    policy jsonb NOT NULL DEFAULT '{}'::jsonb,
+    configuration jsonb NOT NULL DEFAULT '{}'::jsonb,
+    primary_image_path text,
+    backdrop_image_path text,
+    logo_image_path text,
+    date_modified timestamptz NOT NULL DEFAULT now(),
     created_at timestamptz NOT NULL DEFAULT now()
 );
 

@@ -156,6 +156,10 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         "#,
         r#"
         ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS is_disabled BOOLEAN NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS configuration JSONB NOT NULL DEFAULT '{}'::jsonb,
             ADD COLUMN IF NOT EXISTS primary_image_path TEXT,
             ADD COLUMN IF NOT EXISTS backdrop_image_path TEXT,
             ADD COLUMN IF NOT EXISTS logo_image_path TEXT,

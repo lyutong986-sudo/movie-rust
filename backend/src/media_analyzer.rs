@@ -99,11 +99,19 @@ pub fn extract_primary_video_stream(result: &MediaAnalysisResult) -> Option<&Med
 }
 
 pub fn extract_audio_streams(result: &MediaAnalysisResult) -> Vec<&MediaStreamInfo> {
-    result.streams.iter().filter(|s| s.codec_type == "audio").collect()
+    result
+        .streams
+        .iter()
+        .filter(|s| s.codec_type == "audio")
+        .collect()
 }
 
 pub fn extract_subtitle_streams(result: &MediaAnalysisResult) -> Vec<&MediaStreamInfo> {
-    result.streams.iter().filter(|s| s.codec_type == "subtitle").collect()
+    result
+        .streams
+        .iter()
+        .filter(|s| s.codec_type == "subtitle")
+        .collect()
 }
 
 /// 分析远程媒体URL
@@ -140,7 +148,9 @@ async fn run_ffprobe(target: impl AsRef<OsStr>) -> Result<serde_json::Value, Med
     serde_json::from_str(&json_output).map_err(|e| MediaAnalyzerError::ParseError(e.to_string()))
 }
 
-fn parse_probe_result(probe_result: &serde_json::Value) -> Result<MediaAnalysisResult, MediaAnalyzerError> {
+fn parse_probe_result(
+    probe_result: &serde_json::Value,
+) -> Result<MediaAnalysisResult, MediaAnalyzerError> {
     let streams = probe_result
         .get("streams")
         .and_then(|v| v.as_array())
@@ -155,36 +165,75 @@ fn parse_probe_result(probe_result: &serde_json::Value) -> Result<MediaAnalysisR
         .filter_map(|stream| {
             let index = stream.get("index")?.as_i64()? as i32;
             let codec_type = stream.get("codec_type")?.as_str()?.to_string();
-            let codec_name = stream.get("codec_name").and_then(|v| v.as_str()).map(String::from);
-            let codec_long_name = stream.get("codec_long_name").and_then(|v| v.as_str()).map(String::from);
-            let width = stream.get("width").and_then(|v| v.as_i64()).map(|v| v as i32);
-            let height = stream.get("height").and_then(|v| v.as_i64()).map(|v| v as i32);
-            let bit_rate = stream.get("bit_rate").and_then(|v| v.as_str()).map(String::from);
-            let channels = stream.get("channels").and_then(|v| v.as_i64()).map(|v| v as i32);
-            let channel_layout = stream.get("channel_layout").and_then(|v| v.as_str()).map(String::from);
-            let sample_rate = stream.get("sample_rate").and_then(|v| v.as_str()).map(String::from);
-            let language = stream.get("tags")
+            let codec_name = stream
+                .get("codec_name")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let codec_long_name = stream
+                .get("codec_long_name")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let width = stream
+                .get("width")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32);
+            let height = stream
+                .get("height")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32);
+            let bit_rate = stream
+                .get("bit_rate")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let channels = stream
+                .get("channels")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32);
+            let channel_layout = stream
+                .get("channel_layout")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let sample_rate = stream
+                .get("sample_rate")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let language = stream
+                .get("tags")
                 .and_then(|tags| tags.get("language"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let title = stream.get("tags")
+            let title = stream
+                .get("tags")
                 .and_then(|tags| tags.get("title"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
             let tags = stream.get("tags").cloned();
             let disposition = stream.get("disposition");
 
-            let level = stream.get("level").and_then(|v| v.as_i64()).map(|v| v as i32);
-            let profile = stream.get("profile").and_then(|v| v.as_str()).map(String::from);
-            let pixel_format = stream.get("pix_fmt").and_then(|v| v.as_str()).map(String::from);
-            let ref_frames = stream.get("refs").and_then(|v| v.as_i64()).map(|v| v as i32);
-            let average_frame_rate = parse_ffprobe_rational(
-                stream.get("avg_frame_rate").and_then(|v| v.as_str())
-            );
-            let real_frame_rate = parse_ffprobe_rational(
-                stream.get("r_frame_rate").and_then(|v| v.as_str())
-            );
-            let aspect_ratio = stream.get("display_aspect_ratio").and_then(|v| v.as_str()).map(String::from);
+            let level = stream
+                .get("level")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32);
+            let profile = stream
+                .get("profile")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let pixel_format = stream
+                .get("pix_fmt")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let ref_frames = stream
+                .get("refs")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32);
+            let average_frame_rate =
+                parse_ffprobe_rational(stream.get("avg_frame_rate").and_then(|v| v.as_str()));
+            let real_frame_rate =
+                parse_ffprobe_rational(stream.get("r_frame_rate").and_then(|v| v.as_str()));
+            let aspect_ratio = stream
+                .get("display_aspect_ratio")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let is_default = disposition
                 .and_then(|value| value.get("default"))
                 .and_then(|v| v.as_i64())
@@ -205,41 +254,62 @@ fn parse_probe_result(probe_result: &serde_json::Value) -> Result<MediaAnalysisR
                 .and_then(|v| v.as_str())
                 .map(|value| value != "progressive" && value != "unknown")
                 .unwrap_or(false);
-            let stream_start_time_ticks = stream.get("start_time")
+            let stream_start_time_ticks = stream
+                .get("start_time")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<f64>().ok())
                 .map(|seconds| (seconds * 10_000_000.0) as i64);
-            let color_range = stream.get("color_range").and_then(|v| v.as_str()).map(String::from);
-            let color_space = stream.get("color_space").and_then(|v| v.as_str()).map(String::from);
-            let color_transfer = stream.get("color_transfer").and_then(|v| v.as_str()).map(String::from);
-            let color_primaries = stream.get("color_primaries").and_then(|v| v.as_str()).map(String::from);
-            let attachment_size = stream.get("tags")
+            let color_range = stream
+                .get("color_range")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let color_space = stream
+                .get("color_space")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let color_transfer = stream
+                .get("color_transfer")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let color_primaries = stream
+                .get("color_primaries")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let attachment_size = stream
+                .get("tags")
                 .and_then(|tags| tags.get("attachment_size"))
                 .and_then(|v| v.as_i64())
                 .map(|v| v as i32);
-            let extended_video_sub_type = stream.get("tags")
+            let extended_video_sub_type = stream
+                .get("tags")
                 .and_then(|tags| tags.get("extended_video_sub_type"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let extended_video_sub_type_description = stream.get("tags")
+            let extended_video_sub_type_description = stream
+                .get("tags")
                 .and_then(|tags| tags.get("extended_video_sub_type_description"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let extended_video_type = stream.get("tags")
+            let extended_video_type = stream
+                .get("tags")
                 .and_then(|tags| tags.get("extended_video_type"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let is_anamorphic = stream.get("tags")
+            let is_anamorphic = stream
+                .get("tags")
                 .and_then(|tags| tags.get("is_anamorphic"))
                 .and_then(|v| v.as_bool());
-            let is_avc = stream.get("tags")
+            let is_avc = stream
+                .get("tags")
                 .and_then(|tags| tags.get("is_avc"))
                 .and_then(|v| v.as_bool());
-            let is_external_url = stream.get("tags")
+            let is_external_url = stream
+                .get("tags")
                 .and_then(|tags| tags.get("is_external_url"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
-            let is_text_subtitle_stream = stream.get("tags")
+            let is_text_subtitle_stream = stream
+                .get("tags")
                 .and_then(|tags| tags.get("is_text_subtitle_stream"))
                 .and_then(|v| v.as_bool());
 
@@ -323,12 +393,31 @@ fn parse_probe_result(probe_result: &serde_json::Value) -> Result<MediaAnalysisR
         .unwrap_or_default();
 
     let format_info = MediaFormatInfo {
-        filename: format.get("filename").and_then(|v| v.as_str()).map(String::from).unwrap_or_default(),
-        format_name: format.get("format_name").and_then(|v| v.as_str()).map(String::from),
-        format_long_name: format.get("format_long_name").and_then(|v| v.as_str()).map(String::from),
-        duration: format.get("duration").and_then(|v| v.as_str()).map(String::from),
-        size: format.get("size").and_then(|v| v.as_str()).map(String::from),
-        bit_rate: format.get("bit_rate").and_then(|v| v.as_str()).map(String::from),
+        filename: format
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_default(),
+        format_name: format
+            .get("format_name")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        format_long_name: format
+            .get("format_long_name")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        duration: format
+            .get("duration")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        size: format
+            .get("size")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        bit_rate: format
+            .get("bit_rate")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     };
 
     Ok(MediaAnalysisResult {

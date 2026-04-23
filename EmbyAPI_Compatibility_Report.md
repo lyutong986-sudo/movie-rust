@@ -287,6 +287,13 @@
 
 ## 验证记录
 
+### 2026-04-23 初始化管理员数据库修复
+
+- 初始化用户表 `0001_init.sql` 已直接包含 Emby 用户运行所需字段: `policy`、`configuration`、`primary_image_path`、`backdrop_image_path`、`logo_image_path`、`date_modified`，新项目初始化后可直接创建管理员。
+- 删除已并入初始化脚本的 users 补丁迁移: `0007_user_policy.sql`、`0012_user_configuration.sql`、`0015_user_image_fields.sql`，避免初始化项目时重复/半升级导致 `users.configuration` 不存在。
+- 启动兼容 SQL 同步补齐 `is_hidden`、`is_disabled`、`policy`、`configuration` 和用户图片字段，已存在的半初始化数据库重启后也会自动修复。
+- 验证通过: `cargo check --manifest-path backend/Cargo.toml`。
+
 ### 2026-04-23 审计修复
 
 - 修复 `/Users/{userId}/Items`、`/Users/{userId}/Items/Latest`、`/Users/{userId}/Items/{itemId}`、`/Users/{userId}/Items/Resume` 缺少用户访问校验的问题，带用户 ID 的读接口现在要求本人或管理员访问。
