@@ -16,6 +16,7 @@ use crate::{
     naming,
     repository::{self, ItemListOptions, UpdateUserDataInput},
     state::AppState,
+    work_limiter::{WorkLimiterConfig, WorkLimiterKind},
 };
 use axum::{
     extract::{Path, Query, Request, State},
@@ -210,7 +211,9 @@ async fn item_counts(
 ) -> Result<Json<ItemCountsDto>, AppError> {
     if let Some(user_id) = query.user_id {
         ensure_user_access(&session, user_id)?;
-        return Ok(Json(repository::item_counts_for_user(&state.pool, user_id).await?));
+        return Ok(Json(
+            repository::item_counts_for_user(&state.pool, user_id).await?,
+        ));
     }
 
     Ok(Json(repository::item_counts(&state.pool).await?))
@@ -222,7 +225,9 @@ async fn user_item_counts(
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<ItemCountsDto>, AppError> {
     ensure_user_access(&session, user_id)?;
-    Ok(Json(repository::item_counts_for_user(&state.pool, user_id).await?))
+    Ok(Json(
+        repository::item_counts_for_user(&state.pool, user_id).await?,
+    ))
 }
 
 async fn studios(
@@ -1584,6 +1589,11 @@ async fn refresh_item_metadata(
     {
         return Ok(StatusCode::NO_CONTENT);
     }
+    work_limiter_config(&state).await?;
+    let _refresh_permit = state
+        .work_limiters
+        .acquire(WorkLimiterKind::LibraryScan)
+        .await;
 
     let Some(tmdb_id) = tmdb_id_from_provider_ids(&item.provider_ids) else {
         tracing::debug!(
@@ -1602,12 +1612,27 @@ async fn refresh_item_metadata(
         .ok_or_else(|| AppError::BadRequest("未配置 TMDb 元数据提供者".to_string()))?;
 
     if item.item_type.eq_ignore_ascii_case("Series") {
+        let _tmdb_permit = state
+            .work_limiters
+            .acquire(WorkLimiterKind::TmdbMetadata)
+            .await;
         let metadata = provider.get_series_details(&tmdb_id).await?;
+        drop(_tmdb_permit);
         repository::update_media_item_series_metadata(&state.pool, item.id, &metadata).await?;
+        let _tmdb_permit = state
+            .work_limiters
+            .acquire(WorkLimiterKind::TmdbMetadata)
+            .await;
         let catalog = provider.get_series_episode_catalog(&tmdb_id).await?;
+        drop(_tmdb_permit);
         repository::replace_series_episode_catalog(&state.pool, item.id, &catalog).await?;
     } else if item.item_type.eq_ignore_ascii_case("Movie") {
+        let _tmdb_permit = state
+            .work_limiters
+            .acquire(WorkLimiterKind::TmdbMetadata)
+            .await;
         let metadata = provider.get_movie_details(&tmdb_id).await?;
+        drop(_tmdb_permit);
         repository::update_media_item_movie_metadata(&state.pool, item.id, &metadata).await?;
     }
 
@@ -1616,7 +1641,12 @@ async fn refresh_item_metadata(
     } else {
         "movie"
     };
+    let _tmdb_permit = state
+        .work_limiters
+        .acquire(WorkLimiterKind::TmdbMetadata)
+        .await;
     let people = provider.get_item_people(media_type, &tmdb_id).await?;
+    drop(_tmdb_permit);
     let tmdb_person_ids = people
         .iter()
         .filter_map(|person| {
@@ -1637,16 +1667,25 @@ async fn refresh_item_metadata(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn work_limiter_config(state: &AppState) -> Result<WorkLimiterConfig, AppError> {
+    let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+    let config = WorkLimiterConfig {
+        library_scan_limit: startup.library_scan_thread_count.max(1) as u32,
+        media_analysis_limit: startup.strm_analysis_thread_count.max(1) as u32,
+        tmdb_metadata_limit: startup.tmdb_metadata_thread_count.max(1) as u32,
+    };
+    state.work_limiters.configure(config).await;
+    Ok(config)
+}
+
 async fn item_library_options(
     state: &AppState,
     item_id: Uuid,
 ) -> Result<LibraryOptionsDto, AppError> {
-    Ok(
-        repository::get_library_for_media_item(&state.pool, item_id)
-            .await?
-            .map(|library| repository::library_options(&library))
-            .unwrap_or_default(),
-    )
+    Ok(repository::get_library_for_media_item(&state.pool, item_id)
+        .await?
+        .map(|library| repository::library_options(&library))
+        .unwrap_or_default())
 }
 
 fn item_tmdb_provider<'a>(
@@ -1751,7 +1790,12 @@ impl MetadataProvider for RouteProviderRef<'_> {
         episode_number: Option<i32>,
     ) -> Result<Vec<crate::metadata::provider::ExternalRemoteImage>, AppError> {
         self.inner
-            .get_remote_images_for_child(media_type, series_provider_id, season_number, episode_number)
+            .get_remote_images_for_child(
+                media_type,
+                series_provider_id,
+                season_number,
+                episode_number,
+            )
             .await
     }
 }
@@ -1829,6 +1873,7 @@ async fn playback_info(
     let needs_metadata =
         item.video_codec.is_none() || item.audio_codec.is_none() || item.runtime_ticks.is_none();
     if needs_metadata {
+        work_limiter_config(&state).await?;
         let item_path = item.path.clone();
         let path = std::path::Path::new(&item_path);
         if path.exists() {
@@ -1838,6 +1883,10 @@ async fn playback_info(
                     Ok(content) => {
                         if let Some(target_url) = naming::strm_target_from_text(&content) {
                             tracing::debug!("分析.strm文件远程URL: {}", target_url);
+                            let _analysis_permit = state
+                                .work_limiters
+                                .acquire(WorkLimiterKind::MediaAnalysis)
+                                .await;
                             match media_analyzer::analyze_remote_media(&target_url).await {
                                 Ok(analysis) => {
                                     repository::update_media_item_metadata(
@@ -1870,6 +1919,10 @@ async fn playback_info(
                 }
             } else {
                 // 对于普通文件，进行本地分析
+                let _analysis_permit = state
+                    .work_limiters
+                    .acquire(WorkLimiterKind::MediaAnalysis)
+                    .await;
                 match media_analyzer::analyze_media_file(path).await {
                     Ok(analysis) => {
                         repository::update_media_item_metadata(&state.pool, item_id, &analysis)
@@ -2058,8 +2111,10 @@ async fn playback_info(
         let transcoding_container = preferred_transcoding_container(&info);
         let transcoding_sub_protocol =
             preferred_transcoding_sub_protocol(&info, &transcoding_container);
-        let transcoding_video_codec = preferred_transcoding_video_codec(&info, &transcoding_sub_protocol);
-        let transcoding_audio_codec = preferred_transcoding_audio_codec(&info, &transcoding_sub_protocol);
+        let transcoding_video_codec =
+            preferred_transcoding_video_codec(&info, &transcoding_sub_protocol);
+        let transcoding_audio_codec =
+            preferred_transcoding_audio_codec(&info, &transcoding_sub_protocol);
         let transcoding_url = build_transcoding_url(
             &item_emby_id,
             &selected_media_source_id,
@@ -2770,7 +2825,10 @@ fn build_transcoding_url(
     }
 
     if transcoding_sub_protocol.eq_ignore_ascii_case("hls") {
-        format!("/emby/Videos/{item_emby_id}/master.m3u8?{}", params.join("&"))
+        format!(
+            "/emby/Videos/{item_emby_id}/master.m3u8?{}",
+            params.join("&")
+        )
     } else {
         format!(
             "/emby/Videos/{item_emby_id}/stream.{transcoding_container}?{}",

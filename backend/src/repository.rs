@@ -4,13 +4,13 @@ use crate::{
     metadata::models::{ExternalMovieMetadata, ExternalSeriesMetadata},
     metadata::provider::{ExternalEpisodeCatalogItem, ExternalPersonCredit},
     models::{
-        emby_id_to_uuid, uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto, DbLibrary, DbMediaChapter, DbMediaItem,
-        DbMediaStream, DbPerson, DbSeriesEpisodeCatalog, DbUser, DbUserItemData, ExternalUrlDto, GenreDto, ItemCountsDto,
-        LibraryOptionsDto, LogFileDto, MediaItemRow, MediaPathInfoDto, MediaSourceDto, MediaStreamDto,
-        NameIdDto, NameLongIdDto, PersonDto,
-        QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
-        UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
-        BrandingConfiguration, EncodingOptionsDto,
+        emby_id_to_uuid, uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto,
+        BrandingConfiguration, DbLibrary, DbMediaChapter, DbMediaItem, DbMediaStream, DbPerson,
+        DbSeriesEpisodeCatalog, DbUser, DbUserItemData, EncodingOptionsDto, ExternalUrlDto,
+        GenreDto, ItemCountsDto, LibraryOptionsDto, LogFileDto, MediaItemRow, MediaPathInfoDto,
+        MediaSourceDto, MediaStreamDto, NameIdDto, NameLongIdDto, PersonDto, QueryResult,
+        SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest, UserConfigurationDto,
+        UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
     },
     naming, security,
 };
@@ -57,11 +57,10 @@ pub async fn user_count(pool: &sqlx::PgPool) -> Result<i64, AppError> {
 }
 
 pub async fn item_counts(pool: &sqlx::PgPool) -> Result<ItemCountsDto, AppError> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT item_type, COUNT(*)::bigint FROM media_items GROUP BY item_type",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT item_type, COUNT(*)::bigint FROM media_items GROUP BY item_type")
+            .fetch_all(pool)
+            .await?;
 
     let mut counts = ItemCountsDto::default();
     for (item_type, count) in rows {
@@ -325,10 +324,7 @@ pub async fn set_session_viewing(
     set_system_setting(pool, &format!("session_viewing:{session_id}"), value).await
 }
 
-pub async fn delete_session_viewing(
-    pool: &sqlx::PgPool,
-    session_id: &str,
-) -> Result<(), AppError> {
+pub async fn delete_session_viewing(pool: &sqlx::PgPool, session_id: &str) -> Result<(), AppError> {
     sqlx::query("DELETE FROM system_settings WHERE key = $1")
         .bind(format!("session_viewing:{session_id}"))
         .execute(pool)
@@ -445,8 +441,7 @@ fn normalize_startup_configuration(configuration: &mut StartupConfiguration) {
     configuration.metadata_country_code = configuration.metadata_country_code.trim().to_string();
     configuration.preferred_metadata_language =
         configuration.preferred_metadata_language.trim().to_string();
-    configuration.library_scan_thread_count =
-        configuration.library_scan_thread_count.clamp(1, 32);
+    configuration.library_scan_thread_count = configuration.library_scan_thread_count.clamp(1, 32);
     configuration.strm_analysis_thread_count =
         configuration.strm_analysis_thread_count.clamp(1, 64);
     configuration.tmdb_metadata_thread_count =
@@ -454,7 +449,8 @@ fn normalize_startup_configuration(configuration: &mut StartupConfiguration) {
 }
 
 fn normalize_encoding_options(options: &mut EncodingOptionsDto, config: &Config) {
-    options.encoder_location_type = if options.encoder_location_type.eq_ignore_ascii_case("Custom") {
+    options.encoder_location_type = if options.encoder_location_type.eq_ignore_ascii_case("Custom")
+    {
         "Custom".to_string()
     } else {
         "System".to_string()
@@ -518,19 +514,18 @@ pub async fn get_genres(
     _limit: Option<i32>,
 ) -> Result<Vec<GenreDto>, AppError> {
     let query = "SELECT DISTINCT unnest(genres) as name FROM media_items WHERE array_length(genres, 1) > 0 ORDER BY name";
-    
-    let rows = sqlx::query(query)
-        .fetch_all(pool)
-        .await?;
-    
-    let genres: Vec<GenreDto> = rows.iter()
+
+    let rows = sqlx::query(query).fetch_all(pool).await?;
+
+    let genres: Vec<GenreDto> = rows
+        .iter()
         .map(|row| GenreDto {
             name: row.get::<String, _>("name"),
             id: None,
             image_tags: None,
         })
         .collect();
-    
+
     Ok(genres)
 }
 
@@ -547,20 +542,20 @@ pub async fn get_items_by_genre(
         ORDER BY sort_name
         OFFSET $2 LIMIT $3
     ";
-    
+
     let items = sqlx::query_as::<_, DbMediaItem>(query)
         .bind(genre_name)
         .bind(start_index.unwrap_or(0).max(0) as i64)
         .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
         .fetch_all(pool)
         .await?;
-    
+
     let mut item_dtos = Vec::new();
     for item in items {
         let dto = media_item_to_dto(pool, &item, None, server_id).await?;
         item_dtos.push(dto);
     }
-    
+
     Ok(item_dtos)
 }
 
@@ -574,7 +569,7 @@ pub async fn get_persons(
 ) -> Result<Vec<PersonDto>, AppError> {
     let start_index = start_index.unwrap_or(0);
     let limit = limit.unwrap_or(100).min(200); // 限制最大返回200条
-    
+
     let mut query = sqlx::query_as::<_, DbPerson>(
         r#"
         SELECT *
@@ -582,7 +577,7 @@ pub async fn get_persons(
         WHERE 1=1
         "#,
     );
-    
+
     if let Some(name_prefix) = name_starts_with {
         let name_pattern = format!("{}%", name_prefix);
         query = sqlx::query_as::<_, DbPerson>(
@@ -592,7 +587,7 @@ pub async fn get_persons(
             WHERE name ILIKE $1
             ORDER BY name
             LIMIT $2 OFFSET $3
-            "#
+            "#,
         )
         .bind(name_pattern)
         .bind(limit as i64)
@@ -604,19 +599,19 @@ pub async fn get_persons(
             FROM persons
             ORDER BY name
             LIMIT $1 OFFSET $2
-            "#
+            "#,
         )
         .bind(limit as i64)
         .bind(start_index as i64);
     }
-    
+
     let persons = query.fetch_all(pool).await?;
-    
+
     let person_dtos = persons
         .into_iter()
         .map(|person| {
             // 将provider_ids JSON转换为HashMap
-            let provider_ids: Option<std::collections::HashMap<String, String>> = 
+            let provider_ids: Option<std::collections::HashMap<String, String>> =
                 if person.provider_ids.is_null() {
                     None
                 } else {
@@ -625,13 +620,16 @@ pub async fn get_persons(
                         Err(_) => None,
                     }
                 };
-            
+
             PersonDto {
                 name: person.name,
                 id: uuid_to_emby_guid(&person.id),
                 role: None,
                 person_type: None,
-                primary_image_tag: person.primary_image_path.as_ref().map(|_| person.updated_at.timestamp().to_string()),
+                primary_image_tag: person
+                    .primary_image_path
+                    .as_ref()
+                    .map(|_| person.updated_at.timestamp().to_string()),
                 sort_name: person.sort_name,
                 overview: person.overview,
                 external_url: person.external_url,
@@ -639,7 +637,10 @@ pub async fn get_persons(
                 production_year: person.production_year,
                 image_tags: person.primary_image_path.as_ref().map(|_| {
                     let mut tags = std::collections::HashMap::new();
-                    tags.insert("Primary".to_string(), person.updated_at.timestamp().to_string());
+                    tags.insert(
+                        "Primary".to_string(),
+                        person.updated_at.timestamp().to_string(),
+                    );
                     tags
                 }),
                 provider_ids,
@@ -647,7 +648,7 @@ pub async fn get_persons(
             }
         })
         .collect();
-    
+
     Ok(person_dtos)
 }
 
@@ -665,10 +666,10 @@ pub async fn get_person_by_uuid(
     .bind(person_id)
     .fetch_optional(pool)
     .await?;
-    
+
     if let Some(person) = person {
         // 将provider_ids JSON转换为HashMap
-        let provider_ids: Option<std::collections::HashMap<String, String>> = 
+        let provider_ids: Option<std::collections::HashMap<String, String>> =
             if person.provider_ids.is_null() {
                 None
             } else {
@@ -677,13 +678,16 @@ pub async fn get_person_by_uuid(
                     Err(_) => None,
                 }
             };
-        
+
         let person_dto = PersonDto {
             name: person.name,
             id: uuid_to_emby_guid(&person.id),
             role: None,
             person_type: None,
-            primary_image_tag: person.primary_image_path.as_ref().map(|_| person.updated_at.timestamp().to_string()),
+            primary_image_tag: person
+                .primary_image_path
+                .as_ref()
+                .map(|_| person.updated_at.timestamp().to_string()),
             sort_name: person.sort_name,
             overview: person.overview,
             external_url: person.external_url,
@@ -691,23 +695,23 @@ pub async fn get_person_by_uuid(
             production_year: person.production_year,
             image_tags: person.primary_image_path.as_ref().map(|_| {
                 let mut tags = std::collections::HashMap::new();
-                tags.insert("Primary".to_string(), person.updated_at.timestamp().to_string());
+                tags.insert(
+                    "Primary".to_string(),
+                    person.updated_at.timestamp().to_string(),
+                );
                 tags
             }),
             provider_ids,
             favorite: None,
         };
-        
+
         Ok(Some(person_dto))
     } else {
         Ok(None)
     }
 }
 
-pub async fn get_person_by_name(
-    pool: &sqlx::PgPool,
-    name: &str,
-) -> Result<PersonDto, AppError> {
+pub async fn get_person_by_name(pool: &sqlx::PgPool, name: &str) -> Result<PersonDto, AppError> {
     let person = sqlx::query_as::<_, DbPerson>(
         r#"
         SELECT *
@@ -719,10 +723,10 @@ pub async fn get_person_by_name(
     .bind(name)
     .fetch_optional(pool)
     .await?;
-    
+
     if let Some(person) = person {
         // 将provider_ids JSON转换为HashMap
-        let provider_ids: Option<std::collections::HashMap<String, String>> = 
+        let provider_ids: Option<std::collections::HashMap<String, String>> =
             if person.provider_ids.is_null() {
                 None
             } else {
@@ -731,13 +735,16 @@ pub async fn get_person_by_name(
                     Err(_) => None,
                 }
             };
-        
+
         let person_dto = PersonDto {
             name: person.name,
             id: uuid_to_emby_guid(&person.id),
             role: None,
             person_type: None,
-            primary_image_tag: person.primary_image_path.as_ref().map(|_| person.updated_at.timestamp().to_string()),
+            primary_image_tag: person
+                .primary_image_path
+                .as_ref()
+                .map(|_| person.updated_at.timestamp().to_string()),
             sort_name: person.sort_name,
             overview: person.overview,
             external_url: person.external_url,
@@ -745,13 +752,16 @@ pub async fn get_person_by_name(
             production_year: person.production_year,
             image_tags: person.primary_image_path.as_ref().map(|_| {
                 let mut tags = std::collections::HashMap::new();
-                tags.insert("Primary".to_string(), person.updated_at.timestamp().to_string());
+                tags.insert(
+                    "Primary".to_string(),
+                    person.updated_at.timestamp().to_string(),
+                );
                 tags
             }),
             provider_ids,
             favorite: None,
         };
-        
+
         Ok(person_dto)
     } else {
         Err(AppError::NotFound(format!("Person not found: {}", name)))
@@ -836,9 +846,10 @@ pub async fn get_genre_image_path(
     let Some(row) = sqlx::query(&query)
         .bind(genre_name)
         .fetch_optional(pool)
-        .await? else {
-            return Ok(None);
-        };
+        .await?
+    else {
+        return Ok(None);
+    };
 
     if let Some(path) = row.try_get::<Option<String>, _>(image_column)? {
         return Ok(Some(path));
@@ -875,7 +886,8 @@ pub async fn get_items_by_person(
         )
         .bind(person_id_or_name)
         .fetch_optional(pool)
-        .await? else {
+        .await?
+        else {
             return Ok(Vec::new());
         };
         id
@@ -910,15 +922,14 @@ pub async fn get_person_by_external_id(
     provider: &str,
     external_id: &str,
 ) -> Result<Option<DbPerson>, AppError> {
-    let aliases: &[&str] = if provider.eq_ignore_ascii_case("tmdb")
-        || provider.eq_ignore_ascii_case("themoviedb")
-    {
-        &["Tmdb", "TMDb", "tmdb", "TheMovieDb"]
-    } else if provider.eq_ignore_ascii_case("imdb") {
-        &["Imdb", "IMDb", "imdb", "Imdb"]
-    } else {
-        &[]
-    };
+    let aliases: &[&str] =
+        if provider.eq_ignore_ascii_case("tmdb") || provider.eq_ignore_ascii_case("themoviedb") {
+            &["Tmdb", "TMDb", "tmdb", "TheMovieDb"]
+        } else if provider.eq_ignore_ascii_case("imdb") {
+            &["Imdb", "IMDb", "imdb", "Imdb"]
+        } else {
+            &[]
+        };
 
     if aliases.is_empty() {
         return Ok(sqlx::query_as::<_, DbPerson>(
@@ -955,10 +966,7 @@ pub async fn get_person_by_external_id(
     .await?)
 }
 
-pub async fn create_person(
-    pool: &sqlx::PgPool,
-    person: &DbPerson,
-) -> Result<Uuid, AppError> {
+pub async fn create_person(pool: &sqlx::PgPool, person: &DbPerson) -> Result<Uuid, AppError> {
     let result = sqlx::query(
         r#"
         INSERT INTO persons (
@@ -1061,7 +1069,10 @@ pub async fn upsert_person_from_nfo(
         RETURNING id
         "#,
     )
-    .bind(Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("person:{sort_name}").as_bytes()))
+    .bind(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("person:{sort_name}").as_bytes(),
+    ))
     .bind(name)
     .bind(sort_name)
     .bind(provider_ids)
@@ -1123,9 +1134,7 @@ pub async fn upsert_person_role(
     role: Option<&str>,
     sort_order: i32,
 ) -> Result<(), AppError> {
-    let normalized_role = role
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let normalized_role = role.map(str::trim).filter(|value| !value.is_empty());
     let role_key = normalized_role.unwrap_or("<none>");
 
     let updated = sqlx::query(
@@ -1274,21 +1283,29 @@ pub async fn change_user_password(
 }
 
 pub async fn count_admin_users(pool: &sqlx::PgPool) -> Result<i64, AppError> {
-    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_admin = true AND is_disabled = false")
-        .fetch_one(pool)
-        .await?)
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users WHERE is_admin = true AND is_disabled = false",
+    )
+    .fetch_one(pool)
+    .await?)
 }
 
 pub async fn count_enabled_users(pool: &sqlx::PgPool) -> Result<i64, AppError> {
-    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_disabled = false")
-        .fetch_one(pool)
-        .await?)
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE is_disabled = false")
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
-pub async fn update_user_policy(pool: &sqlx::PgPool, user_id: Uuid, policy: &UserPolicyDto) -> Result<(), AppError> {
+pub async fn update_user_policy(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    policy: &UserPolicyDto,
+) -> Result<(), AppError> {
     // 将策略转换为JSON
     let policy_json = serde_json::to_value(policy)?;
-    
+
     // 更新用户策略字段
     sqlx::query(
         r#"
@@ -1392,9 +1409,7 @@ pub async fn update_user_image_path(
         _ => "primary_image_path",
     };
 
-    let query = format!(
-        "UPDATE users SET {column} = $1, date_modified = now() WHERE id = $2"
-    );
+    let query = format!("UPDATE users SET {column} = $1, date_modified = now() WHERE id = $2");
     sqlx::query(&query)
         .bind(path)
         .bind(user_id)
@@ -1449,9 +1464,7 @@ pub async fn update_person_image_path(
         _ => "primary_image_path",
     };
 
-    let query = format!(
-        "UPDATE persons SET {column} = $1, updated_at = now() WHERE id = $2"
-    );
+    let query = format!("UPDATE persons SET {column} = $1, updated_at = now() WHERE id = $2");
     sqlx::query(&query)
         .bind(path)
         .bind(person_id)
@@ -1601,7 +1614,8 @@ pub async fn update_media_item_image_path(
         _ => "image_primary_path",
     };
 
-    let query = format!("UPDATE media_items SET {column} = $1, date_modified = now() WHERE id = $2");
+    let query =
+        format!("UPDATE media_items SET {column} = $1, date_modified = now() WHERE id = $2");
     sqlx::query(&query)
         .bind(path)
         .bind(item_id)
@@ -1620,7 +1634,8 @@ pub async fn list_server_logs(log_dir: &Path) -> Result<Vec<LogFileDto>, AppErro
         .map_err(|error| AppError::Internal(format!("读取日志目录失败: {error}")))?;
 
     for entry in entries {
-        let entry = entry.map_err(|error| AppError::Internal(format!("读取日志文件失败: {error}")))?;
+        let entry =
+            entry.map_err(|error| AppError::Internal(format!("读取日志文件失败: {error}")))?;
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -1834,7 +1849,8 @@ pub async fn rename_library(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
 
-    if !library.name.eq_ignore_ascii_case(new_name) && get_library_by_name(pool, new_name).await?.is_some()
+    if !library.name.eq_ignore_ascii_case(new_name)
+        && get_library_by_name(pool, new_name).await?.is_some()
     {
         return Err(AppError::BadRequest("媒体库名称已存在".to_string()));
     }
@@ -1992,10 +2008,12 @@ pub async fn count_library_items_by_type(
     Ok(i32::try_from(count).unwrap_or(i32::MAX))
 }
 
-pub async fn count_recursive_children(pool: &sqlx::PgPool, parent_id: Uuid) -> Result<i64, AppError> {
-    Ok(
-        sqlx::query_scalar(
-            r#"
+pub async fn count_recursive_children(
+    pool: &sqlx::PgPool,
+    parent_id: Uuid,
+) -> Result<i64, AppError> {
+    Ok(sqlx::query_scalar(
+        r#"
             WITH RECURSIVE descendants AS (
                 SELECT id FROM media_items WHERE parent_id = $1
                 UNION ALL
@@ -2005,11 +2023,10 @@ pub async fn count_recursive_children(pool: &sqlx::PgPool, parent_id: Uuid) -> R
             )
             SELECT COUNT(*) FROM descendants
             "#,
-        )
-        .bind(parent_id)
-        .fetch_one(pool)
-        .await?,
     )
+    .bind(parent_id)
+    .fetch_one(pool)
+    .await?)
 }
 
 pub async fn count_series_seasons(pool: &sqlx::PgPool, series_id: Uuid) -> Result<i32, AppError> {
@@ -2164,9 +2181,7 @@ fn normalize_path_for_compare(path: &str) -> String {
 }
 
 fn paths_conflict(left: &str, right: &str) -> bool {
-    left == right
-        || is_parent_path(left, right)
-        || is_parent_path(right, left)
+    left == right || is_parent_path(left, right) || is_parent_path(right, left)
 }
 
 fn is_parent_path(parent: &str, child: &str) -> bool {
@@ -2399,7 +2414,10 @@ pub async fn list_media_items(
     }
 
     if !options.item_ids.is_empty() {
-        builder.push(" AND id = ANY(").push_bind(options.item_ids).push(")");
+        builder
+            .push(" AND id = ANY(")
+            .push_bind(options.item_ids)
+            .push(")");
     }
 
     if !options.include_types.is_empty() {
@@ -2637,7 +2655,9 @@ pub async fn list_media_items(
 
     if let Some(has_tmdb_id) = options.has_tmdb_id {
         if has_tmdb_id {
-            builder.push(" AND (provider_ids ? 'Tmdb' OR provider_ids ? 'TMDb' OR provider_ids ? 'tmdb')");
+            builder.push(
+                " AND (provider_ids ? 'Tmdb' OR provider_ids ? 'TMDb' OR provider_ids ? 'tmdb')",
+            );
         } else {
             builder.push(" AND NOT (provider_ids ? 'Tmdb' OR provider_ids ? 'TMDb' OR provider_ids ? 'tmdb')");
         }
@@ -2645,7 +2665,9 @@ pub async fn list_media_items(
 
     if let Some(has_imdb_id) = options.has_imdb_id {
         if has_imdb_id {
-            builder.push(" AND (provider_ids ? 'Imdb' OR provider_ids ? 'IMDb' OR provider_ids ? 'imdb')");
+            builder.push(
+                " AND (provider_ids ? 'Imdb' OR provider_ids ? 'IMDb' OR provider_ids ? 'imdb')",
+            );
         } else {
             builder.push(" AND NOT (provider_ids ? 'Imdb' OR provider_ids ? 'IMDb' OR provider_ids ? 'imdb')");
         }
@@ -2696,27 +2718,45 @@ pub async fn list_media_items(
     }
 
     if let Some(min_date) = options.min_premiere_date {
-        builder.push(" AND premiere_date >= ").push_bind(min_date).push("::date");
+        builder
+            .push(" AND premiere_date >= ")
+            .push_bind(min_date)
+            .push("::date");
     }
 
     if let Some(max_date) = options.max_premiere_date {
-        builder.push(" AND premiere_date <= ").push_bind(max_date).push("::date");
+        builder
+            .push(" AND premiere_date <= ")
+            .push_bind(max_date)
+            .push("::date");
     }
 
     if let Some(min_date) = options.min_start_date {
-        builder.push(" AND premiere_date >= ").push_bind(min_date).push("::date");
+        builder
+            .push(" AND premiere_date >= ")
+            .push_bind(min_date)
+            .push("::date");
     }
 
     if let Some(max_date) = options.max_start_date {
-        builder.push(" AND premiere_date <= ").push_bind(max_date).push("::date");
+        builder
+            .push(" AND premiere_date <= ")
+            .push_bind(max_date)
+            .push("::date");
     }
 
     if let Some(min_date) = options.min_end_date {
-        builder.push(" AND end_date >= ").push_bind(min_date).push("::date");
+        builder
+            .push(" AND end_date >= ")
+            .push_bind(min_date)
+            .push("::date");
     }
 
     if let Some(max_date) = options.max_end_date {
-        builder.push(" AND end_date <= ").push_bind(max_date).push("::date");
+        builder
+            .push(" AND end_date <= ")
+            .push_bind(max_date)
+            .push("::date");
     }
 
     if let Some(min_date) = options.min_date_last_saved {
@@ -2856,7 +2896,10 @@ pub async fn list_media_items(
             .push(")");
     }
 
-    if let Some(prefix) = options.name_starts_with.filter(|value| !value.trim().is_empty()) {
+    if let Some(prefix) = options
+        .name_starts_with
+        .filter(|value| !value.trim().is_empty())
+    {
         let pattern = format!("{}%", prefix.trim());
         builder
             .push(" AND (sort_name ILIKE ")
@@ -2876,7 +2919,10 @@ pub async fn list_media_items(
             .push(")");
     }
 
-    if let Some(upper_bound) = options.name_less_than.filter(|value| !value.trim().is_empty()) {
+    if let Some(upper_bound) = options
+        .name_less_than
+        .filter(|value| !value.trim().is_empty())
+    {
         builder
             .push(" AND lower(COALESCE(sort_name, name)) < lower(")
             .push_bind(upper_bound.trim().to_string())
@@ -2959,10 +3005,7 @@ pub async fn list_media_items(
             }
         }
 
-        builder
-            .push(" ")
-            .push(sort_order)
-            .push(" NULLS LAST");
+        builder.push(" ").push(sort_order).push(" NULLS LAST");
     }
 
     builder
@@ -3599,7 +3642,9 @@ pub async fn get_missing_episode_dto(
     .await?;
 
     match row {
-        Some(row) => Ok(Some(missing_episode_row_to_dto(pool, row, user_id, server_id).await?)),
+        Some(row) => Ok(Some(
+            missing_episode_row_to_dto(pool, row, user_id, server_id).await?,
+        )),
         None => Ok(None),
     }
 }
@@ -3731,11 +3776,11 @@ pub async fn get_boxsets_for_item_ids(
             production_locations: item.production_locations.clone(),
             size: None,
             file_name: None,
-              bitrate: None,
-              official_rating: item.official_rating.clone(),
-              community_rating: item.community_rating,
-              critic_rating: None,
-              taglines: Vec::new(),
+            bitrate: None,
+            official_rating: item.official_rating.clone(),
+            community_rating: item.community_rating,
+            critic_rating: None,
+            taglines: Vec::new(),
             remote_trailers: remote_trailers_from_urls(&item.remote_trailers),
             people: Vec::new(),
             studios: name_long_id_items_from_names(&item.studios),
@@ -3746,13 +3791,13 @@ pub async fn get_boxsets_for_item_ids(
             season_count: None,
             series_count: None,
             movie_count: Some(grouped_items.len() as i32),
-              status: None,
-              air_days: Vec::new(),
-              air_time: None,
-              end_date: None,
-              width: item.width,
-              height: item.height,
-              is_movie: Some(false),
+            status: None,
+            air_days: Vec::new(),
+            air_time: None,
+            end_date: None,
+            width: item.width,
+            height: item.height,
+            is_movie: Some(false),
             is_series: Some(false),
             is_live: Some(false),
             is_news: Some(false),
@@ -3962,7 +4007,7 @@ pub async fn get_user_resume_items(
 ) -> Result<(Vec<BaseItemDto>, i64), AppError> {
     let limit = limit.unwrap_or(50).clamp(1, 100);
     let start_index = start_index.unwrap_or(0).max(0);
-    
+
     let total_count: i64 = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT COUNT(*) as count
@@ -3976,7 +4021,7 @@ pub async fn get_user_resume_items(
     .bind(user_id)
     .fetch_one(pool)
     .await?;
-    
+
     let items = sqlx::query_as::<_, DbMediaItem>(
         r#"
         SELECT mi.*,
@@ -3999,7 +4044,7 @@ pub async fn get_user_resume_items(
     .bind(start_index)
     .fetch_all(pool)
     .await?;
-    
+
     let mut dtos = Vec::new();
     for item in items {
         let dto = media_item_to_dto(pool, &item, Some(user_id), server_id).await?;
@@ -4206,7 +4251,8 @@ fn deduplicate_media_items(items: Vec<DbMediaItem>) -> Vec<DbMediaItem> {
 
     for item in items {
         let providers = provider_ids_for_item(&item);
-        let key = item_identity_key(&item, &providers).unwrap_or_else(|| format!("item:{}", item.id));
+        let key =
+            item_identity_key(&item, &providers).unwrap_or_else(|| format!("item:{}", item.id));
         if seen.insert(key) {
             unique.push(item);
         }
@@ -4565,12 +4611,11 @@ pub async fn list_session_commands(
     limit: i64,
     consume: bool,
 ) -> Result<QueryResult<Value>, AppError> {
-    let session_owner = sqlx::query_scalar::<_, Uuid>(
-        "SELECT user_id FROM sessions WHERE access_token = $1",
-    )
-    .bind(session_id)
-    .fetch_optional(pool)
-    .await?;
+    let session_owner =
+        sqlx::query_scalar::<_, Uuid>("SELECT user_id FROM sessions WHERE access_token = $1")
+            .bind(session_id)
+            .fetch_optional(pool)
+            .await?;
 
     let Some(session_owner) = session_owner else {
         return Ok(QueryResult {
@@ -4648,7 +4693,11 @@ fn session_command_to_json(row: SessionCommandRow) -> Value {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(&row.command);
     let arguments = payload_object
-        .and_then(|payload| payload.get("Arguments").or_else(|| payload.get("arguments")))
+        .and_then(|payload| {
+            payload
+                .get("Arguments")
+                .or_else(|| payload.get("arguments"))
+        })
         .cloned()
         .unwrap_or_else(|| json!({}));
 
@@ -4691,7 +4740,10 @@ pub async fn get_display_preferences_template(
 ) -> Result<Option<Value>, AppError> {
     get_system_setting(
         pool,
-        &format!("display_preferences_defaults:{}", client.trim().to_ascii_lowercase()),
+        &format!(
+            "display_preferences_defaults:{}",
+            client.trim().to_ascii_lowercase()
+        ),
     )
     .await
 }
@@ -4903,18 +4955,19 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
     } else {
         UserPolicyDto::default()
     };
-    
+
     // 覆盖关键字段以确保与数据库状态一致
     policy.is_administrator = user.is_admin;
     policy.is_hidden = user.is_hidden;
     policy.is_disabled = user.is_disabled;
 
     let configuration = if !user.configuration.is_null() {
-        serde_json::from_value::<UserConfigurationDto>(user.configuration.clone()).unwrap_or_default()
+        serde_json::from_value::<UserConfigurationDto>(user.configuration.clone())
+            .unwrap_or_default()
     } else {
         UserConfigurationDto::default()
     };
-    
+
     UserDto {
         name: user.name.clone(),
         server_id: uuid_to_emby_guid(&server_id),
@@ -5051,11 +5104,11 @@ pub async fn library_to_item_dto(
         production_locations: Vec::new(),
         size: Some(0),
         file_name: None,
-          bitrate: None,
-          official_rating: None,
-          community_rating: None,
-          critic_rating: None,
-          taglines: Vec::new(),
+        bitrate: None,
+        official_rating: None,
+        community_rating: None,
+        critic_rating: None,
+        taglines: Vec::new(),
         remote_trailers: Vec::new(),
         people: Vec::new(),
         studios: Vec::new(),
@@ -5066,13 +5119,13 @@ pub async fn library_to_item_dto(
         season_count: None,
         series_count: Some(series_count),
         movie_count: Some(movie_count),
-          status: None,
-          air_days: Vec::new(),
-          air_time: None,
-          end_date: None,
-          width: None,
-          height: None,
-          is_movie: Some(false),
+        status: None,
+        air_days: Vec::new(),
+        air_time: None,
+        end_date: None,
+        width: None,
+        height: None,
+        is_movie: Some(false),
         is_series: Some(false),
         is_live: Some(false),
         is_news: Some(false),
@@ -5162,11 +5215,11 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         production_locations: Vec::new(),
         size: Some(0),
         file_name: None,
-          bitrate: None,
-          official_rating: None,
-          community_rating: None,
-          critic_rating: None,
-          taglines: Vec::new(),
+        bitrate: None,
+        official_rating: None,
+        community_rating: None,
+        critic_rating: None,
+        taglines: Vec::new(),
         remote_trailers: Vec::new(),
         people: Vec::new(),
         studios: Vec::new(),
@@ -5177,13 +5230,13 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         season_count: None,
         series_count: None,
         movie_count: None,
-          status: None,
-          air_days: Vec::new(),
-          air_time: None,
-          end_date: None,
-          width: None,
-          height: None,
-          is_movie: Some(false),
+        status: None,
+        air_days: Vec::new(),
+        air_time: None,
+        end_date: None,
+        width: None,
+        height: None,
+        is_movie: Some(false),
         is_series: Some(false),
         is_live: Some(false),
         is_news: Some(false),
@@ -5293,20 +5346,23 @@ pub async fn media_item_to_dto(
         .iter()
         .find(|stream| stream.stream_type == "Video")
         .and_then(|stream| stream.real_frame_rate);
-      let chapters = media_sources
-          .iter()
-          .find(|source| source.source_type == "Default")
-          .or_else(|| media_sources.first())
-          .map(|source| source.chapters.clone())
-          .unwrap_or_default();
-      let video_stream = media_streams
-          .iter()
-          .find(|stream| stream.stream_type.eq_ignore_ascii_case("Video"));
-      let width = item.width.or_else(|| video_stream.and_then(|stream| stream.width));
-      let height = item.height.or_else(|| video_stream.and_then(|stream| stream.height));
-      let primary_image_aspect_ratio =
-          infer_primary_image_aspect_ratio(item, width, height);
-      let item_detail_media_sources = sanitize_media_sources_for_item_detail(media_sources);
+    let chapters = media_sources
+        .iter()
+        .find(|source| source.source_type == "Default")
+        .or_else(|| media_sources.first())
+        .map(|source| source.chapters.clone())
+        .unwrap_or_default();
+    let video_stream = media_streams
+        .iter()
+        .find(|stream| stream.stream_type.eq_ignore_ascii_case("Video"));
+    let width = item
+        .width
+        .or_else(|| video_stream.and_then(|stream| stream.width));
+    let height = item
+        .height
+        .or_else(|| video_stream.and_then(|stream| stream.height));
+    let primary_image_aspect_ratio = infer_primary_image_aspect_ratio(item, width, height);
+    let item_detail_media_sources = sanitize_media_sources_for_item_detail(media_sources);
     let child_count = if is_folder {
         Some(count_item_children(pool, item.id).await?)
     } else {
@@ -5344,33 +5400,57 @@ pub async fn media_item_to_dto(
     let inherited_logo_source = parent_item
         .as_ref()
         .filter(|parent| parent.logo_path.is_some())
-        .or_else(|| series_item.as_ref().filter(|series| series.logo_path.is_some()));
+        .or_else(|| {
+            series_item
+                .as_ref()
+                .filter(|series| series.logo_path.is_some())
+        });
     let inherited_backdrop_source = parent_item
         .as_ref()
         .filter(|parent| parent.backdrop_path.is_some())
-        .or_else(|| series_item.as_ref().filter(|series| series.backdrop_path.is_some()));
+        .or_else(|| {
+            series_item
+                .as_ref()
+                .filter(|series| series.backdrop_path.is_some())
+        });
     let inherited_thumb_source = parent_item
         .as_ref()
         .filter(|parent| parent.thumb_path.is_some())
-        .or_else(|| series_item.as_ref().filter(|series| series.thumb_path.is_some()));
+        .or_else(|| {
+            series_item
+                .as_ref()
+                .filter(|series| series.thumb_path.is_some())
+        });
     let parent_logo_item_id = inherited_logo_source.map(|parent| uuid_to_emby_guid(&parent.id));
-    let parent_logo_image_tag = inherited_logo_source
-        .and_then(|parent| parent.logo_path.as_ref().map(|_| parent.date_modified.timestamp().to_string()));
-    let parent_backdrop_item_id = inherited_backdrop_source.map(|parent| uuid_to_emby_guid(&parent.id));
+    let parent_logo_image_tag = inherited_logo_source.and_then(|parent| {
+        parent
+            .logo_path
+            .as_ref()
+            .map(|_| parent.date_modified.timestamp().to_string())
+    });
+    let parent_backdrop_item_id =
+        inherited_backdrop_source.map(|parent| uuid_to_emby_guid(&parent.id));
     let parent_backdrop_image_tags = inherited_backdrop_source
-        .and_then(|parent| parent.backdrop_path.as_ref().map(|_| vec![parent.date_modified.timestamp().to_string()]))
+        .and_then(|parent| {
+            parent
+                .backdrop_path
+                .as_ref()
+                .map(|_| vec![parent.date_modified.timestamp().to_string()])
+        })
         .unwrap_or_default();
     let parent_thumb_item_id = inherited_thumb_source.map(|parent| uuid_to_emby_guid(&parent.id));
-    let parent_thumb_image_tag = inherited_thumb_source
-        .and_then(|parent| parent.thumb_path.as_ref().map(|_| parent.date_modified.timestamp().to_string()));
-    let series_primary_image_tag = series_item
-        .as_ref()
-        .and_then(|series_item| {
-            series_item
-                .image_primary_path
-                .as_ref()
-                .map(|_| series_item.date_modified.timestamp().to_string())
-        });
+    let parent_thumb_image_tag = inherited_thumb_source.and_then(|parent| {
+        parent
+            .thumb_path
+            .as_ref()
+            .map(|_| parent.date_modified.timestamp().to_string())
+    });
+    let series_primary_image_tag = series_item.as_ref().and_then(|series_item| {
+        series_item
+            .image_primary_path
+            .as_ref()
+            .map(|_| series_item.date_modified.timestamp().to_string())
+    });
     let genre_items = genre_items_from_names(&item.genres);
     let people = get_item_people(pool, item.id).await?;
     let metadata_preferences = metadata_preferences_from_settings(pool).await?;
@@ -5425,11 +5505,13 @@ pub async fn media_item_to_dto(
         container: effective_container(item),
         parent_id: item.parent_id.map(|value| uuid_to_emby_guid(&value)),
         path: Some(item.path.clone()),
-        location_type: Some(if item.path.starts_with("http://") || item.path.starts_with("https://") {
-            "Remote".to_string()
-        } else {
-            "FileSystem".to_string()
-        }),
+        location_type: Some(
+            if item.path.starts_with("http://") || item.path.starts_with("https://") {
+                "Remote".to_string()
+            } else {
+                "FileSystem".to_string()
+            },
+        ),
         run_time_ticks: item.runtime_ticks,
         production_year: item.production_year,
         overview: item.overview.clone(),
@@ -5446,11 +5528,11 @@ pub async fn media_item_to_dto(
         production_locations: item.production_locations.clone(),
         size: Some(item_size(item, is_folder)),
         file_name: item_file_name(item),
-          bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
-          official_rating: item.official_rating.clone(),
-          community_rating: item.community_rating,
-          critic_rating: item.critic_rating,
-          taglines: Vec::new(),
+        bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
+        official_rating: item.official_rating.clone(),
+        community_rating: item.community_rating,
+        critic_rating: item.critic_rating,
+        taglines: Vec::new(),
         remote_trailers: remote_trailers_from_urls(&item.remote_trailers),
         people,
         studios: name_long_id_items_from_names(&item.studios),
@@ -5461,13 +5543,13 @@ pub async fn media_item_to_dto(
         season_count,
         series_count: None,
         movie_count: None,
-          status: item.status.clone(),
-          air_days: item.air_days.clone(),
-          air_time: item.air_time.clone(),
-          end_date: premiere_date_to_utc(item.end_date),
-          width,
-          height,
-          is_movie: Some(item.item_type.eq_ignore_ascii_case("Movie")),
+        status: item.status.clone(),
+        air_days: item.air_days.clone(),
+        air_time: item.air_time.clone(),
+        end_date: premiere_date_to_utc(item.end_date),
+        width,
+        height,
+        is_movie: Some(item.item_type.eq_ignore_ascii_case("Movie")),
         is_series: Some(item.item_type.eq_ignore_ascii_case("Series")),
         is_live: Some(false),
         is_news: Some(false),
@@ -5493,7 +5575,9 @@ pub async fn media_item_to_dto(
         parent_thumb_item_id,
         parent_thumb_image_tag,
         series_primary_image_tag,
-        primary_image_item_id: primary_image_tag.as_ref().map(|_| uuid_to_emby_guid(&item.id)),
+        primary_image_item_id: primary_image_tag
+            .as_ref()
+            .map(|_| uuid_to_emby_guid(&item.id)),
         series_studio: item.studios.first().cloned(),
         user_data,
         media_sources: item_detail_media_sources,
@@ -5501,17 +5585,19 @@ pub async fn media_item_to_dto(
         part_count: if is_folder { 0 } else { 1 },
         chapters,
         locked_fields: Vec::new(),
-          lock_data: false,
-          special_feature_count: Some(0),
-          child_count,
-          primary_image_aspect_ratio,
-          completion_percentage,
-          tags: item.tags.clone(),
-          extra_fields,
-      })
+        lock_data: false,
+        special_feature_count: Some(0),
+        child_count,
+        primary_image_aspect_ratio,
+        completion_percentage,
+        tags: item.tags.clone(),
+        extra_fields,
+    })
 }
 
-fn sanitize_media_sources_for_item_detail(media_sources: Vec<MediaSourceDto>) -> Vec<MediaSourceDto> {
+fn sanitize_media_sources_for_item_detail(
+    media_sources: Vec<MediaSourceDto>,
+) -> Vec<MediaSourceDto> {
     media_sources
         .into_iter()
         .map(|mut source| {
@@ -5555,7 +5641,11 @@ fn emby_extra_fields(
     if let Some(index) = item.parent_index_number {
         fields.insert("SortParentIndexNumber".to_string(), json!(index));
     }
-    if let Some(rating) = item.official_rating.as_ref().filter(|value| !value.trim().is_empty()) {
+    if let Some(rating) = item
+        .official_rating
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
         fields.insert("CustomRating".to_string(), json!(rating));
     }
     if let Some(video_3d_format) = item.tags.iter().find_map(|tag| {
@@ -5572,16 +5662,21 @@ fn emby_extra_fields(
     let artists = people
         .iter()
         .filter(|person| {
-            person
-                .person_type
-                .as_deref()
-                .is_some_and(|kind| matches!(kind.to_ascii_lowercase().as_str(), "artist" | "albumartist" | "musicartist"))
+            person.person_type.as_deref().is_some_and(|kind| {
+                matches!(
+                    kind.to_ascii_lowercase().as_str(),
+                    "artist" | "albumartist" | "musicartist"
+                )
+            })
         })
         .collect::<Vec<_>>();
     if !artists.is_empty() {
         fields.insert(
             "Artists".to_string(),
-            json!(artists.iter().map(|person| person.name.clone()).collect::<Vec<_>>()),
+            json!(artists
+                .iter()
+                .map(|person| person.name.clone())
+                .collect::<Vec<_>>()),
         );
         fields.insert(
             "ArtistItems".to_string(),
@@ -5811,11 +5906,11 @@ where
         production_locations: Vec::new(),
         size: None,
         file_name: None,
-          bitrate: None,
-          official_rating: None,
-          community_rating: None,
-          critic_rating: None,
-          taglines: Vec::new(),
+        bitrate: None,
+        official_rating: None,
+        community_rating: None,
+        critic_rating: None,
+        taglines: Vec::new(),
         remote_trailers: Vec::new(),
         people,
         studios: Vec::new(),
@@ -5826,19 +5921,21 @@ where
         season_count: None,
         series_count: None,
         movie_count: None,
-          status: None,
-          air_days: Vec::new(),
-          air_time: None,
-          end_date: None,
-          width: None,
-          height: None,
-          is_movie: Some(false),
+        status: None,
+        air_days: Vec::new(),
+        air_time: None,
+        end_date: None,
+        width: None,
+        height: None,
+        is_movie: Some(false),
         is_series: Some(false),
         is_live: Some(false),
         is_news: Some(false),
         is_kids: Some(false),
         is_sports: Some(false),
-        is_premiere: row.premiere_date.map(|date| date == Utc::now().date_naive()),
+        is_premiere: row
+            .premiere_date
+            .map(|date| date == Utc::now().date_naive()),
         is_new: None,
         is_repeat: Some(false),
         disabled: Some(false),
@@ -5996,10 +6093,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         supports_transcoding: true,
         direct_stream_url: Some(format!(
             "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
-            item_emby_id,
-            container,
-            media_source_id,
-            media_source_id
+            item_emby_id, container, media_source_id, media_source_id
         )),
         formats: Vec::new(),
         size,
@@ -6049,7 +6143,8 @@ async fn media_sources_for_item(
     item: &DbMediaItem,
     server_id: Uuid,
 ) -> Result<Vec<MediaSourceDto>, AppError> {
-    let mut sources = vec![media_source_for_item_with_type(pool, item, "Default", server_id).await?];
+    let mut sources =
+        vec![media_source_for_item_with_type(pool, item, "Default", server_id).await?];
     let grouped_sources = version_group_items_for_item(pool, item).await?;
     if grouped_sources.len() <= 1 {
         return Ok(sources);
@@ -6061,9 +6156,8 @@ async fn media_sources_for_item(
         } else {
             "Grouping"
         };
-        hydrated_sources.push(
-            media_source_for_item_with_type(pool, source, source_type, server_id).await?,
-        );
+        hydrated_sources
+            .push(media_source_for_item_with_type(pool, source, source_type, server_id).await?);
     }
     sources = hydrated_sources;
 
@@ -6189,7 +6283,10 @@ async fn version_group_items_for_item(
         .await?
     };
 
-    if !grouped_items.iter().any(|candidate| candidate.id == item.id) {
+    if !grouped_items
+        .iter()
+        .any(|candidate| candidate.id == item.id)
+    {
         grouped_items.push(item.clone());
     }
     grouped_items.sort_by_key(|candidate| candidate.date_created);
@@ -6311,7 +6408,10 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             channel_layout: None,
             item_id: Some(uuid_to_emby_guid(&item.id)),
             server_id: None,
-            mime_type: item.audio_codec.as_deref().and_then(mime_type_for_stream_codec),
+            mime_type: item
+                .audio_codec
+                .as_deref()
+                .and_then(mime_type_for_stream_codec),
             subtitle_location_type: None,
         }];
     }
@@ -6369,7 +6469,10 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             channel_layout: None,
             item_id: Some(uuid_to_emby_guid(&item.id)),
             server_id: None,
-            mime_type: item.video_codec.as_deref().and_then(mime_type_for_stream_codec),
+            mime_type: item
+                .video_codec
+                .as_deref()
+                .and_then(mime_type_for_stream_codec),
             subtitle_location_type: None,
         },
         MediaStreamDto {
@@ -6427,7 +6530,10 @@ pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
             channel_layout: None,
             item_id: Some(uuid_to_emby_guid(&item.id)),
             server_id: None,
-            mime_type: item.audio_codec.as_deref().and_then(mime_type_for_stream_codec),
+            mime_type: item
+                .audio_codec
+                .as_deref()
+                .and_then(mime_type_for_stream_codec),
             subtitle_location_type: None,
         },
     ];
@@ -6536,7 +6642,9 @@ fn infer_primary_image_aspect_ratio(
             }
         }
         _ => match (width, height) {
-            (Some(width), Some(height)) if width > 0 && height > 0 => Some(width as f64 / height as f64),
+            (Some(width), Some(height)) if width > 0 && height > 0 => {
+                Some(width as f64 / height as f64)
+            }
             _ => None,
         },
     }
@@ -6630,7 +6738,10 @@ fn nfo_candidates_for_item(item: &DbMediaItem, media_path: &Path) -> Vec<PathBuf
     match item.item_type.as_str() {
         "Movie" | "Trailer" | "Video" => {
             if let Some(parent) = media_path.parent() {
-                if let Some(stem) = media_path.file_stem().map(|value| value.to_string_lossy().to_string()) {
+                if let Some(stem) = media_path
+                    .file_stem()
+                    .map(|value| value.to_string_lossy().to_string())
+                {
                     candidates.push(parent.join(format!("{stem}.nfo")));
                 }
                 candidates.push(parent.join("movie.nfo"));
@@ -6651,7 +6762,10 @@ fn nfo_candidates_for_item(item: &DbMediaItem, media_path: &Path) -> Vec<PathBuf
         }
         "Episode" => {
             if let Some(parent) = media_path.parent() {
-                if let Some(stem) = media_path.file_stem().map(|value| value.to_string_lossy().to_string()) {
+                if let Some(stem) = media_path
+                    .file_stem()
+                    .map(|value| value.to_string_lossy().to_string())
+                {
                     candidates.push(parent.join(format!("{stem}.nfo")));
                 }
                 candidates.push(parent.join("episodedetails.nfo"));
@@ -6664,7 +6778,10 @@ fn nfo_candidates_for_item(item: &DbMediaItem, media_path: &Path) -> Vec<PathBuf
         }
         _ => {
             if let Some(parent) = media_path.parent() {
-                if let Some(stem) = media_path.file_stem().map(|value| value.to_string_lossy().to_string()) {
+                if let Some(stem) = media_path
+                    .file_stem()
+                    .map(|value| value.to_string_lossy().to_string())
+                {
                     candidates.push(parent.join(format!("{stem}.nfo")));
                 }
             }
@@ -6692,15 +6809,20 @@ fn provider_ids_from_nfo_text(xml: &str) -> BTreeMap<String, String> {
 
     if let Ok(regex) = Regex::new(r#"(?is)<uniqueid\b([^>]*)>(.*?)</uniqueid>"#) {
         for captures in regex.captures_iter(xml) {
-            let attrs = captures.get(1).map(|value| value.as_str()).unwrap_or_default();
-            let raw_value = captures.get(2).map(|value| value.as_str()).unwrap_or_default();
+            let attrs = captures
+                .get(1)
+                .map(|value| value.as_str())
+                .unwrap_or_default();
+            let raw_value = captures
+                .get(2)
+                .map(|value| value.as_str())
+                .unwrap_or_default();
             let value = strip_xml_tags(raw_value).trim().to_string();
             if value.is_empty() {
                 continue;
             }
 
-            let provider = uniqueid_provider_name(attrs)
-                .unwrap_or_else(|| "Unknown".to_string());
+            let provider = uniqueid_provider_name(attrs).unwrap_or_else(|| "Unknown".to_string());
             providers.entry(provider).or_insert(value);
         }
     }
@@ -6710,7 +6832,11 @@ fn provider_ids_from_nfo_text(xml: &str) -> BTreeMap<String, String> {
 
 fn first_tag_value(xml: &str, names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| {
-        let pattern = format!(r"(?is)<{}\b[^>]*>(.*?)</{}>", regex::escape(name), regex::escape(name));
+        let pattern = format!(
+            r"(?is)<{}\b[^>]*>(.*?)</{}>",
+            regex::escape(name),
+            regex::escape(name)
+        );
         let regex = Regex::new(&pattern).ok()?;
         let capture = regex.captures(xml)?;
         let raw = capture.get(1)?.as_str();
@@ -6729,7 +6855,12 @@ fn strip_xml_tags(value: &str) -> String {
 
 fn uniqueid_provider_name(attrs: &str) -> Option<String> {
     let regex = Regex::new(r#"(?i)\b(?:type|provider)\s*=\s*["']([^"']+)["']"#).ok()?;
-    let raw = regex.captures(attrs)?.get(1)?.as_str().trim().to_ascii_lowercase();
+    let raw = regex
+        .captures(attrs)?
+        .get(1)?
+        .as_str()
+        .trim()
+        .to_ascii_lowercase();
     let provider = match raw.as_str() {
         "imdb" => "Imdb",
         "tmdb" | "themoviedb" => "Tmdb",
@@ -6795,9 +6926,8 @@ fn item_identity_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -
     let identity_base = base.or(fallback);
 
     match item.item_type.as_str() {
-        "Season" => identity_base.map(|value| {
-            format!("{value}:season:{}", item.index_number.unwrap_or_default())
-        }),
+        "Season" => identity_base
+            .map(|value| format!("{value}:season:{}", item.index_number.unwrap_or_default())),
         "Episode" => identity_base.map(|value| {
             if item.index_number.is_none() && item.index_number_end.is_none() {
                 if let Some(date) = item.premiere_date {
@@ -6852,40 +6982,45 @@ fn parent_folder_name(path: &str) -> Option<String> {
 }
 
 fn presentation_unique_key(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> String {
-    let source = item_identity_key(item, providers).unwrap_or_else(|| match item.item_type.as_str() {
-        "Season" => format!(
-            "item:{}:season:{}",
-            item.id,
-            item.index_number.unwrap_or_default()
-        ),
-        "Episode" => format!(
-            "item:{}:season:{}:episode:{}:{}",
-            item.id,
-            item.parent_index_number.unwrap_or_default(),
-            item.index_number.unwrap_or_default(),
-            item.index_number_end.unwrap_or_default()
-        ),
-        _ => format!("item:{}", item.id),
-    });
-    format!("{}_", uuid_to_emby_guid(&Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes())))
+    let source =
+        item_identity_key(item, providers).unwrap_or_else(|| match item.item_type.as_str() {
+            "Season" => format!(
+                "item:{}:season:{}",
+                item.id,
+                item.index_number.unwrap_or_default()
+            ),
+            "Episode" => format!(
+                "item:{}:season:{}:episode:{}:{}",
+                item.id,
+                item.parent_index_number.unwrap_or_default(),
+                item.index_number.unwrap_or_default(),
+                item.index_number_end.unwrap_or_default()
+            ),
+            _ => format!("item:{}", item.id),
+        });
+    format!(
+        "{}_",
+        uuid_to_emby_guid(&Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes()))
+    )
 }
 
 fn display_preferences_id(item: &DbMediaItem, providers: &BTreeMap<String, String>) -> String {
-    let source = item_identity_key(item, providers).unwrap_or_else(|| match item.item_type.as_str() {
-        "Season" => format!(
-            "item:{}:season:{}",
-            item.id,
-            item.index_number.unwrap_or_default()
-        ),
-        "Episode" => format!(
-            "item:{}:season:{}:episode:{}:{}",
-            item.id,
-            item.parent_index_number.unwrap_or_default(),
-            item.index_number.unwrap_or_default(),
-            item.index_number_end.unwrap_or_default()
-        ),
-        _ => format!("item:{}", item.id),
-    });
+    let source =
+        item_identity_key(item, providers).unwrap_or_else(|| match item.item_type.as_str() {
+            "Season" => format!(
+                "item:{}:season:{}",
+                item.id,
+                item.index_number.unwrap_or_default()
+            ),
+            "Episode" => format!(
+                "item:{}:season:{}:episode:{}:{}",
+                item.id,
+                item.parent_index_number.unwrap_or_default(),
+                item.index_number.unwrap_or_default(),
+                item.index_number_end.unwrap_or_default()
+            ),
+            _ => format!("item:{}", item.id),
+        });
     uuid_to_emby_guid(&Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes()))
 }
 
@@ -7036,7 +7171,10 @@ async fn get_item_people(pool: &sqlx::PgPool, item_id: Uuid) -> Result<Vec<Perso
         .map(|row| {
             let image_tags = row.primary_image_path.as_ref().map(|_| {
                 let mut tags = std::collections::HashMap::new();
-                tags.insert("Primary".to_string(), row.updated_at.timestamp().to_string());
+                tags.insert(
+                    "Primary".to_string(),
+                    row.updated_at.timestamp().to_string(),
+                );
                 tags
             });
             let provider_ids: Option<std::collections::HashMap<String, String>> =
@@ -7133,7 +7271,10 @@ fn effective_container(item: &DbMediaItem) -> Option<String> {
     let strm_target = naming::is_strm(local_path)
         .then(|| naming::read_strm_target(local_path))
         .flatten();
-    Some(effective_container_from_target(item, strm_target.as_deref()))
+    Some(effective_container_from_target(
+        item,
+        strm_target.as_deref(),
+    ))
 }
 
 fn effective_container_from_target(item: &DbMediaItem, strm_target: Option<&str>) -> String {
@@ -7507,7 +7648,7 @@ pub async fn get_media_streams(
     .bind(media_item_id)
     .fetch_all(pool)
     .await?;
-    
+
     Ok(streams)
 }
 
@@ -7539,7 +7680,7 @@ pub async fn get_media_source_with_streams(
     // 获取媒体流
     let db_streams = get_media_streams(pool, item.id).await?;
     let db_chapters = get_media_chapters(pool, item.id).await?;
-    
+
     // 转换DbMediaStream为MediaStreamDto
     let mut media_streams = Vec::new();
     let mut total_bitrate: i32 = 0;
@@ -7553,9 +7694,10 @@ pub async fn get_media_source_with_streams(
             "subtitle" => "Subtitle".to_string(),
             _ => stream.stream_type.clone(),
         };
-        
+
         let display_language = display_language(stream.language.as_deref());
-        let display_title = display_title_for_stream(stream, &stream_type, display_language.as_deref());
+        let display_title =
+            display_title_for_stream(stream, &stream_type, display_language.as_deref());
 
         // 根据流类型设置交付方法和字幕位置类型
         let (delivery_method, delivery_url, subtitle_location_type) = if stream_type == "Subtitle" {
@@ -7569,14 +7711,22 @@ pub async fn get_media_source_with_streams(
                     stream.index,
                     stream.codec.as_deref().unwrap_or("sub")
                 ));
-                (Some("External".to_string()), delivery_url, Some("External".to_string()))
+                (
+                    Some("External".to_string()),
+                    delivery_url,
+                    Some("External".to_string()),
+                )
             } else {
-                (Some("Embed".to_string()), None, Some("InternalStream".to_string()))
+                (
+                    Some("Embed".to_string()),
+                    None,
+                    Some("InternalStream".to_string()),
+                )
             }
         } else {
             (None, None, None)
         };
-        
+
         media_streams.push(MediaStreamDto {
             index: stream.index,
             stream_type,
@@ -7633,18 +7783,15 @@ pub async fn get_media_source_with_streams(
             subtitle_location_type,
         });
     }
-    
+
     // 如果没有媒体流，则回退到旧的逻辑
     if media_streams.is_empty() {
         let mut dto = media_source_for_item(item);
         dto.server_id = Some(uuid_to_emby_guid(&server_id));
-        dto.chapters = db_chapters
-            .iter()
-            .map(chapter_to_value)
-            .collect();
+        dto.chapters = db_chapters.iter().map(chapter_to_value).collect();
         return Ok(dto);
     }
-    
+
     let local_path = Path::new(&item.path);
     let strm_target = naming::is_strm(local_path)
         .then(|| naming::read_strm_target(local_path))
@@ -7676,27 +7823,32 @@ pub async fn get_media_source_with_streams(
         supports_transcoding: true,
         direct_stream_url: Some(format!(
             "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
-            item_emby_id,
-            container,
-            media_source_id,
-            media_source_id
+            item_emby_id, container, media_source_id, media_source_id
         )),
         formats: vec![container.clone()],
         size,
         e_tag: Some(item.date_modified.timestamp().to_string()),
         bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
-        default_audio_stream_index: media_streams.iter()
+        default_audio_stream_index: media_streams
+            .iter()
             .find(|s| s.stream_type == "Audio" && s.is_default)
             .map(|s| s.index)
-            .or_else(|| media_streams.iter()
-                .find(|s| s.stream_type == "Audio")
-                .map(|s| s.index)),
-        default_subtitle_stream_index: media_streams.iter()
+            .or_else(|| {
+                media_streams
+                    .iter()
+                    .find(|s| s.stream_type == "Audio")
+                    .map(|s| s.index)
+            }),
+        default_subtitle_stream_index: media_streams
+            .iter()
             .find(|s| s.stream_type == "Subtitle" && s.is_default)
             .map(|s| s.index)
-            .or_else(|| media_streams.iter()
-                .find(|s| s.stream_type == "Subtitle")
-                .map(|s| s.index)),
+            .or_else(|| {
+                media_streams
+                    .iter()
+                    .find(|s| s.stream_type == "Subtitle")
+                    .map(|s| s.index)
+            }),
         run_time_ticks: item.runtime_ticks,
         container_start_time_ticks: None,
         is_infinite_stream: Some(false),
@@ -7709,9 +7861,7 @@ pub async fn get_media_source_with_streams(
         supports_probing: Some(true),
         video_3d_format: None,
         timestamp: None,
-        required_http_headers: BTreeMap::from([
-            ("Accept-Ranges".to_string(), "bytes".to_string()),
-        ]),
+        required_http_headers: BTreeMap::from([("Accept-Ranges".to_string(), "bytes".to_string())]),
         add_api_key_to_direct_stream_url: Some(false),
         transcoding_url: None,
         transcoding_sub_protocol: None,
@@ -7749,15 +7899,23 @@ pub async fn save_media_streams(
             _ => "unknown",
         };
 
-        let bit_rate = stream.bit_rate.as_deref().and_then(|br| br.parse::<i32>().ok());
-        let sample_rate = stream.sample_rate.as_deref().and_then(|sr| sr.parse::<i32>().ok());
+        let bit_rate = stream
+            .bit_rate
+            .as_deref()
+            .and_then(|br| br.parse::<i32>().ok());
+        let sample_rate = stream
+            .sample_rate
+            .as_deref()
+            .and_then(|sr| sr.parse::<i32>().ok());
 
         // 检查是否为默认轨道（从tags中获取）
         let is_default = stream.is_default;
         let is_forced = stream.is_forced;
 
         // 提取codec_tag和title
-        let codec_tag = stream.tags.as_ref()
+        let codec_tag = stream
+            .tags
+            .as_ref()
             .and_then(|tags| tags.get("codec_tag_string"))
             .and_then(|v| v.as_str())
             .map(String::from);
@@ -7765,8 +7923,13 @@ pub async fn save_media_streams(
 
         // 提取其他字段
         let profile = stream.profile.clone();
-        let bit_depth = stream.tags.as_ref()
-            .and_then(|tags| tags.get("bits_per_raw_sample").or_else(|| tags.get("bits_per_sample")))
+        let bit_depth = stream
+            .tags
+            .as_ref()
+            .and_then(|tags| {
+                tags.get("bits_per_raw_sample")
+                    .or_else(|| tags.get("bits_per_sample"))
+            })
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<i32>().ok());
         let aspect_ratio = stream.aspect_ratio.clone();
@@ -7777,49 +7940,70 @@ pub async fn save_media_streams(
         let color_space = stream.color_space.clone();
         let color_transfer = stream.color_transfer.clone();
         let color_primaries = stream.color_primaries.clone();
-        let rotation = stream.tags.as_ref()
+        let rotation = stream
+            .tags
+            .as_ref()
             .and_then(|tags| tags.get("rotation"))
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<i32>().ok());
-        let hdr10_plus_present_flag = stream.tags.as_ref()
+        let hdr10_plus_present_flag = stream
+            .tags
+            .as_ref()
             .and_then(|tags| tags.get("hdr10_plus_present_flag"))
             .and_then(|v| v.as_bool());
-        let dv_version_major = stream.tags.as_ref()
+        let dv_version_major = stream
+            .tags
+            .as_ref()
             .and_then(|tags| tags.get("dv_version_major"))
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<i32>().ok());
-        let dv_version_minor = stream.tags.as_ref()
+        let dv_version_minor = stream
+            .tags
+            .as_ref()
             .and_then(|tags| tags.get("dv_version_minor"))
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<i32>().ok());
-        let dv_profile = stream.tags.as_ref()
+        let dv_profile = stream
+            .tags
+            .as_ref()
             .and_then(|tags| tags.get("dv_profile"))
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<i32>().ok());
-        let dv_level = stream.tags.as_ref()
+        let dv_level = stream
+            .tags
+            .as_ref()
             .and_then(|tags| tags.get("dv_level"))
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<i32>().ok());
-        let dv_bl_signal_compatibility_id = stream.tags.as_ref()
+        let dv_bl_signal_compatibility_id = stream
+            .tags
+            .as_ref()
             .and_then(|tags| tags.get("dv_bl_signal_compatibility_id"))
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<i32>().ok());
-        let comment = stream.tags.as_ref()
+        let comment = stream
+            .tags
+            .as_ref()
             .and_then(|tags| tags.get("comment"))
             .and_then(|v| v.as_str())
             .map(String::from);
-        let time_base = stream.tags.as_ref()
+        let time_base = stream
+            .tags
+            .as_ref()
             .and_then(|tags| tags.get("time_base"))
             .and_then(|v| v.as_str())
             .map(String::from);
-        let codec_time_base = stream.tags.as_ref()
+        let codec_time_base = stream
+            .tags
+            .as_ref()
             .and_then(|tags| tags.get("codec_time_base"))
             .and_then(|v| v.as_str())
             .map(String::from);
-        
+
         let attachment_size = stream.attachment_size;
         let extended_video_sub_type = stream.extended_video_sub_type.clone();
-        let extended_video_sub_type_description = stream.extended_video_sub_type_description.clone();
+        let extended_video_sub_type_description =
+            stream.extended_video_sub_type_description.clone();
         let extended_video_type = stream.extended_video_type.clone();
         let is_anamorphic = stream.is_anamorphic;
         let is_avc = stream.is_avc;
@@ -7853,7 +8037,7 @@ pub async fn save_media_streams(
             "#,
         )
         .bind(media_item_id)
-        .bind(stream.index)  // 使用流的原始索引
+        .bind(stream.index) // 使用流的原始索引
         .bind(stream_type)
         .bind(stream.codec_name.clone())
         .bind(codec_tag)
@@ -7956,7 +8140,8 @@ fn display_title_for_stream(
 ) -> Option<String> {
     if stream_type == "Audio" {
         let codec = stream.codec.as_deref().unwrap_or("Unknown").to_uppercase();
-        let lang = display_language.unwrap_or_else(|| stream.language.as_deref().unwrap_or("Unknown"));
+        let lang =
+            display_language.unwrap_or_else(|| stream.language.as_deref().unwrap_or("Unknown"));
         let channels = format_audio_channels(stream.channel_layout.as_deref(), stream.channels);
         let mut title = if let Some(channels) = channels {
             format!("{lang} {codec} {channels}")
@@ -7970,7 +8155,8 @@ fn display_title_for_stream(
     }
 
     if stream_type == "Subtitle" {
-        let lang = display_language.unwrap_or_else(|| stream.language.as_deref().unwrap_or("Unknown"));
+        let lang =
+            display_language.unwrap_or_else(|| stream.language.as_deref().unwrap_or("Unknown"));
         let codec = stream.codec.as_deref().unwrap_or("Unknown").to_uppercase();
         let mut title = format!("{lang} ({codec})");
         if stream.is_forced {
@@ -8063,7 +8249,7 @@ pub async fn find_similar_items(
     // 2. 匹配相同类型（电影、电视剧等）
     // 3. 匹配共同标签（genres）
     // 4. 按生产年份相近排序
-    
+
     // 如果目标项目没有标签，则只按类型和年份查找
     if target_item.genres.is_empty() {
         let similar_items = sqlx::query_as::<_, DbMediaItem>(
@@ -8084,7 +8270,7 @@ pub async fn find_similar_items(
         .bind(limit)
         .fetch_all(pool)
         .await?;
-        
+
         let mut result = Vec::new();
         for item in similar_items {
             if same_item_identity(target_identity.as_deref(), &item) {
@@ -8097,7 +8283,7 @@ pub async fn find_similar_items(
         }
         return Ok(result);
     }
-    
+
     // 查找有共同标签的项目
     // 使用数组重叠操作符 && 来查找有共同标签的项目
     let similar_items = sqlx::query_as::<_, DbMediaItem>(
@@ -8128,7 +8314,7 @@ pub async fn find_similar_items(
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    
+
     let mut result = Vec::new();
     for item in similar_items {
         if same_item_identity(target_identity.as_deref(), &item) {
@@ -8139,14 +8325,15 @@ pub async fn find_similar_items(
             break;
         }
     }
-    
+
     // 如果找到的项目不足限制数量，则用相同类型的其他项目补充
     if result.len() < limit as usize {
         let remaining_limit = limit - result.len() as i64;
-        let exclude_ids: Vec<Uuid> = result.iter()
+        let exclude_ids: Vec<Uuid> = result
+            .iter()
             .filter_map(|dto| Uuid::parse_str(&dto.id).ok())
             .collect();
-        
+
         let additional_items = sqlx::query_as::<_, DbMediaItem>(
             r#"
             SELECT *
@@ -8178,7 +8365,7 @@ pub async fn find_similar_items(
             }
         }
     }
-    
+
     Ok(result)
 }
 

@@ -487,7 +487,14 @@ async fn serve_media_item(
 
                 match state
                     .transcoder
-                    .start_transcoding(item_id, user_id, &device_id, transcoding_query, encoding_options, &path)
+                    .start_transcoding(
+                        item_id,
+                        user_id,
+                        &device_id,
+                        transcoding_query,
+                        encoding_options,
+                        &path,
+                    )
                     .await
                 {
                     Ok(session) => {

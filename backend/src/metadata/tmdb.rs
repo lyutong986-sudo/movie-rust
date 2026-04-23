@@ -96,7 +96,10 @@ impl TmdbProvider {
     }
 
     /// 搜索人物
-    async fn search_person_internal(&self, name: &str) -> Result<TmdbPersonSearchResponse, AppError> {
+    async fn search_person_internal(
+        &self,
+        name: &str,
+    ) -> Result<TmdbPersonSearchResponse, AppError> {
         let mut params = HashMap::new();
         self.add_api_key(&mut params);
         params.insert("query".to_string(), name.to_string());
@@ -115,7 +118,10 @@ impl TmdbProvider {
     }
 
     /// 获取人物详细信息
-    async fn get_person_details_internal(&self, person_id: &str) -> Result<TmdbPersonDetails, AppError> {
+    async fn get_person_details_internal(
+        &self,
+        person_id: &str,
+    ) -> Result<TmdbPersonDetails, AppError> {
         let mut params = HashMap::new();
         self.add_api_key(&mut params);
 
@@ -133,7 +139,10 @@ impl TmdbProvider {
     }
 
     /// 获取人物作品
-    async fn get_person_credits_internal(&self, person_id: &str) -> Result<TmdbPersonCredits, AppError> {
+    async fn get_person_credits_internal(
+        &self,
+        person_id: &str,
+    ) -> Result<TmdbPersonCredits, AppError> {
         let mut params = HashMap::new();
         self.add_api_key(&mut params);
 
@@ -150,8 +159,10 @@ impl TmdbProvider {
         Ok(credits)
     }
 
-
-    async fn get_movie_details_internal(&self, movie_id: &str) -> Result<TmdbMovieDetails, AppError> {
+    async fn get_movie_details_internal(
+        &self,
+        movie_id: &str,
+    ) -> Result<TmdbMovieDetails, AppError> {
         let mut params = HashMap::new();
         self.add_api_key(&mut params);
         params.insert(
@@ -188,7 +199,10 @@ impl TmdbProvider {
         Ok(response.json().await?)
     }
 
-    async fn get_movie_images_internal(&self, movie_id: &str) -> Result<TmdbImageCollection, AppError> {
+    async fn get_movie_images_internal(
+        &self,
+        movie_id: &str,
+    ) -> Result<TmdbImageCollection, AppError> {
         let mut params = HashMap::new();
         self.add_api_key(&mut params);
         params.insert(
@@ -292,7 +306,7 @@ impl MetadataProvider for TmdbProvider {
 
     async fn search_person(&self, name: &str) -> Result<Vec<ExternalPersonSearchResult>, AppError> {
         let search_result = self.search_person_internal(name).await?;
-        
+
         let results = search_result
             .results
             .into_iter()
@@ -303,7 +317,9 @@ impl MetadataProvider for TmdbProvider {
                 sort_name: None,
                 overview: None, // TMDB搜索不提供简介
                 external_url: Some(format!("https://www.themoviedb.org/person/{}", person.id)),
-                image_url: person.profile_path.map(|path| format!("{}/original{}", self.config.image_base_url, path)),
+                image_url: person
+                    .profile_path
+                    .map(|path| format!("{}/original{}", self.config.image_base_url, path)),
                 known_for: person
                     .known_for
                     .unwrap_or_default()
@@ -320,21 +336,23 @@ impl MetadataProvider for TmdbProvider {
 
     async fn get_person_details(&self, provider_id: &str) -> Result<ExternalPerson, AppError> {
         let person_details = self.get_person_details_internal(provider_id).await?;
-        
+
         let mut provider_ids = HashMap::new();
         provider_ids.insert("Tmdb".to_string(), person_details.id.to_string());
-        
+
         if let Some(imdb_id) = &person_details.imdb_id {
             provider_ids.insert("Imdb".to_string(), imdb_id.clone());
         }
 
-        let birth_date = person_details.birthday.clone().and_then(|date| {
-            chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()
-        });
+        let birth_date = person_details
+            .birthday
+            .clone()
+            .and_then(|date| chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok());
 
-        let death_date = person_details.deathday.clone().and_then(|date| {
-            chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()
-        });
+        let death_date = person_details
+            .deathday
+            .clone()
+            .and_then(|date| chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok());
 
         let metadata = serde_json::to_value(&person_details).unwrap_or_default();
         let external_person = ExternalPerson {
@@ -343,11 +361,16 @@ impl MetadataProvider for TmdbProvider {
             name: person_details.name,
             sort_name: None,
             overview: Some(person_details.biography),
-            external_url: Some(format!("https://www.themoviedb.org/person/{}", person_details.id)),
+            external_url: Some(format!(
+                "https://www.themoviedb.org/person/{}",
+                person_details.id
+            )),
             birth_date,
             death_date,
             place_of_birth: person_details.place_of_birth,
-            image_url: person_details.profile_path.map(|path| format!("{}/original{}", self.config.image_base_url, path)),
+            image_url: person_details
+                .profile_path
+                .map(|path| format!("{}/original{}", self.config.image_base_url, path)),
             homepage_url: person_details.homepage,
             popularity: Some(person_details.popularity),
             adult: Some(person_details.adult),
@@ -358,9 +381,12 @@ impl MetadataProvider for TmdbProvider {
         Ok(external_person)
     }
 
-    async fn get_person_credits(&self, provider_id: &str) -> Result<Vec<ExternalPersonCredit>, AppError> {
+    async fn get_person_credits(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<ExternalPersonCredit>, AppError> {
         let credits = self.get_person_credits_internal(provider_id).await?;
-        
+
         let mut results = Vec::new();
 
         // 处理电影作品
@@ -368,14 +394,16 @@ impl MetadataProvider for TmdbProvider {
             let role_type = "Actor".to_string();
             let is_featured = cast.order.map(|o| o <= 10).unwrap_or(false);
             let is_leading_role = cast.order.map(|o| o <= 5).unwrap_or(false);
-            
+
             let media_type = if cast.media_type == "tv" {
                 "tv".to_string()
             } else {
                 "movie".to_string()
             };
 
-            let year = cast.release_date.or(cast.first_air_date)
+            let year = cast
+                .release_date
+                .or(cast.first_air_date)
                 .and_then(|date| date.split('-').next().map(str::to_string))
                 .and_then(|year_str| year_str.parse::<i32>().ok());
 
@@ -404,7 +432,8 @@ impl MetadataProvider for TmdbProvider {
                 "Director of Photography" => "Cinematographer",
                 "Editor" => "Editor",
                 _ => "Other",
-            }.to_string();
+            }
+            .to_string();
 
             let media_type = if crew.media_type == "tv" {
                 "tv".to_string()
@@ -412,7 +441,9 @@ impl MetadataProvider for TmdbProvider {
                 "movie".to_string()
             };
 
-            let year = crew.release_date.or(crew.first_air_date)
+            let year = crew
+                .release_date
+                .or(crew.first_air_date)
                 .and_then(|date| date.split('-').next().map(str::to_string))
                 .and_then(|year_str| year_str.parse::<i32>().ok());
 
@@ -434,7 +465,10 @@ impl MetadataProvider for TmdbProvider {
         Ok(results)
     }
 
-    async fn get_series_details(&self, provider_id: &str) -> Result<ExternalSeriesMetadata, AppError> {
+    async fn get_series_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<ExternalSeriesMetadata, AppError> {
         let details = self.get_tv_details_internal(provider_id).await?;
         let first_air_date = parse_tmdb_date(details.first_air_date.as_deref());
         let last_air_date = parse_tmdb_date(details.last_air_date.as_deref());
@@ -442,12 +476,18 @@ impl MetadataProvider for TmdbProvider {
             .next_episode_to_air
             .as_ref()
             .and_then(|episode| parse_tmdb_date(episode.air_date.as_deref()));
-        let inferred_air_day = next_air_date.or(last_air_date).map(|date| weekday_name(date.weekday()));
+        let inferred_air_day = next_air_date
+            .or(last_air_date)
+            .map(|date| weekday_name(date.weekday()));
 
         let mut provider_ids = HashMap::new();
         provider_ids.insert("Tmdb".to_string(), details.id.to_string());
         if let Some(external_ids) = &details.external_ids {
-            if let Some(value) = external_ids.imdb_id.as_ref().filter(|value| !value.trim().is_empty()) {
+            if let Some(value) = external_ids
+                .imdb_id
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 provider_ids.insert("Imdb".to_string(), value.clone());
             }
             if let Some(value) = external_ids.tvdb_id {
@@ -463,7 +503,9 @@ impl MetadataProvider for TmdbProvider {
             original_title: details.original_name,
             overview: details.overview,
             premiere_date: first_air_date,
-            status: details.status.and_then(|value| normalize_tmdb_series_status(&value)),
+            status: details
+                .status
+                .and_then(|value| normalize_tmdb_series_status(&value)),
             end_date: last_air_date,
             air_days: inferred_air_day.into_iter().collect(),
             air_time: None,
@@ -474,7 +516,12 @@ impl MetadataProvider for TmdbProvider {
                 .networks
                 .into_iter()
                 .map(|network| network.name)
-                .chain(details.production_companies.into_iter().map(|company| company.name))
+                .chain(
+                    details
+                        .production_companies
+                        .into_iter()
+                        .map(|company| company.name),
+                )
                 .filter(|name| !name.trim().is_empty())
                 .collect(),
             production_locations: details.origin_country,
@@ -484,16 +531,25 @@ impl MetadataProvider for TmdbProvider {
         })
     }
 
-    async fn get_movie_details(&self, provider_id: &str) -> Result<ExternalMovieMetadata, AppError> {
+    async fn get_movie_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<ExternalMovieMetadata, AppError> {
         let details = self.get_movie_details_internal(provider_id).await?;
         let premiere_date = parse_tmdb_date(details.release_date.as_deref());
-        let runtime_ticks = details.runtime.map(|minutes| i64::from(minutes) * 60 * 10_000_000);
+        let runtime_ticks = details
+            .runtime
+            .map(|minutes| i64::from(minutes) * 60 * 10_000_000);
         let official_rating = tmdb_movie_certification(&details.release_dates);
 
         let mut provider_ids = HashMap::new();
         provider_ids.insert("Tmdb".to_string(), details.id.to_string());
         if let Some(external_ids) = &details.external_ids {
-            if let Some(value) = external_ids.imdb_id.as_ref().filter(|value| !value.trim().is_empty()) {
+            if let Some(value) = external_ids
+                .imdb_id
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+            {
                 provider_ids.insert("Imdb".to_string(), value.clone());
             }
         }
@@ -547,13 +603,12 @@ impl MetadataProvider for TmdbProvider {
         media_type: &str,
         provider_id: &str,
     ) -> Result<Vec<ExternalItemPerson>, AppError> {
-        let credits = if media_type.eq_ignore_ascii_case("tv")
-            || media_type.eq_ignore_ascii_case("series")
-        {
-            self.get_tv_credits_internal(provider_id).await?
-        } else {
-            self.get_movie_credits_internal(provider_id).await?
-        };
+        let credits =
+            if media_type.eq_ignore_ascii_case("tv") || media_type.eq_ignore_ascii_case("series") {
+                self.get_tv_credits_internal(provider_id).await?
+            } else {
+                self.get_movie_credits_internal(provider_id).await?
+            };
 
         let mut people = Vec::new();
 
@@ -650,25 +705,41 @@ impl MetadataProvider for TmdbProvider {
         provider_id: &str,
     ) -> Result<Vec<ExternalRemoteImage>, AppError> {
         let mut images = Vec::new();
-        if media_type.eq_ignore_ascii_case("season")
-            || media_type.eq_ignore_ascii_case("episode")
-        {
+        if media_type.eq_ignore_ascii_case("season") || media_type.eq_ignore_ascii_case("episode") {
             return Ok(images);
         }
 
-        if media_type.eq_ignore_ascii_case("series")
-            || media_type.eq_ignore_ascii_case("tv")
-        {
+        if media_type.eq_ignore_ascii_case("series") || media_type.eq_ignore_ascii_case("tv") {
             let details = self.get_tv_details_internal(provider_id).await?;
-            push_tmdb_remote_image(&mut images, details.poster_path, "Primary", &self.config.image_base_url);
-            push_tmdb_remote_image(&mut images, details.backdrop_path, "Backdrop", &self.config.image_base_url);
+            push_tmdb_remote_image(
+                &mut images,
+                details.poster_path,
+                "Primary",
+                &self.config.image_base_url,
+            );
+            push_tmdb_remote_image(
+                &mut images,
+                details.backdrop_path,
+                "Backdrop",
+                &self.config.image_base_url,
+            );
             if let Ok(collection) = self.get_tv_images_internal(provider_id).await {
                 push_tmdb_image_collection(&mut images, collection, &self.config.image_base_url);
             }
         } else {
             let details = self.get_movie_details_internal(provider_id).await?;
-            push_tmdb_remote_image(&mut images, details.poster_path, "Primary", &self.config.image_base_url);
-            push_tmdb_remote_image(&mut images, details.backdrop_path, "Backdrop", &self.config.image_base_url);
+            push_tmdb_remote_image(
+                &mut images,
+                details.poster_path,
+                "Primary",
+                &self.config.image_base_url,
+            );
+            push_tmdb_remote_image(
+                &mut images,
+                details.backdrop_path,
+                "Backdrop",
+                &self.config.image_base_url,
+            );
             if let Ok(collection) = self.get_movie_images_internal(provider_id).await {
                 push_tmdb_image_collection(&mut images, collection, &self.config.image_base_url);
             }
@@ -692,7 +763,12 @@ impl MetadataProvider for TmdbProvider {
                 .get_tv_season_details_internal(series_provider_id, season_number)
                 .await?;
             let mut images = Vec::new();
-            push_tmdb_remote_image(&mut images, details.poster_path, "Primary", &self.config.image_base_url);
+            push_tmdb_remote_image(
+                &mut images,
+                details.poster_path,
+                "Primary",
+                &self.config.image_base_url,
+            );
             return Ok(images);
         }
 
@@ -839,12 +915,10 @@ fn tmdb_movie_certification(release_dates: &Option<TmdbMovieReleaseDates>) -> Op
         .find(|entry| entry.iso_3166_1.eq_ignore_ascii_case("US"))
         .or_else(|| release_dates.results.first())
         .and_then(|entry| {
-            entry.release_dates
-                .iter()
-                .find_map(|date| {
-                    let certification = date.certification.trim();
-                    (!certification.is_empty()).then(|| certification.to_string())
-                })
+            entry.release_dates.iter().find_map(|date| {
+                let certification = date.certification.trim();
+                (!certification.is_empty()).then(|| certification.to_string())
+            })
         })
 }
 

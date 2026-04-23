@@ -11,6 +11,7 @@ mod scanner;
 mod security;
 mod state;
 mod transcoder;
+mod work_limiter;
 
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
@@ -18,6 +19,7 @@ use state::AppState;
 use std::sync::Arc;
 
 use crate::transcoder::Transcoder;
+use crate::work_limiter::{WorkLimiterConfig, WorkLimiters};
 use tower_http::{
     cors::CorsLayer,
     services::{ServeDir, ServeFile},
@@ -75,12 +77,18 @@ async fn main() -> Result<()> {
     let bind_addr = config.bind_addr()?;
     let config = Arc::new(config);
     let transcoder = Transcoder::new(config.clone());
+    let work_limiters = WorkLimiters::new(WorkLimiterConfig {
+        library_scan_limit: 2,
+        media_analysis_limit: 8,
+        tmdb_metadata_limit: 4,
+    });
     let state = AppState {
         pool,
         config,
         metadata_manager: Some(Arc::new(metadata_manager)),
         websocket_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         transcoder,
+        work_limiters,
     };
 
     let spa =

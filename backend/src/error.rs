@@ -46,7 +46,9 @@ impl IntoResponse for AppError {
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "InternalServerError"),
             AppError::FfmpegError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "FfmpegError"),
             AppError::TranscodingDisabled => (StatusCode::BAD_REQUEST, "TranscodingDisabled"),
-            AppError::InvalidTranscodingProtocol(_) => (StatusCode::BAD_REQUEST, "InvalidTranscodingProtocol"),
+            AppError::InvalidTranscodingProtocol(_) => {
+                (StatusCode::BAD_REQUEST, "InvalidTranscodingProtocol")
+            }
         };
 
         if status.is_server_error() {

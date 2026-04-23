@@ -119,7 +119,9 @@ impl ExternalPerson {
             overview: self.overview.clone(),
             external_url: self.external_url.clone(),
             provider_ids: serde_json::to_value(&self.provider_ids).unwrap_or_default(),
-            premiere_date: self.birth_date.map(|d| DateTime::<Utc>::from_utc(d.and_hms_opt(0, 0, 0).unwrap_or_default(), Utc)),
+            premiere_date: self.birth_date.map(|d| {
+                DateTime::<Utc>::from_utc(d.and_hms_opt(0, 0, 0).unwrap_or_default(), Utc)
+            }),
             production_year: self.birth_date.map(|d| d.year()),
             primary_image_path: self.image_url.clone(),
             backdrop_image_path: None,

@@ -506,6 +506,14 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
   - `STRM URL 读取线程数` 同时作为 `.strm` 远程分析和本地媒体分析（ffprobe）并发上限
   - `TMDB 下载元数据线程数` 同时覆盖 TMDB 元数据请求和图片预下载落盘并发
   - `影片扫描入库线程数` 继续作为扫描导入任务的总并发上限，因此数据库写入并发也被间接收束在同一上限内
+- 新增全局可热更新工作限流器 `WorkLimiters`：
+  - 扫描导入、手动刷新元数据、远程图片列表、远程图片下载都会先读取当前 `StartupConfiguration`，刷新全局限流上限后再申请许可
+  - `/Items/{id}/Refresh` 手动刷新元数据会占用 `影片扫描入库线程数` 许可，并在每次 TMDB 请求前占用 `TMDB 下载元数据线程数` 许可
+  - `/Items/{id}/RemoteImages` 远程图片列表会占用 `TMDB 下载元数据线程数` 许可
+  - `/Items/{id}/RemoteImages/Download` 下载图片时占用 `TMDB 下载元数据线程数` 许可，写入图片路径时占用 `影片扫描入库线程数` 许可
+- 本轮补齐审计发现的限流漏洞：
+  - `WorkLimiters::acquire()` 不再接收旧配置，也不会在申请许可时反写全局 limits；只有读取到当前 `StartupConfiguration` 的入口调用 `configure()`，避免长时间扫描任务把热更新后的线程数改回旧值
+  - `PlaybackInfo` 在缺少媒体 codec/runtime 需要即时分析时，也会先刷新限流配置并占用 `STRM URL 读取线程数` / 本地媒体分析许可，避免播放器详情页绕过全局 ffprobe/STRM 分析并发限制
 - 验证通过：
   - `cargo check --manifest-path backend\Cargo.toml`
   - `npm.cmd run build`

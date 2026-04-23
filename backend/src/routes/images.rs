@@ -8,6 +8,7 @@ use crate::{
     models::{emby_id_to_uuid, ImageInfoDto, LibraryOptionsDto},
     repository,
     state::AppState,
+    work_limiter::{WorkLimiterConfig, WorkLimiterKind},
 };
 use axum::{
     body::{Body, Bytes},
@@ -32,9 +33,18 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/Items/{item_id}/Images", get(list_item_images))
         .route("/Items/{item_id}/ThumbnailSet", get(get_item_thumbnail_set))
-        .route("/Items/{item_id}/RemoteImages", get(list_item_remote_images))
-        .route("/Items/{item_id}/RemoteImages/Providers", get(list_item_remote_image_providers))
-        .route("/Items/{item_id}/RemoteImages/Download", post(download_item_remote_image))
+        .route(
+            "/Items/{item_id}/RemoteImages",
+            get(list_item_remote_images),
+        )
+        .route(
+            "/Items/{item_id}/RemoteImages/Providers",
+            get(list_item_remote_image_providers),
+        )
+        .route(
+            "/Items/{item_id}/RemoteImages/Download",
+            post(download_item_remote_image),
+        )
         .route(
             "/Items/{item_id}/Images/{image_type}",
             get(get_item_image)
@@ -285,13 +295,21 @@ async fn download_item_remote_image(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
+    work_limiter_config(&state).await?;
+    let tmdb_permit = state
+        .work_limiters
+        .acquire(WorkLimiterKind::TmdbMetadata)
+        .await;
     let response = Client::new()
         .get(image_url)
         .send()
         .await
         .map_err(|error| AppError::Internal(format!("下载远程图片失败: {error}")))?;
     if !response.status().is_success() {
-        return Err(AppError::NotFound(format!("远程图片不存在: {}", response.status())));
+        return Err(AppError::NotFound(format!(
+            "远程图片不存在: {}",
+            response.status()
+        )));
     }
     let content_type = response
         .headers()
@@ -303,10 +321,15 @@ async fn download_item_remote_image(
         .bytes()
         .await
         .map_err(|error| AppError::Internal(format!("读取远程图片失败: {error}")))?;
+    drop(tmdb_permit);
     let mut headers = HeaderMap::new();
     if let Ok(value) = content_type.parse() {
         headers.insert(header::CONTENT_TYPE, value);
     }
+    let _write_permit = state
+        .work_limiters
+        .acquire(WorkLimiterKind::LibraryScan)
+        .await;
     upload_item_image_impl(
         session,
         state,
@@ -334,10 +357,16 @@ async fn remote_images_for_item(
 
     if tmdb_remote_images_supported(item) {
         let library_options = item_library_options(state, item.id).await?;
-        if let (Some(manager), Some((tmdb_id, season_number, episode_number, remote_media_type))) =
-            (state.metadata_manager.as_ref(), tmdb_remote_image_context(state, item).await)
-        {
+        if let (Some(manager), Some((tmdb_id, season_number, episode_number, remote_media_type))) = (
+            state.metadata_manager.as_ref(),
+            tmdb_remote_image_context(state, item).await,
+        ) {
             if let Some(provider) = item_tmdb_provider(state, manager, &library_options) {
+                work_limiter_config(state).await?;
+                let tmdb_permit = state
+                    .work_limiters
+                    .acquire(WorkLimiterKind::TmdbMetadata)
+                    .await;
                 let mut provider_images = if season_number.is_some() || episode_number.is_some() {
                     provider
                         .get_remote_images_for_child(
@@ -354,6 +383,7 @@ async fn remote_images_for_item(
                         .await
                         .unwrap_or_default()
                 };
+                drop(tmdb_permit);
                 images.append(&mut provider_images);
             }
         }
@@ -379,13 +409,10 @@ async fn remote_images_for_item(
         });
     } else if !include_all_languages {
         images.retain(|image| {
-            image
-                .language
-                .as_deref()
-                .is_none_or(|language| {
-                    let language = normalized_language_filter(language);
-                    language == "zh" || language == "en"
-                })
+            image.language.as_deref().is_none_or(|language| {
+                let language = normalized_language_filter(language);
+                language == "zh" || language == "en"
+            })
         });
     }
 
@@ -414,7 +441,11 @@ fn normalized_language_filter(language: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn push_existing_remote_image(images: &mut Vec<ExternalRemoteImage>, url: Option<&str>, image_type: &str) {
+fn push_existing_remote_image(
+    images: &mut Vec<ExternalRemoteImage>,
+    url: Option<&str>,
+    image_type: &str,
+) {
     let Some(url) = url.filter(|value| {
         let value = value.trim();
         value.starts_with("http://") || value.starts_with("https://")
@@ -462,7 +493,11 @@ fn remote_image_provider_names(state: &AppState, item: &crate::models::DbMediaIt
         providers.push("LocalMetadata".to_string());
     }
     if tmdb_remote_images_supported(item)
-        && state.metadata_manager.as_ref().and_then(|manager| manager.get_provider("tmdb")).is_some()
+        && state
+            .metadata_manager
+            .as_ref()
+            .and_then(|manager| manager.get_provider("tmdb"))
+            .is_some()
     {
         providers.push("TheMovieDb".to_string());
     }
@@ -493,7 +528,10 @@ async fn tmdb_remote_image_context(
             Some(id)
         } else {
             let parent_id = item.parent_id?;
-            let parent = repository::get_media_item(&state.pool, parent_id).await.ok().flatten()?;
+            let parent = repository::get_media_item(&state.pool, parent_id)
+                .await
+                .ok()
+                .flatten()?;
             tmdb_id_for_item(&parent)
         };
         return tmdb_id.map(|id| (id, item.index_number, None, "Season"));
@@ -502,12 +540,18 @@ async fn tmdb_remote_image_context(
         let season_number = item.parent_index_number;
         let episode_number = item.index_number;
         let parent_id = item.parent_id?;
-        let season = repository::get_media_item(&state.pool, parent_id).await.ok().flatten()?;
+        let season = repository::get_media_item(&state.pool, parent_id)
+            .await
+            .ok()
+            .flatten()?;
         let tmdb_id = if let Some(id) = tmdb_id_for_item(&season) {
             Some(id)
         } else {
             let series_id = season.parent_id?;
-            let series = repository::get_media_item(&state.pool, series_id).await.ok().flatten()?;
+            let series = repository::get_media_item(&state.pool, series_id)
+                .await
+                .ok()
+                .flatten()?;
             tmdb_id_for_item(&series)
         };
         return tmdb_id.map(|id| (id, season_number, episode_number, "Episode"));
@@ -526,12 +570,10 @@ async fn item_library_options(
     state: &AppState,
     item_id: uuid::Uuid,
 ) -> Result<LibraryOptionsDto, AppError> {
-    Ok(
-        repository::get_library_for_media_item(&state.pool, item_id)
-            .await?
-            .map(|library| repository::library_options(&library))
-            .unwrap_or_default(),
-    )
+    Ok(repository::get_library_for_media_item(&state.pool, item_id)
+        .await?
+        .map(|library| repository::library_options(&library))
+        .unwrap_or_default())
 }
 
 fn item_tmdb_provider<'a>(
@@ -558,6 +600,17 @@ fn item_tmdb_provider<'a>(
     metadata_manager
         .get_provider("tmdb")
         .map(|provider| Box::new(RouteProviderRef { inner: provider }) as Box<dyn MetadataProvider>)
+}
+
+async fn work_limiter_config(state: &AppState) -> Result<WorkLimiterConfig, AppError> {
+    let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+    let config = WorkLimiterConfig {
+        library_scan_limit: startup.library_scan_thread_count.max(1) as u32,
+        media_analysis_limit: startup.strm_analysis_thread_count.max(1) as u32,
+        tmdb_metadata_limit: startup.tmdb_metadata_thread_count.max(1) as u32,
+    };
+    state.work_limiters.configure(config).await;
+    Ok(config)
 }
 
 fn item_image_storage_path(
@@ -707,7 +760,12 @@ impl MetadataProvider for RouteProviderRef<'_> {
         episode_number: Option<i32>,
     ) -> Result<Vec<crate::metadata::provider::ExternalRemoteImage>, AppError> {
         self.inner
-            .get_remote_images_for_child(media_type, series_provider_id, season_number, episode_number)
+            .get_remote_images_for_child(
+                media_type,
+                series_provider_id,
+                season_number,
+                episode_number,
+            )
             .await
     }
 }
@@ -737,7 +795,8 @@ async fn get_item_image_with_tail(
             .next()
             .filter(|segment| !segment.eq_ignore_ascii_case("Url"))
             .and_then(|value| value.parse::<i32>().ok());
-        let Json(value) = item_image_url_response(&state, &item_id_str, &image_type, image_index).await?;
+        let Json(value) =
+            item_image_url_response(&state, &item_id_str, &image_type, image_index).await?;
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/json")
@@ -748,7 +807,15 @@ async fn get_item_image_with_tail(
         .split('/')
         .next()
         .and_then(|value| value.parse::<i32>().ok());
-    serve_item_image(session.0, state, item_id_str, image_type, image_index, request).await
+    serve_item_image(
+        session.0,
+        state,
+        item_id_str,
+        image_type,
+        image_index,
+        request,
+    )
+    .await
 }
 
 async fn upload_item_image(
@@ -1151,7 +1218,9 @@ async fn resolve_person_image_path(
     person_id_or_name: &str,
     image_type: &str,
 ) -> Result<Option<String>, AppError> {
-    let Some(path) = repository::get_person_image_path(&state.pool, person_id_or_name, image_type).await? else {
+    let Some(path) =
+        repository::get_person_image_path(&state.pool, person_id_or_name, image_type).await?
+    else {
         return Ok(None);
     };
 

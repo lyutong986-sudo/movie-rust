@@ -9,6 +9,7 @@ use crate::{
     models::{DbLibrary, LibraryOptionsDto, ScanSummary},
     naming,
     repository::{self, UpsertMediaItem},
+    work_limiter::{WorkLimiterConfig, WorkLimiterKind, WorkLimiters},
 };
 use chrono::NaiveDate;
 use regex::Regex;
@@ -20,35 +21,27 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
-use tokio::{
-    sync::{Mutex, Semaphore},
-    task::JoinSet,
-};
+use tokio::{sync::Mutex, task::JoinSet};
 use walkdir::WalkDir;
 
 const TICKS_PER_SECOND: i64 = 10_000_000;
 
-#[derive(Debug, Clone)]
-struct ScanExecutionOptions {
-    library_scan_thread_count: usize,
-    strm_analysis_thread_count: usize,
-    tmdb_metadata_thread_count: usize,
-}
-
 #[derive(Clone)]
 struct ScanRuntime {
-    strm_analysis_limiter: Arc<Semaphore>,
-    tmdb_metadata_limiter: Arc<Semaphore>,
+    work_limiters: WorkLimiters,
     refreshed_series: Arc<Mutex<HashSet<uuid::Uuid>>>,
 }
 
 impl ScanRuntime {
-    fn new(options: &ScanExecutionOptions) -> Self {
+    fn new(work_limiters: WorkLimiters) -> Self {
         Self {
-            strm_analysis_limiter: Arc::new(Semaphore::new(options.strm_analysis_thread_count)),
-            tmdb_metadata_limiter: Arc::new(Semaphore::new(options.tmdb_metadata_thread_count)),
+            work_limiters,
             refreshed_series: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    async fn acquire(&self, kind: WorkLimiterKind) -> crate::work_limiter::WorkPermit {
+        self.work_limiters.acquire(kind).await
     }
 }
 
@@ -98,14 +91,16 @@ pub async fn scan_all_libraries(
     pool: &sqlx::PgPool,
     metadata_manager: Option<Arc<MetadataProviderManager>>,
     config: &Config,
+    work_limiters: WorkLimiters,
 ) -> Result<ScanSummary, AppError> {
     let startup = repository::startup_configuration(pool, config).await?;
-    let execution_options = ScanExecutionOptions {
-        library_scan_thread_count: startup.library_scan_thread_count.max(1) as usize,
-        strm_analysis_thread_count: startup.strm_analysis_thread_count.max(1) as usize,
-        tmdb_metadata_thread_count: startup.tmdb_metadata_thread_count.max(1) as usize,
+    let limits = WorkLimiterConfig {
+        library_scan_limit: startup.library_scan_thread_count.max(1) as u32,
+        media_analysis_limit: startup.strm_analysis_thread_count.max(1) as u32,
+        tmdb_metadata_limit: startup.tmdb_metadata_thread_count.max(1) as u32,
     };
-    let runtime = ScanRuntime::new(&execution_options);
+    work_limiters.configure(limits).await;
+    let runtime = ScanRuntime::new(work_limiters);
     let libraries = repository::list_libraries(pool).await?;
     let mut scanned_files = 0_i64;
     let mut imported_items = 0_i64;
@@ -124,11 +119,12 @@ pub async fn scan_all_libraries(
 
             let mut tasks = JoinSet::new();
             for file in files {
-                while tasks.len() >= execution_options.library_scan_thread_count {
+                while tasks.len() >= limits.library_scan_limit as usize {
                     match tasks.join_next().await {
                         Some(joined) => {
-                            joined
-                                .map_err(|error| AppError::Internal(format!("扫描任务失败: {error}")))??;
+                            joined.map_err(|error| {
+                                AppError::Internal(format!("扫描任务失败: {error}"))
+                            })??;
                             imported_items += 1;
                         }
                         None => break,
@@ -144,6 +140,7 @@ pub async fn scan_all_libraries(
                 let path = path.clone();
 
                 tasks.spawn(async move {
+                    let _scan_permit = runtime.acquire(WorkLimiterKind::LibraryScan).await;
                     if library.collection_type.eq_ignore_ascii_case("tvshows") {
                         import_tv_file(
                             &pool,
@@ -174,8 +171,7 @@ pub async fn scan_all_libraries(
             }
 
             while let Some(joined) = tasks.join_next().await {
-                joined
-                    .map_err(|error| AppError::Internal(format!("扫描任务失败: {error}")))??;
+                joined.map_err(|error| AppError::Internal(format!("扫描任务失败: {error}")))??;
                 imported_items += 1;
             }
         }
@@ -358,10 +354,14 @@ async fn import_tv_file(
         .map(ToOwned::to_owned)
         .unwrap_or(preliminary_series_name);
     let series_path = series_virtual_path(library_root, file, &series_name);
-    let series_provider_ids =
-        merge_provider_ids(series_nfo.provider_ids.clone(), provider_ids_from_path(&series_path));
-    let episode_provider_ids =
-        merge_provider_ids(episode_nfo.provider_ids.clone(), provider_ids_from_path(file));
+    let series_provider_ids = merge_provider_ids(
+        series_nfo.provider_ids.clone(),
+        provider_ids_from_path(&series_path),
+    );
+    let episode_provider_ids = merge_provider_ids(
+        episode_nfo.provider_ids.clone(),
+        provider_ids_from_path(file),
+    );
 
     let season_number = episode_nfo
         .season_number
@@ -370,16 +370,13 @@ async fn import_tv_file(
         .unwrap_or(1);
     let season_path = season_virtual_path(library_root, file, &series_path, season_number);
     let season_nfo = read_nfo_file(&season_path.join("season.nfo")).unwrap_or_default();
-    let season_name = season_nfo
-        .title
-        .clone()
-        .unwrap_or_else(|| {
-            if season_number == 0 {
-                "Specials".to_string()
-            } else {
-                format!("Season {season_number}")
-            }
-        });
+    let season_name = season_nfo.title.clone().unwrap_or_else(|| {
+        if season_number == 0 {
+            "Specials".to_string()
+        } else {
+            format!("Season {season_number}")
+        }
+    });
 
     let series_poster = series_nfo
         .primary_image
@@ -402,23 +399,51 @@ async fn import_tv_file(
     let season_poster = season_nfo
         .primary_image
         .clone()
-        .or_else(|| find_season_art(&series_path, &season_path, season_number, &["poster", "folder"]))
+        .or_else(|| {
+            find_season_art(
+                &series_path,
+                &season_path,
+                season_number,
+                &["poster", "folder"],
+            )
+        })
         .or_else(|| naming::find_folder_image(&season_path))
         .or_else(|| series_poster.clone());
     let season_backdrop = season_nfo
         .backdrop_image
         .clone()
-        .or_else(|| find_season_art(&series_path, &season_path, season_number, &["fanart", "backdrop", "background"]))
+        .or_else(|| {
+            find_season_art(
+                &series_path,
+                &season_path,
+                season_number,
+                &["fanart", "backdrop", "background"],
+            )
+        })
         .or_else(|| series_backdrop.clone());
     let season_logo = season_nfo
         .logo_image
         .clone()
-        .or_else(|| find_season_art(&series_path, &season_path, season_number, &["logo", "clearlogo"]))
+        .or_else(|| {
+            find_season_art(
+                &series_path,
+                &season_path,
+                season_number,
+                &["logo", "clearlogo"],
+            )
+        })
         .or_else(|| series_logo.clone());
     let season_thumb = season_nfo
         .thumb_image
         .clone()
-        .or_else(|| find_season_art(&series_path, &season_path, season_number, &["landscape", "thumb"]))
+        .or_else(|| {
+            find_season_art(
+                &series_path,
+                &season_path,
+                season_number,
+                &["landscape", "thumb"],
+            )
+        })
         .or_else(|| series_thumb.clone());
 
     let series_id = repository::upsert_media_item(
@@ -433,11 +458,11 @@ async fn import_tv_file(
             container: None,
             original_title: series_nfo.original_title.as_deref(),
             overview: series_nfo.overview.as_deref(),
-              production_year: series_nfo.production_year.or(parsed.production_year),
-              official_rating: series_nfo.official_rating.as_deref(),
-              community_rating: series_nfo.community_rating,
-              critic_rating: series_nfo.critic_rating,
-              runtime_ticks: None,
+            production_year: series_nfo.production_year.or(parsed.production_year),
+            official_rating: series_nfo.official_rating.as_deref(),
+            community_rating: series_nfo.community_rating,
+            critic_rating: series_nfo.critic_rating,
+            runtime_ticks: None,
             premiere_date: series_nfo.premiere_date,
             status: series_nfo.status.as_deref(),
             end_date: series_nfo.end_date,
@@ -525,22 +550,28 @@ async fn import_tv_file(
             original_title: season_nfo.original_title.as_deref(),
             overview: season_nfo.overview.as_deref(),
             production_year: season_nfo.production_year.or(series_nfo.production_year),
-              official_rating: season_nfo
-                  .official_rating
-                  .as_deref()
-                  .or(series_nfo.official_rating.as_deref()),
-              community_rating: season_nfo.community_rating.or(series_nfo.community_rating),
-              critic_rating: season_nfo.critic_rating.or(series_nfo.critic_rating),
-              runtime_ticks: None,
+            official_rating: season_nfo
+                .official_rating
+                .as_deref()
+                .or(series_nfo.official_rating.as_deref()),
+            community_rating: season_nfo.community_rating.or(series_nfo.community_rating),
+            critic_rating: season_nfo.critic_rating.or(series_nfo.critic_rating),
+            runtime_ticks: None,
             premiere_date: season_nfo.premiere_date,
-            status: season_nfo.status.as_deref().or(series_nfo.status.as_deref()),
+            status: season_nfo
+                .status
+                .as_deref()
+                .or(series_nfo.status.as_deref()),
             end_date: season_nfo.end_date.or(series_nfo.end_date),
             air_days: if season_nfo.air_days.is_empty() {
                 &series_nfo.air_days
             } else {
                 &season_nfo.air_days
             },
-            air_time: season_nfo.air_time.as_deref().or(series_nfo.air_time.as_deref()),
+            air_time: season_nfo
+                .air_time
+                .as_deref()
+                .or(series_nfo.air_time.as_deref()),
             provider_ids: if has_provider_ids(&season_nfo.provider_ids) {
                 season_nfo.provider_ids.clone()
             } else {
@@ -645,22 +676,28 @@ async fn import_tv_file(
                 .production_year
                 .or(parsed.production_year)
                 .or(series_nfo.production_year),
-              official_rating: episode_nfo
-                  .official_rating
-                  .as_deref()
-                  .or(series_nfo.official_rating.as_deref()),
-              community_rating: episode_nfo.community_rating.or(series_nfo.community_rating),
-              critic_rating: episode_nfo.critic_rating.or(series_nfo.critic_rating),
-              runtime_ticks: episode_nfo.runtime_ticks,
+            official_rating: episode_nfo
+                .official_rating
+                .as_deref()
+                .or(series_nfo.official_rating.as_deref()),
+            community_rating: episode_nfo.community_rating.or(series_nfo.community_rating),
+            critic_rating: episode_nfo.critic_rating.or(series_nfo.critic_rating),
+            runtime_ticks: episode_nfo.runtime_ticks,
             premiere_date: episode_nfo.premiere_date.or(parsed.premiere_date),
-            status: episode_nfo.status.as_deref().or(series_nfo.status.as_deref()),
+            status: episode_nfo
+                .status
+                .as_deref()
+                .or(series_nfo.status.as_deref()),
             end_date: episode_nfo.end_date.or(series_nfo.end_date),
             air_days: if episode_nfo.air_days.is_empty() {
                 &series_nfo.air_days
             } else {
                 &episode_nfo.air_days
             },
-            air_time: episode_nfo.air_time.as_deref().or(series_nfo.air_time.as_deref()),
+            air_time: episode_nfo
+                .air_time
+                .as_deref()
+                .or(series_nfo.air_time.as_deref()),
             provider_ids: if has_provider_ids(&episode_provider_ids) {
                 episode_provider_ids
             } else {
@@ -753,10 +790,11 @@ async fn refresh_series_remote_metadata(
     let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
         return;
     };
-    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
+    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options)
+    else {
         return;
     };
-    let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
+    let _permit = runtime.acquire(WorkLimiterKind::TmdbMetadata).await;
     match provider.get_series_details(&tmdb_id).await {
         Ok(metadata) => {
             if let Err(error) =
@@ -788,10 +826,11 @@ async fn refresh_movie_remote_metadata(
     let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
         return;
     };
-    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
+    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options)
+    else {
         return;
     };
-    let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
+    let _permit = runtime.acquire(WorkLimiterKind::TmdbMetadata).await;
     match provider.get_movie_details(&tmdb_id).await {
         Ok(metadata) => {
             if let Err(error) =
@@ -823,13 +862,16 @@ async fn refresh_series_episode_catalog(
     let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
         return;
     };
-    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
+    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options)
+    else {
         return;
     };
-    let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
+    let _permit = runtime.acquire(WorkLimiterKind::TmdbMetadata).await;
     match provider.get_series_episode_catalog(&tmdb_id).await {
         Ok(items) => {
-            if let Err(error) = repository::replace_series_episode_catalog(pool, series_id, &items).await {
+            if let Err(error) =
+                repository::replace_series_episode_catalog(pool, series_id, &items).await
+            {
                 tracing::warn!(
                     series_id = %series_id,
                     tmdb_id = %tmdb_id,
@@ -857,10 +899,11 @@ async fn refresh_remote_people(
     let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
         return;
     };
-    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
+    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options)
+    else {
         return;
     };
-    let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
+    let _permit = runtime.acquire(WorkLimiterKind::TmdbMetadata).await;
     match provider.get_item_people(media_type, &tmdb_id).await {
         Ok(people) => {
             let tmdb_person_ids = people
@@ -875,7 +918,8 @@ async fn refresh_remote_people(
                 })
                 .collect::<Vec<_>>();
             if let Err(error) =
-                repository::delete_tmdb_person_roles_except(pool, media_item_id, &tmdb_person_ids).await
+                repository::delete_tmdb_person_roles_except(pool, media_item_id, &tmdb_person_ids)
+                    .await
             {
                 tracing::warn!(
                     media_item_id = %media_item_id,
@@ -955,11 +999,14 @@ async fn analyze_imported_media(
     }
 
     let analysis = if naming::is_strm(file) {
-        let _permit = runtime.strm_analysis_limiter.acquire().await.ok();
+        let _permit = runtime.acquire(WorkLimiterKind::MediaAnalysis).await;
         match std::fs::read_to_string(file) {
             Ok(content) => {
                 let Some(target_url) = naming::strm_target_from_text(&content) else {
-                    tracing::debug!("扫描阶段跳过 .strm 分析，未找到有效 URL: {}", file.display());
+                    tracing::debug!(
+                        "扫描阶段跳过 .strm 分析，未找到有效 URL: {}",
+                        file.display()
+                    );
                     return Ok(());
                 };
 
@@ -977,16 +1024,24 @@ async fn analyze_imported_media(
                 }
             }
             Err(error) => {
-                tracing::warn!("扫描阶段读取 .strm 文件失败 file={} error={}", file.display(), error);
+                tracing::warn!(
+                    "扫描阶段读取 .strm 文件失败 file={} error={}",
+                    file.display(),
+                    error
+                );
                 return Ok(());
             }
         }
     } else {
-        let _permit = runtime.strm_analysis_limiter.acquire().await.ok();
+        let _permit = runtime.acquire(WorkLimiterKind::MediaAnalysis).await;
         match media_analyzer::analyze_media_file(file).await {
             Ok(analysis) => analysis,
             Err(error) => {
-                tracing::warn!("扫描阶段分析媒体文件失败 file={} error={}", file.display(), error);
+                tracing::warn!(
+                    "扫描阶段分析媒体文件失败 file={} error={}",
+                    file.display(),
+                    error
+                );
                 return Ok(());
             }
         }
@@ -1098,7 +1153,12 @@ impl MetadataProvider for ProviderRef<'_> {
         episode_number: Option<i32>,
     ) -> Result<Vec<crate::metadata::provider::ExternalRemoteImage>, AppError> {
         self.inner
-            .get_remote_images_for_child(media_type, series_provider_id, season_number, episode_number)
+            .get_remote_images_for_child(
+                media_type,
+                series_provider_id,
+                season_number,
+                episode_number,
+            )
             .await
     }
 }
@@ -1117,7 +1177,8 @@ async fn cache_remote_images_for_item(
     let Some(item) = repository::get_media_item(pool, item_id)
         .await
         .ok()
-        .flatten() else {
+        .flatten()
+    else {
         return;
     };
     let mut images = Vec::new();
@@ -1127,7 +1188,9 @@ async fn cache_remote_images_for_item(
         ("Logo", item.logo_path.as_deref()),
         ("Thumb", item.thumb_path.as_deref()),
     ] {
-        let Some(path) = path.filter(|path| path.starts_with("http://") || path.starts_with("https://")) else {
+        let Some(path) =
+            path.filter(|path| path.starts_with("http://") || path.starts_with("https://"))
+        else {
             continue;
         };
         images.push(crate::metadata::provider::ExternalRemoteImage {
@@ -1146,8 +1209,9 @@ async fn cache_remote_images_for_item(
     if let Some((tmdb_id, season_number, episode_number, remote_media_type)) =
         tmdb_remote_image_context(pool, &item).await
     {
-        if let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) {
-            let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
+        if let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options)
+        {
+            let _permit = runtime.acquire(WorkLimiterKind::TmdbMetadata).await;
             let remote_result = if season_number.is_some() || episode_number.is_some() {
                 provider
                     .get_remote_images_for_child(
@@ -1158,7 +1222,9 @@ async fn cache_remote_images_for_item(
                     )
                     .await
             } else {
-                provider.get_remote_images(remote_media_type, &tmdb_id).await
+                provider
+                    .get_remote_images(remote_media_type, &tmdb_id)
+                    .await
             };
             if let Ok(mut remote_images) = remote_result {
                 images.append(&mut remote_images);
@@ -1189,12 +1255,21 @@ async fn cache_remote_images_for_item(
         let Some(local_path) = local_path else {
             continue;
         };
-        let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
-        if download_image_to_path(&local_path, &image.url).await.is_err() {
+        let _permit = runtime.acquire(WorkLimiterKind::TmdbMetadata).await;
+        if download_image_to_path(&local_path, &image.url)
+            .await
+            .is_err()
+        {
             continue;
         }
         let local_path_text = local_path.to_string_lossy().to_string();
-        let _ = repository::update_media_item_image_path(pool, item_id, image_type, Some(&local_path_text)).await;
+        let _ = repository::update_media_item_image_path(
+            pool,
+            item_id,
+            image_type,
+            Some(&local_path_text),
+        )
+        .await;
     }
 }
 
@@ -1217,12 +1292,17 @@ async fn cache_person_image(
     ) else {
         return;
     };
-    let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
-    if download_image_to_path(&local_path, image_url).await.is_err() {
+    let _permit = runtime.acquire(WorkLimiterKind::TmdbMetadata).await;
+    if download_image_to_path(&local_path, image_url)
+        .await
+        .is_err()
+    {
         return;
     }
     let local_path_text = local_path.to_string_lossy().to_string();
-    let _ = repository::update_person_image_path(pool, person_id, image_type, Some(&local_path_text)).await;
+    let _ =
+        repository::update_person_image_path(pool, person_id, image_type, Some(&local_path_text))
+            .await;
 }
 
 async fn tmdb_remote_image_context(
@@ -1242,7 +1322,10 @@ async fn tmdb_remote_image_context(
             Some(id)
         } else {
             let parent_id = item.parent_id?;
-            let parent = repository::get_media_item(pool, parent_id).await.ok().flatten()?;
+            let parent = repository::get_media_item(pool, parent_id)
+                .await
+                .ok()
+                .flatten()?;
             tmdb_id_from_provider_ids(&parent.provider_ids)
         };
         return tmdb_id.map(|id| (id, item.index_number, None, "Season"));
@@ -1252,12 +1335,19 @@ async fn tmdb_remote_image_context(
         let season_number = item.parent_index_number;
         let episode_number = item.index_number;
         let tmdb_id = if let Some(parent_id) = item.parent_id {
-            if let Some(season) = repository::get_media_item(pool, parent_id).await.ok().flatten() {
+            if let Some(season) = repository::get_media_item(pool, parent_id)
+                .await
+                .ok()
+                .flatten()
+            {
                 if let Some(id) = tmdb_id_from_provider_ids(&season.provider_ids) {
                     Some(id)
                 } else {
                     let series_id = season.parent_id?;
-                    let series = repository::get_media_item(pool, series_id).await.ok().flatten()?;
+                    let series = repository::get_media_item(pool, series_id)
+                        .await
+                        .ok()
+                        .flatten()?;
                     tmdb_id_from_provider_ids(&series.provider_ids)
                 }
             } else {
@@ -1324,9 +1414,18 @@ fn image_target_path(
 
 fn cache_target_path(dir: &Path, stem: &str, image_type: &str, image_url: &str) -> Option<PathBuf> {
     let extension = naming::extension_from_url(image_url)
-        .filter(|ext| naming::IMAGE_EXTENSIONS.iter().any(|candidate| candidate.eq_ignore_ascii_case(ext)))
+        .filter(|ext| {
+            naming::IMAGE_EXTENSIONS
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+        })
         .unwrap_or_else(|| "jpg".to_string());
-    Some(dir.join(format!("{}-{}.{}", stem, image_type.to_ascii_lowercase(), extension)))
+    Some(dir.join(format!(
+        "{}-{}.{}",
+        stem,
+        image_type.to_ascii_lowercase(),
+        extension
+    )))
 }
 
 async fn download_image_to_path(path: &Path, image_url: &str) -> Result<(), AppError> {
@@ -1337,7 +1436,10 @@ async fn download_image_to_path(path: &Path, image_url: &str) -> Result<(), AppE
         .await
         .map_err(|error| AppError::Internal(format!("下载远程图片失败: {error}")))?;
     if !response.status().is_success() {
-        return Err(AppError::NotFound(format!("远程图片不存在: {}", response.status())));
+        return Err(AppError::NotFound(format!(
+            "远程图片不存在: {}",
+            response.status()
+        )));
     }
     let bytes = response
         .bytes()
@@ -1388,7 +1490,10 @@ fn read_nfo_file(path: &Path) -> Option<NfoMetadata> {
     let mut metadata = NfoMetadata {
         title: first_tag(&xml, &["title", "localtitle", "name"]),
         original_title: first_tag(&xml, &["originaltitle", "original_title"]),
-        overview: first_tag(&xml, &["plot", "outline", "review", "biography", "overview"]),
+        overview: first_tag(
+            &xml,
+            &["plot", "outline", "review", "biography", "overview"],
+        ),
         production_year: first_tag(&xml, &["year", "productionyear", "production_year"])
             .and_then(|value| parse_i32(&value)),
         official_rating: first_tag(&xml, &["mpaa", "certification", "officialrating"]),
@@ -1401,15 +1506,23 @@ fn read_nfo_file(path: &Path) -> Option<NfoMetadata> {
         premiere_date: first_tag(&xml, &["premiered", "aired", "releasedate", "date"])
             .and_then(|value| parse_date(&value)),
         status: parse_series_status(&xml),
-        end_date: first_tag(&xml, &["enddate", "end_date", "ended", "lastaired", "last_air_date"])
-            .and_then(|value| parse_date(&value)),
+        end_date: first_tag(
+            &xml,
+            &["enddate", "end_date", "ended", "lastaired", "last_air_date"],
+        )
+        .and_then(|value| parse_date(&value)),
         air_days: parse_air_days(&xml),
         air_time: first_tag(&xml, &["airtime", "airs_time", "air_time"])
             .filter(|value| !value.trim().is_empty()),
         series_name: first_tag(&xml, &["showtitle", "tvshowtitle", "seriesname", "series"]),
         season_number: first_tag(
             &xml,
-            &["season", "seasonnumber", "parentindexnumber", "parent_index_number"],
+            &[
+                "season",
+                "seasonnumber",
+                "parentindexnumber",
+                "parent_index_number",
+            ],
         )
         .and_then(|value| parse_i32(&value)),
         episode_number: first_tag(
@@ -1419,7 +1532,12 @@ fn read_nfo_file(path: &Path) -> Option<NfoMetadata> {
         .and_then(|value| parse_i32(&value)),
         episode_number_end: first_tag(
             &xml,
-            &["episodenumberend", "episodeend", "indexnumberend", "displayepisodeend"],
+            &[
+                "episodenumberend",
+                "episodeend",
+                "indexnumberend",
+                "displayepisodeend",
+            ],
         )
         .and_then(|value| parse_i32(&value)),
         provider_ids: provider_ids_from_nfo(&xml),
@@ -1482,7 +1600,10 @@ fn provider_ids_from_nfo(xml: &str) -> Value {
     }
     if let Ok(regex) = Regex::new(r#"(?is)<uniqueid\b([^>]*)>(.*?)</uniqueid>"#) {
         for captures in regex.captures_iter(xml) {
-            let attrs = captures.get(1).map(|value| value.as_str()).unwrap_or_default();
+            let attrs = captures
+                .get(1)
+                .map(|value| value.as_str())
+                .unwrap_or_default();
             let raw_id = captures
                 .get(2)
                 .map(|value| decode_xml_text(value.as_str()))
@@ -1585,7 +1706,11 @@ fn tmdb_id_from_provider_ids(value: &Value) -> Option<String> {
         object
             .get(*key)
             .and_then(|value| value.as_str().map(ToOwned::to_owned))
-            .or_else(|| object.get(*key).and_then(|value| value.as_i64().map(|id| id.to_string())))
+            .or_else(|| {
+                object
+                    .get(*key)
+                    .and_then(|value| value.as_i64().map(|id| id.to_string()))
+            })
     })
 }
 
@@ -2083,7 +2208,11 @@ fn parse_season_number(value: &str) -> Option<i32> {
     }
     season_folder_regex()
         .captures(value)
-        .and_then(|captures| captures.name("season").or_else(|| captures.name("season_alt")))
+        .and_then(|captures| {
+            captures
+                .name("season")
+                .or_else(|| captures.name("season_alt"))
+        })
         .and_then(|value| value.as_str().parse().ok())
 }
 
@@ -2193,10 +2322,8 @@ mod tests {
 
     #[test]
     fn nfo_parser_accepts_emby_tv_number_aliases() {
-        let path = std::env::temp_dir().join(format!(
-            "movie-rust-nfo-{}.nfo",
-            uuid::Uuid::new_v4()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("movie-rust-nfo-{}.nfo", uuid::Uuid::new_v4()));
         std::fs::write(
             &path,
             r#"
@@ -2224,7 +2351,8 @@ mod tests {
 
     #[test]
     fn find_season_art_matches_series_level_emby_names() {
-        let root = std::env::temp_dir().join(format!("movie-rust-season-art-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("movie-rust-season-art-{}", uuid::Uuid::new_v4()));
         let series_path = root.join("Show");
         let season_path = series_path.join("Season 1");
         std::fs::create_dir_all(&season_path).unwrap();
@@ -2239,7 +2367,8 @@ mod tests {
 
     #[test]
     fn find_season_art_matches_specials_marker() {
-        let root = std::env::temp_dir().join(format!("movie-rust-specials-art-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("movie-rust-specials-art-{}", uuid::Uuid::new_v4()));
         let series_path = root.join("Show");
         let season_path = series_path.join("Specials");
         std::fs::create_dir_all(&season_path).unwrap();

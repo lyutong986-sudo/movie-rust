@@ -1,9 +1,5 @@
-﻿use crate::{
-    auth::AuthSession,
-    error::AppError,
-    models::UserConfigurationDto,
-    repository,
-    state::AppState,
+use crate::{
+    auth::AuthSession, error::AppError, models::UserConfigurationDto, repository, state::AppState,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -16,17 +12,32 @@ use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/DisplayPreferences/{display_preferences_id}", get(display_preferences))
-        .route("/DisplayPreferences/{display_preferences_id}", post(update_display_preferences))
+        .route(
+            "/DisplayPreferences/{display_preferences_id}",
+            get(display_preferences),
+        )
+        .route(
+            "/DisplayPreferences/{display_preferences_id}",
+            post(update_display_preferences),
+        )
         .route(
             "/Users/{user_id}/DisplayPreferences/{display_preferences_id}",
             get(user_display_preferences).post(update_user_display_preferences),
         )
         .route("/Localization/Options", get(localization_options))
         .route("/Localization/Cultures", get(localization_cultures))
-        .route("/UserSettings/{user_id}", get(user_settings).post(update_user_settings))
-        .route("/UserSettings/{user_id}/Partial", post(update_user_settings_partial))
-        .route("/Users/{user_id}/Settings", get(user_settings).post(update_user_settings))
+        .route(
+            "/UserSettings/{user_id}",
+            get(user_settings).post(update_user_settings),
+        )
+        .route(
+            "/UserSettings/{user_id}/Partial",
+            post(update_user_settings_partial),
+        )
+        .route(
+            "/Users/{user_id}/Settings",
+            get(user_settings).post(update_user_settings),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,13 +58,9 @@ async fn display_preferences(
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_settings_access(&session, user_id)?;
     let client = normalized_display_preferences_client(query.client.as_deref());
-    if let Some(saved) = repository::get_display_preferences(
-        &state.pool,
-        user_id,
-        &display_preferences_id,
-        &client,
-    )
-    .await?
+    if let Some(saved) =
+        repository::get_display_preferences(&state.pool, user_id, &display_preferences_id, &client)
+            .await?
     {
         return Ok(Json(saved));
     }
@@ -64,7 +71,8 @@ async fn display_preferences(
         &client,
         &startup.ui_culture,
     );
-    if let Some(template) = repository::get_display_preferences_template(&state.pool, &client).await?
+    if let Some(template) =
+        repository::get_display_preferences_template(&state.pool, &client).await?
     {
         merge_json(&mut value, template);
     }
@@ -79,13 +87,9 @@ async fn user_display_preferences(
 ) -> Result<Json<Value>, AppError> {
     ensure_settings_access(&session, user_id)?;
     let client = normalized_display_preferences_client(query.client.as_deref());
-    if let Some(saved) = repository::get_display_preferences(
-        &state.pool,
-        user_id,
-        &display_preferences_id,
-        &client,
-    )
-    .await?
+    if let Some(saved) =
+        repository::get_display_preferences(&state.pool, user_id, &display_preferences_id, &client)
+            .await?
     {
         return Ok(Json(saved));
     }
@@ -96,7 +100,8 @@ async fn user_display_preferences(
         &client,
         &startup.ui_culture,
     );
-    if let Some(template) = repository::get_display_preferences_template(&state.pool, &client).await?
+    if let Some(template) =
+        repository::get_display_preferences_template(&state.pool, &client).await?
     {
         merge_json(&mut value, template);
     }
@@ -219,11 +224,18 @@ async fn localization_options(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
     let startup = repository::startup_configuration(&state.pool, &state.config).await?;
-    let mut ordered = vec![startup.ui_culture.clone(), "zh-CN".to_string(), "en-US".to_string()];
+    let mut ordered = vec![
+        startup.ui_culture.clone(),
+        "zh-CN".to_string(),
+        "en-US".to_string(),
+    ];
     ordered.dedup();
     let mut options = Vec::new();
     for culture in ordered {
-        if options.iter().any(|entry: &Value| entry["Value"] == culture) {
+        if options
+            .iter()
+            .any(|entry: &Value| entry["Value"] == culture)
+        {
             continue;
         }
         options.push(json!({
@@ -238,7 +250,11 @@ async fn localization_cultures(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
     let startup = repository::startup_configuration(&state.pool, &state.config).await?;
-    let mut ordered = vec![startup.ui_culture.clone(), "zh-CN".to_string(), "en-US".to_string()];
+    let mut ordered = vec![
+        startup.ui_culture.clone(),
+        "zh-CN".to_string(),
+        "en-US".to_string(),
+    ];
     ordered.dedup();
     let cultures = ordered
         .into_iter()
@@ -346,7 +362,11 @@ fn culture_language_code(culture: &str, fallback: &str) -> String {
         .to_ascii_lowercase()
 }
 fn to_two_letter_language(language: &str) -> String {
-    language.chars().take(2).collect::<String>().to_ascii_lowercase()
+    language
+        .chars()
+        .take(2)
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 fn to_three_letter_language(language: &str) -> String {
     match language.to_ascii_lowercase().as_str() {

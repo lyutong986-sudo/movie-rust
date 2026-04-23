@@ -172,7 +172,7 @@ pub struct DbPerson {
     pub sort_name: Option<String>,
     pub overview: Option<String>,
     pub external_url: Option<String>,
-    pub provider_ids: Value,  // JSONB
+    pub provider_ids: Value, // JSONB
     pub premiere_date: Option<DateTime<Utc>>,
     pub production_year: Option<i32>,
     pub primary_image_path: Option<String>,
@@ -258,11 +258,11 @@ impl From<MediaItemRow> for DbMediaItem {
             path: value.path,
             container: value.container,
             overview: value.overview,
-              production_year: value.production_year,
-              official_rating: value.official_rating,
-              community_rating: value.community_rating,
-              critic_rating: value.critic_rating,
-              runtime_ticks: value.runtime_ticks,
+            production_year: value.production_year,
+            official_rating: value.official_rating,
+            community_rating: value.community_rating,
+            critic_rating: value.critic_rating,
+            runtime_ticks: value.runtime_ticks,
             premiere_date: value.premiere_date,
             status: value.status,
             end_date: value.end_date,
@@ -293,8 +293,6 @@ impl From<MediaItemRow> for DbMediaItem {
         }
     }
 }
-
-
 
 #[derive(Debug, Clone, FromRow)]
 pub struct DbUserItemData {
@@ -1239,9 +1237,19 @@ pub struct VideoStreamQuery {
     pub audio_stream_index: Option<i32>,
     #[serde(default, alias = "subtitleStreamIndex")]
     pub subtitle_stream_index: Option<i32>,
-    #[serde(default, alias = "VideoBitRate", alias = "videoBitrate", alias = "videoBitRate")]
+    #[serde(
+        default,
+        alias = "VideoBitRate",
+        alias = "videoBitrate",
+        alias = "videoBitRate"
+    )]
     pub video_bitrate: Option<i64>,
-    #[serde(default, alias = "AudioBitRate", alias = "audioBitrate", alias = "audioBitRate")]
+    #[serde(
+        default,
+        alias = "AudioBitRate",
+        alias = "audioBitrate",
+        alias = "audioBitRate"
+    )]
     pub audio_bitrate: Option<i64>,
     #[serde(default, alias = "maxAudioChannels")]
     pub max_audio_channels: Option<i32>,
@@ -1312,8 +1320,6 @@ pub struct VideoStreamQuery {
     pub _api_key: Option<String>,
 }
 
-
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsQuery {
@@ -1338,7 +1344,13 @@ pub struct ItemsQuery {
     pub video_types: Option<String>,
     #[serde(default, alias = "ImageTypes", alias = "imageTypes")]
     pub image_types: Option<String>,
-    #[serde(default, alias = "Genres", alias = "genres", alias = "GenreIds", alias = "genreIds")]
+    #[serde(
+        default,
+        alias = "Genres",
+        alias = "genres",
+        alias = "GenreIds",
+        alias = "genreIds"
+    )]
     pub genres: Option<String>,
     #[serde(default, alias = "OfficialRatings", alias = "officialRatings")]
     pub official_ratings: Option<String>,
@@ -1380,7 +1392,11 @@ pub struct ItemsQuery {
     pub search_term: Option<String>,
     #[serde(default, alias = "NameStartsWith", alias = "nameStartsWith")]
     pub name_starts_with: Option<String>,
-    #[serde(default, alias = "NameStartsWithOrGreater", alias = "nameStartsWithOrGreater")]
+    #[serde(
+        default,
+        alias = "NameStartsWithOrGreater",
+        alias = "nameStartsWithOrGreater"
+    )]
     pub name_starts_with_or_greater: Option<String>,
     #[serde(default, alias = "NameLessThan", alias = "nameLessThan")]
     pub name_less_than: Option<String>,
@@ -1462,9 +1478,17 @@ pub struct ItemsQuery {
     pub min_date_last_saved: Option<DateTime<Utc>>,
     #[serde(default, alias = "MaxDateLastSaved", alias = "maxDateLastSaved")]
     pub max_date_last_saved: Option<DateTime<Utc>>,
-    #[serde(default, alias = "MinDateLastSavedForUser", alias = "minDateLastSavedForUser")]
+    #[serde(
+        default,
+        alias = "MinDateLastSavedForUser",
+        alias = "minDateLastSavedForUser"
+    )]
     pub min_date_last_saved_for_user: Option<DateTime<Utc>>,
-    #[serde(default, alias = "MaxDateLastSavedForUser", alias = "maxDateLastSavedForUser")]
+    #[serde(
+        default,
+        alias = "MaxDateLastSavedForUser",
+        alias = "maxDateLastSavedForUser"
+    )]
     pub max_date_last_saved_for_user: Option<DateTime<Utc>>,
     #[serde(default, alias = "AiredDuringSeason", alias = "airedDuringSeason")]
     pub aired_during_season: Option<i32>,
@@ -2007,7 +2031,13 @@ pub struct EpisodesQuery {
     pub video_types: Option<String>,
     #[serde(default, alias = "ImageTypes", alias = "imageTypes")]
     pub image_types: Option<String>,
-    #[serde(default, alias = "Genres", alias = "genres", alias = "GenreIds", alias = "genreIds")]
+    #[serde(
+        default,
+        alias = "Genres",
+        alias = "genres",
+        alias = "GenreIds",
+        alias = "genreIds"
+    )]
     pub genres: Option<String>,
     #[serde(default, alias = "OfficialRatings", alias = "officialRatings")]
     pub official_ratings: Option<String>,
@@ -2073,7 +2103,7 @@ pub fn emby_id_to_uuid(id_str: &str) -> Result<Uuid, uuid::Error> {
     } else {
         id_str
     };
-    
+
     Uuid::parse_str(id_to_parse)
 }
 
@@ -2087,10 +2117,10 @@ where
     D: serde::Deserializer<'de>,
 {
     use serde::Deserialize;
-    
+
     // 先尝试作为字符串反序列化
     let opt_str: Option<String> = Option::deserialize(deserializer)?;
-    
+
     match opt_str {
         Some(s) if s.trim().is_empty() => Ok(None), // 空字符串视为None
         Some(s) => {
@@ -2099,7 +2129,9 @@ where
                 return Ok(Some(Uuid::nil()));
             }
             // 尝试解析UUID
-            Uuid::parse_str(normalized).map(Some).map_err(serde::de::Error::custom)
+            Uuid::parse_str(normalized)
+                .map(Some)
+                .map_err(serde::de::Error::custom)
         }
         None => Ok(None),
     }

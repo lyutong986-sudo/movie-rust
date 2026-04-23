@@ -28,13 +28,28 @@ pub fn router() -> Router<AppState> {
         .route("/Sessions/{id}/Commands", get(session_commands))
         .route("/Sessions/{id}/Commands/Pending", get(session_commands))
         .route("/Sessions/{id}/Command", post(no_content_for_session))
-        .route("/Sessions/{id}/Command/{command}", post(no_content_for_session_command))
+        .route(
+            "/Sessions/{id}/Command/{command}",
+            post(no_content_for_session_command),
+        )
         .route("/Sessions/{id}/Message", post(message_for_session))
         .route("/Sessions/{id}/Playing", post(no_content_for_session))
-        .route("/Sessions/{id}/Playing/{command}", post(no_content_for_session_command))
-        .route("/Sessions/{id}/System/{command}", post(no_content_for_session_command))
-        .route("/Sessions/{id}/Users/{user_id}", post(no_content_for_session_user).delete(no_content_for_session_user))
-        .route("/Sessions/{id}/Users/{user_id}/Delete", post(no_content_for_session_user))
+        .route(
+            "/Sessions/{id}/Playing/{command}",
+            post(no_content_for_session_command),
+        )
+        .route(
+            "/Sessions/{id}/System/{command}",
+            post(no_content_for_session_command),
+        )
+        .route(
+            "/Sessions/{id}/Users/{user_id}",
+            post(no_content_for_session_user).delete(no_content_for_session_user),
+        )
+        .route(
+            "/Sessions/{id}/Users/{user_id}/Delete",
+            post(no_content_for_session_user),
+        )
         .route("/Sessions/{id}/Viewing", post(update_session_viewing))
         .route("/Sessions/Capabilities", post(update_capabilities))
         .route("/Sessions/Capabilities/Full", post(update_capabilities))
@@ -129,12 +144,8 @@ async fn list_sessions(
         {
             apply_session_capabilities(&mut dto, &capabilities);
         }
-        if let Some(viewing_item) = session_viewing_item(
-            &state,
-            &session.access_token,
-            session.user_id,
-        )
-        .await?
+        if let Some(viewing_item) =
+            session_viewing_item(&state, &session.access_token, session.user_id).await?
         {
             dto.now_viewing_item = Some(viewing_item);
         }
@@ -244,8 +255,16 @@ async fn auth_providers(
         let policy = repository::user_to_dto(&user, state.config.server_id).policy;
         let auth_id = policy.authentication_provider_id.trim();
         let reset_id = policy.password_reset_provider_id.trim();
-        provider_ids.insert(if auth_id.is_empty() { "Default".to_string() } else { auth_id.to_string() });
-        provider_ids.insert(if reset_id.is_empty() { "Default".to_string() } else { reset_id.to_string() });
+        provider_ids.insert(if auth_id.is_empty() {
+            "Default".to_string()
+        } else {
+            auth_id.to_string()
+        });
+        provider_ids.insert(if reset_id.is_empty() {
+            "Default".to_string()
+        } else {
+            reset_id.to_string()
+        });
     }
 
     if provider_ids.is_empty() {
@@ -351,13 +370,7 @@ async fn no_content_for_session(
         .and_then(Value::as_str)
         .unwrap_or("Command")
         .to_string();
-    repository::record_session_command(
-        &state.pool,
-        &id,
-        &command_name,
-        payload.clone(),
-    )
-    .await?;
+    repository::record_session_command(&state.pool, &id, &command_name, payload.clone()).await?;
     repository::apply_session_command_state(&state.pool, &id, &command_name, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -392,13 +405,7 @@ async fn no_content_for_session_command(
     body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
     let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
-    repository::record_session_command(
-        &state.pool,
-        &id,
-        &command,
-        payload.clone(),
-    )
-    .await?;
+    repository::record_session_command(&state.pool, &id, &command, payload.clone()).await?;
     repository::apply_session_command_state(&state.pool, &id, &command, &payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -409,14 +416,10 @@ async fn no_content_for_session_user(
     Path((id, user_id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
     let payload = json!({ "UserId": user_id });
-    repository::record_session_command(
-        &state.pool,
-        &id,
-        "SetAdditionalUser",
-        payload.clone(),
-    )
-    .await?;
-    repository::apply_session_command_state(&state.pool, &id, "SetAdditionalUser", &payload).await?;
+    repository::record_session_command(&state.pool, &id, "SetAdditionalUser", payload.clone())
+        .await?;
+    repository::apply_session_command_state(&state.pool, &id, "SetAdditionalUser", &payload)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

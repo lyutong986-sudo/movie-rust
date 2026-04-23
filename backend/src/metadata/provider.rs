@@ -20,11 +20,18 @@ pub trait MetadataProvider: Send + Sync {
     async fn get_person_details(&self, provider_id: &str) -> Result<ExternalPerson, AppError>;
 
     /// 获取人物参演作品
-    async fn get_person_credits(&self, provider_id: &str) -> Result<Vec<ExternalPersonCredit>, AppError>;
+    async fn get_person_credits(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<ExternalPersonCredit>, AppError>;
 
-    async fn get_series_details(&self, provider_id: &str) -> Result<ExternalSeriesMetadata, AppError>;
+    async fn get_series_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<ExternalSeriesMetadata, AppError>;
 
-    async fn get_movie_details(&self, provider_id: &str) -> Result<ExternalMovieMetadata, AppError>;
+    async fn get_movie_details(&self, provider_id: &str)
+        -> Result<ExternalMovieMetadata, AppError>;
 
     /// 获取条目人物信息（电影/剧集）
     async fn get_item_people(

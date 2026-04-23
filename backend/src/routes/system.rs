@@ -1,8 +1,8 @@
 use crate::{
     auth::{require_admin, AuthSession},
     models::{
-        uuid_to_emby_guid, ActivityLogQuery, BrandingConfiguration, EncodingOptionsDto, EndpointInfo, LogFileDto, PublicSystemInfo,
-        QueryResult, SystemInfo,
+        uuid_to_emby_guid, ActivityLogQuery, BrandingConfiguration, EncodingOptionsDto,
+        EndpointInfo, LogFileDto, PublicSystemInfo, QueryResult, SystemInfo,
     },
     repository,
     state::AppState,
@@ -145,7 +145,9 @@ async fn server_domains(
         if let Some(public_url) = state.config.public_url.as_ref() {
             let normalized = public_url.trim().trim_end_matches('/').to_string();
             if !normalized.is_empty()
-                && data.iter().all(|entry| entry.get("url").and_then(Value::as_str) != Some(normalized.as_str()))
+                && data.iter().all(|entry| {
+                    entry.get("url").and_then(Value::as_str) != Some(normalized.as_str())
+                })
             {
                 data.push(json!({
                     "name": startup.server_name,
@@ -236,7 +238,9 @@ async fn server_logs(
     _session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<LogFileDto>>, crate::error::AppError> {
-    Ok(Json(repository::list_server_logs(&state.config.log_dir).await?))
+    Ok(Json(
+        repository::list_server_logs(&state.config.log_dir).await?,
+    ))
 }
 
 async fn server_logs_query(
@@ -339,27 +343,32 @@ async fn ping() -> StatusCode {
 
 fn is_private_or_link_local(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private() || v4.is_link_local()
-        }
-        IpAddr::V6(v6) => {
-            v6.is_unique_local() || v6.is_unicast_link_local()
-        }
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
     }
 }
 
-fn log_file_path(log_dir: &FsPath, name: &str) -> Result<std::path::PathBuf, crate::error::AppError> {
+fn log_file_path(
+    log_dir: &FsPath,
+    name: &str,
+) -> Result<std::path::PathBuf, crate::error::AppError> {
     let file_name = name.trim();
     if file_name.is_empty() {
-        return Err(crate::error::AppError::BadRequest("日志文件名不能为空".to_string()));
+        return Err(crate::error::AppError::BadRequest(
+            "日志文件名不能为空".to_string(),
+        ));
     }
     if file_name.contains(['\\', '/', ':']) {
-        return Err(crate::error::AppError::BadRequest("日志文件名非法".to_string()));
+        return Err(crate::error::AppError::BadRequest(
+            "日志文件名非法".to_string(),
+        ));
     }
 
     let path = log_dir.join(file_name);
     if !path.is_file() {
-        return Err(crate::error::AppError::NotFound(format!("日志文件不存在: {file_name}")));
+        return Err(crate::error::AppError::NotFound(format!(
+            "日志文件不存在: {file_name}"
+        )));
     }
     Ok(path)
 }

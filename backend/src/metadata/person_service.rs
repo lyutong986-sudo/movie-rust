@@ -51,7 +51,8 @@ impl PersonService {
         let credits = provider.get_person_credits(external_id).await?;
         let mut seen_links = HashSet::new();
         for (index, credit) in credits.iter().enumerate() {
-            let items = repository::find_items_for_external_person_credit(&self.pool, credit).await?;
+            let items =
+                repository::find_items_for_external_person_credit(&self.pool, credit).await?;
             for item in items {
                 if !seen_links.insert(item.id) {
                     continue;
@@ -96,7 +97,9 @@ impl PersonService {
             .get_provider(provider_name)
             .ok_or_else(|| AppError::BadRequest(format!("Provider '{provider_name}' not found")))?;
 
-        let people = provider.get_item_people(media_type, external_item_id).await?;
+        let people = provider
+            .get_item_people(media_type, external_item_id)
+            .await?;
         let tmdb_person_ids = if provider_name.eq_ignore_ascii_case("tmdb")
             || provider_name.eq_ignore_ascii_case("themoviedb")
         {
@@ -118,7 +121,8 @@ impl PersonService {
             || provider_name.eq_ignore_ascii_case("tmdb")
             || provider_name.eq_ignore_ascii_case("themoviedb")
         {
-            repository::delete_tmdb_person_roles_except(&self.pool, item_id, &tmdb_person_ids).await?;
+            repository::delete_tmdb_person_roles_except(&self.pool, item_id, &tmdb_person_ids)
+                .await?;
         }
         for person in people {
             self.upsert_item_person(item_id, person).await?;

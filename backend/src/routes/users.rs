@@ -1,7 +1,10 @@
 use crate::{
     auth::{self, AuthSession},
     error::AppError,
-    models::{uuid_to_emby_guid, AuthenticateByNameRequest, AuthenticationResult, CreateUserByNameRequest, UpdateUserPasswordRequest, UserDto, UserPolicyDto},
+    models::{
+        uuid_to_emby_guid, AuthenticateByNameRequest, AuthenticationResult,
+        CreateUserByNameRequest, UpdateUserPasswordRequest, UserDto, UserPolicyDto,
+    },
     repository, security,
     state::AppState,
 };
@@ -158,12 +161,9 @@ async fn authenticate(
         return Err(AppError::Unauthorized);
     }
 
-    let device_id = auth::client_value(&headers, "DeviceId")
-        .or(payload.device_id);
-    let device_name = auth::client_value(&headers, "Device")
-        .or(payload.device_name);
-    let client = auth::client_value(&headers, "Client")
-        .or(payload.client);
+    let device_id = auth::client_value(&headers, "DeviceId").or(payload.device_id);
+    let device_name = auth::client_value(&headers, "Device").or(payload.device_name);
+    let client = auth::client_value(&headers, "Client").or(payload.client);
     let application_version = auth::client_value(&headers, "Version");
 
     let session = repository::create_session(
@@ -309,7 +309,9 @@ async fn update_user_policy(
     if !policy.is_administrator && user.is_admin {
         let admin_count = repository::count_admin_users(&state.pool).await?;
         if admin_count <= 1 {
-            return Err(AppError::BadRequest("系统中必须至少有一个管理员用户".to_string()));
+            return Err(AppError::BadRequest(
+                "系统中必须至少有一个管理员用户".to_string(),
+            ));
         }
     }
 
@@ -322,7 +324,9 @@ async fn update_user_policy(
     if policy.is_disabled && !user.is_disabled {
         let enabled_count = repository::count_enabled_users(&state.pool).await?;
         if enabled_count <= 1 {
-            return Err(AppError::BadRequest("系统中必须至少有一个启用用户".to_string()));
+            return Err(AppError::BadRequest(
+                "系统中必须至少有一个启用用户".to_string(),
+            ));
         }
     }
 

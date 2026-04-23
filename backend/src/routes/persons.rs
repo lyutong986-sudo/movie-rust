@@ -78,15 +78,14 @@ pub async fn get_person_items(
     Path(person_id): Path<String>,
     Query(query): Query<GetPersonsQuery>,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
-    let items =
-        repository::get_items_by_person(
-            &state.pool,
-            &person_id,
-            state.config.server_id,
-            query.start_index,
-            query.limit,
-        )
-        .await?;
+    let items = repository::get_items_by_person(
+        &state.pool,
+        &person_id,
+        state.config.server_id,
+        query.start_index,
+        query.limit,
+    )
+    .await?;
     Ok(Json(items))
 }
 
@@ -107,7 +106,9 @@ fn person_to_base_item(person: PersonDto, server_id: Uuid) -> BaseItemDto {
     item.presentation_unique_key = Some(format!("{}_", person.id));
     item.item_type = "Person".to_string();
     item.is_folder = true;
-    item.sort_name = person.sort_name.or_else(|| Some(person.name.to_lowercase()));
+    item.sort_name = person
+        .sort_name
+        .or_else(|| Some(person.name.to_lowercase()));
     item.forced_sort_name = item.sort_name.clone();
     item.primary_image_tag = person.primary_image_tag;
     item.overview = person.overview;
@@ -117,13 +118,20 @@ fn person_to_base_item(person: PersonDto, server_id: Uuid) -> BaseItemDto {
     item.size = None;
     item.special_feature_count = None;
     item.image_tags = image_tags;
-    item.provider_ids = person.provider_ids.unwrap_or_default().into_iter().collect();
+    item.provider_ids = person
+        .provider_ids
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
     item
 }
 
 pub fn router() -> axum::Router<crate::state::AppState> {
     axum::Router::new()
         .route("/Persons", axum::routing::get(get_persons))
-        .route("/Persons/{personId}/Items", axum::routing::get(get_person_items))
+        .route(
+            "/Persons/{personId}/Items",
+            axum::routing::get(get_person_items),
+        )
         .route("/Persons/{personId}", axum::routing::get(get_person))
 }

@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::ExitStatus,
@@ -81,7 +81,7 @@ impl Transcoder {
     /// 鍒涘缓鏂扮殑杞爜鍣?
     pub fn new(config: Arc<Config>) -> Self {
         let max_sessions = config.max_transcode_sessions.max(1);
-        
+
         Self {
             config,
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -89,7 +89,7 @@ impl Transcoder {
             cancellation_senders: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
+
     /// 寮€濮嬭浆鐮佷細璇?
     pub async fn start_transcoding(
         &self,
@@ -104,29 +104,35 @@ impl Transcoder {
         if !options.enable_transcoding {
             return Err(AppError::TranscodingDisabled);
         }
-        
+
         // 鑾峰彇淇″彿閲忚鍙紙绛夊緟绌洪棽妲戒綅锛?
-        let permit = self.session_semaphore.clone().acquire_owned().await
+        let permit = self
+            .session_semaphore
+            .clone()
+            .acquire_owned()
+            .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        
+
         // 鐢熸垚浼氳瘽ID鍜岃緭鍑虹洰褰?
         let session_id = Uuid::new_v4();
-        let output_dir = PathBuf::from(&options.transcoding_temp_path)
-            .join(format!("session_{}", session_id));
-        
+        let output_dir =
+            PathBuf::from(&options.transcoding_temp_path).join(format!("session_{}", session_id));
+
         // 鍒涘缓杈撳嚭鐩綍
-        tokio::fs::create_dir_all(&output_dir).await
+        tokio::fs::create_dir_all(&output_dir)
+            .await
             .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-        
+
         // 纭畾杞爜鍗忚
-        let protocol = params.transcoding_protocol
+        let protocol = params
+            .transcoding_protocol
             .as_deref()
             .unwrap_or("hls")
             .to_lowercase();
-        
+
         // 鏋勫缓鎾斁鍒楄〃璺緞
         let playlist_path = output_dir.join("playlist.m3u8");
-        
+
         // 鍒涘缓鍒濆浼氳瘽瀵硅薄
         let session = TranscodingSession {
             id: session_id,
@@ -144,18 +150,21 @@ impl Transcoder {
             error: None,
             ffmpeg_pid: None,
         };
-        
+
         // 瀛樺偍浼氳瘽
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(session_id, session.clone());
         }
-        
+
         tracing::info!(
             "寮€濮嬭浆鐮佷細璇? session_id={}, media_item_id={}, protocol={}, input={:?}",
-            session_id, media_item_id, protocol, input_path
+            session_id,
+            media_item_id,
+            protocol,
+            input_path
         );
-        
+
         // 鏇存柊浼氳瘽鐘舵€佷负杞爜涓?
         {
             let mut sessions = self.sessions.write().await;
@@ -164,33 +173,37 @@ impl Transcoder {
                 session.updated_at = Instant::now();
             }
         }
-        
+
         // 鏋勫缓FFmpeg鍛戒护琛屽弬鏁?
-        let ffmpeg_args = self.build_ffmpeg_args(input_path, &output_dir, &params, &protocol, &options)?;
+        let ffmpeg_args =
+            self.build_ffmpeg_args(input_path, &output_dir, &params, &protocol, &options)?;
         let ffmpeg_path = if options.encoder_location_type.eq_ignore_ascii_case("Custom") {
             options.encoder_app_path.as_str()
         } else {
             self.config.ffmpeg_path.as_str()
         };
-        
+
         // 鍚姩FFmpeg杩涚▼
         let mut cmd = Command::new(ffmpeg_path);
         cmd.args(&ffmpeg_args);
         cmd.stdout(std::process::Stdio::null()); // 閲嶅畾鍚戞爣鍑嗚緭鍑?
         cmd.stderr(std::process::Stdio::piped()); // 鎹曡幏鏍囧噯閿欒鐢ㄤ簬璋冭瘯
         cmd.kill_on_drop(true);
-        
-        tracing::debug!("鎵цFFmpeg鍛戒护: {} {}", ffmpeg_path, ffmpeg_args.join(" "));
-        
-        let child = cmd.spawn()
-            .map_err(|e| {
-                tracing::error!("鍚姩FFmpeg杩涚▼澶辫触: {}", e);
-                AppError::FfmpegError(format!("鍚姩FFmpeg杩涚▼澶辫触: {}", e))
-            })?;
-        
+
+        tracing::debug!(
+            "鎵цFFmpeg鍛戒护: {} {}",
+            ffmpeg_path,
+            ffmpeg_args.join(" ")
+        );
+
+        let child = cmd.spawn().map_err(|e| {
+            tracing::error!("鍚姩FFmpeg杩涚▼澶辫触: {}", e);
+            AppError::FfmpegError(format!("鍚姩FFmpeg杩涚▼澶辫触: {}", e))
+        })?;
+
         // 鑾峰彇杩涚▼ID
         let pid = child.id();
-        
+
         // 鏇存柊浼氳瘽鐘舵€侊紝璁板綍杩涚▼ID
         {
             let mut sessions = self.sessions.write().await;
@@ -199,7 +212,7 @@ impl Transcoder {
                 session.updated_at = Instant::now();
             }
         }
-        
+
         let (cancel_tx, cancel_rx) = oneshot::channel();
         {
             let mut senders = self.cancellation_senders.write().await;
@@ -209,7 +222,7 @@ impl Transcoder {
         let sessions_clone = self.sessions.clone();
         let senders_clone = self.cancellation_senders.clone();
         let session_id_clone = session_id;
-        
+
         // 鍚姩鍚庡彴浠诲姟鐩戞帶FFmpeg杩涚▼
         tokio::spawn(async move {
             let _permit = permit;
@@ -218,12 +231,12 @@ impl Transcoder {
                 let mut senders = senders_clone.write().await;
                 senders.remove(&session_id_clone);
             }
-            
+
             let mut sessions = sessions_clone.write().await;
             if let Some(mut session) = sessions.get_mut(&session_id_clone) {
                 session.updated_at = Instant::now();
                 session.ffmpeg_pid = None;
-                
+
                 match output {
                     FfmpegCompletion::Finished(Ok(status)) if status.success() => {
                         session.state = TranscodingSessionState::Completed;
@@ -253,16 +266,16 @@ impl Transcoder {
                 }
             }
         });
-        
+
         Ok(session)
     }
-    
+
     /// 鑾峰彇杞爜浼氳瘽
     pub async fn get_session(&self, session_id: Uuid) -> Option<TranscodingSession> {
         let sessions = self.sessions.read().await;
         sessions.get(&session_id).cloned()
     }
-    
+
     /// 鍋滄杞爜浼氳瘽
     pub async fn stop_transcoding(&self, session_id: Uuid) -> Result<(), AppError> {
         if let Some(sender) = self.cancellation_senders.write().await.remove(&session_id) {
@@ -294,7 +307,8 @@ impl Transcoder {
                         && device_id.is_none_or(|device_id| session.device_id == device_id)
                         && matches!(
                             session.state,
-                            TranscodingSessionState::Initializing | TranscodingSessionState::Transcoding
+                            TranscodingSessionState::Initializing
+                                | TranscodingSessionState::Transcoding
                         )
                 })
                 .map(|(id, _)| *id)
@@ -307,12 +321,12 @@ impl Transcoder {
         }
         count
     }
-    
+
     /// 娓呯悊杩囨湡鐨勮浆鐮佷細璇?
     pub async fn cleanup_expired_sessions(&self, max_age: Duration) -> usize {
         let now = Instant::now();
         let mut sessions_to_remove = Vec::new();
-        
+
         // 鎵惧嚭杩囨湡浼氳瘽
         {
             let sessions = self.sessions.read().await;
@@ -322,7 +336,7 @@ impl Transcoder {
                 }
             }
         }
-        
+
         // 绉婚櫎杩囨湡浼氳瘽
         let count = sessions_to_remove.len();
         if count > 0 {
@@ -331,10 +345,10 @@ impl Transcoder {
                 sessions.remove(&id);
             }
         }
-        
+
         count
     }
-    
+
     /// 鏋勫缓FFmpeg鍛戒护琛屽弬鏁?
     fn build_ffmpeg_args(
         &self,
@@ -345,7 +359,7 @@ impl Transcoder {
         options: &EncodingOptionsDto,
     ) -> Result<Vec<String>, AppError> {
         let mut args = vec!["-i".to_string(), input_path.to_string_lossy().to_string()];
-        
+
         // 瑙嗛缂栫爜鍙傛暟
         if let Some(video_codec) = &params.video_codec {
             args.push("-c:v".to_string());
@@ -367,21 +381,24 @@ impl Transcoder {
             args.push("-crf".to_string());
             args.push(options.h264_crf.to_string());
         }
-        
+
         // 瑙嗛鐮佺巼闄愬埗
         if let Some(max_bitrate) = params.max_video_bitrate {
             args.push("-b:v".to_string());
             args.push(format!("{}k", max_bitrate / 1000));
         }
-        
+
         // 鍒嗚鲸鐜囬檺鍒?
         if params.max_width.is_some() || params.max_height.is_some() {
             let width = params.max_width.unwrap_or(1920);
             let height = params.max_height.unwrap_or(1080);
             args.push("-vf".to_string());
-            args.push(format!("scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease", width, height));
+            args.push(format!(
+                "scale='min({},iw)':'min({},ih)':force_original_aspect_ratio=decrease",
+                width, height
+            ));
         }
-        
+
         // 闊抽缂栫爜鍙傛暟
         if let Some(audio_codec) = &params.audio_codec {
             args.push("-c:a".to_string());
@@ -393,13 +410,13 @@ impl Transcoder {
             args.push("-c:a".to_string());
             args.push("copy".to_string()); // 榛樿澶嶅埗闊抽娴?
         }
-        
+
         // 闊抽澹伴亾闄愬埗
         if let Some(max_channels) = params.max_audio_channels {
             args.push("-ac".to_string());
             args.push(max_channels.to_string());
         }
-        
+
         // 绾跨▼鏁?
         let threads = match options.encoding_thread_count {
             0 => num_cpus::get() as u32,
@@ -408,7 +425,7 @@ impl Transcoder {
         };
         args.push("-threads".to_string());
         args.push(threads.to_string());
-        
+
         // 杈撳嚭鏍煎紡
         match protocol {
             "hls" => {
@@ -419,9 +436,19 @@ impl Transcoder {
                 args.push("-hls_list_size".to_string());
                 args.push("0".to_string()); // 0琛ㄧず鏃犻檺鍒楄〃
                 args.push("-hls_segment_filename".to_string());
-                args.push(output_dir.join("segment%d.ts").to_string_lossy().to_string());
-                args.push(output_dir.join("playlist.m3u8").to_string_lossy().to_string());
-            },
+                args.push(
+                    output_dir
+                        .join("segment%d.ts")
+                        .to_string_lossy()
+                        .to_string(),
+                );
+                args.push(
+                    output_dir
+                        .join("playlist.m3u8")
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
             "dash" => {
                 args.push("-f".to_string());
                 args.push("dash".to_string());
@@ -431,11 +458,16 @@ impl Transcoder {
                 args.push("5".to_string()); // 绐楀彛澶у皬
                 args.push("-extra_window_size".to_string());
                 args.push("5".to_string()); // 棰濆绐楀彛澶у皬
-                args.push(output_dir.join("playlist.mpd").to_string_lossy().to_string());
-            },
+                args.push(
+                    output_dir
+                        .join("playlist.mpd")
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
             _ => return Err(AppError::InvalidTranscodingProtocol(protocol.to_string())),
         }
-        
+
         Ok(args)
     }
 }
@@ -461,7 +493,12 @@ async fn wait_for_ffmpeg_or_cancel(
 
 fn ffmpeg_video_encoder<'a>(codec: &'a str, options: &'a EncodingOptionsDto) -> &'a str {
     match codec.trim().to_ascii_lowercase().as_str() {
-        "h264" | "avc" | "libx264" => match options.hardware_acceleration_type.trim().to_ascii_lowercase().as_str() {
+        "h264" | "avc" | "libx264" => match options
+            .hardware_acceleration_type
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "nvenc" => "h264_nvenc",
             "qsv" => "h264_qsv",
             "vaapi" => "h264_vaapi",

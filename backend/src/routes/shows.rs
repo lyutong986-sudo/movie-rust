@@ -293,7 +293,10 @@ async fn get_episodes(
                 max_end_date: query.max_end_date,
                 recursive,
                 search_term: query.search_term.clone(),
-                sort_by: query.sort_by.clone().or_else(|| Some("SortName".to_string())),
+                sort_by: query
+                    .sort_by
+                    .clone()
+                    .or_else(|| Some("SortName".to_string())),
                 sort_order: query
                     .sort_order
                     .clone()
@@ -377,7 +380,12 @@ fn apply_items_query_to_show_result(
     let tags = parse_list(query.tags.as_deref());
     let years = parse_i32_list(query.years.as_deref());
     let containers = parse_list(query.containers.as_deref());
-    let search_term = query.search_term.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_ascii_lowercase);
+    let search_term = query
+        .search_term
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
 
     items.retain(|item| {
         if !media_types.is_empty()
@@ -400,7 +408,12 @@ fn apply_items_query_to_show_result(
         if !image_types.is_empty() && !matches_image_filter(item, &image_types) {
             return false;
         }
-        if !genres.is_empty() && !item.genres.iter().any(|value| contains_ignore_case(&genres, value)) {
+        if !genres.is_empty()
+            && !item
+                .genres
+                .iter()
+                .any(|value| contains_ignore_case(&genres, value))
+        {
             return false;
         }
         if !official_ratings.is_empty()
@@ -411,10 +424,19 @@ fn apply_items_query_to_show_result(
         {
             return false;
         }
-        if !tags.is_empty() && !item.tags.iter().any(|value| contains_ignore_case(&tags, value)) {
+        if !tags.is_empty()
+            && !item
+                .tags
+                .iter()
+                .any(|value| contains_ignore_case(&tags, value))
+        {
             return false;
         }
-        if !years.is_empty() && !item.production_year.is_some_and(|year| years.contains(&year)) {
+        if !years.is_empty()
+            && !item
+                .production_year
+                .is_some_and(|year| years.contains(&year))
+        {
             return false;
         }
         if !containers.is_empty()
@@ -436,7 +458,8 @@ fn apply_items_query_to_show_result(
             }
         }
         if let Some(is_hd) = query.is_hd {
-            let is_item_hd = item.width.unwrap_or_default() >= 1280 || item.height.unwrap_or_default() >= 720;
+            let is_item_hd =
+                item.width.unwrap_or_default() >= 1280 || item.height.unwrap_or_default() >= 720;
             if is_item_hd != is_hd {
                 return false;
             }
@@ -451,22 +474,38 @@ fn apply_items_query_to_show_result(
             }
         }
         if let Some(min_date) = query.min_premiere_date.or(query.min_start_date) {
-            if !item.premiere_date.as_ref().is_some_and(|date| *date >= min_date) {
+            if !item
+                .premiere_date
+                .as_ref()
+                .is_some_and(|date| *date >= min_date)
+            {
                 return false;
             }
         }
         if let Some(max_date) = query.max_premiere_date.or(query.max_start_date) {
-            if !item.premiere_date.as_ref().is_some_and(|date| *date <= max_date) {
+            if !item
+                .premiere_date
+                .as_ref()
+                .is_some_and(|date| *date <= max_date)
+            {
                 return false;
             }
         }
         if let Some(min_date) = query.min_date_last_saved {
-            if !item.date_modified.as_ref().is_some_and(|date| *date >= min_date) {
+            if !item
+                .date_modified
+                .as_ref()
+                .is_some_and(|date| *date >= min_date)
+            {
                 return false;
             }
         }
         if let Some(max_date) = query.max_date_last_saved {
-            if !item.date_modified.as_ref().is_some_and(|date| *date <= max_date) {
+            if !item
+                .date_modified
+                .as_ref()
+                .is_some_and(|date| *date <= max_date)
+            {
                 return false;
             }
         }
@@ -487,7 +526,11 @@ fn apply_items_query_to_show_result(
         true
     });
 
-    apply_episode_sort(&mut items, query.sort_by.as_deref(), query.sort_order.as_deref());
+    apply_episode_sort(
+        &mut items,
+        query.sort_by.as_deref(),
+        query.sort_order.as_deref(),
+    );
     let total_record_count = items.len() as i64;
     let start_index = query.start_index.unwrap_or(0).max(0) as usize;
     let limit = query.limit.unwrap_or(100).clamp(1, 200) as usize;
@@ -566,7 +609,9 @@ fn retain_item_images(item: &mut BaseItemDto, image_types: &[String]) {
 }
 
 fn contains_ignore_case(values: &[String], candidate: &str) -> bool {
-    values.iter().any(|value| value.eq_ignore_ascii_case(candidate))
+    values
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(candidate))
 }
 
 fn matches_image_filter(item: &BaseItemDto, image_types: &[String]) -> bool {
@@ -579,7 +624,10 @@ fn matches_image_filter(item: &BaseItemDto, image_types: &[String]) -> bool {
 }
 
 fn apply_start_item(mut items: Vec<BaseItemDto>, start_item_id: Option<&str>) -> Vec<BaseItemDto> {
-    let Some(start_item_id) = start_item_id.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(start_item_id) = start_item_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return items;
     };
     if let Some(index) = items
@@ -591,7 +639,10 @@ fn apply_start_item(mut items: Vec<BaseItemDto>, start_item_id: Option<&str>) ->
     items
 }
 
-fn apply_adjacent_items(mut items: Vec<BaseItemDto>, adjacent_to: Option<&str>) -> Vec<BaseItemDto> {
+fn apply_adjacent_items(
+    mut items: Vec<BaseItemDto>,
+    adjacent_to: Option<&str>,
+) -> Vec<BaseItemDto> {
     let Some(adjacent_to) = adjacent_to.map(str::trim).filter(|value| !value.is_empty()) else {
         return items;
     };
@@ -682,7 +733,10 @@ async fn get_episodes_by_season(
             max_end_date: query.max_end_date,
             recursive: false,
             search_term: query.search_term.clone(),
-            sort_by: query.sort_by.clone().or_else(|| Some("SortName".to_string())),
+            sort_by: query
+                .sort_by
+                .clone()
+                .or_else(|| Some("SortName".to_string())),
             sort_order: query
                 .sort_order
                 .clone()
@@ -713,13 +767,7 @@ async fn season_to_dto(
     user_id: Uuid,
     season: &crate::models::DbMediaItem,
 ) -> Result<BaseItemDto, AppError> {
-    repository::media_item_to_dto(
-        &state.pool,
-        season,
-        Some(user_id),
-        state.config.server_id,
-    )
-    .await
+    repository::media_item_to_dto(&state.pool, season, Some(user_id), state.config.server_id).await
 }
 
 async fn episode_to_dto(
@@ -727,13 +775,7 @@ async fn episode_to_dto(
     user_id: Uuid,
     episode: &crate::models::DbMediaItem,
 ) -> Result<BaseItemDto, AppError> {
-    repository::media_item_to_dto(
-        &state.pool,
-        episode,
-        Some(user_id),
-        state.config.server_id,
-    )
-    .await
+    repository::media_item_to_dto(&state.pool, episode, Some(user_id), state.config.server_id).await
 }
 
 fn ensure_user_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppError> {

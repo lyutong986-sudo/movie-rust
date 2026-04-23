@@ -148,7 +148,11 @@ fn genre_to_base_item(genre: GenreDto, server_id: uuid::Uuid) -> BaseItemDto {
     item.display_preferences_id = Some(id);
     item.size = None;
     item.special_feature_count = None;
-    item.image_tags = genre.image_tags.unwrap_or_default().into_iter().collect::<BTreeMap<_, _>>();
+    item.image_tags = genre
+        .image_tags
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
     item
 }
 
@@ -157,12 +161,24 @@ pub fn router() -> axum::Router<crate::state::AppState> {
         .route("/Genres", axum::routing::get(get_genres))
         .route("/MusicGenres", axum::routing::get(get_genres))
         .route("/GameGenres", axum::routing::get(get_genres))
-        .route("/Users/{userId}/Genres", axum::routing::get(get_user_genres))
-        .route("/Genres/{genreName}/Items", axum::routing::get(get_genre_items))
+        .route(
+            "/Users/{userId}/Genres",
+            axum::routing::get(get_user_genres),
+        )
+        .route(
+            "/Genres/{genreName}/Items",
+            axum::routing::get(get_genre_items),
+        )
         .route("/Genres/{genreName}", axum::routing::get(get_genre))
-        .route("/MusicGenres/{genreName}/Items", axum::routing::get(get_genre_items))
+        .route(
+            "/MusicGenres/{genreName}/Items",
+            axum::routing::get(get_genre_items),
+        )
         .route("/MusicGenres/{genreName}", axum::routing::get(get_genre))
-        .route("/GameGenres/{genreName}/Items", axum::routing::get(get_genre_items))
+        .route(
+            "/GameGenres/{genreName}/Items",
+            axum::routing::get(get_genre_items),
+        )
         .route("/GameGenres/{genreName}", axum::routing::get(get_genre))
 }
 
@@ -273,13 +289,15 @@ async fn genre_items_for_scope(
 
     let mut items = Vec::with_capacity(result.items.len());
     for item in result.items {
-        items.push(repository::media_item_to_dto(
-            &state.pool,
-            &item,
-            Some(user_id),
-            state.config.server_id,
-        )
-        .await?);
+        items.push(
+            repository::media_item_to_dto(
+                &state.pool,
+                &item,
+                Some(user_id),
+                state.config.server_id,
+            )
+            .await?,
+        );
     }
 
     Ok(items)

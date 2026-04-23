@@ -132,7 +132,7 @@ pub fn strm_target_from_text(content: &str) -> Option<String> {
     let valid_protocols = [
         "http://", "https://", "rtsp://", "rtp://", "rtmp://", "mms://",
     ];
-    
+
     content
         .lines()
         .map(str::trim)
@@ -513,9 +513,10 @@ fn continuation_episode_token_regex() -> &'static Regex {
 
 fn strip_continuation_episode_tokens(value: &str) -> String {
     let stripped = continuation_episode_token_regex().replace(value, "");
-    stripped.into_owned().trim_matches(|ch: char| {
-        ch.is_whitespace() || matches!(ch, '.' | '_' | '-')
-    }).to_string()
+    stripped
+        .into_owned()
+        .trim_matches(|ch: char| ch.is_whitespace() || matches!(ch, '.' | '_' | '-'))
+        .to_string()
 }
 
 fn date_episode_regex() -> &'static Regex {

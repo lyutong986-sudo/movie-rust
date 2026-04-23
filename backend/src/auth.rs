@@ -57,7 +57,7 @@ pub async fn require_auth(
         );
         AppError::Unauthorized
     })?;
-    
+
     if let Some(api_key) = &state.config.api_key {
         if token == *api_key {
             return Ok(AuthSession {
@@ -67,14 +67,14 @@ pub async fn require_auth(
             });
         }
     }
-    
+
     let session = repository::get_session(&state.pool, &token)
         .await?
         .ok_or_else(|| {
             tracing::debug!("令牌无效或会话不存在: {}", token);
             AppError::Unauthorized
         })?;
-    
+
     // 检查会话是否已过期
     if let Some(expires_at) = session.expires_at {
         if expires_at < chrono::Utc::now() {
@@ -82,7 +82,7 @@ pub async fn require_auth(
             return Err(AppError::Unauthorized);
         }
     }
-    
+
     Ok(session.into())
 }
 
@@ -117,7 +117,7 @@ impl FromRequestParts<AppState> for OptionalAuthSession {
                             })));
                         }
                     }
-                    
+
                     match repository::get_session(&state.pool, &token).await {
                         Ok(Some(session)) => Ok(OptionalAuthSession(Some(session.into()))),
                         Ok(None) => Ok(OptionalAuthSession(None)),
@@ -224,8 +224,6 @@ mod tests {
             Some("device-1")
         );
     }
-
-
 
     #[test]
     fn extracts_token_from_emby_query_aliases() {
