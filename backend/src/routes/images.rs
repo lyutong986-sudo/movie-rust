@@ -91,42 +91,59 @@ async fn list_item_images(
 ) -> Result<Json<Vec<ImageInfoDto>>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
-    let item = repository::get_media_item(&state.pool, item_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-
     let mut images = Vec::new();
-    if let Some(path) = item.image_primary_path {
-        images.push(ImageInfoDto {
-            image_type: "Primary".to_string(),
-            image_index: None,
-            image_tag: item.date_modified.timestamp().to_string(),
-            path,
-        });
-    }
-    if let Some(path) = item.backdrop_path {
-        images.push(ImageInfoDto {
-            image_type: "Backdrop".to_string(),
-            image_index: Some(0),
-            image_tag: item.date_modified.timestamp().to_string(),
-            path,
-        });
-    }
-    if let Some(path) = item.logo_path {
-        images.push(ImageInfoDto {
-            image_type: "Logo".to_string(),
-            image_index: None,
-            image_tag: item.date_modified.timestamp().to_string(),
-            path,
-        });
-    }
-    if let Some(path) = item.thumb_path {
-        images.push(ImageInfoDto {
-            image_type: "Thumb".to_string(),
-            image_index: None,
-            image_tag: item.date_modified.timestamp().to_string(),
-            path,
-        });
+    if let Some(item) = repository::get_media_item(&state.pool, item_id).await? {
+        if let Some(path) = item.image_primary_path {
+            images.push(ImageInfoDto {
+                image_type: "Primary".to_string(),
+                image_index: None,
+                image_tag: item.date_modified.timestamp().to_string(),
+                path,
+            });
+        }
+        if let Some(path) = item.backdrop_path {
+            images.push(ImageInfoDto {
+                image_type: "Backdrop".to_string(),
+                image_index: Some(0),
+                image_tag: item.date_modified.timestamp().to_string(),
+                path,
+            });
+        }
+        if let Some(path) = item.logo_path {
+            images.push(ImageInfoDto {
+                image_type: "Logo".to_string(),
+                image_index: None,
+                image_tag: item.date_modified.timestamp().to_string(),
+                path,
+            });
+        }
+        if let Some(path) = item.thumb_path {
+            images.push(ImageInfoDto {
+                image_type: "Thumb".to_string(),
+                image_index: None,
+                image_tag: item.date_modified.timestamp().to_string(),
+                path,
+            });
+        }
+    } else if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
+        let image_tag = person
+            .primary_image_tag
+            .clone()
+            .unwrap_or_else(|| "0".to_string());
+        for image_type in ["Primary", "Backdrop", "Logo", "Thumb"] {
+            if let Some(path) =
+                repository::get_person_image_path(&state.pool, &person.id, image_type).await?
+            {
+                images.push(ImageInfoDto {
+                    image_type: image_type.to_string(),
+                    image_index: (image_type == "Backdrop").then_some(0),
+                    image_tag: image_tag.clone(),
+                    path,
+                });
+            }
+        }
+    } else {
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
     }
 
     Ok(Json(images))
@@ -140,15 +157,20 @@ async fn item_image_url_response(
 ) -> Result<Json<Value>, AppError> {
     let item_id = emby_id_to_uuid(item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
-    let item = repository::get_media_item(&state.pool, item_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
     let normalized = normalized_item_image_type(image_type);
-    let has_image = match normalized.as_str() {
-        "Backdrop" => item.backdrop_path.is_some(),
-        "Logo" => item.logo_path.is_some(),
-        "Thumb" => item.thumb_path.is_some(),
-        _ => item.image_primary_path.is_some(),
+    let has_image = if let Some(item) = repository::get_media_item(&state.pool, item_id).await? {
+        match normalized.as_str() {
+            "Backdrop" => item.backdrop_path.is_some(),
+            "Logo" => item.logo_path.is_some(),
+            "Thumb" => item.thumb_path.is_some(),
+            _ => item.image_primary_path.is_some(),
+        }
+    } else if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
+        repository::get_person_image_path(&state.pool, &person.id, &normalized)
+            .await?
+            .is_some()
+    } else {
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
     };
     if !has_image {
         return Err(AppError::NotFound("图片不存在".to_string()));
@@ -571,7 +593,7 @@ async fn serve_person_image(
     image_type: String,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
-    let path = repository::get_person_image_path(&state.pool, &name, &image_type)
+    let path = resolve_person_image_path(&state, &name, &image_type)
         .await?
         .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
     serve_image(&path, request).await
@@ -694,12 +716,11 @@ async fn serve_item_image(
     }
 
     let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
-        if image_type.eq_ignore_ascii_case("Primary") {
-            if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
-                if let Some(path) = repository::get_person_image_path(&state.pool, &person.id, &image_type).await? {
-                    return serve_image(&path, request).await;
-                }
+        if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
+            if let Some(path) = resolve_person_image_path(&state, &person.id, &image_type).await? {
+                return serve_image(&path, request).await;
             }
+            return Err(AppError::NotFound("图片不存在".to_string()));
         }
         return Err(AppError::NotFound("媒体条目不存在".to_string()));
     };
@@ -858,18 +879,92 @@ fn normalized_item_image_type(image_type: &str) -> String {
 }
 
 fn image_extension_from_headers(headers: &HeaderMap) -> &'static str {
-    match headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
+    image_extension_from_content_type(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default(),
+    )
+}
+
+fn image_extension_from_content_type(content_type: &str) -> &'static str {
+    match content_type.to_ascii_lowercase().as_str() {
         "image/png" => "png",
         "image/webp" => "webp",
         "image/gif" => "gif",
         _ => "jpg",
     }
+}
+
+async fn resolve_person_image_path(
+    state: &AppState,
+    person_id_or_name: &str,
+    image_type: &str,
+) -> Result<Option<String>, AppError> {
+    let Some(path) = repository::get_person_image_path(&state.pool, person_id_or_name, image_type).await? else {
+        return Ok(None);
+    };
+
+    if !path.starts_with("http://") && !path.starts_with("https://") {
+        return Ok(Some(path));
+    }
+
+    let person = if let Ok(person_id) = emby_id_to_uuid(person_id_or_name) {
+        repository::get_person_by_uuid(&state.pool, person_id).await?
+    } else {
+        Some(repository::get_person_by_name(&state.pool, person_id_or_name).await?)
+    }
+    .ok_or_else(|| AppError::NotFound("人物不存在".to_string()))?;
+
+    let normalized = normalized_item_image_type(image_type);
+    let client = Client::new();
+    let response = client
+        .get(&path)
+        .send()
+        .await
+        .map_err(|error| AppError::Internal(format!("下载人物图片失败: {error}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::NotFound(format!(
+            "远程人物图片不存在: {}",
+            response.status()
+        )));
+    }
+
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+    let extension = image_extension_from_content_type(&content_type);
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| AppError::Internal(format!("读取人物图片失败: {error}")))?;
+
+    let dir = state.config.static_dir.join("person-images");
+    fs::create_dir_all(&dir).await.map_err(AppError::Io)?;
+    let filename = format!(
+        "{}-{}.{}",
+        person.id,
+        normalized.to_ascii_lowercase(),
+        extension
+    );
+    let local_path = dir.join(filename);
+    fs::write(&local_path, &bytes).await.map_err(AppError::Io)?;
+
+    let person_uuid = emby_id_to_uuid(&person.id)
+        .map_err(|_| AppError::Internal("人物ID格式无效".to_string()))?;
+    let local_path_text = local_path.to_string_lossy().to_string();
+    repository::update_person_image_path(
+        &state.pool,
+        person_uuid,
+        &normalized,
+        Some(&local_path_text),
+    )
+    .await?;
+
+    Ok(Some(local_path_text))
 }
 
 async fn serve_image(path: &str, request: Request<Body>) -> Result<Response, AppError> {

@@ -54,6 +54,28 @@ impl TmdbProvider {
         })
     }
 
+    pub fn new_with_preferences(
+        api_key: String,
+        preferred_metadata_language: &str,
+        metadata_country_code: &str,
+    ) -> Self {
+        let normalized_language = preferred_metadata_language.trim();
+        let normalized_country = metadata_country_code.trim().to_ascii_uppercase();
+        let language = if normalized_language.is_empty() {
+            "en-US".to_string()
+        } else if normalized_country.is_empty() {
+            normalized_language.to_string()
+        } else {
+            format!("{normalized_language}-{normalized_country}")
+        };
+
+        Self::with_config(TmdbConfig {
+            api_key,
+            language,
+            ..Default::default()
+        })
+    }
+
     /// 使用配置创建TMDB提供者
     pub fn with_config(config: TmdbConfig) -> Self {
         Self {

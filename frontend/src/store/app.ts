@@ -450,6 +450,7 @@ export function defaultLibraryOptions(paths: string[] = []): LibraryOptions {
   return {
     Enabled: true,
     EnablePhotos: true,
+    DownloadImagesInAdvance: false,
     EnableRealtimeMonitor: false,
     EnableChapterImageExtraction: false,
     ExtractChapterImagesDuringLibraryScan: false,

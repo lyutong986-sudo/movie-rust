@@ -1511,6 +1511,8 @@ pub struct LibraryOptionsDto {
     #[serde(default = "default_true")]
     pub enable_photos: bool,
     #[serde(default)]
+    pub download_images_in_advance: bool,
+    #[serde(default)]
     pub enable_realtime_monitor: bool,
     #[serde(default)]
     pub enable_chapter_image_extraction: bool,
@@ -1547,6 +1549,7 @@ impl Default for LibraryOptionsDto {
         Self {
             enabled: true,
             enable_photos: true,
+            download_images_in_advance: false,
             enable_realtime_monitor: false,
             enable_chapter_image_extraction: false,
             extract_chapter_images_during_library_scan: false,

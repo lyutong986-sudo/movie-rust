@@ -293,6 +293,32 @@
 - 添加媒体库弹窗的 `path-editor` 改为可视化目录选择器，支持查看服务器驱动器、逐级进入目录、返回上级并将当前文件夹加入媒体库路径，不再要求手动输入路径。
 - 验证通过: `cargo check --manifest-path backend/Cargo.toml`、`npm.cmd run build`。
 
+### 2026-04-23 人物图片 TMDB 按需缓存
+
+- 对照 Emby 模板可确认服务端图片默认是“被客户端请求时再下载”，而不是让客户端长期直接依赖第三方图链；人物卡片/详情仍会通过 `/Items/{personId}/Images/Primary` 或 `/Persons/{personId}/Images/Primary` 取图。
+- 当前后端已改为人物图片首次命中远程 TMDB URL 时，自动下载到 `static_dir/person-images`，并把 `persons.primary_image_path/backdrop_image_path/logo_image_path` 更新为本地缓存文件路径，后续请求直接走本地文件。
+- 同时补齐 `/Items/{personId}/Images` 对人物实体的兼容，避免人物 DTO 带 `ImageTags.Primary` 时落到 `媒体条目不存在` 的 404。
+
+### 2026-04-23 TMDB 语言与图片预下载
+
+- TMDB provider 启动时改为使用 `APP_PREFERRED_METADATA_LANGUAGE` 和 `APP_METADATA_COUNTRY_CODE` 组装语言参数，不再固定 `en-US`；扫描媒体库时还会优先使用媒体库自己的 `PreferredMetadataLanguage` / `MetadataCountryCode`。
+- 新增并打通 `LibraryOptions.DownloadImagesInAdvance`，前端创建媒体库表单和媒体库设置摘要都已暴露该开关。
+- 扫描时若开启 `DownloadImagesInAdvance`：
+  - 人物图片继续下载到服务端缓存目录 `static_dir/person-images`
+  - 电影/剧集图片在 `SaveLocalMetadata=true` 时写入对应媒体目录；否则回退到 `static_dir/item-images`
+- 对照 Jellyfin 后端 `ImageSaver` 后，又把本地图片命名进一步对齐到 Emby/Jellyfin 习惯：
+  - 电影/剧集主图保存为 `poster.jpg`
+  - 背景图保存为 `fanart.jpg`
+  - 横图保存为 `landscape.jpg`
+  - 季图保存为 `season01-poster.jpg`、`season01-fanart.jpg`、`season01-logo.jpg`、`season01-landscape.jpg`
+  - 集图在本地元数据模式下仅落 `SxxExx-thumb.jpg` 风格主图，不再错误尝试写入额外 backdrop/logo
+- 人物图片仍保持走服务端内部缓存目录，这一点也与 Jellyfin 的 `PeoplePath -> InternalMetadataPath/People/...` 设计一致。
+- 扫描器本地图片读取规则也已同步补齐：
+  - 剧集季级别会识别 `season01-*` / `season-specials-*` 这类 Emby/Jellyfin 常见命名
+  - 集级别会额外识别 sidecar `fanart/backdrop/background/logo/clearlogo/thumb/landscape`
+  - 这样 `DownloadImagesInAdvance + SaveLocalMetadata` 写回磁盘后的图片，在后续重扫时能稳定重新识别并回填数据库
+- 已增加季图命名识别单测，验证 `season01-poster.jpg` 与 `season-specials-fanart.jpg` 两类路径均可命中。
+
 ### 2026-04-23 初始化管理员数据库修复
 
 - 初始化用户表 `0001_init.sql` 已直接包含 Emby 用户运行所需字段: `policy`、`configuration`、`primary_image_path`、`backdrop_image_path`、`logo_image_path`、`date_modified`，新项目初始化后可直接创建管理员。

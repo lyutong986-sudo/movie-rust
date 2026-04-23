@@ -17,6 +17,7 @@ const form = reactive({
   automaticRefreshIntervalDays: 0,
   enabled: true,
   enablePhotos: true,
+  downloadImagesInAdvance: false,
   enableRealtimeMonitor: false,
   saveLocalMetadata: true,
   enableChapterImageExtraction: false,
@@ -114,6 +115,7 @@ function options(): LibraryOptions {
     ...defaultLibraryOptions(cleanPaths.value),
     Enabled: form.enabled,
     EnablePhotos: form.enablePhotos,
+    DownloadImagesInAdvance: form.downloadImagesInAdvance,
     EnableRealtimeMonitor: form.enableRealtimeMonitor,
     SaveLocalMetadata: form.saveLocalMetadata,
     EnableChapterImageExtraction: form.enableChapterImageExtraction,
@@ -214,7 +216,8 @@ async function submit() {
         <div class="switch-grid">
           <label><input v-model="form.enabled" type="checkbox" />启用媒体库</label>
           <label><input v-model="form.enableRealtimeMonitor" type="checkbox" />实时监控</label>
-          <label><input v-model="form.saveLocalMetadata" type="checkbox" />保存 NFO 元数据</label>
+          <label><input v-model="form.downloadImagesInAdvance" type="checkbox" />扫描时预下载图片</label>
+          <label><input v-model="form.saveLocalMetadata" type="checkbox" />保存图片和 NFO 元数据到媒体目录</label>
           <label><input v-model="form.enablePhotos" type="checkbox" />导入图片</label>
           <label><input v-model="form.enableChapterImageExtraction" type="checkbox" />提取章节图片</label>
           <label><input v-model="form.extractChapterImagesDuringLibraryScan" type="checkbox" />扫描时提取章节图片</label>

@@ -1,13 +1,18 @@
 use crate::{
+    config::Config,
     error::AppError,
     media_analyzer,
-    metadata::provider::MetadataProviderManager,
-    models::{DbLibrary, ScanSummary},
+    metadata::{
+        provider::{MetadataProvider, MetadataProviderManager},
+        tmdb::TmdbProvider,
+    },
+    models::{DbLibrary, LibraryOptionsDto, ScanSummary},
     naming,
     repository::{self, UpsertMediaItem},
 };
 use chrono::NaiveDate;
 use regex::Regex;
+use reqwest::Client;
 use serde_json::{json, Map, Value};
 use std::{
     collections::HashSet,
@@ -64,6 +69,7 @@ struct NfoPerson {
 pub async fn scan_all_libraries(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
+    config: &Config,
 ) -> Result<ScanSummary, AppError> {
     let libraries = repository::list_libraries(pool).await?;
     let mut scanned_files = 0_i64;
@@ -71,6 +77,7 @@ pub async fn scan_all_libraries(
     let mut refreshed_series = HashSet::new();
 
     for library in &libraries {
+        let library_options = repository::library_options(library);
         for library_path in repository::library_paths(library) {
             let path = PathBuf::from(&library_path);
             if !path.exists() {
@@ -86,14 +93,24 @@ pub async fn scan_all_libraries(
                     import_tv_file(
                         pool,
                         metadata_manager,
+                        config,
                         &mut refreshed_series,
                         library,
+                        &library_options,
                         &path,
                         &file,
                     )
                     .await?;
                 } else {
-                    import_movie_file(pool, metadata_manager, library, &file).await?;
+                    import_movie_file(
+                        pool,
+                        metadata_manager,
+                        config,
+                        library,
+                        &library_options,
+                        &file,
+                    )
+                    .await?;
                 }
                 imported_items += 1;
             }
@@ -131,7 +148,9 @@ async fn collect_video_files(root: PathBuf) -> Result<Vec<PathBuf>, AppError> {
 async fn import_movie_file(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
+    config: &Config,
     library: &DbLibrary,
+    library_options: &LibraryOptionsDto,
     file: &Path,
 ) -> Result<(), AppError> {
     let parsed = naming::parse_media_path(file);
@@ -205,8 +224,38 @@ async fn import_movie_file(
     )
     .await?;
     sync_nfo_people(pool, movie_id, &nfo.people).await?;
-    refresh_remote_people(pool, metadata_manager, movie_id, "movie", &provider_ids).await;
-    refresh_movie_remote_metadata(pool, metadata_manager, movie_id, &provider_ids).await;
+    refresh_remote_people(
+        pool,
+        metadata_manager,
+        config,
+        library_options,
+        movie_id,
+        "movie",
+        &provider_ids,
+    )
+    .await;
+    refresh_movie_remote_metadata(
+        pool,
+        metadata_manager,
+        config,
+        library_options,
+        movie_id,
+        &provider_ids,
+    )
+    .await;
+    if library_options.download_images_in_advance {
+        cache_remote_images_for_item(
+            pool,
+            metadata_manager,
+            config,
+            library_options,
+            movie_id,
+            file,
+            Some(file.parent().unwrap_or(file)),
+            "Movie",
+        )
+        .await;
+    }
     analyze_imported_media(pool, movie_id, file).await?;
 
     Ok(())
@@ -215,8 +264,10 @@ async fn import_movie_file(
 async fn import_tv_file(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
+    config: &Config,
     refreshed_series: &mut HashSet<uuid::Uuid>,
     library: &DbLibrary,
+    library_options: &LibraryOptionsDto,
     library_root: &Path,
     file: &Path,
 ) -> Result<(), AppError> {
@@ -283,8 +334,24 @@ async fn import_tv_file(
     let season_poster = season_nfo
         .primary_image
         .clone()
+        .or_else(|| find_season_art(&series_path, &season_path, season_number, &["poster", "folder"]))
         .or_else(|| naming::find_folder_image(&season_path))
         .or_else(|| series_poster.clone());
+    let season_backdrop = season_nfo
+        .backdrop_image
+        .clone()
+        .or_else(|| find_season_art(&series_path, &season_path, season_number, &["fanart", "backdrop", "background"]))
+        .or_else(|| series_backdrop.clone());
+    let season_logo = season_nfo
+        .logo_image
+        .clone()
+        .or_else(|| find_season_art(&series_path, &season_path, season_number, &["logo", "clearlogo"]))
+        .or_else(|| series_logo.clone());
+    let season_thumb = season_nfo
+        .thumb_image
+        .clone()
+        .or_else(|| find_season_art(&series_path, &season_path, season_number, &["landscape", "thumb"]))
+        .or_else(|| series_thumb.clone());
 
     let series_id = repository::upsert_media_item(
         pool,
@@ -314,9 +381,9 @@ async fn import_tv_file(
             tags: &series_nfo.tags,
             production_locations: &series_nfo.production_locations,
             image_primary_path: series_poster.as_deref(),
-            backdrop_path: series_backdrop.as_deref(),
-            logo_path: series_logo.as_deref(),
-            thumb_path: series_thumb.as_deref(),
+            backdrop_path: season_backdrop.as_deref(),
+            logo_path: season_logo.as_deref(),
+            thumb_path: season_thumb.as_deref(),
             remote_trailers: &series_nfo.remote_trailers,
             series_name: Some(&series_name),
             season_name: None,
@@ -331,16 +398,48 @@ async fn import_tv_file(
     )
     .await?;
     sync_nfo_people(pool, series_id, &series_nfo.people).await?;
-    refresh_remote_people(pool, metadata_manager, series_id, "tv", &series_provider_ids).await;
+    refresh_remote_people(
+        pool,
+        metadata_manager,
+        config,
+        library_options,
+        series_id,
+        "tv",
+        &series_provider_ids,
+    )
+    .await;
     refresh_series_remote_metadata(
         pool,
         metadata_manager,
+        config,
+        library_options,
         refreshed_series,
         series_id,
         &series_provider_ids,
     )
     .await;
-    refresh_series_episode_catalog(pool, metadata_manager, series_id, &series_provider_ids).await;
+    refresh_series_episode_catalog(
+        pool,
+        metadata_manager,
+        config,
+        library_options,
+        series_id,
+        &series_provider_ids,
+    )
+    .await;
+    if library_options.download_images_in_advance {
+        cache_remote_images_for_item(
+            pool,
+            metadata_manager,
+            config,
+            library_options,
+            series_id,
+            &series_path,
+            Some(&series_path),
+            "Series",
+        )
+        .await;
+    }
 
     let season_id = repository::upsert_media_item(
         pool,
@@ -413,6 +512,19 @@ async fn import_tv_file(
         },
     )
     .await?;
+    if library_options.download_images_in_advance {
+        cache_remote_images_for_item(
+            pool,
+            metadata_manager,
+            config,
+            library_options,
+            season_id,
+            &season_path,
+            Some(&season_path),
+            "Season",
+        )
+        .await;
+    }
 
     let container = file
         .extension()
@@ -426,8 +538,13 @@ async fn import_tv_file(
     let backdrop = episode_nfo
         .backdrop_image
         .clone()
+        .or_else(|| find_item_image(file, &["fanart", "backdrop", "background"]))
         .or_else(|| series_backdrop.clone());
-    let episode_logo = episode_nfo.logo_image.clone().or_else(|| series_logo.clone());
+    let episode_logo = episode_nfo
+        .logo_image
+        .clone()
+        .or_else(|| find_item_image(file, &["logo", "clearlogo"]))
+        .or_else(|| series_logo.clone());
     let episode_thumb = episode_nfo
         .thumb_image
         .clone()
@@ -520,6 +637,19 @@ async fn import_tv_file(
         },
     )
     .await?;
+    if library_options.download_images_in_advance {
+        cache_remote_images_for_item(
+            pool,
+            metadata_manager,
+            config,
+            library_options,
+            episode_id,
+            file,
+            file.parent(),
+            "Episode",
+        )
+        .await;
+    }
     let episode_people = if episode_nfo.people.is_empty() {
         &series_nfo.people
     } else {
@@ -534,6 +664,8 @@ async fn import_tv_file(
 async fn refresh_series_remote_metadata(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
+    config: &Config,
+    library_options: &LibraryOptionsDto,
     refreshed_series: &mut HashSet<uuid::Uuid>,
     series_id: uuid::Uuid,
     provider_ids: &Value,
@@ -542,16 +674,12 @@ async fn refresh_series_remote_metadata(
         return;
     }
 
-    let Some(metadata_manager) = metadata_manager else {
-        return;
-    };
     let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
         return;
     };
-    let Some(provider) = metadata_manager.get_provider("tmdb") else {
+    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
         return;
     };
-
     match provider.get_series_details(&tmdb_id).await {
         Ok(metadata) => {
             if let Err(error) =
@@ -566,12 +694,7 @@ async fn refresh_series_remote_metadata(
             }
         }
         Err(error) => {
-            tracing::warn!(
-                series_id = %series_id,
-                tmdb_id = %tmdb_id,
-                error = %error,
-                "刷新远程剧集元数据失败"
-            );
+            tracing::warn!(series_id = %series_id, tmdb_id = %tmdb_id, error = %error, "刷新远程剧集元数据失败");
         }
     }
 }
@@ -579,19 +702,17 @@ async fn refresh_series_remote_metadata(
 async fn refresh_movie_remote_metadata(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
+    config: &Config,
+    library_options: &LibraryOptionsDto,
     movie_id: uuid::Uuid,
     provider_ids: &Value,
 ) {
-    let Some(metadata_manager) = metadata_manager else {
-        return;
-    };
     let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
         return;
     };
-    let Some(provider) = metadata_manager.get_provider("tmdb") else {
+    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
         return;
     };
-
     match provider.get_movie_details(&tmdb_id).await {
         Ok(metadata) => {
             if let Err(error) =
@@ -606,12 +727,7 @@ async fn refresh_movie_remote_metadata(
             }
         }
         Err(error) => {
-            tracing::warn!(
-                movie_id = %movie_id,
-                tmdb_id = %tmdb_id,
-                error = %error,
-                "刷新远程电影元数据失败"
-            );
+            tracing::warn!(movie_id = %movie_id, tmdb_id = %tmdb_id, error = %error, "刷新远程电影元数据失败");
         }
     }
 }
@@ -619,19 +735,17 @@ async fn refresh_movie_remote_metadata(
 async fn refresh_series_episode_catalog(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
+    config: &Config,
+    library_options: &LibraryOptionsDto,
     series_id: uuid::Uuid,
     provider_ids: &Value,
 ) {
-    let Some(metadata_manager) = metadata_manager else {
-        return;
-    };
     let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
         return;
     };
-    let Some(provider) = metadata_manager.get_provider("tmdb") else {
+    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
         return;
     };
-
     match provider.get_series_episode_catalog(&tmdb_id).await {
         Ok(items) => {
             if let Err(error) = repository::replace_series_episode_catalog(pool, series_id, &items).await {
@@ -644,12 +758,7 @@ async fn refresh_series_episode_catalog(
             }
         }
         Err(error) => {
-            tracing::warn!(
-                series_id = %series_id,
-                tmdb_id = %tmdb_id,
-                error = %error,
-                "获取远程剧集目录失败"
-            );
+            tracing::warn!(series_id = %series_id, tmdb_id = %tmdb_id, error = %error, "获取远程剧集目录失败");
         }
     }
 }
@@ -657,20 +766,18 @@ async fn refresh_series_episode_catalog(
 async fn refresh_remote_people(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
+    config: &Config,
+    library_options: &LibraryOptionsDto,
     media_item_id: uuid::Uuid,
     media_type: &str,
     provider_ids: &Value,
 ) {
-    let Some(metadata_manager) = metadata_manager else {
-        return;
-    };
     let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
         return;
     };
-    let Some(provider) = metadata_manager.get_provider("tmdb") else {
+    let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
         return;
     };
-
     match provider.get_item_people(media_type, &tmdb_id).await {
         Ok(people) => {
             for person in people {
@@ -685,6 +792,16 @@ async fn refresh_remote_people(
                 .await
                 {
                     Ok(person_id) => {
+                        if library_options.download_images_in_advance {
+                            cache_person_image(
+                                pool,
+                                config,
+                                person_id,
+                                person.image_url.as_deref(),
+                                "Primary",
+                            )
+                            .await;
+                        }
                         if let Err(error) = repository::upsert_person_role(
                             pool,
                             person_id,
@@ -717,12 +834,7 @@ async fn refresh_remote_people(
             }
         }
         Err(error) => {
-            tracing::warn!(
-                media_item_id = %media_item_id,
-                tmdb_id = %tmdb_id,
-                error = %error,
-                "获取远程人物信息失败"
-            );
+            tracing::warn!(media_item_id = %media_item_id, tmdb_id = %tmdb_id, error = %error, "获取远程人物信息失败");
         }
     }
 }
@@ -773,6 +885,283 @@ async fn analyze_imported_media(
     };
 
     repository::update_media_item_metadata(pool, item_id, &analysis).await
+}
+
+fn tmdb_provider_for_library<'a>(
+    metadata_manager: Option<&'a MetadataProviderManager>,
+    config: &'a Config,
+    library_options: &'a LibraryOptionsDto,
+) -> Option<Box<dyn MetadataProvider + 'a>> {
+    if let Some(api_key) = &config.tmdb_api_key {
+        let preferred_metadata_language = library_options
+            .preferred_metadata_language
+            .as_deref()
+            .unwrap_or(&config.preferred_metadata_language);
+        let metadata_country_code = library_options
+            .metadata_country_code
+            .as_deref()
+            .unwrap_or(&config.metadata_country_code);
+        let provider = TmdbProvider::new_with_preferences(
+            api_key.clone(),
+            preferred_metadata_language,
+            metadata_country_code,
+        );
+        return Some(Box::new(provider));
+    }
+
+    metadata_manager
+        .and_then(|manager| manager.get_provider("tmdb"))
+        .map(|provider| Box::new(ProviderRef { inner: provider }) as Box<dyn MetadataProvider>)
+}
+
+struct ProviderRef<'a> {
+    inner: &'a dyn MetadataProvider,
+}
+
+#[async_trait::async_trait]
+impl MetadataProvider for ProviderRef<'_> {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn search_person(
+        &self,
+        name: &str,
+    ) -> Result<Vec<crate::metadata::models::ExternalPersonSearchResult>, AppError> {
+        self.inner.search_person(name).await
+    }
+
+    async fn get_person_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::metadata::models::ExternalPerson, AppError> {
+        self.inner.get_person_details(provider_id).await
+    }
+
+    async fn get_person_credits(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalPersonCredit>, AppError> {
+        self.inner.get_person_credits(provider_id).await
+    }
+
+    async fn get_series_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::metadata::models::ExternalSeriesMetadata, AppError> {
+        self.inner.get_series_details(provider_id).await
+    }
+
+    async fn get_movie_details(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::metadata::models::ExternalMovieMetadata, AppError> {
+        self.inner.get_movie_details(provider_id).await
+    }
+
+    async fn get_item_people(
+        &self,
+        media_type: &str,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalItemPerson>, AppError> {
+        self.inner.get_item_people(media_type, provider_id).await
+    }
+
+    async fn get_series_episode_catalog(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalEpisodeCatalogItem>, AppError> {
+        self.inner.get_series_episode_catalog(provider_id).await
+    }
+
+    async fn get_remote_images(
+        &self,
+        media_type: &str,
+        provider_id: &str,
+    ) -> Result<Vec<crate::metadata::provider::ExternalRemoteImage>, AppError> {
+        self.inner.get_remote_images(media_type, provider_id).await
+    }
+}
+
+async fn cache_remote_images_for_item(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<&MetadataProviderManager>,
+    config: &Config,
+    library_options: &LibraryOptionsDto,
+    item_id: uuid::Uuid,
+    item_path: &Path,
+    item_folder: Option<&Path>,
+    media_type: &str,
+) {
+    let Some(item) = repository::get_media_item(pool, item_id)
+        .await
+        .ok()
+        .flatten() else {
+        return;
+    };
+    let mut images = Vec::new();
+    for (image_type, path) in [
+        ("Primary", item.image_primary_path.as_deref()),
+        ("Backdrop", item.backdrop_path.as_deref()),
+        ("Logo", item.logo_path.as_deref()),
+        ("Thumb", item.thumb_path.as_deref()),
+    ] {
+        let Some(path) = path.filter(|path| path.starts_with("http://") || path.starts_with("https://")) else {
+            continue;
+        };
+        images.push(crate::metadata::provider::ExternalRemoteImage {
+            provider_name: "CurrentPath".to_string(),
+            url: path.to_string(),
+            thumbnail_url: Some(path.to_string()),
+            image_type: image_type.to_string(),
+            language: None,
+            width: None,
+            height: None,
+            community_rating: None,
+            vote_count: None,
+        });
+    }
+
+    if let Some(tmdb_id) = tmdb_id_from_provider_ids(&item.provider_ids) {
+        if let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) {
+            if let Ok(mut remote_images) = provider.get_remote_images(media_type, &tmdb_id).await {
+                images.append(&mut remote_images);
+            }
+        }
+    }
+    if images.is_empty() {
+        return;
+    }
+
+    for image_type in ["Primary", "Backdrop", "Logo", "Thumb"] {
+        let Some(image) = images
+            .iter()
+            .find(|image| image.image_type.eq_ignore_ascii_case(image_type))
+        else {
+            continue;
+        };
+        let local_path = if library_options.save_local_metadata {
+            image_target_path(&item, item_path, item_folder, image_type)
+        } else {
+            cache_target_path(
+                &config.static_dir.join("item-images"),
+                &item_id.to_string(),
+                image_type,
+                image.url.as_str(),
+            )
+        };
+        let Some(local_path) = local_path else {
+            continue;
+        };
+        if download_image_to_path(&local_path, &image.url).await.is_err() {
+            continue;
+        }
+        let local_path_text = local_path.to_string_lossy().to_string();
+        let _ = repository::update_media_item_image_path(pool, item_id, image_type, Some(&local_path_text)).await;
+    }
+}
+
+async fn cache_person_image(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    person_id: uuid::Uuid,
+    image_url: Option<&str>,
+    image_type: &str,
+) {
+    let Some(image_url) = image_url.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    let Some(local_path) = cache_target_path(
+        &config.static_dir.join("person-images"),
+        &person_id.to_string(),
+        image_type,
+        image_url,
+    ) else {
+        return;
+    };
+    if download_image_to_path(&local_path, image_url).await.is_err() {
+        return;
+    }
+    let local_path_text = local_path.to_string_lossy().to_string();
+    let _ = repository::update_person_image_path(pool, person_id, image_type, Some(&local_path_text)).await;
+}
+
+fn image_target_path(
+    item: &crate::models::DbMediaItem,
+    item_path: &Path,
+    item_folder: Option<&Path>,
+    image_type: &str,
+) -> Option<PathBuf> {
+    let extension = "jpg";
+    let folder = item_folder.or_else(|| item_path.parent())?;
+    let stem = item_path.file_stem()?.to_string_lossy();
+    let image_type = image_type.to_ascii_lowercase();
+
+    if item.item_type.eq_ignore_ascii_case("Episode") {
+        return match image_type.as_str() {
+            "primary" => Some(folder.join(format!("{stem}-thumb.{extension}"))),
+            _ => None,
+        };
+    }
+
+    if item.item_type.eq_ignore_ascii_case("Season") {
+        let season_number = item.index_number.unwrap_or_default();
+        let marker = if season_number == 0 {
+            "-specials".to_string()
+        } else {
+            format!("{season_number:02}")
+        };
+        let prefix = format!("season{marker}");
+        return match image_type.as_str() {
+            "primary" => Some(folder.join(format!("{prefix}-poster.{extension}"))),
+            "backdrop" => Some(folder.join(format!("{prefix}-fanart.{extension}"))),
+            "logo" => Some(folder.join(format!("{prefix}-logo.{extension}"))),
+            "thumb" => Some(folder.join(format!("{prefix}-landscape.{extension}"))),
+            _ => None,
+        };
+    }
+
+    let filename = match image_type.as_str() {
+        "primary" => "poster",
+        "backdrop" => "fanart",
+        "logo" => "logo",
+        "thumb" => "landscape",
+        _ => return None,
+    };
+
+    if item_path.is_dir() {
+        Some(folder.join(format!("{filename}.{extension}")))
+    } else {
+        Some(folder.join(format!("{stem}-{filename}.{extension}")))
+    }
+}
+
+fn cache_target_path(dir: &Path, stem: &str, image_type: &str, image_url: &str) -> Option<PathBuf> {
+    let extension = naming::extension_from_url(image_url)
+        .filter(|ext| naming::IMAGE_EXTENSIONS.iter().any(|candidate| candidate.eq_ignore_ascii_case(ext)))
+        .unwrap_or_else(|| "jpg".to_string());
+    Some(dir.join(format!("{}-{}.{}", stem, image_type.to_ascii_lowercase(), extension)))
+}
+
+async fn download_image_to_path(path: &Path, image_url: &str) -> Result<(), AppError> {
+    let client = Client::new();
+    let response = client
+        .get(image_url)
+        .send()
+        .await
+        .map_err(|error| AppError::Internal(format!("下载远程图片失败: {error}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::NotFound(format!("远程图片不存在: {}", response.status())));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| AppError::Internal(format!("读取远程图片失败: {error}")))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::Io)?;
+    }
+    std::fs::write(path, &bytes).map_err(AppError::Io)?;
+    Ok(())
 }
 
 fn read_movie_nfo(file: &Path) -> Option<NfoMetadata> {
@@ -1225,6 +1614,38 @@ fn find_folder_art(folder: &Path, names: &[&str]) -> Option<PathBuf> {
     None
 }
 
+fn find_season_art(
+    series_path: &Path,
+    season_path: &Path,
+    season_number: i32,
+    names: &[&str],
+) -> Option<PathBuf> {
+    let markers = season_markers(season_number);
+    for name in names {
+        for marker in &markers {
+            for extension in naming::IMAGE_EXTENSIONS {
+                let filename = format!("season{marker}-{name}.{extension}");
+                for base in [series_path, season_path] {
+                    let candidate = base.join(&filename);
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn season_markers(season_number: i32) -> Vec<String> {
+    if season_number == 0 {
+        return vec!["-specials".to_string(), "00".to_string(), "0".to_string()];
+    }
+
+    vec![format!("{season_number:02}"), season_number.to_string()]
+}
+
 fn image_aspect(attrs: &str) -> Option<String> {
     let regex = Regex::new(r#"(?i)\baspect\s*=\s*["']([^"']+)["']"#).ok()?;
     regex
@@ -1613,5 +2034,35 @@ mod tests {
         assert_eq!(metadata.episode_number, Some(3));
         assert_eq!(metadata.episode_number_end, Some(4));
         assert_eq!(metadata.premiere_date, NaiveDate::from_ymd_opt(2026, 4, 21));
+    }
+
+    #[test]
+    fn find_season_art_matches_series_level_emby_names() {
+        let root = std::env::temp_dir().join(format!("movie-rust-season-art-{}", uuid::Uuid::new_v4()));
+        let series_path = root.join("Show");
+        let season_path = series_path.join("Season 1");
+        std::fs::create_dir_all(&season_path).unwrap();
+        let poster = series_path.join("season01-poster.jpg");
+        std::fs::write(&poster, b"poster").unwrap();
+
+        let found = find_season_art(&series_path, &season_path, 1, &["poster"]);
+
+        assert_eq!(found.as_deref(), Some(poster.as_path()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_season_art_matches_specials_marker() {
+        let root = std::env::temp_dir().join(format!("movie-rust-specials-art-{}", uuid::Uuid::new_v4()));
+        let series_path = root.join("Show");
+        let season_path = series_path.join("Specials");
+        std::fs::create_dir_all(&season_path).unwrap();
+        let fanart = series_path.join("season-specials-fanart.jpg");
+        std::fs::write(&fanart, b"fanart").unwrap();
+
+        let found = find_season_art(&series_path, &season_path, 0, &["fanart"]);
+
+        assert_eq!(found.as_deref(), Some(fanart.as_path()));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

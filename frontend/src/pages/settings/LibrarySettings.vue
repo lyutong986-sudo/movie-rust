@@ -74,6 +74,7 @@ async function remove(folder: VirtualFolderInfo) {
             <div class="library-option-grid">
               <span :class="{ enabled: folder.LibraryOptions.Enabled }">启用</span>
               <span :class="{ enabled: folder.LibraryOptions.EnableRealtimeMonitor }">实时监控</span>
+              <span :class="{ enabled: folder.LibraryOptions.DownloadImagesInAdvance }">预下载图片</span>
               <span :class="{ enabled: folder.LibraryOptions.SaveLocalMetadata }">保存 NFO</span>
               <span :class="{ enabled: folder.LibraryOptions.EnableChapterImageExtraction }">章节图片</span>
               <span :class="{ enabled: folder.LibraryOptions.EnableAutomaticSeriesGrouping }">剧集自动分组</span>

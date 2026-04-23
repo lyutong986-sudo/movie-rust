@@ -1192,6 +1192,29 @@ pub async fn update_user_image_path(
     Ok(())
 }
 
+pub async fn update_person_image_path(
+    pool: &sqlx::PgPool,
+    person_id: Uuid,
+    image_type: &str,
+    path: Option<&str>,
+) -> Result<(), AppError> {
+    let column = match image_type.to_ascii_lowercase().as_str() {
+        "backdrop" => "backdrop_image_path",
+        "logo" => "logo_image_path",
+        _ => "primary_image_path",
+    };
+
+    let query = format!(
+        "UPDATE persons SET {column} = $1, updated_at = now() WHERE id = $2"
+    );
+    sqlx::query(&query)
+        .bind(path)
+        .bind(person_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn create_session(
     pool: &sqlx::PgPool,
     user_id: Uuid,

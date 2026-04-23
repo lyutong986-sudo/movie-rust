@@ -63,7 +63,11 @@ async fn main() -> Result<()> {
     let mut metadata_manager = metadata::provider::MetadataProviderManager::new();
 
     if let Some(tmdb_api_key) = &config.tmdb_api_key {
-        let tmdb_provider = metadata::tmdb::TmdbProvider::new(tmdb_api_key.clone());
+        let tmdb_provider = metadata::tmdb::TmdbProvider::new_with_preferences(
+            tmdb_api_key.clone(),
+            &config.preferred_metadata_language,
+            &config.metadata_country_code,
+        );
         metadata_manager.register_provider(Box::new(tmdb_provider));
         tracing::info!("TMDB 元数据提供者已注册");
     }

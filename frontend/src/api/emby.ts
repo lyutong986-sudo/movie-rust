@@ -163,6 +163,7 @@ export interface MediaPathInfo {
 export interface LibraryOptions {
   Enabled: boolean;
   EnablePhotos: boolean;
+  DownloadImagesInAdvance: boolean;
   EnableRealtimeMonitor: boolean;
   EnableChapterImageExtraction: boolean;
   ExtractChapterImagesDuringLibraryScan: boolean;
