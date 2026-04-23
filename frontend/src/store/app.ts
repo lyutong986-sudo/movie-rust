@@ -504,7 +504,7 @@ export function libraryPayloadFromState(): CreateLibraryPayload {
 
 export async function createLibrary(payload = libraryPayloadFromState()) {
   await run(async () => {
-    const library = await api.createLibrary(payload);
+    const library = await api.createLibrary(payload, true);
     libraries.value.push(library);
     state.libraryPath = '';
     state.showAddLibrary = false;
@@ -519,12 +519,12 @@ export async function createLibrary(payload = libraryPayloadFromState()) {
 export async function deleteLibrary(library: BaseItemDto | VirtualFolderInfo) {
   await run(async () => {
     if ('ItemId' in library) {
-      await api.deleteVirtualFolder(library.Name, false);
+      await api.deleteVirtualFolder(library.Name, true);
       if (state.selectedLibraryId === library.ItemId) {
         state.selectedLibraryId = '';
       }
     } else {
-      await api.deleteLibrary(library.Id);
+      await api.deleteLibrary(library.Id, true);
       if (state.selectedLibraryId === library.Id) {
         state.selectedLibraryId = '';
       }

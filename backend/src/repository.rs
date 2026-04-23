@@ -1530,9 +1530,13 @@ pub async fn create_library(
     if name.is_empty() {
         return Err(AppError::BadRequest("媒体库名称不能为空".to_string()));
     }
+    if get_library_by_name(pool, name).await?.is_some() {
+        return Err(AppError::BadRequest("媒体库名称已存在".to_string()));
+    }
     if paths.is_empty() {
         return Err(AppError::BadRequest("至少需要添加一个媒体路径".to_string()));
     }
+    validate_library_paths_available(pool, None, &paths).await?;
 
     let id = Uuid::new_v4();
     let options = normalize_library_options(options, &paths);
@@ -1650,6 +1654,11 @@ pub async fn rename_library(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
 
+    if !library.name.eq_ignore_ascii_case(new_name) && get_library_by_name(pool, new_name).await?.is_some()
+    {
+        return Err(AppError::BadRequest("媒体库名称已存在".to_string()));
+    }
+
     sqlx::query("UPDATE libraries SET name = $1, date_modified = now() WHERE id = $2")
         .bind(new_name)
         .bind(library.id)
@@ -1671,6 +1680,12 @@ pub async fn update_library_options(
         .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
     let paths = library_paths(&library);
     let options = normalize_library_options(options, &paths);
+    let next_paths = options
+        .path_infos
+        .iter()
+        .map(|path| path.path.clone())
+        .collect::<Vec<_>>();
+    validate_library_paths_available(pool, Some(id), &next_paths).await?;
     let path = options
         .path_infos
         .first()
@@ -1928,6 +1943,60 @@ fn normalize_library_options(
     }
 
     options
+}
+
+async fn validate_library_paths_available(
+    pool: &sqlx::PgPool,
+    exclude_library_id: Option<Uuid>,
+    requested_paths: &[String],
+) -> Result<(), AppError> {
+    let normalized_requested = requested_paths
+        .iter()
+        .map(|path| normalize_path_for_compare(path))
+        .collect::<Vec<_>>();
+
+    let libraries = list_libraries(pool).await?;
+    for library in libraries {
+        if exclude_library_id == Some(library.id) {
+            continue;
+        }
+
+        for existing_path in library_paths(&library) {
+            let normalized_existing = normalize_path_for_compare(&existing_path);
+            for requested_path in &normalized_requested {
+                if paths_conflict(&normalized_existing, requested_path) {
+                    return Err(AppError::BadRequest(format!(
+                        "媒体路径与现有媒体库“{}”冲突: {}",
+                        library.name, existing_path
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_path_for_compare(path: &str) -> String {
+    let replaced = path.trim().replace('\\', "/");
+    let trimmed = replaced.trim_end_matches('/').to_string();
+    trimmed.to_ascii_lowercase()
+}
+
+fn paths_conflict(left: &str, right: &str) -> bool {
+    left == right
+        || is_parent_path(left, right)
+        || is_parent_path(right, left)
+}
+
+fn is_parent_path(parent: &str, child: &str) -> bool {
+    if parent.is_empty() || child.is_empty() || parent == child {
+        return false;
+    }
+
+    let mut prefix = parent.to_string();
+    prefix.push('/');
+    child.starts_with(&prefix)
 }
 
 fn library_paths_from_options_or_path(options: &Value, fallback_path: &str) -> Vec<String> {

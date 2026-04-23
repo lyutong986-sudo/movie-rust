@@ -337,6 +337,24 @@
 - `PreferredImageLanguage` 会在空值时自动回退到 `PreferredMetadataLanguage`；`MinCollectionItems` 在服务端归一化时至少为 `2`，防止旧配置写入无效值。
 - 当前这一轮主要完成的是 **Emby 风格字段与管理面板补齐 + 后端配置持久化**；这些新字段的扫描器/索引器实际行为后续还需要逐项向 Emby 继续靠拢。
 
+### 2026-04-23 媒体库添加/删除链路修复
+
+- 修复媒体库名称未唯一化的问题：
+  - 新初始化数据库的 `libraries.name` 已直接带 `UNIQUE`
+  - 启动兼容 SQL 会在不存在重名库时补建 `lower(name)` 唯一索引
+  - 仓储层 `create_library` / `rename_library` 也会主动拒绝重名，避免仅靠数据库报错
+- 修复媒体路径跨库冲突：
+  - 新建媒体库、更新媒体库路径时，都会校验目标路径是否已被其他媒体库占用
+  - 同时拦截“相同目录”以及“父子目录重叠”两类冲突，减少重复导入和镜像内容
+- 修复 `refreshLibrary` 被忽略的问题：
+  - `/api/admin/libraries`
+  - `/api/admin/libraries/{id}`
+  - `/Library/VirtualFolders`
+  - `/Library/VirtualFolders/Paths`
+  - `/Library/VirtualFolders/Paths/Update`
+  这些链路现在都会实际读取 `refreshLibrary`，开启后触发库扫描刷新
+- 前端创建/删除媒体库时已默认带上 `refreshLibrary=true`，因此新建库后会自动扫描，删除后也会走一次刷新流程，不再要求用户手动再点“扫描所有媒体库”。
+
 ### 2026-04-23 人物图片 TMDB 按需缓存
 
 - 对照 Emby 模板可确认服务端图片默认是“被客户端请求时再下载”，而不是让客户端长期直接依赖第三方图链；人物卡片/详情仍会通过 `/Items/{personId}/Images/Primary` 或 `/Persons/{personId}/Images/Primary` 取图。

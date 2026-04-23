@@ -174,6 +174,26 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             ADD COLUMN IF NOT EXISTS critic_rating DOUBLE PRECISION
         "#,
         r#"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND indexname = 'idx_libraries_name_unique'
+            ) AND NOT EXISTS (
+                SELECT 1
+                FROM libraries
+                GROUP BY lower(name)
+                HAVING COUNT(*) > 1
+            ) THEN
+                CREATE UNIQUE INDEX idx_libraries_name_unique
+                    ON libraries (lower(name));
+            END IF;
+        END
+        $$;
+        "#,
+        r#"
         CREATE TABLE IF NOT EXISTS series_episode_catalog (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             series_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,

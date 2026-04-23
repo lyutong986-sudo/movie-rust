@@ -464,15 +464,23 @@ export class EmbyApi {
     return this.request<LocalizationCulture[]>('/Localization/Cultures');
   }
 
-  async createLibrary(payload: CreateLibraryPayload) {
-    return this.request<BaseItemDto>('/api/admin/libraries', {
+  async createLibrary(payload: CreateLibraryPayload, refreshLibrary = false) {
+    const params = new URLSearchParams({
+      refreshLibrary: refreshLibrary ? 'true' : 'false'
+    });
+
+    return this.request<BaseItemDto>(`/api/admin/libraries?${params}`, {
       method: 'POST',
       body: payload
     });
   }
 
-  async deleteLibrary(libraryId: string) {
-    return this.request<void>(`/api/admin/libraries/${libraryId}`, {
+  async deleteLibrary(libraryId: string, refreshLibrary = false) {
+    const params = new URLSearchParams({
+      refreshLibrary: refreshLibrary ? 'true' : 'false'
+    });
+
+    return this.request<void>(`/api/admin/libraries/${libraryId}?${params}`, {
       method: 'DELETE'
     });
   }

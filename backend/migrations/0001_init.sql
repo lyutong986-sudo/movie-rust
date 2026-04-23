@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS libraries (
     id uuid PRIMARY KEY,
-    name text NOT NULL,
+    name text NOT NULL UNIQUE,
     collection_type text NOT NULL DEFAULT 'movies',
     path text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
