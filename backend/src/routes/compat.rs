@@ -45,6 +45,7 @@ async fn display_preferences(
     Query(query): Query<DisplayPreferencesQuery>,
 ) -> Result<Json<Value>, AppError> {
     let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_settings_access(&session, user_id)?;
     let client = normalized_display_preferences_client(query.client.as_deref());
     if let Some(saved) = repository::get_display_preferences(
         &state.pool,

@@ -84,6 +84,87 @@ pub async fn item_counts(pool: &sqlx::PgPool) -> Result<ItemCountsDto, AppError>
     Ok(counts)
 }
 
+pub fn user_policy_from_value(value: &Value) -> UserPolicyDto {
+    serde_json::from_value::<UserPolicyDto>(value.clone()).unwrap_or_default()
+}
+
+pub async fn visible_library_ids_for_user(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    let user = get_user_by_id(pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+    let policy = user_policy_from_value(&user.policy);
+
+    if user.is_admin || policy.enable_all_folders {
+        let libraries = list_libraries(pool).await?;
+        return Ok(libraries.into_iter().map(|library| library.id).collect());
+    }
+
+    let visible: std::collections::BTreeSet<Uuid> = policy.enabled_folders.into_iter().collect();
+    let libraries = list_libraries(pool).await?;
+    Ok(libraries
+        .into_iter()
+        .filter(|library| visible.contains(&library.id))
+        .map(|library| library.id)
+        .collect())
+}
+
+pub async fn visible_libraries_for_user(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<Vec<DbLibrary>, AppError> {
+    let visible_ids = visible_library_ids_for_user(pool, user_id).await?;
+    if visible_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let libraries = list_libraries(pool).await?;
+    let visible: std::collections::BTreeSet<Uuid> = visible_ids.into_iter().collect();
+    Ok(libraries
+        .into_iter()
+        .filter(|library| visible.contains(&library.id))
+        .collect())
+}
+
+pub async fn item_counts_for_user(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<ItemCountsDto, AppError> {
+    let library_ids = visible_library_ids_for_user(pool, user_id).await?;
+    if library_ids.is_empty() {
+        return Ok(ItemCountsDto::default());
+    }
+
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT item_type, COUNT(*)::bigint FROM media_items WHERE library_id = ANY($1) GROUP BY item_type",
+    )
+    .bind(&library_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut counts = ItemCountsDto::default();
+    for (item_type, count) in rows {
+        let count = i64_to_i32_count(count);
+        match item_type.as_str() {
+            "Movie" => counts.movie_count = count,
+            "Series" => counts.series_count = count,
+            "Episode" => counts.episode_count = count,
+            "Trailer" => counts.trailer_count = count,
+            "BoxSet" => counts.box_set_count = count,
+            "Book" => counts.book_count = count,
+            "MusicVideo" => counts.music_video_count = count,
+            "Audio" | "AudioItem" | "Song" => counts.song_count = count,
+            "MusicAlbum" | "Album" => counts.album_count = count,
+            _ => {}
+        }
+        counts.item_count = counts.item_count.saturating_add(count);
+    }
+
+    Ok(counts)
+}
+
 fn i64_to_i32_count(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }

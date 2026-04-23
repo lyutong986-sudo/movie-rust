@@ -473,3 +473,11 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
   - `cargo check --manifest-path backend\Cargo.toml`
   - `cargo test --manifest-path backend\Cargo.toml playback_info -- --nocapture`
   - `cargo test --manifest-path backend\Cargo.toml api_router_builds_without_route_conflicts -- --nocapture`
+
+### 2026-04-23 用户视角 EmbySDK 响应修复
+
+- `/Users/{userId}/Views` 现已补充访问校验，并改为按目标用户可见媒体库返回，不再忽略路径用户直接回全库。
+- 新增仓库层用户可见媒体库解析，基于用户 policy 的 `enable_all_folders` / `enabled_folders` 计算当前用户可见库集合，供 EmbySDK 入口复用。
+- `/Users/{userId}/Items/Counts` 改为真正返回用户视角统计；同时 `/Items/Counts?UserId=...` 也会在校验通过后返回该用户可见媒体库内的计数，和播放器模板的优先调用顺序保持一致。
+- `/DisplayPreferences/{displayPreferencesId}` 读取端点现已对查询里的 `UserId` 做设置访问校验，避免任意已登录用户跨用户读取显示偏好。
+- `/Items/{itemId}/Similar?UserId=...` 现已校验目标 `UserId` 是否为当前会话本人或管理员，避免通过无用户前缀的 Similar 端点读取他人的 `UserData` 视角。

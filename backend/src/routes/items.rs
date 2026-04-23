@@ -130,11 +130,19 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn user_views(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
-    Path(_user_id): Path<Uuid>,
+    Path(user_id): Path<Uuid>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    libraries_as_query_result(&state).await
+    ensure_user_access(&session, user_id)?;
+    libraries_as_query_result_for_user(&state, user_id).await
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ItemCountsQuery {
+    #[serde(default, alias = "userId")]
+    user_id: Option<Uuid>,
 }
 
 async fn media_folders(
@@ -163,6 +171,26 @@ async fn libraries_as_query_result(
     }))
 }
 
+async fn libraries_as_query_result_for_user(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let libraries = repository::visible_libraries_for_user(&state.pool, user_id).await?;
+    let mut items = Vec::with_capacity(libraries.len());
+
+    for library in libraries {
+        items.push(
+            repository::library_to_item_dto(&state.pool, &library, state.config.server_id).await?,
+        );
+    }
+
+    Ok(Json(QueryResult {
+        total_record_count: items.len() as i64,
+        items,
+        start_index: Some(0),
+    }))
+}
+
 async fn root_item(_session: AuthSession, State(state): State<AppState>) -> Json<BaseItemDto> {
     Json(repository::root_item_dto(state.config.server_id))
 }
@@ -176,9 +204,15 @@ async fn root_item_for_user(
 }
 
 async fn item_counts(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
+    Query(query): Query<ItemCountsQuery>,
 ) -> Result<Json<ItemCountsDto>, AppError> {
+    if let Some(user_id) = query.user_id {
+        ensure_user_access(&session, user_id)?;
+        return Ok(Json(repository::item_counts_for_user(&state.pool, user_id).await?));
+    }
+
     Ok(Json(repository::item_counts(&state.pool).await?))
 }
 
@@ -188,7 +222,7 @@ async fn user_item_counts(
     Path(user_id): Path<Uuid>,
 ) -> Result<Json<ItemCountsDto>, AppError> {
     ensure_user_access(&session, user_id)?;
-    Ok(Json(repository::item_counts(&state.pool).await?))
+    Ok(Json(repository::item_counts_for_user(&state.pool, user_id).await?))
 }
 
 async fn studios(
@@ -2919,6 +2953,7 @@ async fn get_similar_items(
 
     // 简单的相似性算法：基于类型和标签查找相似项目
     let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
     let similar_items = repository::find_similar_items(
         &state.pool,
         &target_item,
