@@ -343,11 +343,12 @@ async fn items(
 }
 
 async fn user_items(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
     list_items_for_user(&state, user_id, query).await
 }
@@ -528,11 +529,12 @@ async fn user_section_items(
 }
 
 async fn latest_items(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
     query.recursive = Some(true);
     query.sort_by = Some("DateCreated".to_string());
@@ -1235,10 +1237,11 @@ async fn item_by_id(
 }
 
 async fn user_item_by_id(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path((user_id, item_id_str)): Path<(Uuid, String)>,
 ) -> Result<Json<BaseItemDto>, AppError> {
+    ensure_user_access(&session, user_id)?;
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     item_dto(&state, user_id, item_id).await
@@ -2422,11 +2425,12 @@ fn apply_requested_stream_selection(
 }
 
 async fn user_resume_items(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
     Query(mut query): Query<ItemsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
     let parent_is_user_root = query.parent_id == Some(user_id);
     if parent_is_user_root {

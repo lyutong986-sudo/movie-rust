@@ -1,5 +1,5 @@
 use crate::{
-    auth,
+    auth::{self, AuthSession},
     error::AppError,
     models::{emby_id_to_uuid, VideoStreamQuery},
     naming, repository,
@@ -15,7 +15,7 @@ use axum::{
 };
 use reqwest::Client;
 use serde::Deserialize;
-use std::path::{Path as StdPath, PathBuf};
+use std::{path::{Path as StdPath, PathBuf}, time::Duration};
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 use uuid::Uuid;
@@ -267,8 +267,9 @@ async fn stream_file(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-    serve_media_item(&state, item_id, request, None).await
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let device_id = request_device_id(&request);
+    serve_media_item(&state, item_id, request, None, &session, device_id).await
 }
 
 async fn master_playlist(
@@ -341,6 +342,8 @@ async fn serve_media_item(
     item_id: Uuid,
     request: Request<Body>,
     query: Option<VideoStreamQuery>,
+    session: &AuthSession,
+    device_id: Option<String>,
 ) -> Result<Response, AppError> {
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
@@ -384,8 +387,10 @@ async fn serve_media_item(
             if transcoding_query.max_video_bitrate.is_none() {
                 transcoding_query.max_video_bitrate = q.max_streaming_bitrate.or(q.video_bitrate);
             }
-            let user_id = Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap();
-            let device_id = "default-device".to_string();
+            let user_id = session.user_id;
+            let device_id = device_id
+                .clone()
+                .unwrap_or_else(|| "unknown-device".to_string());
 
             if state.config.enable_transcoding {
                 tracing::info!(
@@ -449,25 +454,25 @@ async fn serve_media_item(
 async fn video_hls_segment(
     State(state): State<AppState>,
     Path(path): Path<HlsSegmentPath>,
-    Query(query): Query<VideoStreamQuery>,
+    Query(_query): Query<VideoStreamQuery>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-    serve_media_item(&state, item_id, request, Some(query)).await
+    serve_hls_segment(&state, item_id, &path._playlist_id, &path.segment_file, request).await
 }
 
 async fn audio_hls_segment(
     State(state): State<AppState>,
     Path(path): Path<HlsSegmentPath>,
-    Query(query): Query<VideoStreamQuery>,
+    Query(_query): Query<VideoStreamQuery>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-    serve_media_item(&state, item_id, request, Some(query)).await
+    serve_hls_segment(&state, item_id, &path._playlist_id, &path.segment_file, request).await
 }
 
 async fn subtitle_stream(
@@ -534,7 +539,21 @@ async fn hls_playlist_response(
 ) -> Result<Response, AppError> {
     let requested_item_id = emby_id_to_uuid(item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
-    auth::require_auth(state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(state, request.headers(), request.uri().query()).await?;
+    let device_id = request_device_id(&request);
+    if use_transcoded_hls_playlist() {
+        return transcoded_hls_playlist_response(
+            state,
+            requested_item_id,
+            query.clone(),
+            request.method().clone(),
+            request.uri().query(),
+            &session,
+            device_id,
+            false,
+        )
+        .await;
+    }
 
     let item = repository::get_media_item(&state.pool, requested_item_id)
         .await?
@@ -596,7 +615,21 @@ async fn hls_audio_playlist_response(
 ) -> Result<Response, AppError> {
     let requested_item_id = emby_id_to_uuid(item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
-    auth::require_auth(state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(state, request.headers(), request.uri().query()).await?;
+    let device_id = request_device_id(&request);
+    if use_transcoded_hls_playlist() {
+        return transcoded_hls_playlist_response(
+            state,
+            requested_item_id,
+            query.clone(),
+            request.method().clone(),
+            request.uri().query(),
+            &session,
+            device_id,
+            true,
+        )
+        .await;
+    }
 
     let item = repository::get_media_item(&state.pool, requested_item_id)
         .await?
@@ -621,6 +654,135 @@ async fn hls_audio_playlist_response(
         "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{segment_url}\n#EXT-X-ENDLIST\n"
     );
     playlist_response(request.method(), playlist)
+}
+
+fn use_transcoded_hls_playlist() -> bool {
+    true
+}
+
+async fn transcoded_hls_playlist_response(
+    state: &AppState,
+    item_id: Uuid,
+    mut query: VideoStreamQuery,
+    method: Method,
+    original_query: Option<&str>,
+    session: &AuthSession,
+    device_id: Option<String>,
+    is_audio: bool,
+) -> Result<Response, AppError> {
+    if !state.config.enable_transcoding {
+        return Err(AppError::BadRequest("HLS 播放需要启用真实转码输出".to_string()));
+    }
+
+    let item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let path = PathBuf::from(&item.path);
+    if !path.exists() {
+        return Err(AppError::NotFound("媒体文件不存在".to_string()));
+    }
+    if naming::is_strm(&path) {
+        return Err(AppError::BadRequest("STRM 远程流不支持服务端 HLS 分片转码".to_string()));
+    }
+
+    query.transcoding_protocol = Some("hls".to_string());
+    let session = state
+        .transcoder
+        .start_transcoding(
+            item_id,
+            session.user_id,
+            &device_id.unwrap_or_else(|| "unknown-device".to_string()),
+            query,
+            &path,
+        )
+        .await?;
+
+    wait_for_file(&session.playlist_path, Duration::from_secs(3)).await?;
+    let playlist = tokio::fs::read_to_string(&session.playlist_path).await?;
+    let passthrough = auth_passthrough_query(original_query);
+    let item_emby_id = crate::models::uuid_to_emby_guid(&item_id);
+    let rewritten = rewrite_hls_playlist(
+        &playlist,
+        &item_emby_id,
+        &session.id.to_string(),
+        &passthrough,
+        is_audio,
+    );
+    playlist_response(&method, rewritten)
+}
+
+async fn serve_hls_segment(
+    state: &AppState,
+    item_id: Uuid,
+    playlist_id: &str,
+    segment_file: &str,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let session_id = Uuid::parse_str(playlist_id)
+        .map_err(|_| AppError::BadRequest("无效的 HLS 会话 ID".to_string()))?;
+    let session = state
+        .transcoder
+        .get_session(session_id)
+        .await
+        .ok_or_else(|| AppError::NotFound("HLS 转码会话不存在".to_string()))?;
+    if session.media_item_id != item_id {
+        return Err(AppError::NotFound("HLS 分片不属于当前媒体".to_string()));
+    }
+    if segment_file.contains(['\\', '/', ':']) || segment_file.trim().is_empty() {
+        return Err(AppError::BadRequest("无效的 HLS 分片文件名".to_string()));
+    }
+
+    let path = session.output_dir.join(segment_file);
+    if !path.is_file() {
+        return Err(AppError::NotFound("HLS 分片尚未生成".to_string()));
+    }
+
+    ServeFile::new(path)
+        .oneshot(request)
+        .await
+        .map(IntoResponse::into_response)
+        .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))
+}
+
+async fn wait_for_file(path: &StdPath, timeout: Duration) -> Result<(), AppError> {
+    let started = tokio::time::Instant::now();
+    while started.elapsed() < timeout {
+        if path.is_file() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(AppError::Internal("HLS 转码播放列表尚未生成，请稍后重试".to_string()))
+}
+
+fn rewrite_hls_playlist(
+    playlist: &str,
+    item_emby_id: &str,
+    session_id: &str,
+    passthrough: &[(String, String)],
+    is_audio: bool,
+) -> String {
+    let media_prefix = if is_audio { "Audio" } else { "Videos" };
+    playlist
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return line.to_string();
+            }
+
+            let file_name = StdPath::new(trimmed)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(trimmed);
+            append_query_pairs(
+                &format!("/{media_prefix}/{item_emby_id}/hls1/{session_id}/{file_name}"),
+                passthrough,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 async fn proxy_remote_stream(url: &str, request: Request<Body>) -> Result<Response, AppError> {
@@ -767,7 +929,8 @@ async fn stream_video_request(
         .or(path_media_source_id.as_deref());
     let item_id = resolve_stream_item_id(requested_item_id, effective_media_source_id)?;
 
-    auth::require_auth(state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(state, request.headers(), request.uri().query()).await?;
+    let device_id = request_device_id(&request);
 
     tracing::debug!(
         requested_item_id = %requested_item_id,
@@ -780,7 +943,7 @@ async fn stream_video_request(
         "视频流请求参数"
     );
 
-    serve_media_item(state, item_id, request, Some(query)).await
+    serve_media_item(state, item_id, request, Some(query), &session, device_id).await
 }
 
 fn resolve_stream_item_id(default_item_id: Uuid, media_source_id: Option<&str>) -> Result<Uuid, AppError> {
@@ -815,6 +978,11 @@ fn is_hop_by_hop_header(name: &str) -> bool {
     )
 }
 
+fn request_device_id(request: &Request<Body>) -> Option<String> {
+    auth::client_value(request.headers(), "DeviceId")
+        .or_else(|| query_value(request.uri().query(), &["DeviceId", "deviceId"]))
+}
+
 fn playlist_response(method: &Method, playlist: String) -> Result<Response, AppError> {
     let body = if *method == Method::HEAD {
         Body::empty()
@@ -828,6 +996,17 @@ fn playlist_response(method: &Method, playlist: String) -> Result<Response, AppE
         .header(header::CACHE_CONTROL, "no-cache")
         .body(body)
         .map_err(|error| AppError::Internal(format!("构建 HLS 播放列表响应失败: {error}")))
+}
+
+fn query_value(query: Option<&str>, keys: &[&str]) -> Option<String> {
+    let query = query?;
+    url::form_urlencoded::parse(query.as_bytes()).find_map(|(key, value)| {
+        if keys.iter().any(|candidate| key.eq_ignore_ascii_case(candidate)) {
+            Some(value.into_owned()).filter(|value| !value.trim().is_empty())
+        } else {
+            None
+        }
+    })
 }
 
 fn auth_passthrough_query(query: Option<&str>) -> Vec<(String, String)> {

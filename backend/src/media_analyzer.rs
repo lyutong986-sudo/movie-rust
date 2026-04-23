@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{ffi::OsStr, path::Path};
 use thiserror::Error;
 use tokio::process::Command;
 
@@ -90,7 +90,7 @@ pub async fn analyze_media_file(path: &Path) -> Result<MediaAnalysisResult, Medi
         ));
     }
 
-    let probe_result = run_ffprobe(path.to_str().unwrap()).await?;
+    let probe_result = run_ffprobe(path.as_os_str()).await?;
     parse_probe_result(&probe_result)
 }
 
@@ -112,9 +112,9 @@ pub async fn analyze_remote_media(url: &str) -> Result<MediaAnalysisResult, Medi
     parse_probe_result(&probe_result)
 }
 
-async fn run_ffprobe(target: &str) -> Result<serde_json::Value, MediaAnalyzerError> {
+async fn run_ffprobe(target: impl AsRef<OsStr>) -> Result<serde_json::Value, MediaAnalyzerError> {
     let output = Command::new("ffprobe")
-        .args(&[
+        .args([
             "-v",
             "quiet",
             "-print_format",
@@ -122,8 +122,8 @@ async fn run_ffprobe(target: &str) -> Result<serde_json::Value, MediaAnalyzerErr
             "-show_format",
             "-show_streams",
             "-show_chapters",
-            target,
         ])
+        .arg(target)
         .output()
         .await
         .map_err(|e| MediaAnalyzerError::FfprobeError(e.to_string()))?;

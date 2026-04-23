@@ -287,6 +287,14 @@
 
 ## 验证记录
 
+### 2026-04-23 审计修复
+
+- 修复 `/Users/{userId}/Items`、`/Users/{userId}/Items/Latest`、`/Users/{userId}/Items/{itemId}`、`/Users/{userId}/Items/Resume` 缺少用户访问校验的问题，带用户 ID 的读接口现在要求本人或管理员访问。
+- HLS 播放入口改为启动真实 ffmpeg HLS 转码会话，读取转码器生成的 `playlist.m3u8`，并将分片 URL 重写到 `/Videos|Audio/{itemId}/hls1/{sessionId}/{segment}`；segment 请求改为从对应转码会话输出目录读取真实分片，不再把 `0.ts` 伪装成整文件流。
+- 转码启动上下文改为使用当前认证用户 ID，并从 `DeviceId` 查询参数或 Emby 授权头读取真实设备 ID，避免所有转码会话落到 nil user/default-device。
+- 媒体分析调用 ffprobe 时改为直接传入 `Path` 的 `OsStr`，避免非 UTF-8 本地路径触发 `to_str().unwrap()` panic。
+- 验证通过: `cargo check --manifest-path backend/Cargo.toml`。仍存在一批既有 Rust warning，主要为未使用字段/import/未来扩展模型，不阻塞构建。
+
 本轮修复后已通过:
 
 ```text
