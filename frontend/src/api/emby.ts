@@ -160,22 +160,42 @@ export interface MediaPathInfo {
   Path: string;
 }
 
+export interface LocalizationCulture {
+  DisplayName: string;
+  Name: string;
+  ThreeLetterISOLanguageName: string;
+  TwoLetterISOLanguageName: string;
+}
+
 export interface LibraryOptions {
   Enabled: boolean;
   EnablePhotos: boolean;
+  EnableInternetProviders: boolean;
   DownloadImagesInAdvance: boolean;
   EnableRealtimeMonitor: boolean;
+  ExcludeFromSearch: boolean;
+  IgnoreHiddenFiles: boolean;
   EnableChapterImageExtraction: boolean;
   ExtractChapterImagesDuringLibraryScan: boolean;
   SaveLocalMetadata: boolean;
+  SaveMetadataHidden: boolean;
+  MergeTopLevelFolders: boolean;
+  PlaceholderMetadataRefreshIntervalDays: number;
+  ImportMissingEpisodes: boolean;
   EnableAutomaticSeriesGrouping: boolean;
   EnableEmbeddedTitles: boolean;
   EnableEmbeddedEpisodeInfos: boolean;
+  EnableMultiVersionByFiles: boolean;
+  EnableMultiVersionByMetadata: boolean;
+  EnableMultiPartItems: boolean;
   AutomaticRefreshIntervalDays: number;
   PreferredMetadataLanguage?: string;
+  PreferredImageLanguage?: string;
   MetadataCountryCode?: string;
   SeasonZeroDisplayName: string;
   MetadataSavers: string[];
+  ImportCollections: boolean;
+  MinCollectionItems: number;
   DisabledLocalMetadataReaders: string[];
   LocalMetadataReaderOrder: string[];
   PathInfos: MediaPathInfo[];
@@ -440,6 +460,10 @@ export class EmbyApi {
     return this.request<string>(`/Environment/ParentPath?${params}`);
   }
 
+  async localizationCultures() {
+    return this.request<LocalizationCulture[]>('/Localization/Cultures');
+  }
+
   async createLibrary(payload: CreateLibraryPayload) {
     return this.request<BaseItemDto>('/api/admin/libraries', {
       method: 'POST',
@@ -487,6 +511,18 @@ export class EmbyApi {
         Id: id,
         LibraryOptions: libraryOptions
       }
+    });
+  }
+
+  async renameVirtualFolder(name: string, newName: string, refreshLibrary = false) {
+    const params = new URLSearchParams({
+      name,
+      newName,
+      refreshLibrary: refreshLibrary ? 'true' : 'false'
+    });
+
+    return this.request<void>(`/Library/VirtualFolders/Name?${params}`, {
+      method: 'POST'
     });
   }
 

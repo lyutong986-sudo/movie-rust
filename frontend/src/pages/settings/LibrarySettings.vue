@@ -23,9 +23,15 @@ onMounted(async () => {
 function collectionLabel(type: string) {
   if (type === 'tvshows') return '电视剧';
   if (type === 'music') return '音乐';
+  if (type === 'musicvideos') return '音乐视频';
+  if (type === 'photos') return '照片';
   if (type === 'homevideos') return '家庭视频';
   if (type === 'mixed') return '混合内容';
   return '电影';
+}
+
+function edit(folder: VirtualFolderInfo) {
+  state.editingLibrary = folder;
 }
 
 async function remove(folder: VirtualFolderInfo) {
@@ -74,14 +80,19 @@ async function remove(folder: VirtualFolderInfo) {
             <div class="library-option-grid">
               <span :class="{ enabled: folder.LibraryOptions.Enabled }">启用</span>
               <span :class="{ enabled: folder.LibraryOptions.EnableRealtimeMonitor }">实时监控</span>
+              <span :class="{ enabled: folder.LibraryOptions.EnableInternetProviders }">互联网元数据</span>
               <span :class="{ enabled: folder.LibraryOptions.DownloadImagesInAdvance }">预下载图片</span>
               <span :class="{ enabled: folder.LibraryOptions.SaveLocalMetadata }">保存 NFO</span>
+              <span :class="{ enabled: folder.LibraryOptions.ImportMissingEpisodes }">缺失剧集</span>
+              <span :class="{ enabled: folder.LibraryOptions.ImportCollections }">电影合集</span>
+              <span :class="{ enabled: !folder.LibraryOptions.ExcludeFromSearch }">参与搜索</span>
               <span :class="{ enabled: folder.LibraryOptions.EnableChapterImageExtraction }">章节图片</span>
               <span :class="{ enabled: folder.LibraryOptions.EnableAutomaticSeriesGrouping }">剧集自动分组</span>
               <span>{{ folder.LibraryOptions.PreferredMetadataLanguage || 'zh' }}-{{ folder.LibraryOptions.MetadataCountryCode || 'CN' }}</span>
             </div>
 
             <div class="button-row">
+              <button class="secondary" type="button" :disabled="state.busy" @click="edit(folder)">编辑</button>
               <button class="secondary" type="button" :disabled="state.busy" @click="scan">扫描</button>
               <button class="danger" type="button" :disabled="state.busy" @click="remove(folder)">删除</button>
             </div>
@@ -91,11 +102,19 @@ async function remove(folder: VirtualFolderInfo) {
         <div v-else class="empty">
           <p>媒体库</p>
           <h2>还没有媒体库</h2>
-          <p>添加电影、电视剧或音乐目录后，首页和播放器就会按 Jellyfin/Emby 的媒体库结构加载内容。</p>
+          <p>添加电影或电视剧目录后，首页和播放器就会按 Emby 的媒体库结构加载内容。</p>
         </div>
       </div>
     </div>
 
-    <AddLibraryDialog v-if="state.showAddLibrary" @close="state.showAddLibrary = false" />
+    <AddLibraryDialog
+      v-if="state.showAddLibrary"
+      @close="state.showAddLibrary = false"
+    />
+    <AddLibraryDialog
+      v-if="state.editingLibrary"
+      :folder="state.editingLibrary"
+      @close="state.editingLibrary = null"
+    />
   </section>
 </template>

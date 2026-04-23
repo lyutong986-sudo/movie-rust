@@ -1913,6 +1913,20 @@ fn normalize_library_options(
         options.season_zero_display_name = "Specials".to_string();
     }
 
+    if options
+        .preferred_image_language
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        options.preferred_image_language = options.preferred_metadata_language.clone();
+    }
+
+    if options.min_collection_items < 2 {
+        options.min_collection_items = 2;
+    }
+
     options
 }
 

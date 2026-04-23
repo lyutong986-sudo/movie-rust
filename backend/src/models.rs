@@ -1510,32 +1510,58 @@ pub struct LibraryOptionsDto {
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub enable_photos: bool,
+    #[serde(default = "default_true")]
+    pub enable_internet_providers: bool,
     #[serde(default)]
     pub download_images_in_advance: bool,
     #[serde(default)]
     pub enable_realtime_monitor: bool,
+    #[serde(default)]
+    pub exclude_from_search: bool,
+    #[serde(default = "default_true")]
+    pub ignore_hidden_files: bool,
     #[serde(default)]
     pub enable_chapter_image_extraction: bool,
     #[serde(default)]
     pub extract_chapter_images_during_library_scan: bool,
     #[serde(default)]
     pub save_local_metadata: bool,
+    #[serde(default)]
+    pub save_metadata_hidden: bool,
+    #[serde(default)]
+    pub merge_top_level_folders: bool,
+    #[serde(default)]
+    pub placeholder_metadata_refresh_interval_days: i32,
+    #[serde(default)]
+    pub import_missing_episodes: bool,
     #[serde(default = "default_true")]
     pub enable_automatic_series_grouping: bool,
     #[serde(default)]
     pub enable_embedded_titles: bool,
     #[serde(default)]
     pub enable_embedded_episode_infos: bool,
+    #[serde(default = "default_true")]
+    pub enable_multi_version_by_files: bool,
+    #[serde(default)]
+    pub enable_multi_version_by_metadata: bool,
+    #[serde(default = "default_true")]
+    pub enable_multi_part_items: bool,
     #[serde(default)]
     pub automatic_refresh_interval_days: i32,
     #[serde(default)]
     pub preferred_metadata_language: Option<String>,
+    #[serde(default)]
+    pub preferred_image_language: Option<String>,
     #[serde(default)]
     pub metadata_country_code: Option<String>,
     #[serde(default = "default_specials_name")]
     pub season_zero_display_name: String,
     #[serde(default)]
     pub metadata_savers: Vec<String>,
+    #[serde(default)]
+    pub import_collections: bool,
+    #[serde(default = "default_min_collection_items")]
+    pub min_collection_items: i32,
     #[serde(default)]
     pub disabled_local_metadata_readers: Vec<String>,
     #[serde(default)]
@@ -1549,19 +1575,32 @@ impl Default for LibraryOptionsDto {
         Self {
             enabled: true,
             enable_photos: true,
+            enable_internet_providers: true,
             download_images_in_advance: false,
             enable_realtime_monitor: false,
+            exclude_from_search: false,
+            ignore_hidden_files: true,
             enable_chapter_image_extraction: false,
             extract_chapter_images_during_library_scan: false,
             save_local_metadata: false,
+            save_metadata_hidden: false,
+            merge_top_level_folders: false,
+            placeholder_metadata_refresh_interval_days: 0,
+            import_missing_episodes: false,
             enable_automatic_series_grouping: true,
             enable_embedded_titles: false,
             enable_embedded_episode_infos: false,
+            enable_multi_version_by_files: true,
+            enable_multi_version_by_metadata: false,
+            enable_multi_part_items: true,
             automatic_refresh_interval_days: 0,
             preferred_metadata_language: Some("zh".to_string()),
+            preferred_image_language: Some("zh".to_string()),
             metadata_country_code: Some("CN".to_string()),
             season_zero_display_name: default_specials_name(),
             metadata_savers: vec!["Nfo".to_string()],
+            import_collections: true,
+            min_collection_items: default_min_collection_items(),
             disabled_local_metadata_readers: Vec::new(),
             local_metadata_reader_order: vec!["Nfo".to_string()],
             path_infos: Vec::new(),
@@ -1654,6 +1693,10 @@ fn default_true() -> bool {
 
 fn default_specials_name() -> String {
     "Specials".to_string()
+}
+
+fn default_min_collection_items() -> i32 {
+    2
 }
 
 #[derive(Debug, Serialize)]

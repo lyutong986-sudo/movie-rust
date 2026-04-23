@@ -293,6 +293,50 @@
 - 添加媒体库弹窗的 `path-editor` 改为可视化目录选择器，支持查看服务器驱动器、逐级进入目录、返回上级并将当前文件夹加入媒体库路径，不再要求手动输入路径。
 - 验证通过: `cargo check --manifest-path backend/Cargo.toml`、`npm.cmd run build`。
 
+### 2026-04-23 媒体库管理字段补齐
+
+- 对照 Emby 模板 `libraryoptionseditor` 与线上 `/settings/libraries` 页面，当前项目的媒体库管理已补齐模板里真实使用但此前缺失的库级选项：
+  - `EnableInternetProviders`
+  - `ImportMissingEpisodes`
+- `LibraryOptionsDto`、前端 `LibraryOptions` 类型、默认值和更新请求体已同步补齐这两个字段，旧库配置缺失时会按 Emby 习惯回退到：
+  - `EnableInternetProviders = true`
+  - `ImportMissingEpisodes = false`
+- 媒体库管理页新增“编辑”入口，不再只能看摘要和删除：
+  - 支持修改媒体库名称
+  - 支持调整路径列表
+  - 支持编辑元数据、扫描、电视剧专属、章节图片等库级设置
+- 新的媒体库编辑弹窗按内容类型做了 Emby 风格显隐：
+  - `homevideos` 不显示互联网元数据语言/地区与预下载图片
+  - `tvshows` 额外显示“导入缺失剧集占位条目”和“自动合并同名剧集”
+  - `photos` 的本地元数据保存开关预留了显隐逻辑，但由于当前后端尚未正式开放该建库类型，本轮没有在创建下拉中暴露
+- 元数据语言不再只是自由输入框，已接后端 `/Localization/Cultures` 生成语言下拉；国家/地区则先提供常用 Emby 场景选项，保证库设置体验更接近模板。
+- 本轮优先补齐媒体库管理核心字段与交互，字幕相关库选项按要求暂未扩展。
+
+### 2026-04-23 媒体库管理聚焦电影与剧集
+
+- 按当前项目范围，媒体库创建界面已收敛为只支持：
+  - `movies`
+  - `tvshows`
+- 不再在创建页暴露 `music`、`homevideos`、`mixed`，避免把当前并不打算完成的内容类型继续带入管理流程。
+- 继续对照 EmbySDK `LibraryOptions`，为电影库/剧集库补齐一批更接近 Emby 高级设置的字段并打通前后端持久化：
+  - `ExcludeFromSearch`
+  - `IgnoreHiddenFiles`
+  - `SaveMetadataHidden`
+  - `MergeTopLevelFolders`
+  - `PlaceholderMetadataRefreshIntervalDays`
+  - `PreferredImageLanguage`
+  - `EnableMultiVersionByFiles`
+  - `EnableMultiVersionByMetadata`
+  - `EnableMultiPartItems`
+  - `ImportCollections`
+  - `MinCollectionItems`
+- 媒体库编辑弹窗新增更细的电影/剧集分组：
+  - 通用扫描与读取：隐藏文件、隐藏元数据、排除搜索、顶层目录合并、多版本/多分段识别、占位条目刷新间隔
+  - 剧集专属：缺失剧集占位、自动合并同名剧集、特别篇名称
+  - 电影专属：导入电影合集、自动合集最少影片数
+- `PreferredImageLanguage` 会在空值时自动回退到 `PreferredMetadataLanguage`；`MinCollectionItems` 在服务端归一化时至少为 `2`，防止旧配置写入无效值。
+- 当前这一轮主要完成的是 **Emby 风格字段与管理面板补齐 + 后端配置持久化**；这些新字段的扫描器/索引器实际行为后续还需要逐项向 Emby 继续靠拢。
+
 ### 2026-04-23 人物图片 TMDB 按需缓存
 
 - 对照 Emby 模板可确认服务端图片默认是“被客户端请求时再下载”，而不是让客户端长期直接依赖第三方图链；人物卡片/详情仍会通过 `/Items/{personId}/Images/Primary` 或 `/Persons/{personId}/Images/Primary` 取图。

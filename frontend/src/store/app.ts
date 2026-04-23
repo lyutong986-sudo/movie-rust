@@ -3,6 +3,7 @@ import { EmbyApi } from '../api/emby';
 import type {
   BaseItemDto,
   CreateLibraryPayload,
+  LocalizationCulture,
   LibraryOptions,
   SystemInfo,
   UserDto,
@@ -54,6 +55,7 @@ export const state = reactive({
   startupWizardCompleted: true,
   wizardStep: 1,
   showAddLibrary: false,
+  editingLibrary: null as VirtualFolderInfo | null,
   loginAsOther: false,
   initialized: false
 });
@@ -63,6 +65,7 @@ export const currentServerUrl = ref(readText(CURRENT_SERVER_KEY) || defaultServe
 export const user = ref(api.user);
 export const publicUsers = ref<UserDto[]>([]);
 export const adminUsers = ref<UserDto[]>([]);
+export const metadataCultures = ref<LocalizationCulture[]>([]);
 export const libraries = ref<BaseItemDto[]>([]);
 export const virtualFolders = ref<VirtualFolderInfo[]>([]);
 export const items = ref<BaseItemDto[]>([]);
@@ -426,13 +429,15 @@ export async function backToHome() {
 
 export async function loadAdminData() {
   await run(async () => {
-    const [info, users, configuration] = await Promise.all([
+    const [info, users, configuration, cultures] = await Promise.all([
       api.systemInfo(),
       api.users(),
-      api.startupConfiguration()
+      api.startupConfiguration(),
+      api.localizationCultures().catch(() => [])
     ]);
     systemInfo.value = info;
     adminUsers.value = users;
+    metadataCultures.value = cultures;
     state.serverName = configuration.ServerName || state.serverName;
     state.uiCulture = configuration.UiCulture || state.uiCulture;
     state.metadataLanguage = configuration.PreferredMetadataLanguage || state.metadataLanguage;
@@ -450,19 +455,32 @@ export function defaultLibraryOptions(paths: string[] = []): LibraryOptions {
   return {
     Enabled: true,
     EnablePhotos: true,
+    EnableInternetProviders: true,
     DownloadImagesInAdvance: false,
     EnableRealtimeMonitor: false,
+    ExcludeFromSearch: false,
+    IgnoreHiddenFiles: true,
     EnableChapterImageExtraction: false,
     ExtractChapterImagesDuringLibraryScan: false,
     SaveLocalMetadata: true,
+    SaveMetadataHidden: false,
+    MergeTopLevelFolders: false,
+    PlaceholderMetadataRefreshIntervalDays: 0,
+    ImportMissingEpisodes: false,
     EnableAutomaticSeriesGrouping: true,
     EnableEmbeddedTitles: false,
     EnableEmbeddedEpisodeInfos: true,
+    EnableMultiVersionByFiles: true,
+    EnableMultiVersionByMetadata: false,
+    EnableMultiPartItems: true,
     AutomaticRefreshIntervalDays: 0,
     PreferredMetadataLanguage: state.metadataLanguage || 'zh',
+    PreferredImageLanguage: state.metadataLanguage || 'zh',
     MetadataCountryCode: state.metadataCountry || 'CN',
     SeasonZeroDisplayName: 'Specials',
     MetadataSavers: ['Nfo'],
+    ImportCollections: true,
+    MinCollectionItems: 2,
     DisabledLocalMetadataReaders: [],
     LocalMetadataReaderOrder: ['Nfo'],
     PathInfos: paths.filter(Boolean).map((path) => ({ Path: path }))
