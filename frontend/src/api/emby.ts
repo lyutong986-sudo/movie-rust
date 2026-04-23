@@ -25,6 +25,7 @@ export interface PublicSystemInfo {
 
 export interface SystemInfo extends PublicSystemInfo {
   CanSelfRestart: boolean;
+  EncoderLocationType?: string;
 }
 
 export interface SessionInfo {
@@ -156,6 +157,21 @@ export interface StartupRemoteAccess {
   EnableAutomaticPortMapping?: boolean;
 }
 
+export interface EncodingOptions {
+  EnableTranscoding: boolean;
+  EnableThrottling: boolean;
+  HardwareAccelerationType: string;
+  VaapiDevice: string;
+  EncodingThreadCount: number;
+  DownMixAudioBoost: number;
+  EncoderAppPath: string;
+  EncoderLocationType: 'System' | 'Custom' | string;
+  TranscodingTempPath: string;
+  H264Preset: string;
+  H264Crf: number;
+  MaxTranscodeSessions: number;
+}
+
 export interface MediaPathInfo {
   Path: string;
 }
@@ -275,6 +291,24 @@ export class EmbyApi {
 
   async systemInfo() {
     return this.request<SystemInfo>('/System/Info');
+  }
+
+  async encodingConfiguration() {
+    return this.request<EncodingOptions>('/System/Configuration/encoding');
+  }
+
+  async updateEncodingConfiguration(payload: EncodingOptions) {
+    return this.request<EncodingOptions>('/System/Configuration/encoding', {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async updateMediaEncoderPath(payload: { Path: string; PathType: string }) {
+    return this.request<EncodingOptions>('/System/MediaEncoder/Path', {
+      method: 'POST',
+      body: payload
+    });
   }
 
   async users() {

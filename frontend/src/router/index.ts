@@ -88,6 +88,12 @@ export const router = createRouter({
       meta: { title: '播放', section: 'settings' }
     },
     {
+      path: '/settings/transcoding',
+      name: 'settings-transcoding',
+      component: () => import('../pages/settings/TranscodingSettings.vue'),
+      meta: { title: '转码', section: 'admin', admin: true }
+    },
+    {
       path: '/settings/subtitles',
       name: 'settings-subtitles',
       component: () => import('../pages/settings/SubtitlesSettings.vue'),

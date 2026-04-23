@@ -618,6 +618,7 @@ pub struct SystemInfo {
     pub id: String,
     pub startup_wizard_completed: bool,
     pub can_self_restart: bool,
+    pub encoder_location_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -652,6 +653,58 @@ pub struct BrandingConfiguration {
     pub login_disclaimer: String,
     pub custom_css: String,
     pub splashscreen_enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct EncodingOptionsDto {
+    #[serde(default, alias = "enableTranscoding")]
+    pub enable_transcoding: bool,
+    #[serde(default, alias = "enableThrottling")]
+    pub enable_throttling: bool,
+    #[serde(default, alias = "hardwareAccelerationType")]
+    pub hardware_acceleration_type: String,
+    #[serde(default, alias = "vaapiDevice")]
+    pub vaapi_device: String,
+    #[serde(default, alias = "encodingThreadCount")]
+    pub encoding_thread_count: i32,
+    #[serde(default, alias = "downMixAudioBoost")]
+    pub down_mix_audio_boost: f32,
+    #[serde(default, alias = "encoderAppPath")]
+    pub encoder_app_path: String,
+    #[serde(default, alias = "encoderLocationType")]
+    pub encoder_location_type: String,
+    #[serde(default, alias = "transcodingTempPath")]
+    pub transcoding_temp_path: String,
+    #[serde(default, alias = "h264Preset")]
+    pub h264_preset: String,
+    #[serde(default, alias = "h264Crf")]
+    pub h264_crf: i32,
+    #[serde(default, alias = "maxTranscodeSessions")]
+    pub max_transcode_sessions: u32,
+}
+
+impl EncodingOptionsDto {
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        Self {
+            enable_transcoding: config.enable_transcoding,
+            enable_throttling: true,
+            hardware_acceleration_type: String::new(),
+            vaapi_device: String::new(),
+            encoding_thread_count: config.transcode_threads as i32,
+            down_mix_audio_boost: 1.0,
+            encoder_app_path: config.ffmpeg_path.clone(),
+            encoder_location_type: if config.ffmpeg_path.eq_ignore_ascii_case("ffmpeg") {
+                "System".to_string()
+            } else {
+                "Custom".to_string()
+            },
+            transcoding_temp_path: config.transcode_dir.to_string_lossy().to_string(),
+            h264_preset: String::new(),
+            h264_crf: 23,
+            max_transcode_sessions: config.max_transcode_sessions,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

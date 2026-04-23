@@ -11,6 +11,7 @@ const items = [
   { label: '播放', to: '/settings/playback', admin: false },
   { label: '字幕', to: '/settings/subtitles', admin: false },
   { label: '服务器', to: '/settings/server', admin: true },
+  { label: '转码', to: '/settings/transcoding', admin: true },
   { label: '媒体库', to: '/settings/libraries', admin: true },
   { label: '用户', to: '/settings/users', admin: true },
   { label: '设备', to: '/settings/devices', admin: true },

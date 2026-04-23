@@ -1971,7 +1971,8 @@ async fn playback_info(
         }
     }
 
-    if force_transcoding && !state.config.enable_transcoding {
+    let encoding_options = repository::encoding_options(&state.pool, &state.config).await?;
+    if force_transcoding && !encoding_options.enable_transcoding {
         for media_source in &mut media_sources {
             media_source.supports_transcoding = false;
             media_source.transcoding_url = None;

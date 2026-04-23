@@ -431,3 +431,32 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 - 验证通过：
   - `cargo check --manifest-path backend\Cargo.toml`
   - `cargo test --manifest-path backend\Cargo.toml playback_info -- --nocapture`
+
+### 2026-04-23 播放链路审计修复
+
+- `PlaybackInfo` 现在会先检查 `ENABLE_TRANSCODING`：当客户端条件触发转码但服务端关闭转码时，不再返回不可播放的 `TranscodingUrl`，而是保留可用的直连媒体源并返回 `ErrorCode=TranscodingDisabled`，避免播放器请求 `/master.m3u8` 后直接 400。
+- `TranscodingUrl` 已补齐 `VideoCodec` / `AudioCodec` 参数，优先使用 `DeviceProfile.TranscodingProfiles` 中的目标编码；HLS 场景缺省会落到 `h264+aac`，转码器也会把 `h264` 映射到 `libx264`、把常见音频编码映射到 ffmpeg 可用 encoder，避免“声明转码但实际 copy 原始 HEVC/TrueHD”的情况。
+- `/Sessions/Playing`、`/Sessions/Playing/Progress`、`/Sessions/Playing/Stopped` 以及 legacy `/Users/{userId}/PlayingItems/{itemId}` 上报链路已增加用户访问校验，普通用户只能写自己的播放进度，管理员才可代写其他用户，避免污染他人的继续观看和 UserData。
+- `ActiveEncodings` 删除端点现在会解析 `TranscodingJobId` / `EncodingJobId` / `PlaySessionId`，并结合当前用户和 `DeviceId` 停止转码会话；客户端停止播放或切换播放源时，后端会同步取消对应 ffmpeg/HLS 任务。
+- 转码并发控制已修复为把 semaphore permit 绑定到 ffmpeg 后台任务生命周期，直到进程完成或会话取消后才释放；取消转码时会发送取消信号并 kill 等待中的 ffmpeg 子进程，避免并发限制形同虚设和残留进程占用资源。
+- 验证通过：
+  - `cargo check --manifest-path backend\Cargo.toml`
+  - `cargo test --manifest-path backend\Cargo.toml playback_info -- --nocapture`
+  - `cargo test --manifest-path backend\Cargo.toml api_router_builds_without_route_conflicts -- --nocapture`
+
+### 2026-04-23 转码设置页补齐
+
+- 对照 Emby 模板 `encodingsettings.html` / `encodingsettings.js`，在 `class="settings-nav"` 中新增管理员栏目“转码”，路由为 `/settings/transcoding`。
+- 新增前端转码设置页，字段覆盖 Emby 模板核心内容：硬件加速类型、VAAPI 设备、转码线程数、转码限速、ffmpeg 版本/路径、转码临时目录、音频下混增益、H264 编码预设、H264 CRF；同时补充当前后端必需的“启用视频转码”和“最大并发转码数”。
+- 转码页的 ffmpeg 路径和转码临时目录支持复用服务端目录浏览弹窗，避免手动填写路径。
+- 后端新增 Emby 风格配置接口：
+  - `GET /System/Configuration/encoding`
+  - `POST /System/Configuration/encoding`
+  - `POST /System/MediaEncoder/Path`
+- `EncodingOptions` 会持久化到 `system_settings` 的 `encoding` key；缺省值会从现有环境配置回退，包括 `FFMPEG_PATH`、`TRANSCODE_DIR`、`TRANSCODE_THREADS`、`ENABLE_TRANSCODING` 和 `MAX_TRANSCODE_SESSIONS`。
+- 播放链路已改为读取持久化后的转码设置：`PlaybackInfo`、普通流转码入口和 HLS playlist 转码入口都会使用新的 `EncodingOptions`，保存页面后即可影响后续转码请求。
+- 转码器现在会使用页面保存的 ffmpeg 路径、临时目录、线程数、H264 preset/CRF 和硬件加速 encoder 映射；`nvenc/qsv/vaapi/h264_omx` 会分别映射到对应的 H264 ffmpeg encoder。
+- 验证通过：
+  - `cargo check --manifest-path backend\Cargo.toml`
+  - `cargo test --manifest-path backend\Cargo.toml api_router_builds_without_route_conflicts -- --nocapture`
+  - `npm.cmd run build`

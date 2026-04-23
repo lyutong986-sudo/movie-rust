@@ -1,7 +1,7 @@
 use crate::{
-    auth::AuthSession,
+    auth::{require_admin, AuthSession},
     models::{
-        uuid_to_emby_guid, ActivityLogQuery, BrandingConfiguration, EndpointInfo, LogFileDto, PublicSystemInfo,
+        uuid_to_emby_guid, ActivityLogQuery, BrandingConfiguration, EncodingOptionsDto, EndpointInfo, LogFileDto, PublicSystemInfo,
         QueryResult, SystemInfo,
     },
     repository,
@@ -11,7 +11,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header::CONTENT_TYPE, StatusCode},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
@@ -36,6 +36,16 @@ pub fn router() -> Router<AppState> {
         .route("/branding/css", get(branding_css))
         .route("/branding/css.css", get(branding_css))
         .route("/System/Logs", get(server_logs))
+        .route(
+            "/System/Configuration/{name}",
+            get(named_configuration).post(update_named_configuration),
+        )
+        .route(
+            "/system/configuration/{name}",
+            get(named_configuration).post(update_named_configuration),
+        )
+        .route("/System/MediaEncoder/Path", post(update_media_encoder_path))
+        .route("/system/mediaencoder/path", post(update_media_encoder_path))
         .route("/System/Logs/Query", get(server_logs_query))
         .route("/System/Logs/{name}", get(server_log_content))
         .route("/System/Logs/{name}/Lines", get(server_log_lines))
@@ -53,6 +63,15 @@ struct LogQuery {
     limit: Option<i64>,
     #[serde(default, alias = "searchTerm")]
     search_term: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct MediaEncoderPathRequest {
+    #[serde(default, alias = "path")]
+    path: String,
+    #[serde(default, alias = "pathType")]
+    path_type: String,
 }
 
 async fn public_info(
@@ -88,6 +107,9 @@ async fn system_info(
         id: uuid_to_emby_guid(&state.config.server_id),
         startup_wizard_completed,
         can_self_restart: false,
+        encoder_location_type: repository::encoding_options(&state.pool, &state.config)
+            .await?
+            .encoder_location_type,
     }))
 }
 
@@ -153,6 +175,61 @@ async fn branding_css(
 ) -> Result<impl IntoResponse, crate::error::AppError> {
     let css = repository::branding_css(&state.pool, &state.config).await?;
     Ok(([(CONTENT_TYPE, "text/css; charset=utf-8")], css))
+}
+
+async fn named_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    require_admin(&session)?;
+
+    match name.trim().to_ascii_lowercase().as_str() {
+        "encoding" => Ok(Json(json!(
+            repository::encoding_options(&state.pool, &state.config).await?
+        ))),
+        _ => Err(crate::error::AppError::NotFound(format!(
+            "配置不存在: {name}"
+        ))),
+    }
+}
+
+async fn update_named_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    require_admin(&session)?;
+
+    match name.trim().to_ascii_lowercase().as_str() {
+        "encoding" => {
+            let options = serde_json::from_value::<EncodingOptionsDto>(payload)?;
+            let saved =
+                repository::update_encoding_options(&state.pool, &state.config, options).await?;
+            Ok(Json(json!(saved)))
+        }
+        _ => Err(crate::error::AppError::NotFound(format!(
+            "配置不存在: {name}"
+        ))),
+    }
+}
+
+async fn update_media_encoder_path(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<MediaEncoderPathRequest>,
+) -> Result<Json<EncodingOptionsDto>, crate::error::AppError> {
+    require_admin(&session)?;
+    Ok(Json(
+        repository::update_media_encoder_path(
+            &state.pool,
+            &state.config,
+            payload.path,
+            payload.path_type,
+        )
+        .await?,
+    ))
 }
 
 async fn server_logs(

@@ -35,6 +35,12 @@ const adminEntries = computed(() => [
     to: '/settings/server'
   },
   {
+    icon: '转',
+    title: '转码',
+    description: 'ffmpeg、硬件加速、线程和 H264 质量',
+    to: '/settings/transcoding'
+  },
+  {
     icon: '库',
     title: '媒体库',
     description: '创建媒体库、查看路径并执行扫描',

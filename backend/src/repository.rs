@@ -10,7 +10,7 @@ use crate::{
         NameIdDto, NameLongIdDto, PersonDto,
         QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
         UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
-        BrandingConfiguration,
+        BrandingConfiguration, EncodingOptionsDto,
     },
     naming, security,
 };
@@ -151,6 +151,51 @@ pub async fn branding_configuration(
 pub async fn branding_css(pool: &sqlx::PgPool, config: &Config) -> Result<String, AppError> {
     let configuration = branding_configuration(pool, config).await?;
     Ok(configuration.custom_css)
+}
+
+pub async fn encoding_options(
+    pool: &sqlx::PgPool,
+    config: &Config,
+) -> Result<EncodingOptionsDto, AppError> {
+    if let Some(value) = get_system_setting(pool, "encoding").await? {
+        if let Ok(mut options) = serde_json::from_value::<EncodingOptionsDto>(value) {
+            normalize_encoding_options(&mut options, config);
+            return Ok(options);
+        }
+    }
+
+    Ok(EncodingOptionsDto::from_config(config))
+}
+
+pub async fn update_encoding_options(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    mut options: EncodingOptionsDto,
+) -> Result<EncodingOptionsDto, AppError> {
+    normalize_encoding_options(&mut options, config);
+    set_system_setting(pool, "encoding", json!(options)).await?;
+    Ok(options)
+}
+
+pub async fn update_media_encoder_path(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    path: String,
+    path_type: String,
+) -> Result<EncodingOptionsDto, AppError> {
+    let mut options = encoding_options(pool, config).await?;
+    let normalized_path_type = if path_type.eq_ignore_ascii_case("Custom") {
+        "Custom"
+    } else {
+        "System"
+    };
+    options.encoder_location_type = normalized_path_type.to_string();
+    options.encoder_app_path = if normalized_path_type == "System" {
+        "ffmpeg".to_string()
+    } else {
+        path.trim().to_string()
+    };
+    update_encoding_options(pool, config, options).await
 }
 
 pub async fn get_session_capabilities(
@@ -303,6 +348,38 @@ fn default_startup_configuration(config: &Config) -> StartupConfiguration {
         metadata_country_code: config.metadata_country_code.clone(),
         preferred_metadata_language: config.preferred_metadata_language.clone(),
     }
+}
+
+fn normalize_encoding_options(options: &mut EncodingOptionsDto, config: &Config) {
+    options.encoder_location_type = if options.encoder_location_type.eq_ignore_ascii_case("Custom") {
+        "Custom".to_string()
+    } else {
+        "System".to_string()
+    };
+
+    if options.encoder_location_type == "System" {
+        options.encoder_app_path = if config.ffmpeg_path.trim().is_empty() {
+            "ffmpeg".to_string()
+        } else {
+            config.ffmpeg_path.clone()
+        };
+    } else {
+        options.encoder_app_path = options.encoder_app_path.trim().to_string();
+    }
+
+    if options.transcoding_temp_path.trim().is_empty() {
+        options.transcoding_temp_path = config.transcode_dir.to_string_lossy().to_string();
+    } else {
+        options.transcoding_temp_path = options.transcoding_temp_path.trim().to_string();
+    }
+
+    options.hardware_acceleration_type = options.hardware_acceleration_type.trim().to_string();
+    options.vaapi_device = options.vaapi_device.trim().to_string();
+    options.h264_preset = options.h264_preset.trim().to_string();
+    options.encoding_thread_count = options.encoding_thread_count.clamp(-1, 64);
+    options.down_mix_audio_boost = options.down_mix_audio_boost.clamp(0.5, 3.0);
+    options.h264_crf = options.h264_crf.clamp(0, 51);
+    options.max_transcode_sessions = options.max_transcode_sessions.clamp(1, 64);
 }
 
 async fn get_system_setting(pool: &sqlx::PgPool, key: &str) -> Result<Option<Value>, AppError> {

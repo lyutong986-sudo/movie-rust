@@ -469,7 +469,8 @@ async fn serve_media_item(
                 .clone()
                 .unwrap_or_else(|| "unknown-device".to_string());
 
-            if state.config.enable_transcoding {
+            let encoding_options = repository::encoding_options(&state.pool, &state.config).await?;
+            if encoding_options.enable_transcoding {
                 tracing::info!(
                     item_id = %item_id,
                     user_id = %user_id,
@@ -478,7 +479,7 @@ async fn serve_media_item(
 
                 match state
                     .transcoder
-                    .start_transcoding(item_id, user_id, &device_id, transcoding_query, &path)
+                    .start_transcoding(item_id, user_id, &device_id, transcoding_query, encoding_options, &path)
                     .await
                 {
                     Ok(session) => {
@@ -754,7 +755,8 @@ async fn transcoded_hls_playlist_response(
     device_id: Option<String>,
     is_audio: bool,
 ) -> Result<Response, AppError> {
-    if !state.config.enable_transcoding {
+    let encoding_options = repository::encoding_options(&state.pool, &state.config).await?;
+    if !encoding_options.enable_transcoding {
         return Err(AppError::BadRequest(
             "HLS 播放需要启用真实转码输出".to_string(),
         ));
@@ -781,6 +783,7 @@ async fn transcoded_hls_playlist_response(
             session.user_id,
             &device_id.unwrap_or_else(|| "unknown-device".to_string()),
             query,
+            encoding_options,
             &path,
         )
         .await?;

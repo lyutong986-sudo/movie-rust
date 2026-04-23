@@ -533,6 +533,34 @@ button.danger {
   color: #cfd6e2;
 }
 
+.settings-form label > span {
+  color: #91a0b6;
+  line-height: 1.45;
+}
+
+.path-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  gap: 8px;
+  align-items: center;
+}
+
+.form-error,
+.form-success {
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.form-error {
+  color: #ffd7dc;
+  background: rgba(159, 47, 63, 0.18);
+}
+
+.form-success {
+  color: #d7ffe9;
+  background: rgba(119, 215, 180, 0.14);
+}
+
 .admin-table {
   display: grid;
   border: 1px solid #2b323e;

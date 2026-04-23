@@ -11,7 +11,11 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::{config::Config, error::AppError, models::VideoStreamQuery};
+use crate::{
+    config::Config,
+    error::AppError,
+    models::{EncodingOptionsDto, VideoStreamQuery},
+};
 
 /// 杞爜浼氳瘽鐘舵€?
 #[derive(Debug, Clone, PartialEq)]
@@ -93,10 +97,11 @@ impl Transcoder {
         user_id: Uuid,
         device_id: &str,
         params: VideoStreamQuery,
+        options: EncodingOptionsDto,
         input_path: &Path,
     ) -> Result<TranscodingSession, AppError> {
         // 妫€鏌ユ槸鍚﹀惎鐢ㄨ浆鐮?
-        if !self.config.enable_transcoding {
+        if !options.enable_transcoding {
             return Err(AppError::TranscodingDisabled);
         }
         
@@ -106,7 +111,7 @@ impl Transcoder {
         
         // 鐢熸垚浼氳瘽ID鍜岃緭鍑虹洰褰?
         let session_id = Uuid::new_v4();
-        let output_dir = self.config.transcode_dir
+        let output_dir = PathBuf::from(&options.transcoding_temp_path)
             .join(format!("session_{}", session_id));
         
         // 鍒涘缓杈撳嚭鐩綍
@@ -161,8 +166,12 @@ impl Transcoder {
         }
         
         // 鏋勫缓FFmpeg鍛戒护琛屽弬鏁?
-        let ffmpeg_args = self.build_ffmpeg_args(input_path, &output_dir, &params, &protocol)?;
-        let ffmpeg_path = &self.config.ffmpeg_path;
+        let ffmpeg_args = self.build_ffmpeg_args(input_path, &output_dir, &params, &protocol, &options)?;
+        let ffmpeg_path = if options.encoder_location_type.eq_ignore_ascii_case("Custom") {
+            options.encoder_app_path.as_str()
+        } else {
+            self.config.ffmpeg_path.as_str()
+        };
         
         // 鍚姩FFmpeg杩涚▼
         let mut cmd = Command::new(ffmpeg_path);
@@ -333,19 +342,30 @@ impl Transcoder {
         output_dir: &Path,
         params: &VideoStreamQuery,
         protocol: &str,
+        options: &EncodingOptionsDto,
     ) -> Result<Vec<String>, AppError> {
         let mut args = vec!["-i".to_string(), input_path.to_string_lossy().to_string()];
         
         // 瑙嗛缂栫爜鍙傛暟
         if let Some(video_codec) = &params.video_codec {
             args.push("-c:v".to_string());
-            args.push(ffmpeg_video_encoder(video_codec).to_string());
+            args.push(ffmpeg_video_encoder(video_codec, options).to_string());
         } else if protocol.eq_ignore_ascii_case("hls") {
             args.push("-c:v".to_string());
-            args.push("libx264".to_string());
+            args.push(ffmpeg_video_encoder("h264", options).to_string());
         } else {
             args.push("-c:v".to_string());
             args.push("copy".to_string()); // 榛樿澶嶅埗瑙嗛娴?
+        }
+
+        if protocol.eq_ignore_ascii_case("hls") && !options.h264_preset.trim().is_empty() {
+            args.push("-preset".to_string());
+            args.push(options.h264_preset.clone());
+        }
+
+        if protocol.eq_ignore_ascii_case("hls") && options.h264_crf > 0 {
+            args.push("-crf".to_string());
+            args.push(options.h264_crf.to_string());
         }
         
         // 瑙嗛鐮佺巼闄愬埗
@@ -381,11 +401,10 @@ impl Transcoder {
         }
         
         // 绾跨▼鏁?
-        let threads = if self.config.transcode_threads > 0 {
-            self.config.transcode_threads
-        } else {
-            // 鑷姩妫€娴嬶細浣跨敤CPU鏍稿績鏁扮殑涓€鍗?
-            num_cpus::get() as u32 / 2
+        let threads = match options.encoding_thread_count {
+            0 => num_cpus::get() as u32,
+            value if value > 0 => value as u32,
+            _ => (num_cpus::get() as u32 / 2).max(1),
         };
         args.push("-threads".to_string());
         args.push(threads.to_string());
@@ -440,9 +459,15 @@ async fn wait_for_ffmpeg_or_cancel(
     }
 }
 
-fn ffmpeg_video_encoder(codec: &str) -> &str {
+fn ffmpeg_video_encoder<'a>(codec: &'a str, options: &'a EncodingOptionsDto) -> &'a str {
     match codec.trim().to_ascii_lowercase().as_str() {
-        "h264" | "avc" | "libx264" => "libx264",
+        "h264" | "avc" | "libx264" => match options.hardware_acceleration_type.trim().to_ascii_lowercase().as_str() {
+            "nvenc" => "h264_nvenc",
+            "qsv" => "h264_qsv",
+            "vaapi" => "h264_vaapi",
+            "h264_omx" => "h264_omx",
+            _ => "libx264",
+        },
         "h265" | "hevc" | "libx265" => "libx265",
         "copy" => "copy",
         _ => codec.trim(),
