@@ -481,3 +481,11 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 - `/Users/{userId}/Items/Counts` 改为真正返回用户视角统计；同时 `/Items/Counts?UserId=...` 也会在校验通过后返回该用户可见媒体库内的计数，和播放器模板的优先调用顺序保持一致。
 - `/DisplayPreferences/{displayPreferencesId}` 读取端点现已对查询里的 `UserId` 做设置访问校验，避免任意已登录用户跨用户读取显示偏好。
 - `/Items/{itemId}/Similar?UserId=...` 现已校验目标 `UserId` 是否为当前会话本人或管理员，避免通过无用户前缀的 Similar 端点读取他人的 `UserData` 视角。
+
+### 2026-04-23 PlaybackInfo 媒体源名称解码修复
+
+- 排查 Hills 本地播放器播放页文件名偶发显示 `%E8%9C%A1...` 后确认：问题不在播放器，而在后端 `media_source_name()` 的分支逻辑。
+- 旧逻辑只有当文件名包含 ` - 1080p` 这类后缀时，才会从本地文件名提取一个可读名称；否则会直接退回 `item.name`。这样一来，只要数据库里的 `item.name` 来自某些远程/STRM/URL 编码链路，`PlaybackInfo.MediaSources[].Name` 就会把百分号编码原样回给 EmbySDK。
+- 现已改为优先使用本地文件 stem 作为 `MediaSources[].Name` 的稳定来源；只有在完全取不到本地文件名时才回退。
+- 同时，从 URL 提取媒体源名称时新增 percent-decode，`蜡笔小新：...` 这类中文 URL 文件名不再以 `%E8...` 形式出现在播放源列表中。
+- 这次修复的是 `PlaybackInfo` / `MediaSources` 命名链路；如果后续发现某些列表页标题本身也被写成编码值，再继续沿 `media_items.name` 的入库链路往前收口。

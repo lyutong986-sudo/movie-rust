@@ -7132,26 +7132,60 @@ fn effective_container_from_target(item: &DbMediaItem, strm_target: Option<&str>
 }
 
 fn media_source_name(item: &DbMediaItem, strm_target: Option<&str>) -> String {
-    item_file_name(item)
+    let local_stem = item_file_name(item)
         .and_then(|file_name| {
             Path::new(&file_name)
                 .file_stem()
                 .map(|stem| stem.to_string_lossy().to_string())
         })
+        .map(|stem| decode_percent_encoded_component(stem.trim()));
+
+    local_stem
+        .as_deref()
         .and_then(|stem| {
             stem.rsplit_once(" - ")
                 .map(|(_, quality)| quality.trim().to_string())
                 .filter(|quality| !quality.is_empty())
         })
+        .or(local_stem.filter(|stem| !stem.is_empty()))
         .or_else(|| strm_target.and_then(source_name_from_url))
-        .unwrap_or_else(|| item.name.clone())
+        .unwrap_or_else(|| decode_percent_encoded_component(item.name.trim()))
 }
 
 fn source_name_from_url(value: &str) -> Option<String> {
     let url = url::Url::parse(value).ok()?;
     let file_name = Path::new(url.path()).file_stem()?.to_string_lossy();
-    let name = file_name.trim();
+    let decoded = decode_percent_encoded_component(file_name.trim());
+    let name = decoded.trim();
     (!name.is_empty()).then(|| name.to_string())
+}
+
+fn decode_percent_encoded_component(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.contains('%') {
+        return trimmed.to_string();
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hi = (bytes[index + 1] as char).to_digit(16);
+            let lo = (bytes[index + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                decoded.push(((hi << 4) | lo) as u8);
+                index += 3;
+                continue;
+            }
+        }
+
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&decoded).trim().to_string()
 }
 
 fn remote_trailers_from_urls(urls: &[String]) -> Vec<Value> {
