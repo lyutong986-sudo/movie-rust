@@ -1,5 +1,5 @@
 use crate::{
-    auth::AuthSession,
+    auth::{self, AuthSession},
     error::AppError,
     media_analyzer,
     metadata::{
@@ -1745,6 +1745,10 @@ async fn playback_info(
 ) -> Result<Json<PlaybackInfoResponse>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    let request_headers = request.headers().clone();
+    let request_query = request.uri().query().map(ToOwned::to_owned);
+    let request_device_id = auth::client_value(&request_headers, "DeviceId")
+        .or_else(|| query_value(request_query.as_deref(), &["DeviceId", "deviceId"]));
     // 根据请求方法处理
     let info = if request.method() == http::Method::POST {
         // POST请求：尝试从请求体解析JSON
@@ -1899,12 +1903,19 @@ async fn playback_info(
         .unwrap_or_default();
     let force_transcoding = !transcode_reasons.is_empty();
 
+    let playback_user_id = info.user_id.unwrap_or(session.user_id);
+    let playback_user_id = uuid_to_emby_guid(&playback_user_id);
     for media_source in &mut media_sources {
+        let media_source_id = media_source.id.clone();
         if let Some(url) = media_source.direct_stream_url.as_mut() {
-            url.push_str("&PlaySessionId=");
-            url.push_str(&play_session_id);
-            url.push_str("&X-Emby-Token=");
-            url.push_str(&session.access_token);
+            *url = decorate_playback_url(
+                url,
+                &media_source_id,
+                &play_session_id,
+                &session.access_token,
+                &playback_user_id,
+                request_device_id.as_deref(),
+            );
         }
         media_source
             .required_http_headers
@@ -1960,6 +1971,22 @@ async fn playback_info(
         }
     }
 
+    if force_transcoding && !state.config.enable_transcoding {
+        for media_source in &mut media_sources {
+            media_source.supports_transcoding = false;
+            media_source.transcoding_url = None;
+            media_source.transcoding_container = None;
+            media_source.transcoding_sub_protocol = None;
+        }
+
+        return Ok(Json(PlaybackInfoResponse {
+            media_sources,
+            play_session_id,
+            error_code: Some("TranscodingDisabled".to_string()),
+            ..Default::default()
+        }));
+    }
+
     if force_transcoding {
         let item_emby_id = crate::models::uuid_to_emby_guid(&item.id);
         let selected_media_source_id = media_sources
@@ -1970,15 +1997,21 @@ async fn playback_info(
         let transcoding_container = preferred_transcoding_container(&info);
         let transcoding_sub_protocol =
             preferred_transcoding_sub_protocol(&info, &transcoding_container);
+        let transcoding_video_codec = preferred_transcoding_video_codec(&info, &transcoding_sub_protocol);
+        let transcoding_audio_codec = preferred_transcoding_audio_codec(&info, &transcoding_sub_protocol);
         let transcoding_url = build_transcoding_url(
             &item_emby_id,
             &selected_media_source_id,
             &play_session_id,
             &session.access_token,
+            &playback_user_id,
+            request_device_id.as_deref(),
             info.audio_stream_index,
             info.subtitle_stream_index,
             info.start_time_ticks,
             effective_max_bitrate,
+            transcoding_video_codec.as_deref(),
+            transcoding_audio_codec.as_deref(),
             &transcoding_container,
             &transcoding_sub_protocol,
         );
@@ -1986,6 +2019,8 @@ async fn playback_info(
         if let Some(selected_source) = media_sources.get_mut(selected_media_source_index) {
             selected_source.supports_direct_play = false;
             selected_source.supports_direct_stream = false;
+            selected_source.direct_stream_url = None;
+            selected_source.add_api_key_to_direct_stream_url = Some(false);
             selected_source.transcoding_url = Some(transcoding_url.clone());
             selected_source.transcoding_container = Some(transcoding_container.clone());
             selected_source.transcoding_sub_protocol = Some(transcoding_sub_protocol.clone());
@@ -2586,15 +2621,56 @@ fn preferred_transcoding_sub_protocol(info: &PlaybackInfoDto, container: &str) -
         .to_string()
 }
 
+fn preferred_transcoding_video_codec(info: &PlaybackInfoDto, sub_protocol: &str) -> Option<String> {
+    preferred_transcoding_profile(info)
+        .and_then(|profile| profile.video_codec.as_deref())
+        .map(first_csv_value)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            if sub_protocol.eq_ignore_ascii_case("hls") {
+                Some("h264".to_string())
+            } else {
+                None
+            }
+        })
+}
+
+fn preferred_transcoding_audio_codec(info: &PlaybackInfoDto, sub_protocol: &str) -> Option<String> {
+    preferred_transcoding_profile(info)
+        .and_then(|profile| profile.audio_codec.as_deref())
+        .map(first_csv_value)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            if sub_protocol.eq_ignore_ascii_case("hls") {
+                Some("aac".to_string())
+            } else {
+                None
+            }
+        })
+}
+
+fn first_csv_value(value: &str) -> String {
+    value
+        .split(',')
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn build_transcoding_url(
     item_emby_id: &str,
     media_source_id: &str,
     play_session_id: &str,
     access_token: &str,
+    user_id: &str,
+    device_id: Option<&str>,
     audio_stream_index: Option<i32>,
     subtitle_stream_index: Option<i32>,
     start_time_ticks: Option<i64>,
     max_streaming_bitrate: Option<i64>,
+    video_codec: Option<&str>,
+    audio_codec: Option<&str>,
     transcoding_container: &str,
     transcoding_sub_protocol: &str,
 ) -> String {
@@ -2603,8 +2679,14 @@ fn build_transcoding_url(
         format!("mediaSourceId={media_source_id}"),
         format!("PlaySessionId={play_session_id}"),
         format!("Container={transcoding_container}"),
+        format!("api_key={access_token}"),
         format!("X-Emby-Token={access_token}"),
+        format!("X-MediaBrowser-Token={access_token}"),
+        format!("UserId={user_id}"),
     ];
+    if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
+        params.push(format!("DeviceId={device_id}"));
+    }
 
     if let Some(value) = audio_stream_index {
         params.push(format!("AudioStreamIndex={value}"));
@@ -2619,15 +2701,124 @@ fn build_transcoding_url(
         params.push(format!("VideoBitRate={value}"));
         params.push(format!("MaxStreamingBitrate={value}"));
     }
+    if let Some(value) = video_codec.filter(|value| !value.trim().is_empty()) {
+        params.push(format!("VideoCodec={value}"));
+    }
+    if let Some(value) = audio_codec.filter(|value| !value.trim().is_empty()) {
+        params.push(format!("AudioCodec={value}"));
+    }
 
     if transcoding_sub_protocol.eq_ignore_ascii_case("hls") {
-        format!("/Videos/{item_emby_id}/master.m3u8?{}", params.join("&"))
+        format!("/emby/Videos/{item_emby_id}/master.m3u8?{}", params.join("&"))
     } else {
         format!(
-            "/Videos/{item_emby_id}/stream.{transcoding_container}?{}",
+            "/emby/Videos/{item_emby_id}/stream.{transcoding_container}?{}",
             params.join("&")
         )
     }
+}
+
+fn decorate_playback_url(
+    url: &str,
+    media_source_id: &str,
+    play_session_id: &str,
+    access_token: &str,
+    user_id: &str,
+    device_id: Option<&str>,
+) -> String {
+    let url = ensure_emby_api_prefix(url);
+    let mut pairs = vec![
+        ("MediaSourceId", media_source_id),
+        ("mediaSourceId", media_source_id),
+        ("PlaySessionId", play_session_id),
+        ("api_key", access_token),
+        ("X-Emby-Token", access_token),
+        ("X-MediaBrowser-Token", access_token),
+        ("UserId", user_id),
+    ];
+    if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
+        pairs.push(("DeviceId", device_id));
+    }
+    append_query_pairs_if_missing(&url, &pairs)
+}
+
+fn ensure_emby_api_prefix(url: &str) -> String {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("/emby/")
+        || lower.starts_with("/mediabrowser/")
+    {
+        return trimmed.to_string();
+    }
+    if trimmed.starts_with('/') {
+        format!("/emby{trimmed}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn append_query_pairs_if_missing(url: &str, pairs: &[(&str, &str)]) -> String {
+    let (without_fragment, fragment) = url
+        .split_once('#')
+        .map(|(base, fragment)| (base, Some(fragment)))
+        .unwrap_or((url, None));
+    let (base, existing_query) = without_fragment
+        .split_once('?')
+        .map(|(base, query)| (base, Some(query)))
+        .unwrap_or((without_fragment, None));
+
+    let mut existing_pairs: Vec<(String, String)> = existing_query
+        .map(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut existing_keys: BTreeSet<String> = existing_pairs
+        .iter()
+        .map(|(key, _)| key.to_ascii_lowercase())
+        .collect();
+
+    for (key, value) in pairs {
+        if value.trim().is_empty() {
+            continue;
+        }
+        if existing_keys.insert(key.to_ascii_lowercase()) {
+            existing_pairs.push(((*key).to_string(), (*value).to_string()));
+        }
+    }
+
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in existing_pairs {
+        serializer.append_pair(&key, &value);
+    }
+    let query = serializer.finish();
+    let mut output = if query.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{query}")
+    };
+    if let Some(fragment) = fragment {
+        output.push('#');
+        output.push_str(fragment);
+    }
+    output
+}
+
+fn query_value(query: Option<&str>, keys: &[&str]) -> Option<String> {
+    let query = query?;
+    url::form_urlencoded::parse(query.as_bytes()).find_map(|(key, value)| {
+        if keys
+            .iter()
+            .any(|candidate| key.eq_ignore_ascii_case(candidate))
+        {
+            Some(value.into_owned()).filter(|value| !value.trim().is_empty())
+        } else {
+            None
+        }
+    })
 }
 
 fn parse_include_types(value: Option<&str>) -> Vec<String> {
@@ -2854,17 +3045,48 @@ mod tests {
             "mediasource_ITEMID",
             "PLAYSESSION",
             "TOKEN",
+            "USERID",
+            Some("DEVICEID"),
             Some(1),
             Some(2),
             Some(123),
             Some(4_000_000),
+            Some("h264"),
+            Some("aac"),
             "mp4",
             "http",
         );
 
-        assert!(url.starts_with("/Videos/ITEMID/stream.mp4?"));
+        assert!(url.starts_with("/emby/Videos/ITEMID/stream.mp4?"));
         assert!(url.contains("MediaSourceId=mediasource_ITEMID"));
         assert!(url.contains("PlaySessionId=PLAYSESSION"));
+        assert!(url.contains("api_key=TOKEN"));
+        assert!(url.contains("UserId=USERID"));
+        assert!(url.contains("DeviceId=DEVICEID"));
+        assert!(url.contains("VideoCodec=h264"));
+        assert!(url.contains("AudioCodec=aac"));
+    }
+
+    #[test]
+    fn playback_info_decorates_direct_stream_urls_for_local_player() {
+        let url = decorate_playback_url(
+            "/Videos/ITEMID/stream.mkv?Static=true&MediaSourceId=mediasource_ITEMID",
+            "mediasource_ITEMID",
+            "PLAYSESSION",
+            "TOKEN",
+            "USERID",
+            Some("DEVICEID"),
+        );
+
+        assert!(url.starts_with("/emby/Videos/ITEMID/stream.mkv?"));
+        assert!(url.contains("Static=true"));
+        assert!(url.contains("MediaSourceId=mediasource_ITEMID"));
+        assert!(url.contains("PlaySessionId=PLAYSESSION"));
+        assert!(url.contains("api_key=TOKEN"));
+        assert!(url.contains("X-Emby-Token=TOKEN"));
+        assert!(url.contains("X-MediaBrowser-Token=TOKEN"));
+        assert!(url.contains("UserId=USERID"));
+        assert!(url.contains("DeviceId=DEVICEID"));
     }
 
     #[test]

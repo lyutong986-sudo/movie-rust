@@ -420,3 +420,14 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 ```
 
 当前仍存在一批既有 Rust warning，主要是未使用 import、未使用字段、未使用辅助函数和部分未来扩展模型；它们不阻塞构建，但建议后续在功能稳定后统一清理。
+
+### 2026-04-23 本地播放器播放 URL 兼容修复
+
+- 对照本地播放器模板 `PlaybackSourceBuilder` 后确认：客户端优先使用 `PlaybackInfo.MediaSources[].DirectStreamUrl`，并会把相对 URL 直接通过 `baseUrl.resolve()` 解析；因此服务端返回 `/Videos/...` 在 `/emby` 前缀部署或代理场景下可能绕过 Emby API 前缀。
+- `PlaybackInfo` 现在会把内部 DirectStream URL 装饰为 `/emby/Videos/...`，并补齐 `MediaSourceId`、`mediaSourceId`、`PlaySessionId`、`UserId`、`DeviceId`、`api_key`、`X-Emby-Token`、`X-MediaBrowser-Token` 查询参数，同时继续保留 `RequiredHttpHeaders`，兼容 MPV/Exo/VLC 不同播放核心。
+- `TranscodingUrl` 同步改为 `/emby/Videos/...`，并补齐 `api_key`、`UserId`、`DeviceId` 和 Emby token 参数，避免 Exo 触发 HLS/HTTP 转码后拿到无法鉴权或缺少前缀的播放地址。
+- 当设备配置或码率/音轨条件触发转码时，被选中的 `MediaSource` 会移除 `DirectStreamUrl`，避免本地播放器“有直连地址就优先直连”的逻辑绕过 `TranscodingUrl`。
+- 新增后端单元测试 `playback_info_decorates_direct_stream_urls_for_local_player`，覆盖本地播放器强依赖的 URL 字段。
+- 验证通过：
+  - `cargo check --manifest-path backend\Cargo.toml`
+  - `cargo test --manifest-path backend\Cargo.toml playback_info -- --nocapture`

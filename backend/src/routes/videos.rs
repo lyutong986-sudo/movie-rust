@@ -117,7 +117,10 @@ async fn active_encodings(
     State(state): State<AppState>,
     request: Request<Body>,
 ) -> Result<StatusCode, AppError> {
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let query = request.uri().query().map(ToOwned::to_owned);
+    let device_id = request_device_id(&request);
+    stop_active_encoding_request(&state, &session, query.as_deref(), device_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -125,8 +128,65 @@ async fn active_encodings_delete(
     State(state): State<AppState>,
     request: Request<Body>,
 ) -> Result<StatusCode, AppError> {
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let query = request.uri().query().map(ToOwned::to_owned);
+    let device_id = request_device_id(&request);
+    stop_active_encoding_request(&state, &session, query.as_deref(), device_id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn stop_active_encoding_request(
+    state: &AppState,
+    session: &AuthSession,
+    query: Option<&str>,
+    device_id: Option<String>,
+) -> Result<(), AppError> {
+    if let Some(session_id) = query_value(
+        query,
+        &[
+            "TranscodingJobId",
+            "transcodingJobId",
+            "EncodingJobId",
+            "encodingJobId",
+            "PlaySessionId",
+            "playSessionId",
+        ],
+    )
+    .and_then(|value| parse_transcoding_session_id(&value))
+    {
+        state.transcoder.stop_transcoding(session_id).await?;
+    }
+
+    let stopped = state
+        .transcoder
+        .stop_transcoding_for_user_device(session.user_id, device_id.as_deref())
+        .await;
+    tracing::debug!(
+        user_id = %session.user_id,
+        device_id = ?device_id,
+        stopped,
+        "ActiveEncodings cleanup completed"
+    );
+    Ok(())
+}
+
+fn parse_transcoding_session_id(value: &str) -> Option<Uuid> {
+    let trimmed = value.trim();
+    Uuid::parse_str(trimmed).ok().or_else(|| {
+        if trimmed.len() == 32 {
+            Uuid::parse_str(&format!(
+                "{}-{}-{}-{}-{}",
+                &trimmed[0..8],
+                &trimmed[8..12],
+                &trimmed[12..16],
+                &trimmed[16..20],
+                &trimmed[20..32]
+            ))
+            .ok()
+        } else {
+            None
+        }
+    })
 }
 
 #[derive(Debug, Deserialize)]

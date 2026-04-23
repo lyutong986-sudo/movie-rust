@@ -505,6 +505,7 @@ async fn record_report(
     report: PlaybackReport,
 ) -> Result<StatusCode, AppError> {
     let user_id = report.user_id.unwrap_or(session.user_id);
+    ensure_user_access(session, user_id)?;
     repository::record_playback_event(
         &state.pool,
         user_id,
@@ -520,6 +521,14 @@ async fn record_report(
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn ensure_user_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppError> {
+    if session.is_admin || session.user_id == user_id {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
 }
 
 async fn record_legacy(
@@ -540,6 +549,7 @@ async fn record_legacy_for_user(
     event_type: &str,
     query: LegacyPlaybackQuery,
 ) -> Result<StatusCode, AppError> {
+    ensure_user_access(session, user_id)?;
     let played_to_completion = if event_type == "Stopped" {
         query.position_ticks.is_none_or(|ticks| ticks > 0)
     } else {
