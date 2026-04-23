@@ -489,3 +489,23 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 - 现已改为优先使用本地文件 stem 作为 `MediaSources[].Name` 的稳定来源；只有在完全取不到本地文件名时才回退。
 - 同时，从 URL 提取媒体源名称时新增 percent-decode，`蜡笔小新：...` 这类中文 URL 文件名不再以 `%E8...` 形式出现在播放源列表中。
 - 这次修复的是 `PlaybackInfo` / `MediaSources` 命名链路；如果后续发现某些列表页标题本身也被写成编码值，再继续沿 `media_items.name` 的入库链路往前收口。
+
+### 2026-04-23 服务器页扫描并发设置
+
+- `settings/server` 已新增 3 个可保存的服务器级并发配置：
+  - `影片扫描入库线程数`
+  - `STRM URL 读取线程数`
+  - `TMDB 下载元数据线程数`
+- 这 3 个字段已写入 `StartupConfiguration`，通过现有 `/Startup/Configuration` 读写，不额外引入新的兼容壳接口。
+- 扫描器已实际消费这些配置，而不只是前端展示：
+  - `library_scan_thread_count` 控制单个媒体库路径下并发导入媒体文件的任务数量
+  - `strm_analysis_thread_count` 控制扫描阶段 `.strm` 远程 URL 分析并发
+  - `tmdb_metadata_thread_count` 控制扫描阶段 TMDB 详情、人物、剧集目录、远程图片列表拉取并发
+- 为避免电视剧多集并发导入时重复刷新同一剧集，扫描器内部把 `refreshed_series` 去重集合改成了并发安全共享状态。
+- 按当前约定进一步收紧并发映射：
+  - `STRM URL 读取线程数` 同时作为 `.strm` 远程分析和本地媒体分析（ffprobe）并发上限
+  - `TMDB 下载元数据线程数` 同时覆盖 TMDB 元数据请求和图片预下载落盘并发
+  - `影片扫描入库线程数` 继续作为扫描导入任务的总并发上限，因此数据库写入并发也被间接收束在同一上限内
+- 验证通过：
+  - `cargo check --manifest-path backend\Cargo.toml`
+  - `npm.cmd run build`

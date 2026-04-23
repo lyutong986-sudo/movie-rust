@@ -108,7 +108,7 @@ async fn create_library(
     )
     .await?;
     if refresh_library {
-        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref(), &state.config)
+        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.clone(), &state.config)
             .await?;
     }
     Ok(Json(
@@ -125,7 +125,7 @@ async fn delete_library(
     auth::require_admin(&session)?;
     repository::delete_library(&state.pool, library_id).await?;
     if query.refresh_library.unwrap_or(false) {
-        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref(), &state.config)
+        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.clone(), &state.config)
             .await?;
     }
     Ok(StatusCode::NO_CONTENT)
@@ -173,7 +173,7 @@ async fn add_virtual_folder(
 
     repository::create_library(&state.pool, name, collection_type, &paths, options).await?;
     if refresh_library {
-        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref(), &state.config)
+        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.clone(), &state.config)
             .await?;
     }
     Ok(StatusCode::NO_CONTENT)
@@ -192,7 +192,7 @@ async fn remove_virtual_folder(
     let refresh_library = query.refresh_library.unwrap_or(false);
     repository::delete_library_by_name(&state.pool, name).await?;
     if refresh_library {
-        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref(), &state.config)
+        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.clone(), &state.config)
             .await?;
     }
     Ok(StatusCode::NO_CONTENT)
@@ -241,7 +241,7 @@ async fn add_media_path(
         .ok_or_else(|| AppError::BadRequest("缺少媒体路径".to_string()))?;
     repository::add_library_path(&state.pool, &payload.name, &path).await?;
     if query.refresh_library.unwrap_or(false) {
-        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref(), &state.config)
+        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.clone(), &state.config)
             .await?;
     }
     Ok(StatusCode::NO_CONTENT)
@@ -256,7 +256,7 @@ async fn update_media_path(
     auth::require_admin(&session)?;
     repository::update_library_path(&state.pool, &payload.name, payload.path_info).await?;
     if query.refresh_library.unwrap_or(false) {
-        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref(), &state.config)
+        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.clone(), &state.config)
             .await?;
     }
     Ok(StatusCode::NO_CONTENT)
@@ -279,7 +279,7 @@ async fn remove_media_path(
     let refresh_library = query.refresh_library.unwrap_or(false);
     repository::remove_library_path(&state.pool, name, path).await?;
     if refresh_library {
-        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref(), &state.config)
+        let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.clone(), &state.config)
             .await?;
     }
     Ok(StatusCode::NO_CONTENT)
@@ -291,7 +291,7 @@ async fn scan_libraries(
 ) -> Result<Json<ScanSummary>, AppError> {
     auth::require_admin(&session)?;
     Ok(Json(
-        scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref(), &state.config)
+        scanner::scan_all_libraries(&state.pool, state.metadata_manager.clone(), &state.config)
             .await?,
     ))
 }
@@ -301,7 +301,7 @@ async fn refresh_libraries(
     State(state): State<AppState>,
 ) -> Result<StatusCode, AppError> {
     auth::require_admin(&session)?;
-    let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.as_deref(), &state.config)
+    let _ = scanner::scan_all_libraries(&state.pool, state.metadata_manager.clone(), &state.config)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -150,6 +150,9 @@ export interface StartupConfiguration {
   UiCulture: string;
   MetadataCountryCode: string;
   PreferredMetadataLanguage: string;
+  LibraryScanThreadCount: number;
+  StrmAnalysisThreadCount: number;
+  TmdbMetadataThreadCount: number;
 }
 
 export interface StartupRemoteAccess {

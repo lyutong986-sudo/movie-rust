@@ -69,6 +69,18 @@ onMounted(async () => {
             <option value="KR">韩国</option>
           </select>
         </label>
+        <label>
+          影片扫描入库线程数
+          <input v-model.number="state.libraryScanThreadCount" min="1" max="32" type="number" />
+        </label>
+        <label>
+          STRM URL 读取线程数
+          <input v-model.number="state.strmAnalysisThreadCount" min="1" max="64" type="number" />
+        </label>
+        <label>
+          TMDB 下载元数据线程数
+          <input v-model.number="state.tmdbMetadataThreadCount" min="1" max="32" type="number" />
+        </label>
         <div class="button-row">
           <button :disabled="state.busy" type="submit">保存服务器设置</button>
         </div>

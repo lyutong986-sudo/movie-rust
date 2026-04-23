@@ -707,13 +707,31 @@ impl EncodingOptionsDto {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct StartupConfiguration {
     pub server_name: String,
     pub ui_culture: String,
     pub metadata_country_code: String,
     pub preferred_metadata_language: String,
+    #[serde(default = "default_library_scan_thread_count")]
+    pub library_scan_thread_count: i32,
+    #[serde(default = "default_strm_analysis_thread_count")]
+    pub strm_analysis_thread_count: i32,
+    #[serde(default = "default_tmdb_metadata_thread_count")]
+    pub tmdb_metadata_thread_count: i32,
+}
+
+fn default_library_scan_thread_count() -> i32 {
+    2
+}
+
+fn default_strm_analysis_thread_count() -> i32 {
+    8
+}
+
+fn default_tmdb_metadata_thread_count() -> i32 {
+    4
 }
 
 #[derive(Debug, Deserialize)]

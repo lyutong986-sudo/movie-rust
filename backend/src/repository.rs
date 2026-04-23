@@ -197,18 +197,23 @@ pub async fn startup_configuration(
     config: &Config,
 ) -> Result<StartupConfiguration, AppError> {
     if let Some(value) = get_system_setting(pool, "startup_configuration").await? {
-        if let Ok(configuration) = serde_json::from_value::<StartupConfiguration>(value) {
+        if let Ok(mut configuration) = serde_json::from_value::<StartupConfiguration>(value) {
+            normalize_startup_configuration(&mut configuration);
             return Ok(configuration);
         }
     }
 
-    Ok(default_startup_configuration(config))
+    let mut configuration = default_startup_configuration(config);
+    normalize_startup_configuration(&mut configuration);
+    Ok(configuration)
 }
 
 pub async fn update_startup_configuration(
     pool: &sqlx::PgPool,
     configuration: &StartupConfiguration,
 ) -> Result<(), AppError> {
+    let mut configuration = configuration.clone();
+    normalize_startup_configuration(&mut configuration);
     set_system_setting(pool, "startup_configuration", json!(configuration)).await
 }
 
@@ -428,7 +433,24 @@ fn default_startup_configuration(config: &Config) -> StartupConfiguration {
         ui_culture: config.ui_culture.clone(),
         metadata_country_code: config.metadata_country_code.clone(),
         preferred_metadata_language: config.preferred_metadata_language.clone(),
+        library_scan_thread_count: 2,
+        strm_analysis_thread_count: 8,
+        tmdb_metadata_thread_count: 4,
     }
+}
+
+fn normalize_startup_configuration(configuration: &mut StartupConfiguration) {
+    configuration.server_name = configuration.server_name.trim().to_string();
+    configuration.ui_culture = configuration.ui_culture.trim().to_string();
+    configuration.metadata_country_code = configuration.metadata_country_code.trim().to_string();
+    configuration.preferred_metadata_language =
+        configuration.preferred_metadata_language.trim().to_string();
+    configuration.library_scan_thread_count =
+        configuration.library_scan_thread_count.clamp(1, 32);
+    configuration.strm_analysis_thread_count =
+        configuration.strm_analysis_thread_count.clamp(1, 64);
+    configuration.tmdb_metadata_thread_count =
+        configuration.tmdb_metadata_thread_count.clamp(1, 32);
 }
 
 fn normalize_encoding_options(options: &mut EncodingOptionsDto, config: &Config) {

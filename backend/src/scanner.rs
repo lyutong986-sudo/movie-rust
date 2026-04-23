@@ -18,11 +18,39 @@ use std::{
     collections::HashSet,
     ffi::OsStr,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
+};
+use tokio::{
+    sync::{Mutex, Semaphore},
+    task::JoinSet,
 };
 use walkdir::WalkDir;
 
 const TICKS_PER_SECOND: i64 = 10_000_000;
+
+#[derive(Debug, Clone)]
+struct ScanExecutionOptions {
+    library_scan_thread_count: usize,
+    strm_analysis_thread_count: usize,
+    tmdb_metadata_thread_count: usize,
+}
+
+#[derive(Clone)]
+struct ScanRuntime {
+    strm_analysis_limiter: Arc<Semaphore>,
+    tmdb_metadata_limiter: Arc<Semaphore>,
+    refreshed_series: Arc<Mutex<HashSet<uuid::Uuid>>>,
+}
+
+impl ScanRuntime {
+    fn new(options: &ScanExecutionOptions) -> Self {
+        Self {
+            strm_analysis_limiter: Arc::new(Semaphore::new(options.strm_analysis_thread_count)),
+            tmdb_metadata_limiter: Arc::new(Semaphore::new(options.tmdb_metadata_thread_count)),
+            refreshed_series: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 struct NfoMetadata {
@@ -68,13 +96,19 @@ struct NfoPerson {
 
 pub async fn scan_all_libraries(
     pool: &sqlx::PgPool,
-    metadata_manager: Option<&MetadataProviderManager>,
+    metadata_manager: Option<Arc<MetadataProviderManager>>,
     config: &Config,
 ) -> Result<ScanSummary, AppError> {
+    let startup = repository::startup_configuration(pool, config).await?;
+    let execution_options = ScanExecutionOptions {
+        library_scan_thread_count: startup.library_scan_thread_count.max(1) as usize,
+        strm_analysis_thread_count: startup.strm_analysis_thread_count.max(1) as usize,
+        tmdb_metadata_thread_count: startup.tmdb_metadata_thread_count.max(1) as usize,
+    };
+    let runtime = ScanRuntime::new(&execution_options);
     let libraries = repository::list_libraries(pool).await?;
     let mut scanned_files = 0_i64;
     let mut imported_items = 0_i64;
-    let mut refreshed_series = HashSet::new();
 
     for library in &libraries {
         let library_options = repository::library_options(library);
@@ -88,30 +122,60 @@ pub async fn scan_all_libraries(
             let files = collect_video_files(path.clone()).await?;
             scanned_files += files.len() as i64;
 
+            let mut tasks = JoinSet::new();
             for file in files {
-                if library.collection_type.eq_ignore_ascii_case("tvshows") {
-                    import_tv_file(
-                        pool,
-                        metadata_manager,
-                        config,
-                        &mut refreshed_series,
-                        library,
-                        &library_options,
-                        &path,
-                        &file,
-                    )
-                    .await?;
-                } else {
-                    import_movie_file(
-                        pool,
-                        metadata_manager,
-                        config,
-                        library,
-                        &library_options,
-                        &file,
-                    )
-                    .await?;
+                while tasks.len() >= execution_options.library_scan_thread_count {
+                    match tasks.join_next().await {
+                        Some(joined) => {
+                            joined
+                                .map_err(|error| AppError::Internal(format!("扫描任务失败: {error}")))??;
+                            imported_items += 1;
+                        }
+                        None => break,
+                    }
                 }
+
+                let pool = pool.clone();
+                let metadata_manager = metadata_manager.clone();
+                let config = config.clone();
+                let runtime = runtime.clone();
+                let library = library.clone();
+                let library_options = library_options.clone();
+                let path = path.clone();
+
+                tasks.spawn(async move {
+                    if library.collection_type.eq_ignore_ascii_case("tvshows") {
+                        import_tv_file(
+                            &pool,
+                            metadata_manager.as_deref(),
+                            &config,
+                            &runtime,
+                            &library,
+                            &library_options,
+                            &path,
+                            &file,
+                        )
+                        .await?;
+                    } else {
+                        import_movie_file(
+                            &pool,
+                            metadata_manager.as_deref(),
+                            &config,
+                            &runtime,
+                            &library,
+                            &library_options,
+                            &file,
+                        )
+                        .await?;
+                    }
+
+                    Ok::<(), AppError>(())
+                });
+            }
+
+            while let Some(joined) = tasks.join_next().await {
+                joined
+                    .map_err(|error| AppError::Internal(format!("扫描任务失败: {error}")))??;
                 imported_items += 1;
             }
         }
@@ -149,6 +213,7 @@ async fn import_movie_file(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
     config: &Config,
+    runtime: &ScanRuntime,
     library: &DbLibrary,
     library_options: &LibraryOptionsDto,
     file: &Path,
@@ -228,6 +293,7 @@ async fn import_movie_file(
         pool,
         metadata_manager,
         config,
+        runtime,
         library_options,
         movie_id,
         "movie",
@@ -238,6 +304,7 @@ async fn import_movie_file(
         pool,
         metadata_manager,
         config,
+        runtime,
         library_options,
         movie_id,
         &provider_ids,
@@ -248,6 +315,7 @@ async fn import_movie_file(
             pool,
             metadata_manager,
             config,
+            runtime,
             library_options,
             movie_id,
             file,
@@ -256,7 +324,7 @@ async fn import_movie_file(
         )
         .await;
     }
-    analyze_imported_media(pool, movie_id, file).await?;
+    analyze_imported_media(pool, runtime, movie_id, file).await?;
 
     Ok(())
 }
@@ -265,7 +333,7 @@ async fn import_tv_file(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
     config: &Config,
-    refreshed_series: &mut HashSet<uuid::Uuid>,
+    runtime: &ScanRuntime,
     library: &DbLibrary,
     library_options: &LibraryOptionsDto,
     library_root: &Path,
@@ -402,6 +470,7 @@ async fn import_tv_file(
         pool,
         metadata_manager,
         config,
+        runtime,
         library_options,
         series_id,
         "tv",
@@ -412,8 +481,8 @@ async fn import_tv_file(
         pool,
         metadata_manager,
         config,
+        runtime,
         library_options,
-        refreshed_series,
         series_id,
         &series_provider_ids,
     )
@@ -422,6 +491,7 @@ async fn import_tv_file(
         pool,
         metadata_manager,
         config,
+        runtime,
         library_options,
         series_id,
         &series_provider_ids,
@@ -432,6 +502,7 @@ async fn import_tv_file(
             pool,
             metadata_manager,
             config,
+            runtime,
             library_options,
             series_id,
             &series_path,
@@ -517,6 +588,7 @@ async fn import_tv_file(
             pool,
             metadata_manager,
             config,
+            runtime,
             library_options,
             season_id,
             &season_path,
@@ -642,6 +714,7 @@ async fn import_tv_file(
             pool,
             metadata_manager,
             config,
+            runtime,
             library_options,
             episode_id,
             file,
@@ -656,7 +729,7 @@ async fn import_tv_file(
         &episode_nfo.people
     };
     sync_nfo_people(pool, episode_id, episode_people).await?;
-    analyze_imported_media(pool, episode_id, file).await?;
+    analyze_imported_media(pool, runtime, episode_id, file).await?;
 
     Ok(())
 }
@@ -665,13 +738,16 @@ async fn refresh_series_remote_metadata(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
     config: &Config,
+    runtime: &ScanRuntime,
     library_options: &LibraryOptionsDto,
-    refreshed_series: &mut HashSet<uuid::Uuid>,
     series_id: uuid::Uuid,
     provider_ids: &Value,
 ) {
-    if !refreshed_series.insert(series_id) {
-        return;
+    {
+        let mut refreshed_series = runtime.refreshed_series.lock().await;
+        if !refreshed_series.insert(series_id) {
+            return;
+        }
     }
 
     let Some(tmdb_id) = tmdb_id_from_provider_ids(provider_ids) else {
@@ -680,6 +756,7 @@ async fn refresh_series_remote_metadata(
     let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
         return;
     };
+    let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
     match provider.get_series_details(&tmdb_id).await {
         Ok(metadata) => {
             if let Err(error) =
@@ -703,6 +780,7 @@ async fn refresh_movie_remote_metadata(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
     config: &Config,
+    runtime: &ScanRuntime,
     library_options: &LibraryOptionsDto,
     movie_id: uuid::Uuid,
     provider_ids: &Value,
@@ -713,6 +791,7 @@ async fn refresh_movie_remote_metadata(
     let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
         return;
     };
+    let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
     match provider.get_movie_details(&tmdb_id).await {
         Ok(metadata) => {
             if let Err(error) =
@@ -736,6 +815,7 @@ async fn refresh_series_episode_catalog(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
     config: &Config,
+    runtime: &ScanRuntime,
     library_options: &LibraryOptionsDto,
     series_id: uuid::Uuid,
     provider_ids: &Value,
@@ -746,6 +826,7 @@ async fn refresh_series_episode_catalog(
     let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
         return;
     };
+    let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
     match provider.get_series_episode_catalog(&tmdb_id).await {
         Ok(items) => {
             if let Err(error) = repository::replace_series_episode_catalog(pool, series_id, &items).await {
@@ -767,6 +848,7 @@ async fn refresh_remote_people(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
     config: &Config,
+    runtime: &ScanRuntime,
     library_options: &LibraryOptionsDto,
     media_item_id: uuid::Uuid,
     media_type: &str,
@@ -778,6 +860,7 @@ async fn refresh_remote_people(
     let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) else {
         return;
     };
+    let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
     match provider.get_item_people(media_type, &tmdb_id).await {
         Ok(people) => {
             let tmdb_person_ids = people
@@ -817,6 +900,7 @@ async fn refresh_remote_people(
                             cache_person_image(
                                 pool,
                                 config,
+                                runtime,
                                 person_id,
                                 person.image_url.as_deref(),
                                 "Primary",
@@ -862,6 +946,7 @@ async fn refresh_remote_people(
 
 async fn analyze_imported_media(
     pool: &sqlx::PgPool,
+    runtime: &ScanRuntime,
     item_id: uuid::Uuid,
     file: &Path,
 ) -> Result<(), AppError> {
@@ -870,6 +955,7 @@ async fn analyze_imported_media(
     }
 
     let analysis = if naming::is_strm(file) {
+        let _permit = runtime.strm_analysis_limiter.acquire().await.ok();
         match std::fs::read_to_string(file) {
             Ok(content) => {
                 let Some(target_url) = naming::strm_target_from_text(&content) else {
@@ -896,6 +982,7 @@ async fn analyze_imported_media(
             }
         }
     } else {
+        let _permit = runtime.strm_analysis_limiter.acquire().await.ok();
         match media_analyzer::analyze_media_file(file).await {
             Ok(analysis) => analysis,
             Err(error) => {
@@ -1020,6 +1107,7 @@ async fn cache_remote_images_for_item(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
     config: &Config,
+    runtime: &ScanRuntime,
     library_options: &LibraryOptionsDto,
     item_id: uuid::Uuid,
     item_path: &Path,
@@ -1059,6 +1147,7 @@ async fn cache_remote_images_for_item(
         tmdb_remote_image_context(pool, &item).await
     {
         if let Some(provider) = tmdb_provider_for_library(metadata_manager, config, library_options) {
+            let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
             let remote_result = if season_number.is_some() || episode_number.is_some() {
                 provider
                     .get_remote_images_for_child(
@@ -1100,6 +1189,7 @@ async fn cache_remote_images_for_item(
         let Some(local_path) = local_path else {
             continue;
         };
+        let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
         if download_image_to_path(&local_path, &image.url).await.is_err() {
             continue;
         }
@@ -1111,6 +1201,7 @@ async fn cache_remote_images_for_item(
 async fn cache_person_image(
     pool: &sqlx::PgPool,
     config: &Config,
+    runtime: &ScanRuntime,
     person_id: uuid::Uuid,
     image_url: Option<&str>,
     image_type: &str,
@@ -1126,6 +1217,7 @@ async fn cache_person_image(
     ) else {
         return;
     };
+    let _permit = runtime.tmdb_metadata_limiter.acquire().await.ok();
     if download_image_to_path(&local_path, image_url).await.is_err() {
         return;
     }

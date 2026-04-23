@@ -37,6 +37,9 @@ export const state = reactive({
   uiCulture: 'zh-CN',
   metadataLanguage: 'zh',
   metadataCountry: 'CN',
+  libraryScanThreadCount: 2,
+  strmAnalysisThreadCount: 8,
+  tmdbMetadataThreadCount: 4,
   allowRemoteAccess: false,
   enableUPNP: false,
   showWizardPassword: false,
@@ -166,6 +169,12 @@ export async function loadStartupWizard() {
     state.uiCulture = configuration.UiCulture || state.uiCulture;
     state.metadataLanguage = configuration.PreferredMetadataLanguage || state.metadataLanguage;
     state.metadataCountry = configuration.MetadataCountryCode || state.metadataCountry;
+    state.libraryScanThreadCount =
+      configuration.LibraryScanThreadCount || state.libraryScanThreadCount;
+    state.strmAnalysisThreadCount =
+      configuration.StrmAnalysisThreadCount || state.strmAnalysisThreadCount;
+    state.tmdbMetadataThreadCount =
+      configuration.TmdbMetadataThreadCount || state.tmdbMetadataThreadCount;
 
     const firstUser = await api.firstStartupUser();
     if (firstUser) {
@@ -181,7 +190,10 @@ export function startupConfigurationPayload() {
     ServerName: state.serverName,
     UiCulture: state.uiCulture,
     MetadataCountryCode: state.metadataCountry,
-    PreferredMetadataLanguage: state.metadataLanguage
+    PreferredMetadataLanguage: state.metadataLanguage,
+    LibraryScanThreadCount: Number(state.libraryScanThreadCount) || 2,
+    StrmAnalysisThreadCount: Number(state.strmAnalysisThreadCount) || 8,
+    TmdbMetadataThreadCount: Number(state.tmdbMetadataThreadCount) || 4
   };
 }
 
@@ -442,6 +454,12 @@ export async function loadAdminData() {
     state.uiCulture = configuration.UiCulture || state.uiCulture;
     state.metadataLanguage = configuration.PreferredMetadataLanguage || state.metadataLanguage;
     state.metadataCountry = configuration.MetadataCountryCode || state.metadataCountry;
+    state.libraryScanThreadCount =
+      configuration.LibraryScanThreadCount || state.libraryScanThreadCount;
+    state.strmAnalysisThreadCount =
+      configuration.StrmAnalysisThreadCount || state.strmAnalysisThreadCount;
+    state.tmdbMetadataThreadCount =
+      configuration.TmdbMetadataThreadCount || state.tmdbMetadataThreadCount;
     await loadVirtualFolders();
   });
 }
