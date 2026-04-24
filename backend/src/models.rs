@@ -19,6 +19,8 @@ pub struct DbUser {
     pub backdrop_image_path: Option<String>,
     pub logo_image_path: Option<String>,
     pub date_modified: DateTime<Utc>,
+    #[sqlx(default)]
+    pub easy_password_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]

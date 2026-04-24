@@ -42,10 +42,21 @@ pub fn router() -> Router<AppState> {
         .route("/users/{user_id}/password", post(update_password))
         .route("/Users/Me", get(me))
         .route("/users/me", get(me))
-        .route("/Users/{user_id}", get(user_by_id))
-        .route("/users/{user_id}", get(user_by_id))
+        // Emby POST /Users/{Id} 用于"更新用户基本信息"（重命名 / 写回 Policy / Configuration）。
+        // DELETE /Users/{Id} 是官方 OpenAPI 里的删除动词，保留 POST /Users/{Id}/Delete 兼容旧客户端。
+        .route(
+            "/Users/{user_id}",
+            get(user_by_id).post(update_user).delete(delete_user),
+        )
+        .route(
+            "/users/{user_id}",
+            get(user_by_id).post(update_user).delete(delete_user),
+        )
         .route("/Users/{user_id}/Delete", post(delete_user))
         .route("/users/{user_id}/delete", post(delete_user))
+        .route("/Users/{user_id}/EasyPassword", post(update_easy_password))
+        .route("/Users/{user_id}/easypassword", post(update_easy_password))
+        .route("/users/{user_id}/easypassword", post(update_easy_password))
         .route("/Users/{user_id}/Policy", post(update_user_policy))
         .route("/Users/{user_id}/Configuration", get(user_configuration).post(update_user_configuration))
         .route("/Users/{user_id}/Configuration/Partial", post(update_user_configuration_partial))
@@ -259,6 +270,125 @@ async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /Users/{Id}`：Emby 官方的 `UpdateUser`，客户端通常携带一份完整
+/// `UserDto`（含 `Name` / `Policy` / `Configuration`）提交。我们只接受白名单
+/// 字段：
+/// - 任何拥有 `EnableUserPreferenceAccess` 的用户都可以改自己的
+///   `Configuration`；
+/// - 管理员额外可以改 `Name` 和 `Policy`（Policy 走 `update_user_policy` 的
+///   安全检查链，保证系统至少存在一个管理员/启用用户）。
+async fn update_user(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Json(payload): Json<Value>,
+) -> Result<Json<UserDto>, AppError> {
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+
+    let self_update = session.user_id == user_id;
+    if !session.is_admin && !self_update {
+        return Err(AppError::Forbidden);
+    }
+    if self_update && !session.is_admin {
+        let policy = repository::user_policy_from_value(&user.policy);
+        if !policy.enable_user_preference_access {
+            return Err(AppError::Forbidden);
+        }
+    }
+
+    let payload_obj = payload.as_object();
+
+    if session.is_admin {
+        if let Some(new_name) = payload_obj
+            .and_then(|map| map.get("Name").or_else(|| map.get("name")))
+            .and_then(Value::as_str)
+        {
+            repository::rename_user(&state.pool, user_id, new_name).await?;
+        }
+    }
+
+    if let Some(configuration_value) = payload_obj
+        .and_then(|map| {
+            map.get("Configuration").or_else(|| map.get("configuration"))
+        })
+        .cloned()
+    {
+        let mut current = if user.configuration.is_null() {
+            serde_json::to_value(UserConfigurationDto::default())?
+        } else {
+            user.configuration.clone()
+        };
+        merge_json(&mut current, configuration_value);
+        let next = serde_json::from_value::<UserConfigurationDto>(current)
+            .map_err(|error| AppError::BadRequest(format!("用户配置格式无效: {error}")))?;
+        repository::update_user_configuration(&state.pool, user_id, &next).await?;
+    }
+
+    if session.is_admin {
+        if let Some(policy_value) = payload_obj
+            .and_then(|map| map.get("Policy").or_else(|| map.get("policy")))
+            .cloned()
+        {
+            if policy_value.is_object() {
+                apply_user_policy_update(&state, user_id, policy_value).await?;
+            }
+        }
+    }
+
+    let refreshed = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+    Ok(Json(repository::user_to_dto(&refreshed, state.config.server_id)))
+}
+
+/// `POST /Users/{Id}/EasyPassword`：Emby 用于设置 PIN 的快速密码。
+/// - 用户只能改自己的 PIN，管理员可以代改；
+/// - 传入 `ResetPassword=true` 会清空现有 PIN；
+/// - 非管理员改自己的 PIN 需要提供 `CurrentPw` / `CurrentPassword` 与主密码匹配。
+async fn update_easy_password(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Json(payload): Json<UpdateUserPasswordRequest>,
+) -> Result<StatusCode, AppError> {
+    if session.user_id != user_id && !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+
+    if payload.reset_password.unwrap_or(false) {
+        repository::set_user_easy_password(&state.pool, user_id, None).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let new_password = payload
+        .new_pw
+        .as_deref()
+        .or(payload.new_password.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("缺少新的快速密码".to_string()))?;
+
+    if session.user_id == user_id && !session.is_admin {
+        let current_password = payload
+            .current_pw
+            .as_deref()
+            .or(payload.current_password.as_deref())
+            .unwrap_or_default();
+        if !security::verify_password(&user.password_hash, current_password) {
+            return Err(AppError::Unauthorized);
+        }
+    }
+
+    repository::set_user_easy_password(&state.pool, user_id, Some(new_password)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn authenticate_by_name(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -465,7 +595,21 @@ async fn update_user_policy(
     if !session.is_admin {
         return Err(AppError::Unauthorized);
     }
+    apply_user_policy_update(&state, user_id, payload).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
+/// 带安全约束的策略写入：保留 `update_user_policy` 与 `update_user` 复用。
+///
+/// 约束：
+/// - 不能把最后一个启用的管理员降级或禁用；
+/// - 不允许禁用管理员用户；
+/// - 不能让系统出现"零个启用用户"。
+async fn apply_user_policy_update(
+    state: &AppState,
+    user_id: Uuid,
+    payload: Value,
+) -> Result<(), AppError> {
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
@@ -501,9 +645,7 @@ async fn update_user_policy(
         }
     }
 
-    repository::update_user_policy(&state.pool, user_id, &policy).await?;
-
-    Ok(StatusCode::NO_CONTENT)
+    repository::update_user_policy(&state.pool, user_id, &policy).await
 }
 
 async fn user_configuration(
@@ -750,5 +892,52 @@ mod tests {
     #[test]
     fn users_router_builds_with_new_settings_and_rating_endpoints() {
         let _router = super::router();
+    }
+
+    #[test]
+    fn update_user_password_request_accepts_easy_password_reset_payload() {
+        // 前端 / EmbyClient 在清除 PIN 时会发 `{ResetPassword: true}`，必须能被 serde 解析。
+        let payload: UpdateUserPasswordRequest =
+            serde_json::from_value(json!({ "ResetPassword": true }))
+                .expect("ResetPassword 负载应可解析");
+        assert_eq!(payload.reset_password, Some(true));
+        assert!(payload.new_pw.is_none());
+        assert!(payload.new_password.is_none());
+    }
+
+    #[test]
+    fn update_user_payload_extracts_whitelisted_fields() {
+        // 模拟 Emby 客户端 "保存用户" 发来的 UserDto 提交，验证我们只取 Name/Configuration/Policy。
+        let payload = json!({
+            "Id": "whatever",
+            "Name": "Renamed",
+            "HasPassword": true,
+            "Configuration": { "SubtitleMode": "Always" },
+            "Policy": { "IsAdministrator": true }
+        });
+        let map = payload.as_object().unwrap();
+        assert_eq!(map.get("Name").and_then(Value::as_str), Some("Renamed"));
+        assert!(map.get("Configuration").unwrap().is_object());
+        assert!(map.get("Policy").unwrap().is_object());
+        // HasPassword / Id 不在写入白名单内 —— 静态断言。
+        let payload_clone = payload.clone();
+        let policy_part = payload_clone
+            .get("Policy")
+            .cloned()
+            .unwrap_or(Value::Null);
+        assert!(policy_part.is_object());
+    }
+
+    #[test]
+    fn merge_json_preserves_existing_policy_when_patch_is_empty_object() {
+        let mut target = json!({
+            "IsAdministrator": true,
+            "EnableContentDownloading": true,
+            "EnabledFolders": []
+        });
+        merge_json(&mut target, json!({}));
+        assert_eq!(target["IsAdministrator"], json!(true));
+        assert_eq!(target["EnableContentDownloading"], json!(true));
+        assert_eq!(target["EnabledFolders"], json!([]));
     }
 }

@@ -131,7 +131,52 @@ test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured
 | 11 | Items/{id} 元数据写回 / MetadataEditor schema | 已完成 | 新增 `POST /Items/{id}` + `update_media_item_editable_fields` |
 | 12 | `RemoteSearch/Image` / `RemoteSearch/Trailer` TMDB 聚合 | 已完成 | 复用 `get_remote_images` + `ExternalMovieMetadata.remote_trailers` |
 | 13 | `Items/Metadata/Reset` 状态查询 REST | 已完成 | GET /Items/Metadata/Reset?Ids=... |
-| 14 | BackupRestore 真实 `pg_dump` / `pg_restore` 落盘 | 待办 | 需封装外部工具 |
-| 15 | OpenAPI / Swagger 自动化文档 | 待办 | 建议接入 `utoipa` 一次性生成 |
+| 14 | 用户管理补齐（POST /Users/{Id} / DELETE /Users/{Id} / EasyPassword） | 已完成 | 见第六轮 |
+| 15 | BackupRestore 真实 `pg_dump` / `pg_restore` 落盘 | 待办 | 需封装外部工具 |
+| 16 | OpenAPI / Swagger 自动化文档 | 待办 | 建议接入 `utoipa` 一次性生成 |
 
-至此，本地播放器模板对后端的任一调用都会落到真实业务路径；Emby Web Console 客户端对"设备/任务/合集/推荐/预告/直播/编码选项/备份入口/带宽测试/工作室图片/元数据编辑/远程海报 / 远程预告"等页面也能拿到结构正确、字段完整的响应。
+## 八、第六轮：用户管理补齐（2026-04-24）
+
+对照 Emby 模板 `MediaBrowser.Api/UserService.cs` 与 `openapi_v2_noversion.json` 中 `/Users/*` 段，补齐本地播放器模板暂时没调用、但 EmbySDK 与 Emby Web 客户端会用到的三条高价值端点；并修复一处遗留乱码。
+
+### 端点
+
+- `POST /Users/{Id}`（新增）
+  - Emby `UserService.Post(UpdateUser)`，客户端"保存用户"时一次性提交 `Name / Configuration / Policy`。
+  - Admin 可改 `Name`、`Policy`，普通用户在具备 `EnableUserPreferenceAccess` 时只能改自己的 `Configuration`。
+  - 策略写回走共享的 `apply_user_policy_update`，继续强制"至少一个管理员 / 启用用户"的安全约束。
+- `DELETE /Users/{Id}`（新增）
+  - OpenAPI 明确要求的 HTTP DELETE 动词，和既有 `POST /Users/{Id}/Delete` 并存。
+- `POST /Users/{Id}/EasyPassword`（新增）
+  - Emby `UserService.Post(UpdateUserEasyPassword)`。
+  - 支持 `ResetPassword=true` 清除 PIN、非管理员自改 PIN 必须带 `CurrentPw/CurrentPassword` 且与主密码匹配。
+
+### 数据层
+
+- 新增迁移 `backend/migrations/0021_users_easy_password.sql`：
+  - `ALTER TABLE users ADD COLUMN IF NOT EXISTS easy_password_hash text`
+- `DbUser` 增加 `easy_password_hash: Option<String>`，三条 `SELECT ... FROM users` 查询同步拉取该列。
+- `user_to_dto` / `user_to_public_dto` 现在返回真实的 `HasConfiguredEasyPassword`（此前硬编码为 false）。
+- 新增 `repository::set_user_easy_password(pool, user_id, Option<&str>)`：传空即清除。
+- 新增 `repository::rename_user(pool, user_id, name)`：trim + 唯一性校验，避免改名和现有用户重名。
+
+### 其他修复
+
+- `repository::create_user` 中的乱码 `"瑕佸复制的用户不存在"` 已修正为 `"要复制的用户不存在"`。
+- `update_user_policy` 的校验链被抽成 `apply_user_policy_update` 复用，`POST /Users/{Id}` 的 Policy 写回遵循同一条安全链。
+
+### 测试
+
+``````
+cargo test --bin movie-rust-backend
+running 58 tests
+test result: ok. 58 passed; 0 failed
+``````
+
+本轮新增测试（3 条，全部集中在 `routes::users::tests`）：
+
+- `update_user_password_request_accepts_easy_password_reset_payload`
+- `update_user_payload_extracts_whitelisted_fields`
+- `merge_json_preserves_existing_policy_when_patch_is_empty_object`
+
+至此，本地播放器模板对后端的任一调用都会落到真实业务路径；Emby Web Console 客户端对"设备/任务/合集/推荐/预告/直播/编码选项/备份入口/带宽测试/工作室图片/元数据编辑/远程海报 / 远程预告/用户管理"等页面也能拿到结构正确、字段完整的响应。

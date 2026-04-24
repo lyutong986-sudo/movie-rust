@@ -1406,7 +1406,8 @@ pub async fn get_user_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Option<
     Ok(sqlx::query_as::<_, DbUser>(
         r#"
         SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
-               configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified
+               configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
+               easy_password_hash
         FROM users
         WHERE lower(name) = lower($1)
         "#,
@@ -1420,7 +1421,8 @@ pub async fn get_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbUs
     Ok(sqlx::query_as::<_, DbUser>(
         r#"
         SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
-               configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified
+               configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
+               easy_password_hash
         FROM users
         WHERE id = $1
         "#,
@@ -1450,7 +1452,7 @@ pub async fn create_user(
     let (policy, configuration) = if let Some(copy_from_user_id) = copy_from_user_id {
         let source = get_user_by_id(pool, copy_from_user_id)
             .await?
-            .ok_or_else(|| AppError::NotFound("瑕佸复制的用户不存在".to_string()))?;
+            .ok_or_else(|| AppError::NotFound("要复制的用户不存在".to_string()))?;
         let mut policy = user_policy_from_value(&source.policy);
         policy.is_administrator = false;
         policy.is_hidden = false;
@@ -1515,6 +1517,62 @@ pub async fn change_user_password(
         .execute(pool)
         .await?;
 
+    Ok(())
+}
+
+/// 写入 / 清除 Emby `EasyPassword`（PIN）。传入 `None` 或空白表示移除 PIN。
+pub async fn set_user_easy_password(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    new_password: Option<&str>,
+) -> Result<(), AppError> {
+    let hash = match new_password.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            if value.len() < 4 {
+                return Err(AppError::BadRequest("快速密码至少需要 4 个字符".to_string()));
+            }
+            Some(security::hash_password(value)?)
+        }
+        None => None,
+    };
+
+    sqlx::query(
+        "UPDATE users SET easy_password_hash = $1, date_modified = now() WHERE id = $2",
+    )
+    .bind(hash)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// 改名：Emby `POST /Users/{Id}` 允许 admin 重命名用户，这里统一做 trim + 唯一性校验。
+pub async fn rename_user(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    new_name: &str,
+) -> Result<(), AppError> {
+    let trimmed = new_name.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest("用户名不能为空".to_string()));
+    }
+    let current = get_user_by_id(pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+    if current.name == trimmed {
+        return Ok(());
+    }
+    if let Some(existing) = get_user_by_name(pool, trimmed).await? {
+        if existing.id != user_id {
+            return Err(AppError::BadRequest("用户名已被占用".to_string()));
+        }
+    }
+    sqlx::query("UPDATE users SET name = $1, date_modified = now() WHERE id = $2")
+        .bind(trimmed)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1606,7 +1664,8 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
         sqlx::query_as::<_, DbUser>(
             r#"
             SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
-                   configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified
+                   configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
+                   easy_password_hash
             FROM users
             WHERE is_hidden = false AND is_disabled = false
             ORDER BY name
@@ -1618,7 +1677,8 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
         sqlx::query_as::<_, DbUser>(
             r#"
             SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
-                   configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified
+                   configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
+                   easy_password_hash
             FROM users
             ORDER BY name
             "#,
@@ -5410,6 +5470,10 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
     };
 
     let has_password = !security::verify_password(&user.password_hash, "");
+    let has_easy_password = user
+        .easy_password_hash
+        .as_deref()
+        .is_some_and(|hash| !hash.trim().is_empty());
 
     UserDto {
         name: user.name.clone(),
@@ -5417,7 +5481,7 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
         id: uuid_to_emby_guid(&user.id),
         has_password,
         has_configured_password: has_password,
-        has_configured_easy_password: false,
+        has_configured_easy_password: has_easy_password,
         policy,
         configuration,
     }
@@ -5425,6 +5489,10 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
 
 pub fn user_to_public_dto(user: &DbUser, server_id: Uuid) -> PublicUserDto {
     let has_password = !security::verify_password(&user.password_hash, "");
+    let has_easy_password = user
+        .easy_password_hash
+        .as_deref()
+        .is_some_and(|hash| !hash.trim().is_empty());
 
     PublicUserDto {
         name: user.name.clone(),
@@ -5432,7 +5500,7 @@ pub fn user_to_public_dto(user: &DbUser, server_id: Uuid) -> PublicUserDto {
         id: uuid_to_emby_guid(&user.id),
         has_password,
         has_configured_password: has_password,
-        has_configured_easy_password: false,
+        has_configured_easy_password: has_easy_password,
     }
 }
 
