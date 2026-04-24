@@ -14,15 +14,21 @@ mod transcoder;
 mod work_limiter;
 
 use anyhow::{Context, Result};
+use axum::{
+    body::Body,
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
+};
 use sqlx::postgres::PgPoolOptions;
 use state::AppState;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::transcoder::Transcoder;
 use crate::work_limiter::{WorkLimiterConfig, WorkLimiters};
 use tower_http::{
     cors::CorsLayer,
-    services::{ServeDir, ServeFile},
+    services::ServeDir,
     trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -91,14 +97,29 @@ async fn main() -> Result<()> {
         work_limiters,
     };
 
-    let spa =
-        ServeDir::new(&static_dir).not_found_service(ServeFile::new(static_dir.join("index.html")));
+    // SPA 入口：
+    // - `ServeDir` 负责实际存在于 `frontend/dist` 下的静态资源（`/index.html`、`/assets/*`、
+    //   `/favicon.svg`、`/manifest.webmanifest` 等）。
+    // - 对于 **Vue Router 客户端路由**（例如 `/settings`、`/library/<id>`、`/queue`、`/wizard`）
+    //   或路径不存在、方法不支持（HEAD/OPTIONS）等，统一交给 `spa_fallback` 返回 `index.html`，
+    //   让前端路由器接管，避免用户直接访问 / 刷新 Vue 路由时拿到 404。
+    let index_path: Arc<PathBuf> = Arc::new(static_dir.join("index.html"));
+    let spa_index_service = {
+        let index_path = index_path.clone();
+        tower::service_fn(move |_req: axum::http::Request<Body>| {
+            let index_path = index_path.clone();
+            async move { Ok::<_, std::convert::Infallible>(serve_spa_index(&index_path).await) }
+        })
+    };
+    let spa = ServeDir::new(&static_dir).not_found_service(spa_index_service);
 
     let http_trace = TraceLayer::new_for_http()
         .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
         .on_response(DefaultOnResponse::new().level(Level::INFO))
         .on_failure(DefaultOnFailure::new().level(Level::ERROR));
 
+    // 同时把 API 路由未匹配的兜底也指向 SPA：防止 API 路由前缀被 Vue Router 路径「抢」走后
+    // 返回裸的 Axum 404。例如 `/library/abc` 未命中任何 API，则交由 ServeDir + SPA fallback。
     let app = routes::router(state.clone())
         .fallback_service(spa)
         .layer(http_trace)
@@ -109,6 +130,39 @@ async fn main() -> Result<()> {
 
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
+}
+
+/// 读取 `index.html` 并作为 `200 OK text/html; charset=utf-8` 返回。
+///
+/// - 每次请求都重新读一次，避免热更新 `frontend/dist` 时仍旧命中旧字节。
+/// - 若文件不存在（例如运行目录缺少构建产物），返回 500 并在响应体里写明提示，
+///   方便运维在反向代理后面也能一眼看出部署阶段出问题，而不是一句无上下文的 404。
+async fn serve_spa_index(index_path: &std::path::Path) -> Response {
+    match tokio::fs::read(index_path).await {
+        Ok(bytes) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Err(err) => {
+            tracing::error!(
+                path = %index_path.display(),
+                error = %err,
+                "读取 SPA 入口文件失败（请确认 frontend/dist/index.html 已构建并放置正确位置）"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                format!(
+                    "SPA 入口 {} 未找到：请先在项目根目录执行 `cd frontend && npm run build`，\
+                     或将构建产物拷贝到 APP_STATIC_DIR 指定的目录。",
+                    index_path.display()
+                ),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn run_startup_schema_tasks(pool: &sqlx::PgPool) -> Result<()> {
