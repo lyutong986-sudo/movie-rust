@@ -525,6 +525,88 @@ export interface ItemQueryOptions {
   fields?: string[];
   videoTypes?: string[];
   hasSubtitles?: boolean;
+  enableImages?: boolean;
+  enableUserData?: boolean;
+  imageTypeLimit?: number;
+  enableImageTypes?: string[];
+  enableTotalRecordCount?: boolean;
+}
+
+export interface LatestQueryOptions {
+  parentId?: string;
+  includeTypes?: string[];
+  isPlayed?: boolean;
+  limit?: number;
+  groupItems?: boolean;
+  fields?: string[];
+  enableImages?: boolean;
+  enableUserData?: boolean;
+  imageTypeLimit?: number;
+  enableImageTypes?: string[];
+}
+
+export interface SimilarQueryOptions {
+  limit?: number;
+  sortBy?: string;
+  fields?: string[];
+  enableImages?: boolean;
+  enableUserData?: boolean;
+  imageTypeLimit?: number;
+  enableImageTypes?: string[];
+}
+
+export interface NextUpQueryOptions {
+  seriesId: string;
+  parentId?: string;
+  startIndex?: number;
+  limit?: number;
+  fields?: string[];
+  enableImages?: boolean;
+  enableUserData?: boolean;
+  imageTypeLimit?: number;
+  enableImageTypes?: string[];
+  enableTotalRecordCount?: boolean;
+}
+
+export interface ShowEpisodesQueryOptions {
+  season?: number;
+  seasonId?: string;
+  isMissing?: boolean;
+  adjacentTo?: string;
+  startItemId?: string;
+  startIndex?: number;
+  limit?: number;
+  sortBy?: string;
+  fields?: string[];
+  enableImages?: boolean;
+  enableUserData?: boolean;
+  imageTypeLimit?: number;
+  enableImageTypes?: string[];
+}
+
+export interface ShowSeasonsQueryOptions {
+  isSpecialSeason?: boolean;
+  isMissing?: boolean;
+  adjacentTo?: string;
+  fields?: string[];
+  enableImages?: boolean;
+  enableUserData?: boolean;
+  imageTypeLimit?: number;
+  enableImageTypes?: string[];
+}
+
+export interface ResumeQueryOptions {
+  parentId?: string;
+  includeTypes?: string[];
+  excludeActiveSessions?: boolean;
+  startIndex?: number;
+  limit?: number;
+  fields?: string[];
+  enableImages?: boolean;
+  enableUserData?: boolean;
+  imageTypeLimit?: number;
+  enableImageTypes?: string[];
+  enableTotalRecordCount?: boolean;
 }
 
 export interface PlaybackReportPayload {
@@ -944,6 +1026,7 @@ export class EmbyApi {
     if (options.fields?.length) {
       params.set('Fields', options.fields.join(','));
     }
+    this.applyDtoOptions(params, options);
     return this.request<QueryResult<BaseItemDto>>(`/Users/${userId}/Items?${params}`);
   }
 
@@ -958,14 +1041,40 @@ export class EmbyApi {
     return this.request<BaseItemDto>(`/Users/${userId}/Items/${itemId}`);
   }
 
-  async latest(parentId?: string, limit = 12) {
+  async latest(parentId?: string, limit?: number): Promise<BaseItemDto[]>;
+  async latest(options: LatestQueryOptions): Promise<BaseItemDto[]>;
+  async latest(
+    parentIdOrOptions?: string | LatestQueryOptions,
+    limitOrOptions: number | LatestQueryOptions = 12
+  ) {
     const userId = this.requireUserId();
-    const params = new URLSearchParams({
-      Limit: String(limit)
-    });
-    if (parentId) {
-      params.set('ParentId', parentId);
+    let options: LatestQueryOptions = {};
+    if (typeof parentIdOrOptions === 'string' || parentIdOrOptions === undefined) {
+      options = typeof limitOrOptions === 'number'
+        ? { parentId: parentIdOrOptions, limit: limitOrOptions }
+        : { ...limitOrOptions, parentId: parentIdOrOptions ?? limitOrOptions.parentId };
+    } else {
+      options = parentIdOrOptions;
     }
+    const params = new URLSearchParams({
+      Limit: String(options.limit ?? 12)
+    });
+    if (options.parentId) {
+      params.set('ParentId', options.parentId);
+    }
+    if (options.includeTypes?.length) {
+      params.set('IncludeItemTypes', options.includeTypes.join(','));
+    }
+    if (options.isPlayed !== undefined) {
+      params.set('IsPlayed', String(options.isPlayed));
+    }
+    if (options.groupItems !== undefined) {
+      params.set('GroupItems', String(options.groupItems));
+    }
+    if (options.fields?.length) {
+      params.set('Fields', options.fields.join(','));
+    }
+    this.applyDtoOptions(params, options);
     return this.request<BaseItemDto[]>(`/Users/${userId}/Items/Latest?${params}`);
   }
 
@@ -1186,23 +1295,163 @@ export class EmbyApi {
     return `${this.baseUrl}/Items/${person.Id}/Images/Primary?api_key=${encodeURIComponent(this.token)}&tag=${encodeURIComponent(person.PrimaryImageTag)}`;
   }
 
-  async similar(itemId: string, limit = 24) {
+  async similar(itemId: string, limit?: number): Promise<QueryResult<BaseItemDto>>;
+  async similar(itemId: string, options: SimilarQueryOptions): Promise<QueryResult<BaseItemDto>>;
+  async similar(itemId: string, limitOrOptions: number | SimilarQueryOptions = 24) {
     const userId = this.requireUserId();
-    const params = new URLSearchParams({ Limit: String(limit), UserId: userId });
+    const options: SimilarQueryOptions = typeof limitOrOptions === 'number'
+      ? { limit: limitOrOptions }
+      : limitOrOptions;
+    const params = new URLSearchParams({ Limit: String(options.limit ?? 24), UserId: userId });
+    if (options.fields?.length) {
+      params.set('Fields', options.fields.join(','));
+    }
+    if (options.sortBy) {
+      params.set('SortBy', options.sortBy);
+    }
+    this.applyDtoOptions(params, options);
     return this.request<QueryResult<BaseItemDto>>(`/Items/${itemId}/Similar?${params}`);
   }
 
-  async resume(parentId?: string, limit = 24) {
+  async resume(parentId?: string, limit?: number): Promise<QueryResult<BaseItemDto>>;
+  async resume(options: ResumeQueryOptions): Promise<QueryResult<BaseItemDto>>;
+  async resume(
+    parentIdOrOptions?: string | ResumeQueryOptions,
+    limitOrOptions: number | ResumeQueryOptions = 24
+  ) {
     const userId = this.requireUserId();
-    const params = new URLSearchParams({ Limit: String(limit) });
-    if (parentId) params.set('ParentId', parentId);
+    let options: ResumeQueryOptions = {};
+    if (typeof parentIdOrOptions === 'string' || parentIdOrOptions === undefined) {
+      options = typeof limitOrOptions === 'number'
+        ? { parentId: parentIdOrOptions, limit: limitOrOptions }
+        : { ...limitOrOptions, parentId: parentIdOrOptions ?? limitOrOptions.parentId };
+    } else {
+      options = parentIdOrOptions;
+    }
+    const params = new URLSearchParams({ Limit: String(options.limit ?? 24) });
+    if (options.parentId) params.set('ParentId', options.parentId);
+    if (options.startIndex !== undefined) {
+      params.set('StartIndex', String(options.startIndex));
+    }
+    if (options.includeTypes?.length) {
+      params.set('IncludeItemTypes', options.includeTypes.join(','));
+    }
+    if (options.excludeActiveSessions !== undefined) {
+      params.set('ExcludeActiveSessions', String(options.excludeActiveSessions));
+    }
+    if (options.fields?.length) {
+      params.set('Fields', options.fields.join(','));
+    }
+    this.applyDtoOptions(params, options);
     return this.request<QueryResult<BaseItemDto>>(`/Users/${userId}/Items/Resume?${params}`);
   }
 
-  async nextUp(seriesId: string, limit = 1) {
+  async nextUp(seriesId: string, limit?: number): Promise<QueryResult<BaseItemDto>>;
+  async nextUp(options: NextUpQueryOptions): Promise<QueryResult<BaseItemDto>>;
+  async nextUp(
+    seriesIdOrOptions: string | NextUpQueryOptions,
+    limit = 1
+  ) {
     const userId = this.requireUserId();
-    const params = new URLSearchParams({ SeriesId: seriesId, UserId: userId, Limit: String(limit) });
+    const options: NextUpQueryOptions = typeof seriesIdOrOptions === 'string'
+      ? { seriesId: seriesIdOrOptions, limit }
+      : seriesIdOrOptions;
+    const params = new URLSearchParams({
+      SeriesId: options.seriesId,
+      UserId: userId,
+      Limit: String(options.limit ?? 1)
+    });
+    if (options.parentId) {
+      params.set('ParentId', options.parentId);
+    }
+    if (options.startIndex !== undefined) {
+      params.set('StartIndex', String(options.startIndex));
+    }
+    if (options.fields?.length) {
+      params.set('Fields', options.fields.join(','));
+    }
+    this.applyDtoOptions(params, options);
     return this.request<QueryResult<BaseItemDto>>(`/Shows/NextUp?${params}`);
+  }
+
+  async showSeasons(seriesId: string, options: ShowSeasonsQueryOptions = {}) {
+    const userId = this.requireUserId();
+    const params = new URLSearchParams({ UserId: userId });
+    if (options.isSpecialSeason !== undefined) {
+      params.set('IsSpecialSeason', String(options.isSpecialSeason));
+    }
+    if (options.isMissing !== undefined) {
+      params.set('IsMissing', String(options.isMissing));
+    }
+    if (options.adjacentTo) {
+      params.set('AdjacentTo', options.adjacentTo);
+    }
+    if (options.fields?.length) {
+      params.set('Fields', options.fields.join(','));
+    }
+    this.applyDtoOptions(params, options);
+    return this.request<QueryResult<BaseItemDto>>(`/Shows/${seriesId}/Seasons?${params}`);
+  }
+
+  async showEpisodes(seriesId: string, options: ShowEpisodesQueryOptions = {}) {
+    const userId = this.requireUserId();
+    const params = new URLSearchParams({ UserId: userId });
+    if (options.season !== undefined) {
+      params.set('Season', String(options.season));
+    }
+    if (options.seasonId) {
+      params.set('SeasonId', options.seasonId);
+    }
+    if (options.isMissing !== undefined) {
+      params.set('IsMissing', String(options.isMissing));
+    }
+    if (options.adjacentTo) {
+      params.set('AdjacentTo', options.adjacentTo);
+    }
+    if (options.startItemId) {
+      params.set('StartItemId', options.startItemId);
+    }
+    if (options.startIndex !== undefined) {
+      params.set('StartIndex', String(options.startIndex));
+    }
+    if (options.limit !== undefined) {
+      params.set('Limit', String(options.limit));
+    }
+    if (options.sortBy) {
+      params.set('SortBy', options.sortBy);
+    }
+    if (options.fields?.length) {
+      params.set('Fields', options.fields.join(','));
+    }
+    this.applyDtoOptions(params, options);
+    return this.request<QueryResult<BaseItemDto>>(`/Shows/${seriesId}/Episodes?${params}`);
+  }
+
+  private applyDtoOptions(
+    params: URLSearchParams,
+    options: {
+      enableImages?: boolean;
+      enableUserData?: boolean;
+      imageTypeLimit?: number;
+      enableImageTypes?: string[];
+      enableTotalRecordCount?: boolean;
+    }
+  ) {
+    if (options.enableImages !== undefined) {
+      params.set('EnableImages', String(options.enableImages));
+    }
+    if (options.enableUserData !== undefined) {
+      params.set('EnableUserData', String(options.enableUserData));
+    }
+    if (options.imageTypeLimit !== undefined) {
+      params.set('ImageTypeLimit', String(options.imageTypeLimit));
+    }
+    if (options.enableImageTypes?.length) {
+      params.set('EnableImageTypes', options.enableImageTypes.join(','));
+    }
+    if (options.enableTotalRecordCount !== undefined) {
+      params.set('EnableTotalRecordCount', String(options.enableTotalRecordCount));
+    }
   }
 
   private imageUrl(item: BaseItemDto, imageType: string, tag?: string, imageIndex?: number) {

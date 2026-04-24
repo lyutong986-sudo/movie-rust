@@ -9,10 +9,17 @@ import { genreRoute, itemRoute, playbackRoute } from '../../utils/navigation';
 interface SeasonSection {
   season: BaseItemDto;
   episodes: BaseItemDto[];
+  totalRecordCount: number;
+  loadedCount: number;
+  hasMore: boolean;
+  loading: boolean;
+  initialized: boolean;
 }
 
 const route = useRoute();
 const router = useRouter();
+const EPISODES_PAGE_SIZE = 60;
+let seriesRequestToken = 0;
 
 const loading = ref(false);
 const error = ref('');
@@ -22,6 +29,8 @@ const relatedItems = ref<BaseItemDto[]>([]);
 const similarItems = ref<BaseItemDto[]>([]);
 const activeSeasonId = ref('');
 const nextUpEpisode = ref<BaseItemDto | null>(null);
+const relatedLoading = ref(false);
+const similarLoading = ref(false);
 
 const backdrop = computed(() => (series.value ? api.backdropUrl(series.value) : ''));
 const poster = computed(() =>
@@ -56,7 +65,7 @@ const metaChips = computed(() => {
     '剧集',
     series.value.ProductionYear ? String(series.value.ProductionYear) : '',
     seasons.value.length ? `${seasons.value.length} 季` : '',
-    firstEpisode.value?.RunTimeTicks ? runtimeText(firstEpisode.value) : '',
+    activeSeason.value?.totalRecordCount ? `${activeSeason.value.totalRecordCount} 集` : '',
     series.value.OfficialRating || ''
   ].filter(Boolean);
 });
@@ -75,9 +84,30 @@ watch(
   { immediate: true }
 );
 
+watch(
+  () => activeSeasonId.value,
+  async (seasonId) => {
+    if (!seasonId) {
+      return;
+    }
+    const section = seasons.value.find((entry) => entry.season.Id === seasonId);
+    if (section && !section.initialized && !section.loading) {
+      await loadSeasonEpisodes(seasonId, true);
+    }
+  }
+);
+
 async function loadSeries(itemId: string) {
+  const requestToken = ++seriesRequestToken;
   loading.value = true;
   error.value = '';
+  relatedLoading.value = false;
+  similarLoading.value = false;
+  relatedItems.value = [];
+  similarItems.value = [];
+  seasons.value = [];
+  activeSeasonId.value = '';
+  nextUpEpisode.value = null;
 
   try {
     const currentSeries = await api.item(itemId);
@@ -85,62 +115,162 @@ async function loadSeries(itemId: string) {
       await router.replace(itemRoute(currentSeries));
       return;
     }
+    if (requestToken !== seriesRequestToken) {
+      return;
+    }
 
     series.value = currentSeries;
 
-    // 季列表必须先拿到，后续并行
-    const seasonItems = (
-      await api.items(currentSeries.Id, '', false, {
-        includeTypes: ['Season'],
-        sortBy: 'IndexNumber',
-        sortOrder: 'Ascending',
-        limit: 100
+    const [seasonResult, nextUpResult] = await Promise.all([
+      api.showSeasons(currentSeries.Id, {
+        fields: ['PrimaryImageAspectRatio'],
+        enableImages: true,
+        enableUserData: true,
+        imageTypeLimit: 1,
+        enableImageTypes: ['Primary', 'Thumb', 'Backdrop']
+      }),
+      api.nextUp({
+        seriesId: currentSeries.Id,
+        limit: 1,
+        enableImages: false,
+        enableUserData: true,
+        enableTotalRecordCount: false
       })
-    ).Items;
-
-    // 并行：各季分集 + nextUp + 最新剧集 + 相似剧集
-    const [seasonEntries, nextUpResult, relatedResult, similarResult] = await Promise.all([
-      Promise.all(
-        seasonItems.map(async (season) => ({
-          season,
-          episodes: (
-            await api.items(season.Id, '', false, {
-              includeTypes: ['Episode'],
-              sortBy: 'IndexNumber',
-              sortOrder: 'Ascending',
-              limit: 200
-            })
-          ).Items
-        }))
-      ),
-      api.nextUp(currentSeries.Id, 1).catch(() => null),
-      api
-        .items(undefined, '', true, {
-          includeTypes: ['Series'],
-          sortBy: 'DateCreated',
-          sortOrder: 'Descending',
-          limit: 36
-        })
-        .catch(() => null),
-      api.similar(currentSeries.Id, 20).catch(() => null)
     ]);
+    if (requestToken !== seriesRequestToken) {
+      return;
+    }
 
-    seasons.value = seasonEntries;
-    nextUpEpisode.value = nextUpResult?.Items?.[0] || null;
-    relatedItems.value =
-      relatedResult?.Items?.filter((candidate) => candidate.Id !== currentSeries.Id) || [];
-    similarItems.value = similarResult?.Items || [];
+    seasons.value = (seasonResult.Items || []).map((season) => ({
+      season,
+      episodes: [],
+      totalRecordCount: 0,
+      loadedCount: 0,
+      hasMore: false,
+      loading: false,
+      initialized: false
+    }));
+    nextUpEpisode.value = nextUpResult.Items?.[0] || null;
 
-    // 默认选中 nextUp / 最近播放 对应的季（此时 seasons 已填好，lastPlayedEpisode 计算可用）
-    const targetEp = nextUpEpisode.value || lastPlayedEpisode.value;
-    activeSeasonId.value = targetEp?.SeasonId || seasons.value[0]?.season.Id || '';
+    activeSeasonId.value = nextUpEpisode.value?.SeasonId || seasons.value[0]?.season.Id || '';
+    if (activeSeasonId.value) {
+      await loadSeasonEpisodes(activeSeasonId.value, true, requestToken);
+    }
+    void loadSeriesRecommendations(currentSeries.Id, requestToken);
   } catch (loadError) {
-    error.value = loadError instanceof Error ? loadError.message : String(loadError);
+    if (requestToken === seriesRequestToken) {
+      error.value = loadError instanceof Error ? loadError.message : String(loadError);
+    }
     series.value = null;
     seasons.value = [];
     relatedItems.value = [];
   } finally {
-    loading.value = false;
+    if (requestToken === seriesRequestToken) {
+      loading.value = false;
+    }
+  }
+}
+
+async function loadSeriesRecommendations(seriesId: string, requestToken: number) {
+  relatedLoading.value = true;
+  similarLoading.value = true;
+  try {
+    const [relatedResult, similarResult] = await Promise.all([
+      api.latest({
+        includeTypes: ['Series'],
+        limit: 18,
+        groupItems: false,
+        fields: ['PrimaryImageAspectRatio', 'ChildCount'],
+        enableImages: true,
+        imageTypeLimit: 1,
+        enableImageTypes: ['Primary', 'Thumb', 'Backdrop', 'Logo'],
+        enableUserData: true
+      }),
+      api.similar(seriesId, {
+        limit: 12,
+        fields: ['PrimaryImageAspectRatio', 'ChildCount', 'MediaStreams', 'MediaSources'],
+        enableImages: true,
+        enableUserData: true,
+        imageTypeLimit: 1,
+        enableImageTypes: ['Primary', 'Thumb', 'Backdrop', 'Logo']
+      })
+    ]);
+    if (requestToken !== seriesRequestToken) {
+      return;
+    }
+    relatedItems.value = relatedResult.filter((candidate) => candidate.Id !== seriesId);
+    similarItems.value = similarResult.Items || [];
+  } catch {
+    if (requestToken !== seriesRequestToken) {
+      return;
+    }
+    relatedItems.value = [];
+    similarItems.value = [];
+  } finally {
+    if (requestToken === seriesRequestToken) {
+      relatedLoading.value = false;
+      similarLoading.value = false;
+    }
+  }
+}
+
+async function loadSeasonEpisodes(seasonId: string, reset = false, requestToken = seriesRequestToken) {
+  const currentSeries = series.value;
+  if (!currentSeries) {
+    return;
+  }
+  const seasonIndex = seasons.value.findIndex((entry) => entry.season.Id === seasonId);
+  if (seasonIndex < 0) {
+    return;
+  }
+  const section = seasons.value[seasonIndex];
+  if (section.loading) {
+    return;
+  }
+  if (!reset && section.initialized && !section.hasMore) {
+    return;
+  }
+
+  seasons.value[seasonIndex] = { ...section, loading: true };
+  try {
+    const startIndex = reset ? 0 : section.loadedCount;
+    const result = await api.showEpisodes(currentSeries.Id, {
+      seasonId,
+      sortBy: 'IndexNumber',
+      startIndex,
+      limit: EPISODES_PAGE_SIZE,
+      fields: ['Overview', 'MediaStreams', 'MediaSources', 'PrimaryImageAspectRatio'],
+      enableImages: true,
+      enableUserData: true,
+      imageTypeLimit: 1,
+      enableImageTypes: ['Primary', 'Thumb', 'Backdrop']
+    });
+    if (requestToken !== seriesRequestToken) {
+      return;
+    }
+    const incoming = result.Items || [];
+    const merged = reset
+      ? incoming
+      : [
+          ...section.episodes,
+          ...incoming.filter((episode) => !section.episodes.some((existing) => existing.Id === episode.Id))
+        ];
+    const totalRecordCount = result.TotalRecordCount || merged.length;
+    const hasMore = merged.length < totalRecordCount && incoming.length > 0;
+    seasons.value[seasonIndex] = {
+      ...section,
+      episodes: merged,
+      totalRecordCount,
+      loadedCount: merged.length,
+      hasMore,
+      initialized: true,
+      loading: false
+    };
+  } catch (loadError) {
+    if (requestToken === seriesRequestToken) {
+      error.value = loadError instanceof Error ? loadError.message : String(loadError);
+      seasons.value[seasonIndex] = { ...section, loading: false, initialized: true, hasMore: false };
+    }
   }
 }
 
@@ -298,7 +428,9 @@ function episodeThumb(episode: BaseItemDto) {
     <section v-if="seasons.length" class="space-y-3">
       <div class="flex items-baseline justify-between">
         <h3 class="text-highlighted text-base font-semibold">分集</h3>
-        <span class="text-muted text-sm">{{ seasons.length }} 季</span>
+        <span class="text-muted text-sm">
+          {{ activeSeason?.loadedCount || 0 }} / {{ activeSeason?.totalRecordCount || 0 }} 集
+        </span>
       </div>
 
       <UTabs
@@ -310,6 +442,9 @@ function episodeThumb(episode: BaseItemDto) {
       />
 
       <div v-if="activeSeason" class="flex flex-col gap-3">
+        <div v-if="activeSeason.loading && !activeSeason.episodes.length" class="text-muted text-sm">
+          正在加载本季分集...
+        </div>
         <article
           v-for="episode in activeSeason.episodes"
           :key="episode.Id"
@@ -368,6 +503,17 @@ function episodeThumb(episode: BaseItemDto) {
             </div>
           </div>
         </article>
+        <div v-if="activeSeason.hasMore" class="flex justify-center pt-2">
+          <UButton
+            color="neutral"
+            variant="soft"
+            size="sm"
+            :loading="activeSeason.loading"
+            @click="loadSeasonEpisodes(activeSeason.season.Id)"
+          >
+            加载更多分集
+          </UButton>
+        </div>
       </div>
     </section>
 
@@ -416,6 +562,7 @@ function episodeThumb(episode: BaseItemDto) {
       @play="playItem"
       @select="openItem"
     />
+    <div v-else-if="similarLoading" class="text-muted text-sm">正在加载类似剧集...</div>
 
     <!-- 相关 -->
     <MediaRow
@@ -426,5 +573,6 @@ function episodeThumb(episode: BaseItemDto) {
       @play="playItem"
       @select="openItem"
     />
+    <div v-else-if="relatedLoading" class="text-muted text-sm">正在加载更多剧集...</div>
   </div>
 </template>

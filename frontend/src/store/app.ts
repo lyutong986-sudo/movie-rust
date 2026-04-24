@@ -405,7 +405,10 @@ export async function loadHome() {
       sortOrder: searching ? 'Ascending' : 'Descending',
       // 首页推荐无需一次拉满 180 条，降低首屏体积可显著改善慢库响应。
       limit: searching ? 120 : 72,
-      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio']
+      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio'],
+      imageTypeLimit: 1,
+      enableImageTypes: ['Primary', 'Thumb', 'Backdrop', 'Logo'],
+      enableTotalRecordCount: false
     });
     homeItems.value = itemsFromQuery(result);
   }, '', { rethrow: true });
@@ -428,7 +431,10 @@ async function loadLibraryHomeItems(library: BaseItemDto) {
       sortBy: 'DateCreated',
       sortOrder: 'Descending',
       limit: 18,
-      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio']
+      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio'],
+      imageTypeLimit: 1,
+      enableImageTypes: ['Primary', 'Thumb', 'Backdrop', 'Logo'],
+      enableTotalRecordCount: false
     });
     return itemsFromQuery(result);
   }
@@ -439,7 +445,10 @@ async function loadLibraryHomeItems(library: BaseItemDto) {
       sortBy: 'DateCreated',
       sortOrder: 'Descending',
       limit: 18,
-      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio']
+      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio'],
+      imageTypeLimit: 1,
+      enableImageTypes: ['Primary', 'Thumb', 'Backdrop', 'Logo'],
+      enableTotalRecordCount: false
     });
     return itemsFromQuery(result);
   }
@@ -450,7 +459,10 @@ async function loadLibraryHomeItems(library: BaseItemDto) {
       sortBy: 'DateCreated',
       sortOrder: 'Descending',
       limit: 18,
-      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio']
+      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio'],
+      imageTypeLimit: 1,
+      enableImageTypes: ['Primary', 'Thumb', 'Backdrop', 'Logo'],
+      enableTotalRecordCount: false
     });
     return itemsFromQuery(result);
   }
@@ -508,7 +520,10 @@ function buildLibraryItemsOptions(startIndex: number, limit: number) {
     limit,
     startIndex,
     // 列表卡只用到：图片、名字/年份、质量徽章（需 MediaStreams.Video）、ChildCount。
-    fields: ['MediaStreams', 'MediaSources', 'ChildCount']
+    fields: ['MediaStreams', 'MediaSources', 'ChildCount'],
+    imageTypeLimit: 1,
+    enableImageTypes: ['Primary', 'Thumb', 'Backdrop', 'Logo'],
+    enableTotalRecordCount: true
   };
 }
 

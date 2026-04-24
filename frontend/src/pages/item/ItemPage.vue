@@ -27,6 +27,7 @@ const item = ref<BaseItemDto | null>(null);
 const childItems = ref<BaseItemDto[]>([]);
 const relatedItems = ref<BaseItemDto[]>([]);
 const similarItems = ref<BaseItemDto[]>([]);
+const similarLoading = ref(false);
 const currentSourceIndex = ref(0);
 const trailerOpen = ref(false);
 const trailerEmbed = ref('');
@@ -34,6 +35,7 @@ const playlistPickerOpen = ref(false);
 const playlistOptions = ref<PlaylistInfo[]>([]);
 const playlistLoading = ref(false);
 const newPlaylistName = ref('');
+let itemRequestToken = 0;
 
 async function openPlaylistPicker() {
   if (!item.value) return;
@@ -183,9 +185,11 @@ watch(
 );
 
 async function loadItem(itemId: string) {
+  const requestToken = ++itemRequestToken;
   loading.value = true;
   error.value = '';
   similarItems.value = [];
+  similarLoading.value = false;
 
   try {
     const currentItem = await api.item(itemId);
@@ -198,15 +202,23 @@ async function loadItem(itemId: string) {
       return;
     }
 
+    if (requestToken !== itemRequestToken) {
+      return;
+    }
     item.value = currentItem;
     currentSourceIndex.value = 0;
 
-    // 并行：子项、同级相关、Similar
+    // 首屏并行仅加载关键数据：子项 + 同级相关，Similar 延迟加载。
     const childPromise = currentItem.IsFolder
       ? api.items(currentItem.Id, '', false, {
           sortBy: currentItem.Type === 'Season' ? 'IndexNumber' : 'SortName',
           sortOrder: 'Ascending',
-          limit: 120
+          limit: 80,
+          fields: ['Overview', 'MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio'],
+          enableImages: true,
+          imageTypeLimit: 1,
+          enableImageTypes: ['Primary', 'Thumb', 'Backdrop', 'Logo'],
+          enableTotalRecordCount: false
         }).then((r) => r.Items).catch(() => [] as BaseItemDto[])
       : Promise.resolve([] as BaseItemDto[]);
 
@@ -215,32 +227,68 @@ async function loadItem(itemId: string) {
           .items(currentItem.ParentId, '', false, {
             sortBy: currentItem.Type === 'Episode' ? 'IndexNumber' : 'SortName',
             sortOrder: 'Ascending',
-            limit: 60
+            limit: 48,
+            fields: ['Overview', 'MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio'],
+            enableImages: true,
+            imageTypeLimit: 1,
+            enableImageTypes: ['Primary', 'Thumb', 'Backdrop', 'Logo'],
+            enableTotalRecordCount: false
           })
           .then((r) => r.Items.filter((c) => c.Id !== currentItem.Id))
           .catch(() => [] as BaseItemDto[])
       : Promise.resolve([] as BaseItemDto[]);
 
-    const similarPromise =
-      currentItem.Type === 'Movie' || currentItem.Type === 'Series'
-        ? api.similar(currentItem.Id, 20).then((r) => r.Items || []).catch(() => [] as BaseItemDto[])
-        : Promise.resolve([] as BaseItemDto[]);
-
-    const [children, related, similar] = await Promise.all([
+    const [children, related] = await Promise.all([
       childPromise,
-      relatedPromise,
-      similarPromise
+      relatedPromise
     ]);
+    if (requestToken !== itemRequestToken) {
+      return;
+    }
     childItems.value = children;
     relatedItems.value = related;
-    similarItems.value = similar;
+    void loadSimilarItems(currentItem, requestToken);
   } catch (loadError) {
-    error.value = loadError instanceof Error ? loadError.message : String(loadError);
+    if (requestToken === itemRequestToken) {
+      error.value = loadError instanceof Error ? loadError.message : String(loadError);
+    }
     item.value = null;
     childItems.value = [];
     relatedItems.value = [];
   } finally {
-    loading.value = false;
+    if (requestToken === itemRequestToken) {
+      loading.value = false;
+    }
+  }
+}
+
+async function loadSimilarItems(currentItem: BaseItemDto, requestToken: number) {
+  if (currentItem.Type !== 'Movie' && currentItem.Type !== 'Series') {
+    similarItems.value = [];
+    return;
+  }
+  similarLoading.value = true;
+  try {
+    const result = await api.similar(currentItem.Id, {
+      limit: 12,
+      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio'],
+      enableImages: true,
+      imageTypeLimit: 1,
+      enableImageTypes: ['Primary', 'Thumb', 'Backdrop', 'Logo'],
+      enableUserData: true
+    });
+    if (requestToken !== itemRequestToken) {
+      return;
+    }
+    similarItems.value = result.Items || [];
+  } catch {
+    if (requestToken === itemRequestToken) {
+      similarItems.value = [];
+    }
+  } finally {
+    if (requestToken === itemRequestToken) {
+      similarLoading.value = false;
+    }
   }
 }
 
@@ -705,6 +753,7 @@ watch(
       @play="playItem"
       @select="openChild"
     />
+    <div v-else-if="similarLoading" class="text-muted text-sm">正在加载类似内容...</div>
 
     <!-- 相关 -->
     <MediaRow
