@@ -1616,6 +1616,9 @@ export class EmbyApi {
     if (transcodingUrl) {
       return this.absoluteUrlWithOptionalApiKey(transcodingUrl);
     }
+    if (source && source.SupportsTranscoding === false) {
+      return '';
+    }
 
     const params = new URLSearchParams();
     if (source?.Id) {

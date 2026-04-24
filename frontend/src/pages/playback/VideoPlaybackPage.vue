@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type Player from 'video.js/dist/types/player';
 import type Hls from 'hls.js';
@@ -315,15 +315,17 @@ async function loadPlayback(nextItemId: string) {
     }
 
     touchOverlay();
-    if (videoRef.value) {
-      initVideoJsPlayer();
-      await applyPlaybackSource(0);
-    }
   } catch (loadError) {
     error.value = loadError instanceof Error ? loadError.message : String(loadError);
     item.value = null;
   } finally {
     loading.value = false;
+    // v-if="loading" 会在加载期间卸载 <video>，因此需要等 DOM 切回播放器后再设置媒体源。
+    await nextTick();
+    if (!error.value && item.value && sourceCandidates.value.length && videoRef.value) {
+      initVideoJsPlayer();
+      await applyPlaybackSource(0);
+    }
   }
 }
 
