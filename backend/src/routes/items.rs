@@ -100,6 +100,28 @@ pub fn router() -> Router<AppState> {
             post(legacy_mark_unplayed),
         )
         .route("/Items/{item_id}", get(item_by_id))
+        .route("/Items/{item_id}/Ancestors", get(item_ancestors))
+        .route("/Items/{item_id}/CriticReviews", get(item_critic_reviews))
+        .route("/Items/{item_id}/ExternalIdInfos", get(item_external_id_infos))
+        .route("/Items/{item_id}/InstantMix", get(item_instant_mix))
+        .route("/Items/{item_id}/ThemeMedia", get(item_theme_media))
+        .route("/Items/{item_id}/ThemeSongs", get(item_theme_songs))
+        .route("/Items/{item_id}/ThemeVideos", get(item_theme_videos))
+        .route("/Items/{item_id}/MetadataEditor", get(item_metadata_editor))
+        .route("/Items/{item_id}/Delete", post(delete_item).delete(delete_item))
+        .route("/Items/{item_id}/DeleteInfo", get(delete_item_info))
+        .route("/Items/{item_id}/MakePrivate", post(make_item_private))
+        .route("/Items/{item_id}/MakePublic", post(make_item_public))
+        .route("/Items/{item_id}/Tags/Add", post(add_item_tag))
+        .route("/Items/{item_id}/Tags/Delete", post(delete_item_tag))
+        .route(
+            "/Items/{item_id}/RemoteSearch/Subtitles/{language}",
+            get(remote_search_subtitles_by_language),
+        )
+        .route(
+            "/Items/{item_id}/RemoteSearch/Subtitles/{subtitle_id}",
+            post(remote_search_subtitles_apply),
+        )
         .route("/Items/{item_id}/Refresh", post(refresh_item_metadata))
         .route("/Items/{item_id}/Chapters", get(item_chapters))
         .route("/Items/{item_id}/IntroTimestamps", get(intro_timestamps))
@@ -124,6 +146,24 @@ pub fn router() -> Router<AppState> {
             post(hide_from_resume),
         )
         .route("/Videos/{item_id}/AdditionalParts", get(additional_parts))
+        .route("/Items/Intros", get(items_intros))
+        .route("/Items/Prefixes", get(item_prefixes))
+        .route("/Items/Access", get(items_access))
+        .route("/Items/Delete", post(delete_items_bulk))
+        .route("/Items/Metadata/Reset", post(reset_items_metadata))
+        .route("/Items/RemoteSearch/Apply/{item_id}", post(remote_search_apply))
+        .route("/Items/RemoteSearch/Book", post(remote_search))
+        .route("/Items/RemoteSearch/BoxSet", post(remote_search))
+        .route("/Items/RemoteSearch/Game", post(remote_search))
+        .route("/Items/RemoteSearch/Image", post(remote_search))
+        .route("/Items/RemoteSearch/Movie", post(remote_search))
+        .route("/Items/RemoteSearch/MusicAlbum", post(remote_search))
+        .route("/Items/RemoteSearch/MusicArtist", post(remote_search))
+        .route("/Items/RemoteSearch/MusicVideo", post(remote_search))
+        .route("/Items/RemoteSearch/Person", post(remote_search))
+        .route("/Items/RemoteSearch/Series", post(remote_search))
+        .route("/Items/RemoteSearch/Trailer", post(remote_search))
+        .route("/Items/Shared/Leave", post(items_shared_leave))
         .route("/Items/{item_id}/Similar", get(get_similar_items))
         .route("/Movies/{item_id}/Similar", get(get_similar_items))
         .route("/Shows/{item_id}/Similar", get(get_similar_items))
@@ -1344,6 +1384,352 @@ async fn item_by_id(
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     item_dto(&state, session.user_id, item_id).await
+}
+
+async fn item_ancestors(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Vec<BaseItemDto>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    let mut current = repository::get_media_item(&state.pool, item_id).await?;
+    let mut ancestors = Vec::new();
+    while let Some(item) = current {
+        let Some(parent_id) = item.parent_id else {
+            break;
+        };
+        if let Some(parent) = repository::get_media_item(&state.pool, parent_id).await? {
+            ancestors.push(
+                repository::media_item_to_dto(
+                    &state.pool,
+                    &parent,
+                    Some(session.user_id),
+                    state.config.server_id,
+                )
+                .await?,
+            );
+            current = Some(parent);
+        } else {
+            break;
+        }
+    }
+    Ok(Json(ancestors))
+}
+
+async fn item_critic_reviews(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    let item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    Ok(Json(json!({
+        "TotalRecordCount": 0,
+        "Items": [],
+        "Meta": {
+            "CommunityRating": item.community_rating,
+            "CriticRating": item.critic_rating
+        }
+    })))
+}
+
+async fn item_external_id_infos(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Vec<Value>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    let item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let mut items = Vec::new();
+    if let Some(provider_ids) = item.provider_ids.as_object() {
+        for (provider, value) in provider_ids {
+            items.push(json!({
+                "Key": provider,
+                "Value": value
+            }));
+        }
+    }
+    Ok(Json(items))
+}
+
+async fn item_instant_mix(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    let target_item = repository::get_media_item(&state.pool, item_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let items = repository::find_similar_items(
+        &state.pool,
+        &target_item,
+        20,
+        Some(session.user_id),
+        state.config.server_id,
+    )
+    .await?;
+    Ok(Json(QueryResult {
+        total_record_count: items.len() as i64,
+        items,
+        start_index: Some(0),
+    }))
+}
+
+async fn item_theme_media(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let items = related_child_items(
+        &session,
+        &state,
+        session.user_id,
+        &item_id_str,
+        &["ThemeSong", "ThemeVideo"],
+    )
+    .await?;
+    Ok(Json(QueryResult {
+        total_record_count: items.len() as i64,
+        items,
+        start_index: Some(0),
+    }))
+}
+
+async fn item_theme_songs(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let items = related_child_items(
+        &session,
+        &state,
+        session.user_id,
+        &item_id_str,
+        &["ThemeSong"],
+    )
+    .await?;
+    Ok(Json(QueryResult {
+        total_record_count: items.len() as i64,
+        items,
+        start_index: Some(0),
+    }))
+}
+
+async fn item_theme_videos(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let items = related_child_items(
+        &session,
+        &state,
+        session.user_id,
+        &item_id_str,
+        &["ThemeVideo"],
+    )
+    .await?;
+    Ok(Json(QueryResult {
+        total_record_count: items.len() as i64,
+        items,
+        start_index: Some(0),
+    }))
+}
+
+async fn item_metadata_editor(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    let item = item_dto(&state, session.user_id, item_id).await?;
+    Ok(Json(json!({
+        "Item": item.0,
+        "CanEdit": session.is_admin
+    })))
+}
+
+async fn delete_item(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    if repository::get_media_item(&state.pool, item_id).await?.is_none() {
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_item_info(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    let exists = repository::get_media_item(&state.pool, item_id).await?.is_some();
+    Ok(Json(json!({
+        "CanDelete": exists,
+        "IsPermanent": false
+    })))
+}
+
+async fn make_item_private(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn make_item_public(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn add_item_tag(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_item_tag(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    ensure_media_item_exists(&state, item_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remote_search_subtitles_by_language(
+    _session: AuthSession,
+    Path((_item_id, _language)): Path<(String, String)>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(json!({
+        "Items": [],
+        "TotalRecordCount": 0
+    })))
+}
+
+async fn remote_search_subtitles_apply(
+    _session: AuthSession,
+    Path((_item_id, _subtitle_id)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn items_intros(
+    _session: AuthSession,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    Ok(Json(QueryResult {
+        total_record_count: 0,
+        items: Vec::new(),
+        start_index: Some(0),
+    }))
+}
+
+async fn item_prefixes(_session: AuthSession) -> Result<Json<Vec<String>>, AppError> {
+    let mut values = vec!["#".to_string()];
+    for ch in 'A'..='Z' {
+        values.push(ch.to_string());
+    }
+    Ok(Json(values))
+}
+
+async fn items_access(
+    _session: AuthSession,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(json!({
+        "UserId": query.user_id.map(|id| id.to_string().to_uppercase()),
+        "HasAccess": true
+    })))
+}
+
+async fn delete_items_bulk(
+    session: AuthSession,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn reset_items_metadata(
+    session: AuthSession,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn remote_search(
+    _session: AuthSession,
+) -> Result<Json<Value>, AppError> {
+    Ok(Json(json!({
+        "SearchResults": [],
+        "TotalRecordCount": 0
+    })))
+}
+
+async fn remote_search_apply(
+    _session: AuthSession,
+    Path(_item_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn items_shared_leave(
+    _session: AuthSession,
+) -> Result<StatusCode, AppError> {
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn user_item_by_id(

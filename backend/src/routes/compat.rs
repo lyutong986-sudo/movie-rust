@@ -26,6 +26,8 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Localization/Options", get(localization_options))
         .route("/Localization/Cultures", get(localization_cultures))
+        .route("/Localization/Countries", get(localization_countries))
+        .route("/Localization/ParentalRatings", get(localization_parental_ratings))
         .route(
             "/UserSettings/{user_id}",
             get(user_settings).post(update_user_settings),
@@ -269,6 +271,21 @@ async fn localization_cultures(
         })
         .collect::<Vec<_>>();
     Ok(Json(json!(cultures)))
+}
+
+async fn localization_countries(_session: AuthSession) -> Result<Json<Value>, AppError> {
+    Ok(Json(json!([
+        {"Name": "中国", "TwoLetterISORegionName": "CN", "ThreeLetterISORegionName": "CHN"},
+        {"Name": "United States", "TwoLetterISORegionName": "US", "ThreeLetterISORegionName": "USA"}
+    ])))
+}
+
+async fn localization_parental_ratings(_session: AuthSession) -> Result<Json<Value>, AppError> {
+    Ok(Json(json!([
+        {"Name": "NR", "Value": "NR", "Description": "Not Rated"},
+        {"Name": "PG-13", "Value": "PG-13", "Description": "Parents Strongly Cautioned"},
+        {"Name": "R", "Value": "R", "Description": "Restricted"}
+    ])))
 }
 async fn user_settings(
     session: AuthSession,

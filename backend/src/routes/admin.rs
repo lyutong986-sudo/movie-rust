@@ -32,12 +32,14 @@ pub fn router() -> Router<AppState> {
                 .post(add_virtual_folder)
                 .delete(remove_virtual_folder),
         )
+        .route("/Library/VirtualFolders/Delete", post(remove_virtual_folder))
         .route("/Library/VirtualFolders/Query", get(virtual_folders))
         .route("/Library/VirtualFolders/Name", post(rename_virtual_folder))
         .route(
             "/Library/VirtualFolders/Paths",
             post(add_media_path).delete(remove_media_path),
         )
+        .route("/Library/VirtualFolders/Paths/Delete", post(remove_media_path))
         .route(
             "/Library/VirtualFolders/Paths/Update",
             post(update_media_path),
@@ -47,6 +49,11 @@ pub fn router() -> Router<AppState> {
             post(update_library_options),
         )
         .route("/Library/Refresh", post(refresh_libraries))
+        .route("/Library/Media/Updated", post(library_notify))
+        .route("/Library/Movies/Added", post(library_notify))
+        .route("/Library/Movies/Updated", post(library_notify))
+        .route("/Library/Series/Added", post(library_notify))
+        .route("/Library/Series/Updated", post(library_notify))
         .route("/Library/PhysicalPaths", get(physical_paths))
         .route(
             "/Library/SelectableMediaFolders",
@@ -54,8 +61,18 @@ pub fn router() -> Router<AppState> {
         )
         .route("/Environment/Drives", get(environment_drives))
         .route(
+            "/Environment/DefaultDirectoryBrowser",
+            get(environment_default_directory_browser),
+        )
+        .route("/Environment/NetworkDevices", get(environment_network_devices))
+        .route("/Environment/NetworkShares", get(environment_network_shares))
+        .route(
             "/Environment/DirectoryContents",
             get(environment_directory_contents).post(environment_directory_contents),
+        )
+        .route(
+            "/Environment/ValidatePath",
+            get(environment_validate_path).post(environment_validate_path),
         )
         .route("/Environment/ParentPath", get(environment_parent_path))
         .route("/api/admin/scan", post(scan_libraries))
@@ -351,6 +368,13 @@ async fn refresh_libraries(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn library_notify(
+    session: AuthSession,
+) -> Result<StatusCode, AppError> {
+    auth::require_admin(&session)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn physical_paths(
     session: AuthSession,
     State(state): State<AppState>,
@@ -415,6 +439,12 @@ struct DirectoryContentsQuery {
 
 #[derive(Debug, Deserialize)]
 struct ParentPathQuery {
+    #[serde(default, rename = "Path", alias = "path")]
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ValidatePathQuery {
     #[serde(default, rename = "Path", alias = "path")]
     path: Option<String>,
 }
@@ -500,6 +530,37 @@ async fn environment_parent_path(
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_default();
     Ok(Json(parent))
+}
+
+async fn environment_default_directory_browser(
+    session: AuthSession,
+) -> Result<Json<Vec<FileSystemEntryInfo>>, AppError> {
+    auth::require_admin(&session)?;
+    Ok(Json(list_root_entries()))
+}
+
+async fn environment_network_devices(
+    session: AuthSession,
+) -> Result<Json<Vec<FileSystemEntryInfo>>, AppError> {
+    auth::require_admin(&session)?;
+    Ok(Json(Vec::new()))
+}
+
+async fn environment_network_shares(
+    session: AuthSession,
+) -> Result<Json<Vec<FileSystemEntryInfo>>, AppError> {
+    auth::require_admin(&session)?;
+    Ok(Json(Vec::new()))
+}
+
+async fn environment_validate_path(
+    session: AuthSession,
+    Query(query): Query<ValidatePathQuery>,
+) -> Result<Json<bool>, AppError> {
+    auth::require_admin(&session)?;
+    let path = query.path.unwrap_or_default();
+    let is_valid = !path.trim().is_empty() && StdPath::new(path.trim()).exists();
+    Ok(Json(is_valid))
 }
 
 fn list_root_entries() -> Vec<FileSystemEntryInfo> {

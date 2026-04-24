@@ -36,6 +36,8 @@ pub fn router() -> Router<AppState> {
         .route("/branding/css", get(branding_css))
         .route("/branding/css.css", get(branding_css))
         .route("/System/Logs", get(server_logs))
+        .route("/System/Configuration", get(system_configuration).post(update_system_configuration))
+        .route("/System/Configuration/Partial", post(update_system_configuration_partial))
         .route(
             "/System/Configuration/{name}",
             get(named_configuration).post(update_named_configuration),
@@ -52,6 +54,11 @@ pub fn router() -> Router<AppState> {
         .route("/system/logs", get(server_logs))
         .route("/System/ActivityLog/Entries", get(activity_log_entries))
         .route("/system/activitylog/entries", get(activity_log_entries))
+        .route("/System/ReleaseNotes", get(release_notes))
+        .route("/System/ReleaseNotes/Versions", get(release_note_versions))
+        .route("/System/WakeOnLanInfo", get(wake_on_lan_info))
+        .route("/System/Restart", post(system_restart))
+        .route("/System/Shutdown", post(system_shutdown))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -196,6 +203,34 @@ async fn named_configuration(
     }
 }
 
+async fn system_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    require_admin(&session)?;
+    Ok(Json(build_system_configuration(&state).await?))
+}
+
+async fn update_system_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    require_admin(&session)?;
+    apply_system_configuration_update(&state, payload).await?;
+    Ok(Json(build_system_configuration(&state).await?))
+}
+
+async fn update_system_configuration_partial(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, crate::error::AppError> {
+    require_admin(&session)?;
+    apply_system_configuration_update(&state, payload).await?;
+    Ok(Json(build_system_configuration(&state).await?))
+}
+
 async fn update_named_configuration(
     session: AuthSession,
     State(state): State<AppState>,
@@ -215,6 +250,55 @@ async fn update_named_configuration(
             "配置不存在: {name}"
         ))),
     }
+}
+
+async fn build_system_configuration(state: &AppState) -> Result<Value, crate::error::AppError> {
+    let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+    let remote_access = repository::startup_remote_access(&state.pool, &state.config).await?;
+    let encoding = repository::encoding_options(&state.pool, &state.config).await?;
+    Ok(json!({
+        "ServerName": startup.server_name,
+        "UICulture": startup.ui_culture,
+        "PreferredMetadataLanguage": startup.preferred_metadata_language,
+        "MetadataCountryCode": startup.metadata_country_code,
+        "LibraryScanThreadCount": startup.library_scan_thread_count,
+        "StrmAnalysisThreadCount": startup.strm_analysis_thread_count,
+        "TmdbMetadataThreadCount": startup.tmdb_metadata_thread_count,
+        "EnableRemoteAccess": remote_access.enable_remote_access,
+        "EnableAutomaticPortMapping": remote_access.enable_automatic_port_mapping.unwrap_or(false),
+        "Encoding": encoding
+    }))
+}
+
+async fn apply_system_configuration_update(
+    state: &AppState,
+    payload: Value,
+) -> Result<(), crate::error::AppError> {
+    if let Some(startup_value) = payload.get("StartupConfiguration") {
+        let startup = serde_json::from_value::<crate::models::StartupConfiguration>(
+            startup_value.clone(),
+        )?;
+        repository::update_startup_configuration(&state.pool, &startup).await?;
+    } else if payload.get("ServerName").is_some()
+        || payload.get("UICulture").is_some()
+        || payload.get("PreferredMetadataLanguage").is_some()
+        || payload.get("MetadataCountryCode").is_some()
+        || payload.get("LibraryScanThreadCount").is_some()
+        || payload.get("StrmAnalysisThreadCount").is_some()
+        || payload.get("TmdbMetadataThreadCount").is_some()
+    {
+        let current = repository::startup_configuration(&state.pool, &state.config).await?;
+        let mut current_value = serde_json::to_value(current)?;
+        merge_object(&mut current_value, &payload);
+        let startup = serde_json::from_value::<crate::models::StartupConfiguration>(current_value)?;
+        repository::update_startup_configuration(&state.pool, &startup).await?;
+    }
+
+    if let Some(encoding_value) = payload.get("Encoding") {
+        let options = serde_json::from_value::<EncodingOptionsDto>(encoding_value.clone())?;
+        let _ = repository::update_encoding_options(&state.pool, &state.config, options).await?;
+    }
+    Ok(())
 }
 
 async fn update_media_encoder_path(
@@ -337,6 +421,40 @@ async fn activity_log_entries(
     }))
 }
 
+async fn release_notes() -> Json<Value> {
+    Json(json!({
+        "Version": env!("CARGO_PKG_VERSION"),
+        "Description": "Movie Rust Emby-compatible backend release.",
+        "Url": "https://github.com"
+    }))
+}
+
+async fn release_note_versions() -> Json<Value> {
+    Json(json!([
+        {
+            "Version": env!("CARGO_PKG_VERSION"),
+            "Date": chrono::Utc::now().date_naive().to_string()
+        }
+    ]))
+}
+
+async fn wake_on_lan_info() -> Json<Value> {
+    Json(json!({
+        "CanWake": false,
+        "Entries": []
+    }))
+}
+
+async fn system_restart(session: AuthSession) -> Result<StatusCode, crate::error::AppError> {
+    require_admin(&session)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn system_shutdown(session: AuthSession) -> Result<StatusCode, crate::error::AppError> {
+    require_admin(&session)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn ping() -> StatusCode {
     StatusCode::NO_CONTENT
 }
@@ -371,4 +489,19 @@ fn log_file_path(
         )));
     }
     Ok(path)
+}
+
+fn merge_object(target: &mut Value, patch: &Value) {
+    match (target, patch) {
+        (Value::Object(target_map), Value::Object(patch_map)) => {
+            for (key, value) in patch_map {
+                if let Some(existing) = target_map.get_mut(key) {
+                    merge_object(existing, value);
+                } else {
+                    target_map.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        (target_slot, patch_value) => *target_slot = patch_value.clone(),
+    }
 }

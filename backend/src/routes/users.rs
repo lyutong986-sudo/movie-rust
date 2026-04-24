@@ -11,7 +11,7 @@ use crate::{
 };
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
     routing::{get, post},
     Json, Router,
@@ -26,6 +26,9 @@ pub fn router() -> Router<AppState> {
         .route("/users/public", get(public_users))
         .route("/Users", get(users))
         .route("/users", get(users))
+        .route("/Users/Query", get(query_users))
+        .route("/Users/Prefixes", get(user_prefixes))
+        .route("/Users/ItemAccess", get(user_item_access))
         .route("/Users/New", post(create_user))
         .route("/users/new", post(create_user))
         .route("/Users/AuthenticateByName", post(authenticate_by_name))
@@ -44,8 +47,34 @@ pub fn router() -> Router<AppState> {
         .route("/Users/{user_id}/Delete", post(delete_user))
         .route("/users/{user_id}/delete", post(delete_user))
         .route("/Users/{user_id}/Policy", post(update_user_policy))
+        .route("/Users/{user_id}/Configuration", get(user_configuration).post(update_user_configuration))
+        .route("/Users/{user_id}/Configuration/Partial", post(update_user_configuration_partial))
+        .route("/Users/{user_id}/Connect/Link", post(user_connect_link))
+        .route("/Users/{user_id}/Connect/Link/Delete", post(user_connect_link_delete))
+        .route(
+            "/Users/{user_id}/TrackSelections/{track_type}",
+            post(user_track_selection),
+        )
+        .route(
+            "/Users/{user_id}/TrackSelections/{track_type}/Delete",
+            post(user_track_selection_delete),
+        )
+        .route(
+            "/Users/{user_id}/Items/{item_id}/Rating",
+            post(user_item_rating).delete(user_item_rating_delete),
+        )
+        .route(
+            "/Users/{user_id}/Items/{item_id}/Rating/Delete",
+            post(user_item_rating_delete),
+        )
+        .route(
+            "/Users/{user_id}/TypedSettings/{key}",
+            get(user_typed_settings).post(update_user_typed_settings),
+        )
         .route("/Users/{user_id}/policy", post(update_user_policy))
         .route("/users/{user_id}/policy", post(update_user_policy))
+        .route("/Users/ForgotPassword", post(forgot_password))
+        .route("/Users/ForgotPassword/Pin", post(forgot_password_pin))
 }
 
 async fn public_users(State(state): State<AppState>) -> Result<Json<Vec<PublicUserDto>>, AppError> {
@@ -70,6 +99,107 @@ async fn users(
             .map(|user| repository::user_to_dto(user, state.config.server_id))
             .collect(),
     ))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct UserQuery {
+    #[serde(default, alias = "startIndex")]
+    start_index: Option<i64>,
+    #[serde(default, alias = "limit")]
+    limit: Option<i64>,
+    #[serde(default, alias = "searchTerm")]
+    search_term: Option<String>,
+}
+
+async fn query_users(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<UserQuery>,
+) -> Result<Json<Value>, AppError> {
+    auth::require_admin(&session)?;
+    let users = repository::list_users(&state.pool, false).await?;
+    let search_term = query
+        .search_term
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    let filtered = users
+        .into_iter()
+        .filter(|user| {
+            search_term
+                .as_ref()
+                .is_none_or(|term| user.name.to_ascii_lowercase().contains(term))
+        })
+        .collect::<Vec<_>>();
+    let start_index = query.start_index.unwrap_or(0).max(0) as usize;
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000) as usize;
+    let total_record_count = filtered.len() as i64;
+    let items = filtered
+        .into_iter()
+        .skip(start_index)
+        .take(limit)
+        .map(|user| repository::user_to_dto(&user, state.config.server_id))
+        .collect::<Vec<_>>();
+    Ok(Json(serde_json::json!({
+        "Items": items,
+        "TotalRecordCount": total_record_count,
+        "StartIndex": start_index
+    })))
+}
+
+async fn user_prefixes(
+    _session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    let startup = repository::startup_configuration(&state.pool, &state.config).await?;
+    let mut items = vec!["#".to_string()];
+    let ui = startup.ui_culture.to_ascii_lowercase();
+    if ui.starts_with("zh") {
+        for ch in 'A'..='Z' {
+            items.push(ch.to_string());
+        }
+        items.push("拼音".to_string());
+    } else {
+        for ch in 'A'..='Z' {
+            items.push(ch.to_string());
+        }
+    }
+    Ok(Json(serde_json::json!(items)))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct UserItemAccessQuery {
+    #[serde(default, alias = "userId")]
+    user_id: Option<Uuid>,
+    #[serde(default, alias = "itemId")]
+    item_id: Option<String>,
+}
+
+async fn user_item_access(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<UserItemAccessQuery>,
+) -> Result<Json<Value>, AppError> {
+    let target_user_id = query.user_id.unwrap_or(session.user_id);
+    auth::ensure_user_access(&session, target_user_id)?;
+    let Some(item_id) = query.item_id.as_deref() else {
+        return Ok(Json(serde_json::json!({
+            "UserId": target_user_id.to_string().to_uppercase(),
+            "Items": [],
+            "TotalRecordCount": 0
+        })));
+    };
+    let item_uuid = crate::models::emby_id_to_uuid(item_id)
+        .map_err(|_| AppError::BadRequest("无效的 itemId".to_string()))?;
+    let has_access = repository::user_can_access_item(&state.pool, target_user_id, item_uuid).await?;
+    Ok(Json(serde_json::json!({
+        "UserId": target_user_id.to_string().to_uppercase(),
+        "ItemId": item_id,
+        "HasAccess": has_access
+    })))
 }
 
 async fn user_by_id(
@@ -373,6 +503,132 @@ async fn update_user_policy(
 
     repository::update_user_policy(&state.pool, user_id, &policy).await?;
 
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn user_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<UserConfigurationDto>, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+    let configuration = if user.configuration.is_null() {
+        UserConfigurationDto::default()
+    } else {
+        serde_json::from_value::<UserConfigurationDto>(user.configuration).unwrap_or_default()
+    };
+    Ok(Json(configuration))
+}
+
+async fn update_user_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Json(configuration): Json<UserConfigurationDto>,
+) -> Result<Json<UserConfigurationDto>, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
+    repository::update_user_configuration(&state.pool, user_id, &configuration).await?;
+    Ok(Json(configuration))
+}
+
+async fn update_user_configuration_partial(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(user_id): Path<Uuid>,
+    Json(payload): Json<Value>,
+) -> Result<Json<UserConfigurationDto>, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+    let mut current = if user.configuration.is_null() {
+        serde_json::to_value(UserConfigurationDto::default())?
+    } else {
+        user.configuration
+    };
+    merge_json(&mut current, payload);
+    let next = serde_json::from_value::<UserConfigurationDto>(current)
+        .map_err(|error| AppError::BadRequest(format!("用户配置格式无效: {error}")))?;
+    repository::update_user_configuration(&state.pool, user_id, &next).await?;
+    Ok(Json(next))
+}
+
+async fn forgot_password() -> Result<StatusCode, AppError> {
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn forgot_password_pin() -> Result<StatusCode, AppError> {
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn user_connect_link(
+    session: AuthSession,
+    Path(user_id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn user_connect_link_delete(
+    session: AuthSession,
+    Path(user_id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn user_track_selection(
+    session: AuthSession,
+    Path((user_id, _track_type)): Path<(Uuid, String)>,
+) -> Result<StatusCode, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn user_track_selection_delete(
+    session: AuthSession,
+    Path((user_id, _track_type)): Path<(Uuid, String)>,
+) -> Result<StatusCode, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn user_item_rating(
+    session: AuthSession,
+    Path((user_id, _item_id)): Path<(Uuid, String)>,
+) -> Result<StatusCode, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn user_item_rating_delete(
+    session: AuthSession,
+    Path((user_id, _item_id)): Path<(Uuid, String)>,
+) -> Result<StatusCode, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn user_typed_settings(
+    session: AuthSession,
+    Path((user_id, key)): Path<(Uuid, String)>,
+) -> Result<Json<Value>, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
+    Ok(Json(serde_json::json!({
+        "Key": key,
+        "Value": {}
+    })))
+}
+
+async fn update_user_typed_settings(
+    session: AuthSession,
+    Path((user_id, _key)): Path<(Uuid, String)>,
+    Json(_payload): Json<Value>,
+) -> Result<StatusCode, AppError> {
+    auth::ensure_user_access(&session, user_id)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

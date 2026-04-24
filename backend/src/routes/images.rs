@@ -53,11 +53,31 @@ pub fn router() -> Router<AppState> {
                 .delete(delete_item_image),
         )
         .route(
+            "/Items/{item_id}/Images/{image_type}/Delete",
+            post(delete_item_image).delete(delete_item_image),
+        )
+        .route(
             "/Items/{item_id}/Images/{image_type}/{*image_tail}",
             get(get_item_image_with_tail)
                 .head(get_item_image_with_tail)
                 .post(upload_item_image_with_tail)
                 .delete(delete_item_image_with_tail),
+        )
+        .route(
+            "/Items/{item_id}/Images/{image_type}/{image_index}/Delete",
+            post(delete_item_image_index).delete(delete_item_image_index),
+        )
+        .route(
+            "/Items/{item_id}/Images/{image_type}/{image_index}/Url",
+            get(get_item_image_index_url),
+        )
+        .route(
+            "/Items/{item_id}/Images/{image_type}/{image_index}/Index",
+            post(set_item_image_index),
+        )
+        .route(
+            "/Items/{item_id}/Images/{image_type}/{image_index}/{tag}/{format}/{max_width}/{max_height}/{percent_played}/{unplayed_count}",
+            get(get_item_image_extended).head(get_item_image_extended),
         )
         .route(
             "/Persons/{name}/Images/{image_type}",
@@ -92,8 +112,16 @@ pub fn router() -> Router<AppState> {
                 .delete(delete_user_image),
         )
         .route(
+            "/Users/{user_id}/Images/{image_type}/Delete",
+            post(delete_user_image).delete(delete_user_image),
+        )
+        .route(
             "/Users/{user_id}/Images/{image_type}/{*image_tail}",
             get(get_user_image_with_tail).head(get_user_image_with_tail),
+        )
+        .route(
+            "/Users/{user_id}/Images/{image_type}/{image_index}/Delete",
+            post(delete_user_image_index).delete(delete_user_image_index),
         )
 }
 
@@ -194,6 +222,105 @@ async fn item_image_url_response(
         url.push_str(&index.to_string());
     }
     Ok(Json(json!({ "Url": url })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ItemImageIndexPath {
+    item_id: String,
+    image_type: String,
+    image_index: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ItemImageExtendedPath {
+    item_id: String,
+    image_type: String,
+    image_index: i32,
+    tag: String,
+    format: String,
+    max_width: i32,
+    max_height: i32,
+    percent_played: i32,
+    unplayed_count: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserImageIndexPath {
+    user_id: String,
+    image_type: String,
+    image_index: i32,
+}
+
+async fn get_item_image_index_url(
+    State(state): State<AppState>,
+    Path(path): Path<ItemImageIndexPath>,
+) -> Result<Json<Value>, AppError> {
+    item_image_url_response(
+        &state,
+        &path.item_id,
+        &path.image_type,
+        Some(path.image_index),
+    )
+    .await
+}
+
+async fn delete_item_image_index(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(path): Path<ItemImageIndexPath>,
+) -> Result<StatusCode, AppError> {
+    delete_item_image_with_tail(
+        session,
+        State(state),
+        Path((path.item_id, path.image_type, path.image_index.to_string())),
+    )
+    .await
+}
+
+async fn set_item_image_index(
+    session: AuthSession,
+    State(_state): State<AppState>,
+    Path(_path): Path<ItemImageIndexPath>,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_item_image_extended(
+    State(state): State<AppState>,
+    Path(path): Path<ItemImageExtendedPath>,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
+    let _ = (
+        &path.tag,
+        &path.format,
+        path.max_width,
+        path.max_height,
+        path.percent_played,
+        path.unplayed_count,
+    );
+    get_item_image_with_tail(
+        OptionalAuthSession(None),
+        State(state),
+        Path((
+            path.item_id,
+            path.image_type,
+            path.image_index.to_string(),
+        )),
+        request,
+    )
+    .await
+}
+
+async fn delete_user_image_index(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(path): Path<UserImageIndexPath>,
+) -> Result<StatusCode, AppError> {
+    let _ = path.image_index;
+    delete_user_image(session, State(state), Path((path.user_id, path.image_type))).await
 }
 
 async fn list_item_remote_images(

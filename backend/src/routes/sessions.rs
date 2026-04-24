@@ -55,6 +55,7 @@ pub fn router() -> Router<AppState> {
         .route("/Sessions/Capabilities/Full", post(update_capabilities))
         .route("/Sessions/Logout", post(logout_session))
         .route("/Sessions/Playing", post(playback_started))
+        .route("/Sessions/Playing/Ping", post(playback_ping))
         .route("/Sessions/Playing/Progress", post(playback_progress))
         .route("/Sessions/Playing/Stopped", post(playback_stopped))
         .route(
@@ -459,6 +460,14 @@ async fn playback_started(
     Json(report): Json<PlaybackReport>,
 ) -> Result<StatusCode, AppError> {
     record_report(&state, &session, "Started", report).await
+}
+
+async fn playback_ping(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(report): Json<PlaybackReport>,
+) -> Result<StatusCode, AppError> {
+    record_report(&state, &session, "Ping", report).await
 }
 
 async fn playback_progress(
