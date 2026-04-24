@@ -179,7 +179,32 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         "#,
         r#"
         ALTER TABLE media_items
-            ADD COLUMN IF NOT EXISTS critic_rating DOUBLE PRECISION
+            ADD COLUMN IF NOT EXISTS original_title TEXT,
+            ADD COLUMN IF NOT EXISTS official_rating TEXT,
+            ADD COLUMN IF NOT EXISTS community_rating DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS critic_rating DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS series_name TEXT,
+            ADD COLUMN IF NOT EXISTS season_name TEXT,
+            ADD COLUMN IF NOT EXISTS index_number INTEGER,
+            ADD COLUMN IF NOT EXISTS index_number_end INTEGER,
+            ADD COLUMN IF NOT EXISTS parent_index_number INTEGER,
+            ADD COLUMN IF NOT EXISTS provider_ids JSONB NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS genres TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS studios TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS production_locations TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS width INTEGER,
+            ADD COLUMN IF NOT EXISTS height INTEGER,
+            ADD COLUMN IF NOT EXISTS bit_rate BIGINT,
+            ADD COLUMN IF NOT EXISTS video_codec TEXT,
+            ADD COLUMN IF NOT EXISTS audio_codec TEXT,
+            ADD COLUMN IF NOT EXISTS logo_path TEXT,
+            ADD COLUMN IF NOT EXISTS thumb_path TEXT,
+            ADD COLUMN IF NOT EXISTS remote_trailers TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS status TEXT,
+            ADD COLUMN IF NOT EXISTS end_date DATE,
+            ADD COLUMN IF NOT EXISTS air_days TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS air_time TEXT
         "#,
         r#"
         DO $$

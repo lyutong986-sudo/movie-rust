@@ -561,3 +561,5 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 - /Auth/Keys 现在使用 sessions.session_type 区分 ApiKey 和 Interactive：创建 API key 会写入 ApiKey 类型，列表只返回 ApiKey，删除也只允许删除真实 API key，不再把普通登录会话混进 Auth Keys。/Sessions 系列入口和 WebSocket 仅接受交互式会话，避免 API key 冒充在线会话或远程控制会话。
 
 - 启动向导现在会在创建首个管理员后立即登录该管理员；随后 /Startup/Configuration、/Startup/RemoteAccess、/Startup/Complete 会使用已建立的管理员会话继续完成初始化，从而兼顾首个用户创建后的安全收口与向导可用性。
+
+- 数据库初始化改为通过启动期 schema compatibility 预留字段兜底 media_items 结构：即使历史迁移缺失、迁移脚本被调整或旧库直接复用，服务启动时也会自动补齐 original_title 等当前后端真实依赖的列，避免初始化后进入界面即因缺列报错。
