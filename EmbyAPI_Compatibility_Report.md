@@ -704,3 +704,14 @@ npx vite build         # 构建成功
 | 现象 | 原因（定位） | 修复 |
 | --- | --- | --- |
 | 镜像已完成 `exporting` + `pushing manifest`，但在 `# exporting to GitHub Actions Cache` 阶段报 `failed to parse error response 502`（GitHub Unicorn HTML）后整任务失败。 | `cache-to: type=gha` 导出层到 GHA 缓存服务时偶发网关错误；这是缓存基础设施波动，不是 Dockerfile 或镜像推送失败。 | 将 PR 与 push 两个构建步骤的 `cache-to` 改为 `type=gha,mode=max,scope=movie-rust,ignore-error=true`，即“缓存导出失败不阻塞构建/推送结果”。 |
+
+**K. 前端审计修复：错误传播与向导成功门禁（2026-04-24）**
+
+| 问题 | 修复 |
+| --- | --- |
+| 通用 `run()` 仅吞错写 `state.error`，上层无法基于成功/失败做流程分支。 | `frontend/src/store/app.ts` 的 `run()` 增加返回值 `Promise<boolean>`，并支持 `RunOptions.rethrow`。成功返回 `true`，失败返回 `false`（可选重抛）。 |
+| `completeWizard()` 在向导主流程失败时仍可能继续 `enterHome()`。 | `completeWizard()` 使用 `const wizardCompleted = await run(...)`；仅 `wizardCompleted === true` 时才进入首页加载流程。 |
+| 首屏挂载时 `loadLibraries()/loadAdminData()` 异常会形成未处理 Promise 拒绝。 | `frontend/src/layouts/AppLayout.vue` 的 `onMounted` 增加 `try/catch`，统一写入 `state.error`，避免无声失败。 |
+| `enterHome()` 链路中 `loadHome()` 失败无法向上感知（被 `run` 吞掉）。 | `loadHome()` 改为 `run(..., '', { rethrow: true })`，允许关键初始化路径捕获真实失败。 |
+
+**校验**：`frontend> npx vue-tsc -b`、`frontend> npm run build` —— ✅ 通过。

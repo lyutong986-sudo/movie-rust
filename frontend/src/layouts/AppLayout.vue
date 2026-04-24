@@ -182,13 +182,17 @@ watch(locale, (value) => {
 onMounted(async () => {
   document.documentElement.lang = locale.value;
   window.addEventListener('keydown', onKeyDown);
-  if (!libraries.value.length) await loadLibraries();
-  if (isAdminSection.value) {
-    if (!isAdmin.value) {
-      await router.replace('/');
-      return;
+  try {
+    if (!libraries.value.length) await loadLibraries();
+    if (isAdminSection.value) {
+      if (!isAdmin.value) {
+        await router.replace('/');
+        return;
+      }
+      await loadAdminData();
     }
-    await loadAdminData();
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
   }
 });
 

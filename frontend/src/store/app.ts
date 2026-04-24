@@ -262,7 +262,7 @@ export async function saveMetadataAndContinue() {
 }
 
 export async function completeWizard() {
-  await run(async () => {
+  const wizardCompleted = await run(async () => {
     await api.updateRemoteAccess({
       EnableRemoteAccess: state.allowRemoteAccess,
       EnableAutomaticPortMapping: state.enableUPNP
@@ -276,6 +276,10 @@ export async function completeWizard() {
       user.value = result.User;
     }
   }, state.adminPassword ? '设置完成' : '设置完成，请登录');
+
+  if (!wizardCompleted) {
+    return;
+  }
 
   // enterHome 不包在 run 内：避免与「设置完成」同一次 catch 混在一起，且确保导航到首页前数据已拉取
   if (user.value) {
@@ -361,7 +365,7 @@ export async function loadHome() {
       limit: 180
     });
     homeItems.value = itemsFromQuery(result);
-  });
+  }, '', { rethrow: true });
 }
 
 export async function loadLatestByLibrary() {
@@ -792,7 +796,11 @@ export function fileSize(size?: number) {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export async function run(task: () => Promise<void>, success = '') {
+type RunOptions = {
+  rethrow?: boolean;
+};
+
+export async function run(task: () => Promise<void>, success = '', options: RunOptions = {}): Promise<boolean> {
   state.busy = true;
   state.error = '';
   if (success) {
@@ -804,8 +812,13 @@ export async function run(task: () => Promise<void>, success = '') {
     if (success) {
       state.message = success;
     }
+    return true;
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
+    if (options.rethrow) {
+      throw error;
+    }
+    return false;
   } finally {
     state.busy = false;
   }
