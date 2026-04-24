@@ -40,8 +40,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           vue: ['vue', 'vue-router'],
-          'nuxt-ui': ['@nuxt/ui/vue-plugin'],
-          zod: ['zod']
+          'nuxt-ui': ['@nuxt/ui/vue-plugin']
         }
       }
     }

@@ -3,8 +3,7 @@ use axum::{
     response::Response,
 };
 use serde::Deserialize;
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::RwLock;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{error::AppError, state::AppState};
@@ -26,8 +25,6 @@ pub struct WebSocketSession {
     pub device_id: Option<String>,
     pub access_token: Option<String>,
 }
-
-pub type Sessions = Arc<RwLock<HashMap<Uuid, WebSocketSession>>>;
 
 pub async fn emby_websocket_handler(
     ws: WebSocketUpgrade,

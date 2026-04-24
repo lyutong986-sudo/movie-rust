@@ -11,10 +11,6 @@ pub enum MediaAnalyzerError {
     ParseError(String),
     #[error("文件不存在: {0}")]
     FileNotFound(String),
-    #[error("未找到视频流")]
-    NoVideoStream,
-    #[error("未找到音频流")]
-    NoAudioStream,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,26 +88,6 @@ pub async fn analyze_media_file(path: &Path) -> Result<MediaAnalysisResult, Medi
 
     let probe_result = run_ffprobe(path.as_os_str()).await?;
     parse_probe_result(&probe_result)
-}
-
-pub fn extract_primary_video_stream(result: &MediaAnalysisResult) -> Option<&MediaStreamInfo> {
-    result.streams.iter().find(|s| s.codec_type == "video")
-}
-
-pub fn extract_audio_streams(result: &MediaAnalysisResult) -> Vec<&MediaStreamInfo> {
-    result
-        .streams
-        .iter()
-        .filter(|s| s.codec_type == "audio")
-        .collect()
-}
-
-pub fn extract_subtitle_streams(result: &MediaAnalysisResult) -> Vec<&MediaStreamInfo> {
-    result
-        .streams
-        .iter()
-        .filter(|s| s.codec_type == "subtitle")
-        .collect()
 }
 
 /// 分析远程媒体URL

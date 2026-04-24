@@ -103,9 +103,8 @@ docker run -d --name movie-rust `
 http://127.0.0.1:8096
 ```
 
-已经实现的兼容接口见 [API_COMPAT.md](./docs/API_COMPAT.md)。
-
-Jellyfin 前端页面复刻进度见 [JELLYFIN_FRONTEND_PARITY.md](./docs/JELLYFIN_FRONTEND_PARITY.md)。
+完整的 Emby API 兼容性记录、修复轮次、前端落地清单统一汇总在根目录的
+[EmbyAPI_Compatibility_Report.md](./EmbyAPI_Compatibility_Report.md) 中。
 
 ## 媒体库扫描
 

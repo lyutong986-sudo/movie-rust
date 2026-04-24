@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitStatus,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tokio::{
     process::{Child, Command},
@@ -168,7 +168,7 @@ impl Transcoder {
         // 鏇存柊浼氳瘽鐘舵€佷负杞爜涓?
         {
             let mut sessions = self.sessions.write().await;
-            if let Some(mut session) = sessions.get_mut(&session_id) {
+            if let Some(session) = sessions.get_mut(&session_id) {
                 session.state = TranscodingSessionState::Transcoding;
                 session.updated_at = Instant::now();
             }
@@ -207,7 +207,7 @@ impl Transcoder {
         // 鏇存柊浼氳瘽鐘舵€侊紝璁板綍杩涚▼ID
         {
             let mut sessions = self.sessions.write().await;
-            if let Some(mut session) = sessions.get_mut(&session_id) {
+            if let Some(session) = sessions.get_mut(&session_id) {
                 session.ffmpeg_pid = pid;
                 session.updated_at = Instant::now();
             }
@@ -233,7 +233,7 @@ impl Transcoder {
             }
 
             let mut sessions = sessions_clone.write().await;
-            if let Some(mut session) = sessions.get_mut(&session_id_clone) {
+            if let Some(session) = sessions.get_mut(&session_id_clone) {
                 session.updated_at = Instant::now();
                 session.ffmpeg_pid = None;
 
@@ -323,32 +323,6 @@ impl Transcoder {
     }
 
     /// 娓呯悊杩囨湡鐨勮浆鐮佷細璇?
-    pub async fn cleanup_expired_sessions(&self, max_age: Duration) -> usize {
-        let now = Instant::now();
-        let mut sessions_to_remove = Vec::new();
-
-        // 鎵惧嚭杩囨湡浼氳瘽
-        {
-            let sessions = self.sessions.read().await;
-            for (id, session) in sessions.iter() {
-                if now.duration_since(session.created_at) > max_age {
-                    sessions_to_remove.push(*id);
-                }
-            }
-        }
-
-        // 绉婚櫎杩囨湡浼氳瘽
-        let count = sessions_to_remove.len();
-        if count > 0 {
-            let mut sessions = self.sessions.write().await;
-            for id in sessions_to_remove {
-                sessions.remove(&id);
-            }
-        }
-
-        count
-    }
-
     /// 鏋勫缓FFmpeg鍛戒护琛屽弬鏁?
     fn build_ffmpeg_args(
         &self,

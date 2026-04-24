@@ -184,11 +184,6 @@ impl MetadataProviderManager {
     pub fn get_provider(&self, name: &str) -> Option<&dyn MetadataProvider> {
         self.providers.get(name).map(|p| p.as_ref())
     }
-
-    /// 获取所有提供者
-    pub fn providers(&self) -> Vec<&dyn MetadataProvider> {
-        self.providers.values().map(|p| p.as_ref()).collect()
-    }
 }
 
 impl Default for MetadataProviderManager {

@@ -6,9 +6,9 @@ use crate::{
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto,
         BrandingConfiguration, DbLibrary, DbMediaChapter, DbMediaItem, DbMediaStream, DbPerson,
-        DbSeriesEpisodeCatalog, DbUser, DbUserItemData, EncodingOptionsDto, ExternalUrlDto,
+        DbUser, DbUserItemData, EncodingOptionsDto, ExternalUrlDto,
         GenreDto, ItemCountsDto, LibraryOptionsDto, LogFileDto, MediaItemRow, MediaPathInfoDto,
-        MediaSourceDto, MediaStreamDto, NameIdDto, NameLongIdDto, PersonDto, PublicUserDto,
+        MediaSourceDto, MediaStreamDto, NameLongIdDto, PersonDto, PublicUserDto,
         QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
         UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
     },
@@ -968,17 +968,9 @@ pub async fn get_persons(
     let start_index = start_index.unwrap_or(0);
     let limit = limit.unwrap_or(100).min(200); // 限制最大返回200条
 
-    let mut query = sqlx::query_as::<_, DbPerson>(
-        r#"
-        SELECT *
-        FROM persons
-        WHERE 1=1
-        "#,
-    );
-
-    if let Some(name_prefix) = name_starts_with {
+    let persons = if let Some(name_prefix) = name_starts_with {
         let name_pattern = format!("{}%", name_prefix);
-        query = sqlx::query_as::<_, DbPerson>(
+        sqlx::query_as::<_, DbPerson>(
             r#"
             SELECT *
             FROM persons
@@ -989,9 +981,11 @@ pub async fn get_persons(
         )
         .bind(name_pattern)
         .bind(limit as i64)
-        .bind(start_index as i64);
+        .bind(start_index as i64)
+        .fetch_all(pool)
+        .await?
     } else {
-        query = sqlx::query_as::<_, DbPerson>(
+        sqlx::query_as::<_, DbPerson>(
             r#"
             SELECT *
             FROM persons
@@ -1000,10 +994,10 @@ pub async fn get_persons(
             "#,
         )
         .bind(limit as i64)
-        .bind(start_index as i64);
-    }
-
-    let persons = query.fetch_all(pool).await?;
+        .bind(start_index as i64)
+        .fetch_all(pool)
+        .await?
+    };
 
     let person_dtos = persons
         .into_iter()
@@ -2173,71 +2167,6 @@ pub async fn find_active_session(
     .bind(token)
     .fetch_optional(pool)
     .await?)
-}
-
-pub async fn list_all_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, AppError> {
-    Ok(sqlx::query_as::<_, AuthSessionRow>(
-        r#"
-        SELECT
-            s.access_token,
-            s.user_id,
-            u.name AS user_name,
-            u.is_admin,
-            s.session_type,
-            s.device_id,
-            s.device_name,
-            s.client,
-            s.application_version,
-            s.last_activity_at,
-            s.expires_at
-        FROM sessions s
-        INNER JOIN users u ON u.id = s.user_id
-        ORDER BY s.last_activity_at DESC
-        "#,
-    )
-    .fetch_all(pool)
-    .await?)
-}
-
-pub async fn create_api_key_session(
-    pool: &sqlx::PgPool,
-    user_id: Uuid,
-    device_id: Option<String>,
-    device_name: Option<String>,
-    client: Option<String>,
-    application_version: Option<String>,
-) -> Result<AuthSessionRow, AppError> {
-    create_session_with_type(
-        pool,
-        user_id,
-        device_id,
-        device_name,
-        client,
-        application_version,
-        None,
-        "ApiKey",
-    )
-    .await
-}
-
-pub async fn delete_api_key_session(
-    pool: &sqlx::PgPool,
-    access_token: &str,
-) -> Result<(), AppError> {
-    let affected = sqlx::query(
-        r#"
-        DELETE FROM sessions
-        WHERE access_token = $1 AND session_type = 'ApiKey'
-        "#,
-    )
-    .bind(access_token)
-    .execute(pool)
-    .await?
-    .rows_affected();
-    if affected == 0 {
-        return Err(AppError::NotFound("API Key 不存在".to_string()));
-    }
-    Ok(())
 }
 
 pub async fn list_api_key_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, AppError> {
@@ -4446,7 +4375,7 @@ pub async fn get_missing_episode_image_path(
 
 pub async fn get_boxsets_for_item_ids(
     pool: &sqlx::PgPool,
-    user_id: Uuid,
+    _user_id: Uuid,
     item_ids: &[Uuid],
     server_id: Uuid,
     start_index: i64,
@@ -4939,61 +4868,6 @@ pub async fn set_user_favorite(
     .await?;
 
     Ok(user_item_data_to_dto_for_item(data, item_id))
-}
-
-pub async fn get_user_resume_items(
-    pool: &sqlx::PgPool,
-    user_id: Uuid,
-    limit: Option<i64>,
-    start_index: Option<i64>,
-    server_id: Uuid,
-) -> Result<(Vec<BaseItemDto>, i64), AppError> {
-    let limit = limit.unwrap_or(50).clamp(1, 100);
-    let start_index = start_index.unwrap_or(0).max(0);
-
-    let total_count: i64 = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*) as count
-        FROM user_item_data uid
-        INNER JOIN media_items mi ON mi.id = uid.item_id
-        WHERE uid.user_id = $1
-          AND uid.playback_position_ticks > 0
-          AND (uid.is_played = false OR uid.playback_position_ticks < mi.runtime_ticks)
-        "#,
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await?;
-
-    let items = sqlx::query_as::<_, DbMediaItem>(
-        r#"
-        SELECT mi.*,
-               uid.playback_position_ticks as user_playback_position_ticks,
-               uid.is_favorite as user_is_favorite,
-               uid.is_played as user_is_played,
-               uid.play_count as user_play_count,
-               uid.last_played_date as user_last_played_date
-        FROM user_item_data uid
-        INNER JOIN media_items mi ON mi.id = uid.item_id
-        WHERE uid.user_id = $1
-          AND uid.playback_position_ticks > 0
-          AND (uid.is_played = false OR uid.playback_position_ticks < mi.runtime_ticks)
-        ORDER BY uid.last_played_date DESC NULLS LAST
-        LIMIT $2 OFFSET $3
-        "#,
-    )
-    .bind(user_id)
-    .bind(limit)
-    .bind(start_index)
-    .fetch_all(pool)
-    .await?;
-
-    let mut dtos = Vec::new();
-    for item in items {
-        let dto = media_item_to_dto(pool, &item, Some(user_id), server_id).await?;
-        dtos.push(dto);
-    }
-    Ok((dtos, total_count))
 }
 
 pub async fn set_user_played(
@@ -7320,198 +7194,6 @@ pub async fn get_media_sources_for_item(
 ) -> Result<Vec<MediaSourceDto>, AppError> {
     media_sources_for_item(pool, item, server_id).await
 }
-
-pub fn media_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
-    if item.media_type.eq_ignore_ascii_case("Audio") {
-        return vec![MediaStreamDto {
-            index: 0,
-            stream_type: "Audio".to_string(),
-            codec: item.audio_codec.clone(),
-            codec_tag: None,
-            language: None,
-            display_title: item
-                .audio_codec
-                .clone()
-                .or_else(|| Some("Default".to_string())),
-            is_default: true,
-            is_forced: false,
-            width: None,
-            height: None,
-            bit_rate: None,
-            channels: None,
-            sample_rate: None,
-            is_external: false,
-            delivery_method: None,
-            delivery_url: None,
-            is_chunked_response: Some(false),
-            supports_external_stream: false,
-            path: None,
-            aspect_ratio: None,
-            attachment_size: None,
-            average_frame_rate: None,
-            bit_depth: None,
-            color_primaries: None,
-            color_space: None,
-            color_transfer: None,
-            display_language: None,
-            extended_video_sub_type: None,
-            extended_video_sub_type_description: None,
-            extended_video_type: None,
-            is_anamorphic: None,
-            is_avc: None,
-            is_external_url: None,
-            is_hearing_impaired: None,
-            is_interlaced: None,
-            is_text_subtitle_stream: None,
-            level: None,
-            pixel_format: None,
-            profile: None,
-            protocol: Some("File".to_string()),
-            real_frame_rate: None,
-            ref_frames: None,
-            rotation: None,
-            stream_start_time_ticks: None,
-            time_base: None,
-            title: None,
-            comment: None,
-            video_range: None,
-            channel_layout: None,
-            item_id: Some(uuid_to_emby_guid(&item.id)),
-            server_id: None,
-            mime_type: item
-                .audio_codec
-                .as_deref()
-                .and_then(mime_type_for_stream_codec),
-            subtitle_location_type: None,
-        }];
-    }
-
-    let mut streams = vec![
-        MediaStreamDto {
-            index: 0,
-            stream_type: "Video".to_string(),
-            codec: item.video_codec.clone(),
-            codec_tag: None,
-            language: None,
-            display_title: video_display_title(item),
-            is_default: true,
-            is_forced: false,
-            width: item.width,
-            height: item.height,
-            bit_rate: None,
-            channels: None,
-            sample_rate: None,
-            is_external: false,
-            delivery_method: None,
-            delivery_url: None,
-            is_chunked_response: Some(false),
-            supports_external_stream: false,
-            path: None,
-            aspect_ratio: None,
-            attachment_size: None,
-            average_frame_rate: None,
-            bit_depth: None,
-            color_primaries: None,
-            color_space: None,
-            color_transfer: None,
-            display_language: None,
-            extended_video_sub_type: None,
-            extended_video_sub_type_description: None,
-            extended_video_type: None,
-            is_anamorphic: None,
-            is_avc: None,
-            is_external_url: None,
-            is_hearing_impaired: None,
-            is_interlaced: None,
-            is_text_subtitle_stream: None,
-            level: None,
-            pixel_format: None,
-            profile: None,
-            protocol: Some("File".to_string()),
-            real_frame_rate: None,
-            ref_frames: None,
-            rotation: None,
-            stream_start_time_ticks: None,
-            time_base: None,
-            title: None,
-            comment: None,
-            video_range: None,
-            channel_layout: None,
-            item_id: Some(uuid_to_emby_guid(&item.id)),
-            server_id: None,
-            mime_type: item
-                .video_codec
-                .as_deref()
-                .and_then(mime_type_for_stream_codec),
-            subtitle_location_type: None,
-        },
-        MediaStreamDto {
-            index: 1,
-            stream_type: "Audio".to_string(),
-            codec: item.audio_codec.clone(),
-            codec_tag: None,
-            language: None,
-            display_title: item
-                .audio_codec
-                .clone()
-                .or_else(|| Some("Default".to_string())),
-            is_default: true,
-            is_forced: false,
-            width: None,
-            height: None,
-            bit_rate: None,
-            channels: None,
-            sample_rate: None,
-            is_external: false,
-            delivery_method: None,
-            delivery_url: None,
-            is_chunked_response: Some(false),
-            supports_external_stream: false,
-            path: None,
-            aspect_ratio: None,
-            attachment_size: None,
-            average_frame_rate: None,
-            bit_depth: None,
-            color_primaries: None,
-            color_space: None,
-            color_transfer: None,
-            display_language: None,
-            extended_video_sub_type: None,
-            extended_video_sub_type_description: None,
-            extended_video_type: None,
-            is_anamorphic: None,
-            is_avc: None,
-            is_external_url: None,
-            is_hearing_impaired: None,
-            is_interlaced: None,
-            is_text_subtitle_stream: None,
-            level: None,
-            pixel_format: None,
-            profile: None,
-            protocol: Some("File".to_string()),
-            real_frame_rate: None,
-            ref_frames: None,
-            rotation: None,
-            stream_start_time_ticks: None,
-            time_base: None,
-            title: None,
-            comment: None,
-            video_range: None,
-            channel_layout: None,
-            item_id: Some(uuid_to_emby_guid(&item.id)),
-            server_id: None,
-            mime_type: item
-                .audio_codec
-                .as_deref()
-                .and_then(mime_type_for_stream_codec),
-            subtitle_location_type: None,
-        },
-    ];
-
-    streams.extend(subtitle_streams_for_item(item));
-    streams
-}
-
 pub fn subtitle_path_for_stream_index(item: &DbMediaItem, stream_index: i32) -> Option<PathBuf> {
     subtitle_streams_for_item(item)
         .into_iter()
@@ -7617,17 +7299,6 @@ fn infer_primary_image_aspect_ratio(
             }
             _ => None,
         },
-    }
-}
-
-fn video_display_title(item: &DbMediaItem) -> Option<String> {
-    match (item.width, item.height, item.video_codec.as_deref()) {
-        (Some(width), Some(height), Some(codec)) => Some(format!("{width}x{height} {codec}")),
-        (Some(width), Some(height), None) => Some(format!("{width}x{height}")),
-        (None, Some(height), Some(codec)) => Some(format!("{height}p {codec}")),
-        (None, Some(height), None) => Some(format!("{height}p")),
-        (_, _, Some(codec)) => Some(codec.to_string()),
-        _ => None,
     }
 }
 
@@ -8066,17 +7737,6 @@ fn external_urls_from_provider_map(
 
 fn genre_items_from_names(names: &[String]) -> Vec<NameLongIdDto> {
     name_long_id_items_from_names(names)
-}
-
-fn name_id_items_from_names(names: &[String]) -> Vec<NameIdDto> {
-    names
-        .iter()
-        .filter(|name| !name.trim().is_empty())
-        .map(|name| NameIdDto {
-            name: name.clone(),
-            id: name.clone(),
-        })
-        .collect()
 }
 
 fn name_long_id_items_from_names(names: &[String]) -> Vec<NameLongIdDto> {
@@ -8653,11 +8313,7 @@ pub async fn get_media_source_with_streams(
 
     // 转换DbMediaStream为MediaStreamDto
     let mut media_streams = Vec::new();
-    let mut total_bitrate: i32 = 0;
     for stream in db_streams.iter() {
-        if let Some(br) = stream.bit_rate {
-            total_bitrate += br;
-        }
         let stream_type = match stream.stream_type.as_str() {
             "video" => "Video".to_string(),
             "audio" => "Audio".to_string(),

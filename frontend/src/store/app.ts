@@ -109,7 +109,6 @@ export const selectedMediaSource = computed(() => selectedItem.value?.MediaSourc
 export const selectedStreams = computed(
   () => selectedMediaSource.value?.MediaStreams || selectedItem.value?.MediaStreams || []
 );
-export const currentItems = computed(() => (state.selectedLibraryId ? items.value : homeItems.value));
 export const currentParentName = computed(
   () => parentStack.value.at(-1)?.Name || selectedLibrary.value?.Name || '首页'
 );
@@ -122,7 +121,6 @@ export const favorites = computed(() =>
   homeItems.value.filter((item) => item.UserData?.IsFavorite).slice(0, 12)
 );
 export const latest = computed(() => recentlyAddedTitles.value.slice(0, 18));
-export const libraryCards = computed(() => libraries.value);
 export const totalLibraryItems = computed(() =>
   libraries.value.reduce((sum, library) => sum + (library.ChildCount || 0), 0)
 );

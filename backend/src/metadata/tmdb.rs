@@ -46,14 +46,6 @@ pub struct TmdbProvider {
 }
 
 impl TmdbProvider {
-    /// 创建新的TMDB提供者
-    pub fn new(api_key: String) -> Self {
-        Self::with_config(TmdbConfig {
-            api_key,
-            ..Default::default()
-        })
-    }
-
     pub fn new_with_preferences(
         api_key: String,
         preferred_metadata_language: &str,

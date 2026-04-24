@@ -1,16 +1,12 @@
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Query, State},
     Json,
 };
 use serde::Deserialize;
 
 use crate::{
     error::AppError,
-    metadata::{
-        models::ExternalPersonSearchResult, person_service::PersonService,
-        provider::MetadataProviderManager,
-    },
+    metadata::{models::ExternalPersonSearchResult, person_service::PersonService},
     state::AppState,
 };
 

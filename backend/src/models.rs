@@ -149,25 +149,6 @@ pub struct DbMediaChapter {
 }
 
 #[derive(Debug, Clone, FromRow)]
-pub struct DbSeriesEpisodeCatalog {
-    pub id: Uuid,
-    pub series_id: Uuid,
-    pub provider: String,
-    pub external_series_id: String,
-    pub external_season_id: Option<String>,
-    pub external_episode_id: Option<String>,
-    pub season_number: i32,
-    pub episode_number: i32,
-    pub episode_number_end: Option<i32>,
-    pub name: String,
-    pub overview: Option<String>,
-    pub premiere_date: Option<NaiveDate>,
-    pub image_path: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, FromRow)]
 pub struct DbPerson {
     pub id: Uuid,
     pub name: String,
@@ -181,21 +162,6 @@ pub struct DbPerson {
     pub backdrop_image_path: Option<String>,
     pub logo_image_path: Option<String>,
     pub favorite_count: i32,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, FromRow)]
-pub struct DbPersonRole {
-    pub id: Uuid,
-    pub person_id: Uuid,
-    pub media_item_id: Uuid,
-    pub role_type: String,
-    pub role: Option<String>,
-    pub sort_order: i32,
-    pub is_featured: bool,
-    pub is_leading_role: bool,
-    pub is_recurring: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -650,8 +616,7 @@ pub struct AuthenticationResult {
     pub server_id: String,
 }
 
-/// `GET /Connect/Exchange` 响应（Emby.Server.Connect.ConnectAuthenticationExchangeResult）。
-/// 参考：<https://dev.emby.media/reference/RestAPI/ConnectService/getConnectExchange.html>
+/// `GET /Connect/Exchange` 闁告繂绉寸花鏌ユ晬閸︽by.Server.Connect.ConnectAuthenticationExchangeResult闁挎稑顦埀?/// 闁告瑥鍊介埀顒€鍠涚槐?https://dev.emby.media/reference/RestAPI/ConnectService/getConnectExchange.html>
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ConnectAuthenticationExchangeResult {
@@ -896,27 +861,6 @@ pub struct DbPlaylistItem {
     pub playlist_item_id: String,
     pub sort_index: i32,
     pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct ApiKeyInfoDto {
-    #[serde(rename = "AccessToken")]
-    pub access_token: String,
-    #[serde(rename = "AppName")]
-    pub app_name: String,
-    #[serde(rename = "AppVersion")]
-    pub app_version: String,
-    #[serde(rename = "DeviceId")]
-    pub device_id: String,
-    #[serde(rename = "DeviceName")]
-    pub device_name: String,
-    #[serde(rename = "UserId", skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<String>,
-    #[serde(rename = "UserName", skip_serializing_if = "Option::is_none")]
-    pub user_name: Option<String>,
-    #[serde(rename = "DateCreated")]
-    pub date_created: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1208,13 +1152,6 @@ pub struct BaseItemDto {
 pub struct ExternalUrlDto {
     pub name: String,
     pub url: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct NameIdDto {
-    pub name: String,
-    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2125,86 +2062,6 @@ pub struct PersonDto {
     pub favorite: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct SeasonDto {
-    pub name: String,
-    pub server_id: String,
-    pub id: String,
-    #[serde(rename = "Type")]
-    pub item_type: String,
-    pub is_folder: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sort_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub index_number: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_index_number: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub series_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub series_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub overview: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub premiere_date: Option<NaiveDate>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub production_year: Option<i32>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub image_tags: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_primary_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub child_count: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_data: Option<UserItemDataDto>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct EpisodeDto {
-    pub name: String,
-    pub server_id: String,
-    pub id: String,
-    #[serde(rename = "Type")]
-    pub item_type: String,
-    pub is_folder: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sort_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub index_number: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub index_number_end: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_index_number: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub series_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub series_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub season_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub season_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub overview: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub premiere_date: Option<NaiveDate>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub production_year: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_time_ticks: Option<i64>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub image_tags: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_primary_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_data: Option<UserItemDataDto>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub media_sources: Option<Vec<MediaSourceDto>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub media_streams: Option<Vec<MediaStreamDto>>,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct SeasonsQuery {
@@ -2349,54 +2206,42 @@ pub struct EpisodesQuery {
     pub _api_key: Option<String>,
 }
 
-/// 将UUID转换为Emby API兼容的大写GUID格式
+/// 閻忓繐鎽橴ID閺夌儐鍓氬畷鍙夌▔缁″超by API闁稿繒鍘ч鎰版儍閸曨偁浜ｉ柛鎰攢UID闁哄秶鍘х槐?
 pub fn uuid_to_emby_guid(uuid: &Uuid) -> String {
     uuid.to_string().to_uppercase()
 }
-
-/// 将Option<Uuid>转换为Option<Emby GUID字符串>
-pub fn optional_uuid_to_emby_guid(uuid: Option<Uuid>) -> Option<String> {
-    uuid.map(|u| uuid_to_emby_guid(&u))
-}
-
-/// 将Emby API中的ID字符串转换为UUID
-/// 支持格式:
-/// 1. 纯UUID (如: "12345678-1234-1234-1234-123456789012")
-/// 2. Emby GUID格式 (大写UUID)
-/// 3. mediasource_{GUID} 格式 (如: "mediasource_12345678-1234-1234-1234-123456789012")
+/// 閻忓繐鎸糾by API濞戞搩鍘惧▓鎱朌閻庢稒顨堥浣圭▔閼艰埖绁柟璇℃線鐠愮兙UID
+/// 闁衡偓椤栨稑鐦柡宥囧帶缁?
+/// 1. 缂佸墽鏌桿ID (濠? "12345678-1234-1234-1234-123456789012")
+/// 2. Emby GUID闁哄秶鍘х槐?(濠㈠爢鍐ㄦ櫢UUID)
+/// 3. mediasource_{GUID} 闁哄秶鍘х槐?(濠? "mediasource_12345678-1234-1234-1234-123456789012")
 pub fn emby_id_to_uuid(id_str: &str) -> Result<Uuid, uuid::Error> {
-    // 检查是否是 mediasource_ 前缀
+    // 婵☆偀鍋撻柡灞诲劜濡叉悂宕ラ敂鑺バ?mediasource_ 闁告挸绉剁槐?
     let id_to_parse = if id_str.starts_with("mediasource_") {
-        &id_str[12..] // 移除 "mediasource_" 前缀
+        &id_str[12..] // 缂佸顭峰▍?"mediasource_" 闁告挸绉剁槐?
     } else {
         id_str
     };
 
     Uuid::parse_str(id_to_parse)
 }
-
-/// 尝试将Emby API中的ID字符串转换为UUID，如果失败返回None
-pub fn try_emby_id_to_uuid(id_str: &str) -> Option<Uuid> {
-    emby_id_to_uuid(id_str).ok()
-}
-
 fn deserialize_optional_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     use serde::Deserialize;
 
-    // 先尝试作为字符串反序列化
+    // 闁稿繐鐗嗛惃鍓ф嫚閺囨氨绋婂☉鎾虫惈閻⊙呯箔閿旇儻顩柛娆忕Т缁參宕氬Δ鈧€?
     let opt_str: Option<String> = Option::deserialize(deserializer)?;
 
     match opt_str {
-        Some(s) if s.trim().is_empty() => Ok(None), // 空字符串视为None
+        Some(s) if s.trim().is_empty() => Ok(None), // 缂佸苯鎼悺褏绮敂鑳洬閻熸瑥妫旂拹鐑磑ne
         Some(s) => {
             let normalized = s.trim();
             if normalized.eq_ignore_ascii_case("root") {
                 return Ok(Some(Uuid::nil()));
             }
-            // 尝试解析UUID
+            // 閻忓繑绻嗛惁顖滄喆閿濆棛鈧祵UID
             Uuid::parse_str(normalized)
                 .map(Some)
                 .map_err(serde::de::Error::custom)
@@ -2409,8 +2254,7 @@ where
 #[serde(rename_all = "PascalCase")]
 pub struct GetSimilarItems {
     #[serde(skip)]
-    pub id: Option<String>, // 从路径参数提取，不由查询字符串解析
-    #[serde(default, alias = "UserId", alias = "userId")]
+    pub id: Option<String>, // 濞寸姴姘﹂惌鎯ь嚗閸曨偄妫橀柡浣哄瑜颁線宕ｉ弽鐢电濞戞挸绉堕弫閬嶅蓟閵夘煈鍤勯悗娑欘殘椤戜焦绋夐懠缂庢帡寮?    #[serde(default, alias = "UserId", alias = "userId")]
     pub user_id: Option<Uuid>,
     #[serde(default, alias = "Limit")]
     pub limit: Option<i64>,
@@ -2482,8 +2326,7 @@ pub struct PlaybackInfoDto {
 #[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct DeviceProfile {
-    // 简化设备配置，后续可扩展
-    #[serde(default)]
+    // 缂佺姭鍋撻柛鏍ㄧ墳椤旀洘寰勯崶顒€甯崇紓鍐惧櫙缁辨繈宕ユ惔锝囨暰闁告瑯鍨辨晶璺ㄤ沪?    #[serde(default)]
     pub max_streaming_bitrate: Option<i64>,
     #[serde(default)]
     pub max_static_bitrate: Option<i64>,

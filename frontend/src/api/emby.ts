@@ -1147,19 +1147,6 @@ export class EmbyApi {
     });
   }
 
-  async updateUserData(
-    itemId: string,
-    payload: Partial<
-      Pick<BaseItemDto['UserData'], 'PlaybackPositionTicks' | 'PlayCount' | 'IsFavorite' | 'Played'>
-    >
-  ) {
-    const userId = this.requireUserId();
-    return this.request<BaseItemDto['UserData']>(`/Users/${userId}/Items/${itemId}/UserData`, {
-      method: 'POST',
-      body: payload
-    });
-  }
-
   async changePassword(userId: string, payload: { CurrentPw?: string; CurrentPassword?: string; NewPw: string }) {
     return this.request<void>(`/Users/${userId}/Password`, {
       method: 'POST',
