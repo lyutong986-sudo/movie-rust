@@ -529,6 +529,94 @@ async fn set_system_setting(pool: &sqlx::PgPool, key: &str, value: Value) -> Res
     Ok(())
 }
 
+pub async fn get_setting_value(pool: &sqlx::PgPool, key: &str) -> Result<Option<Value>, AppError> {
+    get_system_setting(pool, key).await
+}
+
+pub async fn set_setting_value(
+    pool: &sqlx::PgPool,
+    key: &str,
+    value: Value,
+) -> Result<(), AppError> {
+    set_system_setting(pool, key, value).await
+}
+
+pub async fn delete_setting_value(pool: &sqlx::PgPool, key: &str) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM system_settings WHERE key = $1")
+        .bind(key)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_media_item(pool: &sqlx::PgPool, item_id: Uuid) -> Result<bool, AppError> {
+    let result = sqlx::query("DELETE FROM media_items WHERE id = $1")
+        .bind(item_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn add_media_item_tag(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    tag: &str,
+) -> Result<bool, AppError> {
+    let normalized = tag.trim();
+    if normalized.is_empty() {
+        return Ok(false);
+    }
+    let result = sqlx::query(
+        r#"
+        UPDATE media_items
+        SET tags = (
+            SELECT ARRAY(
+                SELECT DISTINCT value
+                FROM unnest(array_append(COALESCE(tags, ARRAY[]::text[]), $2::text)) AS value
+                WHERE btrim(value) <> ''
+                ORDER BY value
+            )
+        ),
+        date_modified = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(item_id)
+    .bind(normalized)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn remove_media_item_tag(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    tag: &str,
+) -> Result<bool, AppError> {
+    let normalized = tag.trim();
+    if normalized.is_empty() {
+        return Ok(false);
+    }
+    let result = sqlx::query(
+        r#"
+        UPDATE media_items
+        SET tags = ARRAY(
+            SELECT value
+            FROM unnest(COALESCE(tags, ARRAY[]::text[])) AS value
+            WHERE lower(value) <> lower($2::text)
+            ORDER BY value
+        ),
+        date_modified = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(item_id)
+    .bind(normalized)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub async fn get_genres(
     pool: &sqlx::PgPool,
     _start_index: Option<i32>,

@@ -566,69 +566,130 @@ async fn forgot_password_pin() -> Result<StatusCode, AppError> {
 
 async fn user_connect_link(
     session: AuthSession,
+    State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
+    Json(payload): Json<Value>,
 ) -> Result<StatusCode, AppError> {
     auth::ensure_user_access(&session, user_id)?;
+    repository::set_setting_value(
+        &state.pool,
+        &format!("user_connect_link:{user_id}"),
+        payload,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn user_connect_link_delete(
     session: AuthSession,
+    State(state): State<AppState>,
     Path(user_id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
     auth::ensure_user_access(&session, user_id)?;
+    repository::delete_setting_value(&state.pool, &format!("user_connect_link:{user_id}")).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn user_track_selection(
     session: AuthSession,
+    State(state): State<AppState>,
     Path((user_id, _track_type)): Path<(Uuid, String)>,
+    Json(payload): Json<Value>,
 ) -> Result<StatusCode, AppError> {
     auth::ensure_user_access(&session, user_id)?;
+    repository::set_setting_value(
+        &state.pool,
+        &format!("user_track_selection:{user_id}:{}", _track_type.to_ascii_lowercase()),
+        payload,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn user_track_selection_delete(
     session: AuthSession,
+    State(state): State<AppState>,
     Path((user_id, _track_type)): Path<(Uuid, String)>,
 ) -> Result<StatusCode, AppError> {
     auth::ensure_user_access(&session, user_id)?;
+    repository::delete_setting_value(
+        &state.pool,
+        &format!("user_track_selection:{user_id}:{}", _track_type.to_ascii_lowercase()),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RatingQuery {
+    #[serde(default, alias = "likes")]
+    likes: Option<bool>,
+    #[serde(default, alias = "rating")]
+    rating: Option<f64>,
 }
 
 async fn user_item_rating(
     session: AuthSession,
+    State(state): State<AppState>,
     Path((user_id, _item_id)): Path<(Uuid, String)>,
+    Query(query): Query<RatingQuery>,
 ) -> Result<StatusCode, AppError> {
     auth::ensure_user_access(&session, user_id)?;
+    let item_id = crate::models::emby_id_to_uuid(&_item_id)
+        .map_err(|_| AppError::BadRequest("无效的 itemId".to_string()))?;
+    repository::set_setting_value(
+        &state.pool,
+        &format!("user_item_rating:{user_id}:{item_id}"),
+        serde_json::json!({
+            "ItemId": _item_id,
+            "Likes": query.likes,
+            "Rating": query.rating
+        }),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn user_item_rating_delete(
     session: AuthSession,
+    State(state): State<AppState>,
     Path((user_id, _item_id)): Path<(Uuid, String)>,
 ) -> Result<StatusCode, AppError> {
     auth::ensure_user_access(&session, user_id)?;
+    let item_id = crate::models::emby_id_to_uuid(&_item_id)
+        .map_err(|_| AppError::BadRequest("无效的 itemId".to_string()))?;
+    repository::delete_setting_value(&state.pool, &format!("user_item_rating:{user_id}:{item_id}"))
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn user_typed_settings(
     session: AuthSession,
+    State(state): State<AppState>,
     Path((user_id, key)): Path<(Uuid, String)>,
 ) -> Result<Json<Value>, AppError> {
     auth::ensure_user_access(&session, user_id)?;
-    Ok(Json(serde_json::json!({
-        "Key": key,
-        "Value": {}
-    })))
+    let setting_key = format!("user_typed_settings:{user_id}:{}", key.to_ascii_lowercase());
+    let value = repository::get_setting_value(&state.pool, &setting_key)
+        .await?
+        .unwrap_or_else(|| serde_json::json!({}));
+    Ok(Json(serde_json::json!({ "Key": key, "Value": value })))
 }
 
 async fn update_user_typed_settings(
     session: AuthSession,
+    State(state): State<AppState>,
     Path((user_id, _key)): Path<(Uuid, String)>,
-    Json(_payload): Json<Value>,
+    Json(payload): Json<Value>,
 ) -> Result<StatusCode, AppError> {
     auth::ensure_user_access(&session, user_id)?;
+    repository::set_setting_value(
+        &state.pool,
+        &format!("user_typed_settings:{user_id}:{}", _key.to_ascii_lowercase()),
+        payload,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

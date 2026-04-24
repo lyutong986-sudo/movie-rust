@@ -1568,7 +1568,7 @@ async fn delete_item(
     }
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
-    if repository::get_media_item(&state.pool, item_id).await?.is_none() {
+    if !repository::delete_media_item(&state.pool, item_id).await? {
         return Err(AppError::NotFound("媒体条目不存在".to_string()));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -1584,10 +1584,13 @@ async fn delete_item_info(
     }
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
-    let exists = repository::get_media_item(&state.pool, item_id).await?.is_some();
+    let item = repository::get_media_item(&state.pool, item_id).await?;
+    let exists = item.is_some();
     Ok(Json(json!({
         "CanDelete": exists,
-        "IsPermanent": false
+        "IsPermanent": false,
+        "ItemName": item.as_ref().map(|value| value.name.clone()),
+        "ItemType": item.as_ref().map(|value| value.item_type.clone())
     })))
 }
 
@@ -1602,6 +1605,12 @@ async fn make_item_private(
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     ensure_media_item_exists(&state, item_id).await?;
+    repository::set_setting_value(
+        &state.pool,
+        &format!("item_visibility:{item_id}"),
+        json!({"IsPublic": false}),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1616,20 +1625,50 @@ async fn make_item_public(
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     ensure_media_item_exists(&state, item_id).await?;
+    repository::set_setting_value(
+        &state.pool,
+        &format!("item_visibility:{item_id}"),
+        json!({"IsPublic": true}),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct TagMutationQuery {
+    #[serde(default, alias = "tag")]
+    tag: Option<String>,
+    #[serde(default, alias = "name")]
+    name: Option<String>,
+}
+
+fn extract_tag(query: &TagMutationQuery) -> Result<String, AppError> {
+    query
+        .tag
+        .as_deref()
+        .or(query.name.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| AppError::BadRequest("缺少标签参数".to_string()))
 }
 
 async fn add_item_tag(
     session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
+    Query(query): Query<TagMutationQuery>,
 ) -> Result<StatusCode, AppError> {
     if !session.is_admin {
         return Err(AppError::Forbidden);
     }
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
-    ensure_media_item_exists(&state, item_id).await?;
+    let tag = extract_tag(&query)?;
+    if !repository::add_media_item_tag(&state.pool, item_id, &tag).await? {
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1637,13 +1676,17 @@ async fn delete_item_tag(
     session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
+    Query(query): Query<TagMutationQuery>,
 ) -> Result<StatusCode, AppError> {
     if !session.is_admin {
         return Err(AppError::Forbidden);
     }
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
-    ensure_media_item_exists(&state, item_id).await?;
+    let tag = extract_tag(&query)?;
+    if !repository::remove_media_item_tag(&state.pool, item_id, &tag).await? {
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1683,29 +1726,68 @@ async fn item_prefixes(_session: AuthSession) -> Result<Json<Vec<String>>, AppEr
 }
 
 async fn items_access(
-    _session: AuthSession,
+    session: AuthSession,
+    State(state): State<AppState>,
     Query(query): Query<ItemsQuery>,
 ) -> Result<Json<Value>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    let item_ids = parse_emby_uuid_list(query.ids.as_deref());
+    if item_ids.is_empty() {
+        return Ok(Json(json!({
+            "UserId": user_id.to_string().to_uppercase(),
+            "HasAccess": true,
+            "Items": []
+        })));
+    }
+    let mut items = Vec::with_capacity(item_ids.len());
+    let mut has_access = true;
+    for item_id in item_ids {
+        let access = repository::user_can_access_item(&state.pool, user_id, item_id).await?;
+        has_access &= access;
+        items.push(json!({
+            "ItemId": uuid_to_emby_guid(&item_id),
+            "HasAccess": access
+        }));
+    }
     Ok(Json(json!({
-        "UserId": query.user_id.map(|id| id.to_string().to_uppercase()),
-        "HasAccess": true
+        "UserId": user_id.to_string().to_uppercase(),
+        "HasAccess": has_access,
+        "Items": items
     })))
 }
 
 async fn delete_items_bulk(
     session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<ItemsQuery>,
 ) -> Result<StatusCode, AppError> {
     if !session.is_admin {
         return Err(AppError::Forbidden);
+    }
+    let item_ids = parse_emby_uuid_list(query.ids.as_deref());
+    for item_id in item_ids {
+        let _ = repository::delete_media_item(&state.pool, item_id).await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn reset_items_metadata(
     session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<ItemsQuery>,
 ) -> Result<StatusCode, AppError> {
     if !session.is_admin {
         return Err(AppError::Forbidden);
+    }
+    let item_ids = parse_emby_uuid_list(query.ids.as_deref());
+    for item_id in item_ids {
+        repository::set_setting_value(
+            &state.pool,
+            &format!("metadata_reset:{item_id}"),
+            json!({"RequestedAt": chrono::Utc::now()}),
+        )
+        .await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
