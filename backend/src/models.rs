@@ -2191,6 +2191,14 @@ pub struct GetSimilarItems {
     pub user_id: Option<Uuid>,
     #[serde(default, alias = "Limit")]
     pub limit: Option<i64>,
+    #[serde(default, alias = "StartIndex", alias = "startIndex")]
+    pub start_index: Option<i64>,
+    #[serde(
+        default,
+        alias = "GroupItemsIntoCollections",
+        alias = "groupItemsIntoCollections"
+    )]
+    pub group_items_into_collections: Option<bool>,
     #[serde(default, alias = "Fields")]
     pub fields: Option<String>,
     #[serde(default, alias = "EnableImages", alias = "enableImages")]

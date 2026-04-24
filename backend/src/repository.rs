@@ -8875,6 +8875,7 @@ pub async fn find_similar_items(
     limit: i64,
     user_id: Option<Uuid>,
     server_id: Uuid,
+    group_items_into_collections: bool,
 ) -> Result<Vec<BaseItemDto>, AppError> {
     let target_identity = item_identity_key(target_item, &provider_ids_for_item(target_item));
 
@@ -8913,7 +8914,7 @@ pub async fn find_similar_items(
             }
             let identity_key = item_identity_key(&item, &provider_ids_for_item(&item))
                 .unwrap_or_else(|| format!("item:{}", item.id));
-            if !seen_identity_keys.insert(identity_key) {
+            if group_items_into_collections && !seen_identity_keys.insert(identity_key) {
                 continue;
             }
             result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
@@ -8965,7 +8966,7 @@ pub async fn find_similar_items(
             item_identity_key(&item, &provider_ids_for_item(&item)).unwrap_or_else(|| {
                 format!("item:{}", item.id)
             });
-        if !seen_identity_keys.insert(identity_key) {
+        if group_items_into_collections && !seen_identity_keys.insert(identity_key) {
             continue;
         }
         result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
@@ -9009,7 +9010,7 @@ pub async fn find_similar_items(
             }
             let identity_key = item_identity_key(&item, &provider_ids_for_item(&item))
                 .unwrap_or_else(|| format!("item:{}", item.id));
-            if !seen_identity_keys.insert(identity_key) {
+            if group_items_into_collections && !seen_identity_keys.insert(identity_key) {
                 continue;
             }
             result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);

@@ -1477,6 +1477,7 @@ async fn item_instant_mix(
         20,
         Some(session.user_id),
         state.config.server_id,
+        true,
     )
     .await?;
     Ok(Json(QueryResult {
@@ -4465,20 +4466,29 @@ async fn get_similar_items(
     // 简单的相似性算法：基于类型和标签查找相似项目
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
+    let start_index = query.start_index.unwrap_or(0).max(0) as usize;
+    let limit = query.limit.unwrap_or(20).max(0);
+    let group_items_into_collections = query.group_items_into_collections.unwrap_or(true);
+    let fetch_limit = limit.saturating_add(start_index as i64);
     let similar_items = repository::find_similar_items(
         &state.pool,
         &target_item,
-        query.limit.unwrap_or(20),
+        fetch_limit,
         Some(user_id),
         state.config.server_id,
+        group_items_into_collections,
     )
     .await?;
-
     let total_record_count = similar_items.len() as i64;
+    let items = similar_items
+        .into_iter()
+        .skip(start_index)
+        .take(limit as usize)
+        .collect::<Vec<_>>();
     Ok(Json(QueryResult {
-        items: similar_items,
+        items,
         total_record_count,
-        start_index: Some(0),
+        start_index: Some(start_index as i64),
     }))
 }
 

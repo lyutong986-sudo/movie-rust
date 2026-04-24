@@ -789,3 +789,29 @@ npx vite build         # 构建成功
 ### D. 校验
 
 - `backend> cargo build` —— ✅ 通过
+
+## 二十二、第二十二轮：`/Similar` 参数兼容补齐 + 播放页按需加载（2026-04-24）
+
+> 范围：按 EmbySDK 请求习惯补齐 Similar 查询参数语义；优化 `hls.js + video.js` 引入方式，降低播放页首包体积。
+
+### A. `/Items/{id}/Similar` 兼容增强
+
+| 修复点 | 说明 |
+| --- | --- |
+| `GetSimilarItems` 新增参数 | `StartIndex` / `startIndex`、`GroupItemsIntoCollections` / `groupItemsIntoCollections`。 |
+| 分页行为 | `routes/items.rs::get_similar_items` 支持 `StartIndex + Limit` 分页切片，返回 `start_index` 与分页后的 `items`。 |
+| 分组行为 | `repository::find_similar_items` 新增 `group_items_into_collections` 参数：为 `true` 时按 `item_identity_key` 去重（同内容多版本合并）；为 `false` 时保留多版本。 |
+| 兼容调用面 | `Item/InstantMix` 调用路径显式传 `group_items_into_collections = true`，保持既有“去重推荐”语义。 |
+
+### B. 播放页播放器内核改为动态加载
+
+| 修复点 | 说明 |
+| --- | --- |
+| 移除静态导入 | `VideoPlaybackPage.vue` 去掉顶层 `import 'video.js' / 'hls.js' / 'video.js.css'`。 |
+| 按需加载 | 新增 `ensurePlaybackEngines()`：进入播放页后再 `import('video.js')`、`import('hls.js')`、`import('video.js/dist/video-js.css')`。 |
+| 行为不变 | 仍保持“优先 HLS，失败回退直链”的播放候选策略与现有自研控制层。 |
+
+### C. 构建结果
+
+- `frontend> npm run build` —— ✅ 通过
+- 播放页主 chunk 从先前约 **1.2MB** 降到约 **17KB**（播放器核心拆分为独立异步 chunk：`hls` / `video.es` / `video-js.css`）。

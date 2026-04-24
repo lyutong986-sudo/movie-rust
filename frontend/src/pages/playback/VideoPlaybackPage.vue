@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import Hls from 'hls.js';
-import videojs from 'video.js';
 import type Player from 'video.js/dist/types/player';
-import 'video.js/dist/video-js.css';
+import type Hls from 'hls.js';
 import type { BaseItemDto, MediaStreamDto } from '../../api/emby';
 import {
   api,
@@ -23,6 +21,11 @@ const router = useRouter();
 const videoRef = ref<HTMLVideoElement | null>(null);
 const playerRef = ref<Player | null>(null);
 const hlsRef = ref<Hls | null>(null);
+type VideoJsFactory = typeof import('video.js')['default'];
+type HlsConstructor = typeof import('hls.js')['default'];
+const videoJsFactoryRef = ref<VideoJsFactory | null>(null);
+const hlsConstructorRef = ref<HlsConstructor | null>(null);
+const playbackEngineReady = ref(false);
 const loading = ref(false);
 const error = ref('');
 const item = ref<BaseItemDto | null>(null);
@@ -151,10 +154,11 @@ watch(
   }
 );
 
-onMounted(() => {
+onMounted(async () => {
+  await ensurePlaybackEngines();
   initVideoJsPlayer();
   if (sourceCandidates.value.length) {
-    void applyPlaybackSource(0);
+    await applyPlaybackSource(0);
   }
   document.addEventListener('fullscreenchange', onFullscreenChange);
   window.addEventListener('keydown', onKeyDown);
@@ -170,9 +174,24 @@ onBeforeUnmount(async () => {
   await stopPlayback();
 });
 
+async function ensurePlaybackEngines() {
+  if (playbackEngineReady.value) return;
+  const [{ default: videojs }, { default: HlsCtor }] = await Promise.all([
+    import('video.js'),
+    import('hls.js'),
+    import('video.js/dist/video-js.css')
+  ]);
+  videoJsFactoryRef.value = videojs;
+  hlsConstructorRef.value = HlsCtor;
+  playbackEngineReady.value = true;
+}
+
 function initVideoJsPlayer() {
   if (playerRef.value || !videoRef.value) return;
-  playerRef.value = videojs(videoRef.value, {
+  const videojs = videoJsFactoryRef.value;
+  if (!videojs) return;
+  const createPlayer = videojs as unknown as (element: HTMLVideoElement, options: unknown) => Player;
+  playerRef.value = createPlayer(videoRef.value, {
     autoplay: true,
     controls: false,
     preload: 'auto',
@@ -193,28 +212,30 @@ function destroyHls() {
 }
 
 async function applyPlaybackSource(keepTime = 0) {
+  await ensurePlaybackEngines();
   const player = playerRef.value;
   const media = videoRef.value;
   const candidate = sourceCandidates.value[activeSourceCandidate.value];
+  const HlsCtor = hlsConstructorRef.value;
   if (!player || !media || !candidate) return;
 
   destroyHls();
   media.pause();
   media.currentTime = Math.max(0, keepTime);
 
-  if (candidate.type === 'application/x-mpegURL' && Hls.isSupported()) {
-    const hls = new Hls({
+  if (candidate.type === 'application/x-mpegURL' && HlsCtor?.isSupported()) {
+    const hls = new HlsCtor({
       enableWorker: true
     });
     hlsRef.value = hls;
     hls.loadSource(candidate.src);
     hls.attachMedia(media);
-    hls.on(Hls.Events.ERROR, (_event, data) => {
+    hls.on(HlsCtor.Events.ERROR, (_event, data) => {
       if (data.fatal) {
         void tryNextSource(data.details || 'hls_fatal_error');
       }
     });
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+    hls.on(HlsCtor.Events.MANIFEST_PARSED, () => {
       void media.play().catch(() => {
         // 自动播放被策略拦截时保持静默，等待用户交互
       });
