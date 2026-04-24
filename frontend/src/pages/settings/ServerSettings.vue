@@ -1,7 +1,24 @@
 <script setup lang="ts">
 import { onMounted } from 'vue';
-import SettingsNav from '../../components/SettingsNav.vue';
+import SettingsLayout from '../../layouts/SettingsLayout.vue';
 import { isAdmin, loadAdminData, saveServerSettings, state, systemInfo } from '../../store/app';
+
+const uiCultureOptions = [
+  { label: '简体中文', value: 'zh-CN' },
+  { label: 'English', value: 'en-US' }
+];
+const metaLangOptions = [
+  { label: '中文', value: 'zh' },
+  { label: 'English', value: 'en' },
+  { label: '日本語', value: 'ja' },
+  { label: '한국어', value: 'ko' }
+];
+const countryOptions = [
+  { label: '中国', value: 'CN' },
+  { label: 'United States', value: 'US' },
+  { label: '日本', value: 'JP' },
+  { label: '韩国', value: 'KR' }
+];
 
 onMounted(async () => {
   if (isAdmin.value) {
@@ -11,80 +28,78 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section class="settings-shell">
-    <SettingsNav />
+  <SettingsLayout>
+    <div v-if="!isAdmin" class="flex flex-col items-center gap-2 rounded-xl border border-dashed border-default p-10 text-center">
+      <UIcon name="i-lucide-lock" class="size-10 text-muted" />
+      <h3 class="text-highlighted text-lg font-semibold">需要管理员权限</h3>
+      <p class="text-muted text-sm">当前账户不能修改服务器配置。</p>
+    </div>
 
-    <div class="settings-content">
-      <div v-if="!isAdmin" class="empty">
-        <p>服务器</p>
-        <h2>需要管理员权限</h2>
-        <p>当前账户不能修改服务器配置。</p>
+    <form v-else class="space-y-4" @submit.prevent="saveServerSettings">
+      <div class="grid gap-3 sm:grid-cols-3">
+        <UCard variant="soft">
+          <p class="text-muted text-xs">版本</p>
+          <p class="text-highlighted mt-1 text-base font-semibold">{{ systemInfo?.Version || '0.1.0' }}</p>
+          <p class="text-muted text-xs">{{ systemInfo?.ProductName || 'Movie Rust' }}</p>
+        </UCard>
+        <UCard variant="soft">
+          <p class="text-muted text-xs">系统</p>
+          <p class="text-highlighted mt-1 text-base font-semibold">{{ systemInfo?.OperatingSystem || 'Unknown' }}</p>
+          <p class="text-muted text-xs">与 Jellyfin/Emby 兼容接口共存</p>
+        </UCard>
+        <UCard variant="soft">
+          <p class="text-muted text-xs">引导状态</p>
+          <p class="text-highlighted mt-1 text-base font-semibold">
+            {{ state.startupWizardCompleted ? '已完成' : '未完成' }}
+          </p>
+          <p class="text-muted text-xs">管理员账户通过首次启动向导创建</p>
+        </UCard>
       </div>
 
-      <form v-else class="settings-page settings-form" @submit.prevent="saveServerSettings">
-        <div class="stat-grid">
-          <article>
-            <small>版本</small>
-            <strong>{{ systemInfo?.Version || '0.1.0' }}</strong>
-            <span>{{ systemInfo?.ProductName || 'Movie Rust' }}</span>
-          </article>
-          <article>
-            <small>系统</small>
-            <strong>{{ systemInfo?.OperatingSystem || 'Unknown' }}</strong>
-            <span>与 Jellyfin/Emby 兼容接口共存</span>
-          </article>
-          <article>
-            <small>引导状态</small>
-            <strong>{{ state.startupWizardCompleted ? '已完成' : '未完成' }}</strong>
-            <span>管理员账户通过首次启动向导创建</span>
-          </article>
-        </div>
+      <UAlert v-if="state.error" color="error" icon="i-lucide-triangle-alert" :description="state.error" />
+      <UAlert v-else-if="state.message" color="success" icon="i-lucide-check" :description="state.message" />
 
-        <label>
-          服务器名称
-          <input v-model="state.serverName" />
-        </label>
-        <label>
-          界面语言
-          <select v-model="state.uiCulture">
-            <option value="zh-CN">简体中文</option>
-            <option value="en-US">English</option>
-          </select>
-        </label>
-        <label>
-          元数据语言
-          <select v-model="state.metadataLanguage">
-            <option value="zh">中文</option>
-            <option value="en">English</option>
-            <option value="ja">日本語</option>
-            <option value="ko">한국어</option>
-          </select>
-        </label>
-        <label>
-          元数据国家/地区
-          <select v-model="state.metadataCountry">
-            <option value="CN">中国</option>
-            <option value="US">United States</option>
-            <option value="JP">日本</option>
-            <option value="KR">韩国</option>
-          </select>
-        </label>
-        <label>
-          影片扫描入库线程数
-          <input v-model.number="state.libraryScanThreadCount" min="1" max="32" type="number" />
-        </label>
-        <label>
-          STRM URL 读取线程数
-          <input v-model.number="state.strmAnalysisThreadCount" min="1" max="64" type="number" />
-        </label>
-        <label>
-          TMDB 下载元数据线程数
-          <input v-model.number="state.tmdbMetadataThreadCount" min="1" max="32" type="number" />
-        </label>
-        <div class="button-row">
-          <button :disabled="state.busy" type="submit">保存服务器设置</button>
+      <UCard>
+        <template #header>
+          <h3 class="text-highlighted text-sm font-semibold">基础信息</h3>
+        </template>
+        <div class="grid gap-4 sm:grid-cols-2">
+          <UFormField label="服务器名称">
+            <UInput v-model="state.serverName" class="w-full" />
+          </UFormField>
+          <UFormField label="界面语言">
+            <USelect v-model="state.uiCulture" :items="uiCultureOptions" class="w-full" />
+          </UFormField>
+          <UFormField label="元数据语言">
+            <USelect v-model="state.metadataLanguage" :items="metaLangOptions" class="w-full" />
+          </UFormField>
+          <UFormField label="元数据国家/地区">
+            <USelect v-model="state.metadataCountry" :items="countryOptions" class="w-full" />
+          </UFormField>
         </div>
-      </form>
-    </div>
-  </section>
+      </UCard>
+
+      <UCard>
+        <template #header>
+          <h3 class="text-highlighted text-sm font-semibold">并发线程</h3>
+        </template>
+        <div class="grid gap-4 sm:grid-cols-3">
+          <UFormField label="影片扫描入库线程数" hint="扫描媒体库时使用的并行任务数">
+            <UInput v-model.number="state.libraryScanThreadCount" type="number" :min="1" :max="32" class="w-full" />
+          </UFormField>
+          <UFormField label="STRM URL 读取线程数" hint="解析 STRM 链接的并发数">
+            <UInput v-model.number="state.strmAnalysisThreadCount" type="number" :min="1" :max="64" class="w-full" />
+          </UFormField>
+          <UFormField label="TMDB 元数据线程数" hint="抓取第三方元数据的并发数">
+            <UInput v-model.number="state.tmdbMetadataThreadCount" type="number" :min="1" :max="32" class="w-full" />
+          </UFormField>
+        </div>
+        <template #footer>
+          <div class="flex justify-end">
+            <UButton type="submit" :loading="state.busy" icon="i-lucide-save">保存服务器设置</UButton>
+          </div>
+        </template>
+      </UCard>
+    </form>
+  </SettingsLayout>
 </template>

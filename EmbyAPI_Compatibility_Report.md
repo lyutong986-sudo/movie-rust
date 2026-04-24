@@ -269,3 +269,167 @@ Finished `dev` profile ... 0 error
 
 - 本地既有开发库：执行一次 `DROP DATABASE movie_rust; CREATE DATABASE movie_rust;`（或等价的 docker volume 清理）后重启后端；`0001_schema.sql` 会一次性建出全量 schema。
 - 生产 / 保留老数据的实例：无需手动干预，启动时 `ensure_schema_compatibility` 会按需 `ADD COLUMN IF NOT EXISTS`，既有数据不动；历史 `_sqlx_migrations` 里残留的旧版本记录可留可删。
+
+## 十一、第九轮：前端 UI / 交互 / 设计 / 排版全面重写（Nuxt UI v4）
+
+### 起因
+
+此前前端是用纯 Vue 3 + 一坨手写 `styles.css`（约 1.4k 行）堆出来的界面，导致：
+
+- 视觉风格与现代 Emby / Jellyfin 客户端差距大，按钮、表单、弹窗各自为政；
+- 组件样式是"一次性"CSS，没有 design token，不能跟随暗色 / 明色主题；
+- 添加一个新页面经常要再抄一份 `.empty / .settings-shell / .button-row` 布局，极度重复造轮子。
+
+用户提出"使用并遵循 `模板项目\ui-4`，不要重复造轮子"，即直接接入 Nuxt UI v4（Vue 生态的最现代 UI kit，由 Reka UI + Tailwind CSS 4 + Tailwind Variants 组成），让后续所有页面直接用 `U*` 组件 + Tailwind class 维护。
+
+### 改造内容
+
+1. **依赖与构建**
+   - `frontend/package.json`：接入 `@nuxt/ui ^4.6.1`、`tailwindcss ^4`、`zod ^3`；
+   - `frontend/vite.config.ts`：装载 `@nuxt/ui/vite` 插件，配置 primary=sky、neutral=slate；保留原有所有 Emby 兼容端点代理；
+   - `frontend/src/main.ts`：用 `@nuxt/ui/vue-plugin` 注册全局 Nuxt UI Vue 插件；
+   - `frontend/src/assets/main.css`：`@import "tailwindcss"` + `@import "@nuxt/ui"`，设置字体与全局容器；
+   - `frontend/tsconfig.json`：加入 `@nuxt/ui/vue-plugin` 全局组件类型；
+   - **删除** 老的 `frontend/src/styles.css`（1436 行自写 CSS），全部样式改为 Nuxt UI design token + Tailwind class。
+
+2. **壳 / 布局层**
+   - `App.vue`：外层统一用 `<UApp>`，根据 `route.meta.layout` 分发到 `AppLayout`（主 Dashboard）、`AuthLayout`（登录/选服/引导）、或 `fullpage`（播放器）。
+   - `layouts/AppLayout.vue`：改写为 `UDashboardGroup + UDashboardSidebar + UDashboardPanel + UDashboardNavbar + UNavigationMenu` 组合；侧栏展示用户卡 + 一级导航 + 媒体库导航 + 管理入口，顶栏含搜索、返回、暗色模式切换；`UDropdownMenu` 做用户菜单。
+   - `layouts/AuthLayout.vue`：新建，渐变背景 + 品牌头 + `UCard` 容纳登录/选服/引导表单，并统一在底部展示 `state.error / state.message`。
+   - `layouts/SettingsLayout.vue`：新建，`grid-cols-[220px_1fr]` 侧边栏 + 内容区，所有 Settings 页共用。
+   - `components/SettingsNav.vue`：完全改用 `UNavigationMenu` + Lucide icon，按是否管理员动态过滤条目。
+
+3. **页面全量重写**（均已通过 `vue-tsc --noEmit` + `vite build`）
+   - **`pages/HomePage.vue`**：Hero + 媒体库卡片 + 继续观看 / 收藏 / 最新等 row，全部用 `UBadge / UButton / UIcon / MediaCard` 重画。
+   - **`pages/library/LibraryPage.vue`**：面包屑 / 排序筛选 / `USelect / UButton` 控件 + grid 海报区 + 空态。
+   - **`pages/item/ItemPage.vue`**、**`pages/series/SeriesPage.vue`**：大图 hero + `UTabs`（概述 / 演职员 / 媒体流 / 剧集）+ `UCard / UBadge / UIcon / UProgress / UAlert` 元素；episode 卡片支持缩略图 + 播放悬浮按钮。
+   - **`pages/genre/GenrePage.vue`**：类型视图全部用 Tailwind grid + `UAlert / UProgress` 空态/错误态。
+   - **`pages/SearchPage.vue`**：`UTabs` 分类结果 + `UProgress` loading + `UAlert` 错误。
+   - **`pages/WizardPage.vue`**：首启引导 3 步 + `UProgress / UBadge / UFormField / USelect / USwitch`，全程有 `UAlert` 状态反馈。
+   - **`pages/server/{Login,SelectServer,AddServer}Page.vue`**：登录/选服/添加服务器全部 Nuxt UI 表单 + `UAvatar / UCard / UFormField / UInput`，登录页支持头像列表直接点击登录或手动输入。
+   - **`pages/settings/*` 共 11 个页面**：SettingsIndex / Account / Playback / Subtitles / Server / Transcoding / Library / Users / Devices / ApiKeys / LogsActivity / Network 全部通过 `SettingsLayout + UCard + UFormField + UInput/USelect/USwitch/UCheckbox/UBadge/UAlert` 重写；权限不足页统一为 `UIcon + 标题 + 描述` 的空态卡片。
+   - **`pages/playback/VideoPlaybackPage.vue`**：全屏黑底 `<video>` + 渐变 overlay，`UButton` icon 播放/快进/快退，`UIcon` 状态，媒体源/媒体流用半透明 glass card 展示；overlay 自动隐藏。
+   - **`pages/playback/MusicPlaybackPage.vue`**：封面 blur 背景 + 左右分栏（专辑封面 + 控制 / 播放队列），队列高亮当前曲目并显示 `i-lucide-audio-lines`。
+
+4. **组件层重写**
+   - `components/MediaCard.vue`：海报 hover 播放按钮 + 进度 `UProgress` + 已看 / 收藏 badge；全部 Tailwind。
+   - `components/AddLibraryDialog.vue`：大弹窗与文件夹选择器都换成 `UModal + UFormField + UInput/USelect/USwitch/UAlert/UIcon`；`open` 采用 v-model 风格。
+
+5. **类型补齐**
+   - `api/emby.ts#BaseItemDto` 追加 `OfficialRating / CommunityRating / CriticRating / Tags / Studios / People / Taglines / Tagline`，消除详情页引用这些字段时的 TS 报错。
+
+### 验证
+
+``````
+cd frontend
+npm install          # 依赖就位
+npx vue-tsc --noEmit # 0 error
+npx vite build       # 构建成功（生成 dist/，无类型/语法错误）
+``````
+
+### 收益
+
+- 整个前端统一使用 Nuxt UI v4 design token：暗色 / 明色 / `color="primary|neutral|error|success"` 一套处理；
+- 各页面不再重复写 `.empty / .settings-shell / .button-row`，新增页面只用 `UCard + UFormField` 拼装即可；
+- 无障碍（focus ring、键盘导航、aria）由 Reka UI 原生保证；
+- 视觉上与现代 Emby / Jellyfin 客户端拉齐，并保留项目专属的品牌渐变（radial primary/indigo + slate 中性色）；
+- 整个 `styles.css` 被删掉 → 代码量显著下降，后续所有 UI 维护改在页面内的 Tailwind class 上完成，不再污染全局 CSS。
+
+## 十二、第十轮：前端体验与构建优化
+
+### 背景
+
+第九轮重写完成后进入打磨阶段，解决以下真实体验 / 性能问题：
+
+1. `AppLayout` 里 `UColorModeButton v-if="!$slots.default"` 永远为 false，顶部 bar 多出一个冗余切换按钮，侧边栏头部的切换按钮反而不显示。
+2. 顶部工具栏的返回按钮在首页也显示，点一下会退到站外。
+3. 侧边栏主导航同时出现「控制台 / 设置」两项，语义重复，真正的二级入口已由 Settings 页负责。
+4. HomePage 的继续观看 / 收藏 / 最近添加 / 每个库的最新都用栅格 `grid` 摆放，内容多时会占用 4~5 屏，不符合主流媒体 UI 的横向滚动行习惯。
+5. LibraryPage 在首次加载 / 切换排序时无任何骨架提示，只看到空白。
+6. 顶部搜索框必须按回车才跳转，体验落后于主流客户端的即搜即跳。
+7. `npm run build` 后 `index` 主 chunk 590KB（gzip 170KB），因为 vue、vue-router、Nuxt UI、Reka UI、Zod 全部塞进同一个文件。
+
+### 实施
+
+- **`layouts/AppLayout.vue`**
+  - 侧边栏 header 的 `UColorModeButton` 条件修为 `v-if="!collapsed"`，真正出现在 logo 右侧。
+  - 顶部 navbar 冗余的 `UColorModeButton` 删掉；返回按钮新增 `v-if="!isHome"`，首页不显示。
+  - 主导航裁剪为「首页 / 搜索 / 设置」3 项，避免「控制台 vs 设置」重复。
+  - 搜索 `UInput` 新增 `onSearchInput` 节流（350ms）跳转 `/search`，并保留回车提交，移动端依然可用。
+- **`components/MediaRow.vue`（新增）**
+  - 横向滚动行组件：snap-x / snap-mandatory / `scroll-smooth`，左右箭头按钮按照 `scrollLeft / scrollWidth` 自动启用或禁用。
+  - 响应式卡宽：海报模式 `w-28 … w-40`，缩略图模式 `w-52 … w-64`；原 `MediaCard` 组件直接复用。
+- **`pages/HomePage.vue`**
+  - 「继续观看 / 收藏 / 最近添加 / 每个库最新」全部切换到 `MediaRow`，视觉上与 Emby / Jellyfin 的首页一致，内容再多也只占一行高度。
+- **`components/MediaCardSkeleton.vue`（新增）+ `pages/library/LibraryPage.vue`**
+  - 提供 `aspect-[2/3] / aspect-video` 两种骨架，`LibraryPage` 在 `state.busy && !items.length` 时渲染 14 张骨架，避免白屏。
+- **`vite.config.ts`**
+  - 新增 `build.rollupOptions.output.manualChunks`，把 `vue + vue-router`、`@nuxt/ui/vue-plugin`、`zod` 单独切出。
+
+### 验证
+
+``````
+cd frontend
+npx vue-tsc --noEmit   # 0 error
+npx vite build         # 构建成功
+``````
+
+构建产物体积对比：
+
+| Chunk | 优化前 | 优化后 |
+| --- | --- | --- |
+| `index.*.js` | 590 KB (gzip 170 KB) | 435 KB (gzip 111 KB) |
+| `vue.*.js` | —— | 104 KB (gzip 40 KB) |
+| `nuxt-ui.*.js` | —— | 51 KB (gzip 20 KB) |
+
+首屏 JS 总量保持不变，但切成多 chunk 后浏览器可以并行下载 / HTTP 缓存更稳定，首次访问完成后单纯跳路由只加载对应页面 chunk（2~8 KB 左右）。
+
+### 收益
+
+- 顶部导航与首页不再出现反直觉的按钮 / 栅格，完成度接近 Jellyfin / Emby 官方界面。
+- 首页「行式」浏览对横屏友好，支持触控横滑和键盘方向键（由 Reka UI 包装）。
+- LibraryPage 有骨架过渡，切换排序 / 筛选时不再出现闪白。
+- 顶部搜索即搜即跳，桌面端无需再按回车。
+- 构建产物结构更清晰、主 chunk 缩小，为后续加入更多代码分片（如独立的 Admin bundle）打下基础。
+
+## 十三、第十一轮：详情页演职人员 / Tagline / 图像降级
+
+### 背景
+
+十二轮结束后再做一次详情页打磨：
+
+1. `ItemPage` / `SeriesPage` 的 Hero 只有简介，缺少 Emby 常见的 Tagline 斜体引言。
+2. `BaseItemDto.People` 虽然在 TypeScript 侧被定义，但页面一直没渲染演员表。
+3. `MediaCard` 的封面加载失败时会直接显示坏图 icon，没有降级到纯色首字母占位。
+4. `relatedItems` 仍然是密集栅格，在宽屏容易让用户失去 Hero 的聚焦。
+
+### 实施
+
+- **`api/emby.ts`**
+  - `BaseItemDto.People` 增补 `PrimaryImageTag / ImageBlurHashes`，与 EmbySDK `BaseItemPerson` 对齐；
+  - 新增 `EmbyClient.personImageUrl(person)` 生成 `/Items/{personId}/Images/Primary?api_key=...&tag=...`，失败时返回空串由 `UAvatar` 走文字降级。
+- **`components/MediaCard.vue`**
+  - 引入 `imageError` 状态 + `@error="imageError = true"`，失败时自动降级为首字母卡片；`watch item.Id` 切换项目时重置；`decoding="async"` 避免主线程阻塞。
+- **`pages/item/ItemPage.vue`**
+  - Hero 追加 Tagline（优先 `Tagline`，回退 `Taglines[0]`），使用 primary 色斜体；
+  - 新增「演职人员」横向滚动段（`UAvatar + Role/Type` 文本）；
+  - 新增「标签」chip 区块；
+  - 「相关」从栅格替换为 `MediaRow`，与首页行式体验统一。
+- **`pages/series/SeriesPage.vue`**
+  - Hero 追加 Tagline 显示；
+  - 「播放」按钮文案升级为 `从 SxxExx 开始播放`，移除重复的「返回」按钮（顶栏已有）；
+  - 新增「演职人员」段；
+  - 「更多剧集」替换为 `MediaRow`。
+
+### 验证
+
+``````
+npx vue-tsc --noEmit   # 0 error
+npx vite build         # 构建成功
+``````
+
+### 收益
+
+- 详情页视觉信息层次更接近 Jellyfin Web：Hero → Tagline → 简介 → 动作 → 类型 → 演员 → 标签 → 相关。
+- 演员行已按 EmbySDK 字段预留好图像通路，后端后续在 `People` 字段填充 `PrimaryImageTag` 即可自动带图。
+- 封面加载失败再也不会留白或显示坏图，所有列表 / 网格页都受益。

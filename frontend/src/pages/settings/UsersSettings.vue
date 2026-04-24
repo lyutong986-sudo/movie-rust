@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
-import SettingsNav from '../../components/SettingsNav.vue';
+import SettingsLayout from '../../layouts/SettingsLayout.vue';
 import { api, adminUsers, isAdmin, libraries, loadAdminData } from '../../store/app';
 import type { AccessSchedule, UserConfiguration, UserDto, UserPolicy } from '../../api/emby';
 
@@ -76,30 +76,56 @@ const scheduleForm = reactive<AccessSchedule>({
   EndHour: 24
 });
 
-const selectedUser = computed(() => adminUsers.value.find((user) => user.Id === selectedUserId.value));
-const mediaLibraries = computed(() => libraries.value.filter((library) => ['movies', 'tvshows'].includes((library.CollectionType || '').toLowerCase())));
+const selectedUser = computed(() =>
+  adminUsers.value.find((u) => u.Id === selectedUserId.value)
+);
+const mediaLibraries = computed(() =>
+  libraries.value.filter((library) =>
+    ['movies', 'tvshows'].includes((library.CollectionType || '').toLowerCase())
+  )
+);
+const subtitleModeOptions = ['Default', 'Always', 'OnlyForced', 'None', 'Smart'].map((v) => ({
+  label: v,
+  value: v
+}));
+const syncPlayOptions = ['CreateAndJoinGroups', 'JoinGroups', 'None'].map((v) => ({
+  label: v,
+  value: v
+}));
+const dayOfWeekOptions = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].map(
+  (v) => ({ label: v, value: v })
+);
+const authProviderItems = computed(() =>
+  authProviderOptions.value.map((v) => ({ label: v, value: v }))
+);
+const copyFromOptions = computed(() => [
+  { label: '从默认结构创建', value: '' },
+  ...adminUsers.value.map((a) => ({ label: `复制 ${a.Name}`, value: a.Id }))
+]);
 
-watch(selectedUser, (user) => {
-  if (user) {
-    Object.assign(policyForm, normalizePolicy(user.Policy));
-    Object.assign(configurationForm, normalizeConfiguration(user.Configuration));
-    tagText.value = (policyForm.BlockedTags || []).join(', ');
-    deviceText.value = (policyForm.EnabledDevices || []).join(', ');
-    enabledChannelText.value = (policyForm.EnabledChannels || []).join(', ');
-    blockedChannelText.value = (policyForm.BlockedChannels || []).join(', ');
-    resetPassword.value = '';
-    resetPasswordConfirm.value = '';
-  }
-}, { immediate: true });
+watch(
+  selectedUser,
+  (u) => {
+    if (u) {
+      Object.assign(policyForm, normalizePolicy(u.Policy));
+      Object.assign(configurationForm, normalizeConfiguration(u.Configuration));
+      tagText.value = (policyForm.BlockedTags || []).join(', ');
+      deviceText.value = (policyForm.EnabledDevices || []).join(', ');
+      enabledChannelText.value = (policyForm.EnabledChannels || []).join(', ');
+      blockedChannelText.value = (policyForm.BlockedChannels || []).join(', ');
+      resetPassword.value = '';
+      resetPasswordConfirm.value = '';
+    }
+  },
+  { immediate: true }
+);
 
 onMounted(async () => {
   if (isAdmin.value) {
     await loadAdminData();
     try {
       const providers = await api.authProviders();
-      const values = providers
-        .map((provider) => provider.Id || provider.Name)
-        .filter(Boolean);
+      const values = providers.map((p) => p.Id || p.Name).filter(Boolean);
       authProviderOptions.value = values.length ? Array.from(new Set(values)) : ['Default'];
     } catch {
       authProviderOptions.value = ['Default'];
@@ -180,7 +206,7 @@ async function createUser() {
   saving.value = true;
   error.value = '';
   try {
-    const user = await api.createUser(name, {
+    const u = await api.createUser(name, {
       password: newPassword.value.trim() || undefined,
       copyFromUserId: copyFromUserId.value || undefined
     });
@@ -188,7 +214,7 @@ async function createUser() {
     newPassword.value = '';
     copyFromUserId.value = '';
     await loadAdminData();
-    selectedUserId.value = user.Id;
+    selectedUserId.value = u.Id;
   } catch (err) {
     error.value = err instanceof Error ? err.message : '创建用户失败';
   } finally {
@@ -197,8 +223,8 @@ async function createUser() {
 }
 
 async function saveUser() {
-  const user = selectedUser.value;
-  if (!user) return;
+  const u = selectedUser.value;
+  if (!u) return;
   saving.value = true;
   error.value = '';
   try {
@@ -211,8 +237,8 @@ async function saveUser() {
       EnabledFolders: policyForm.EnableAllFolders ? [] : [...(policyForm.EnabledFolders || [])],
       AccessSchedules: [...(policyForm.AccessSchedules || [])]
     };
-    await api.updateUserPolicy(user.Id, next);
-    await api.updateUserSettings(user.Id, {
+    await api.updateUserPolicy(u.Id, next);
+    await api.updateUserSettings(u.Id, {
       ...configurationForm,
       GroupedFolders: [...(configurationForm.GroupedFolders || [])],
       LatestItemsExcludes: [...(configurationForm.LatestItemsExcludes || [])],
@@ -226,7 +252,7 @@ async function saveUser() {
       if (resetPassword.value !== resetPasswordConfirm.value) {
         throw new Error('两次输入的新密码不一致');
       }
-      await api.changePassword(user.Id, {
+      await api.changePassword(u.Id, {
         NewPw: resetPassword.value
       });
       resetPassword.value = '';
@@ -241,12 +267,12 @@ async function saveUser() {
 }
 
 async function removeUser() {
-  const user = selectedUser.value;
-  if (!user || !window.confirm(`删除用户 ${user.Name}？`)) return;
+  const u = selectedUser.value;
+  if (!u || !window.confirm(`删除用户 ${u.Name}？`)) return;
   saving.value = true;
   error.value = '';
   try {
-    await api.deleteUser(user.Id);
+    await api.deleteUser(u.Id);
     await loadAdminData();
     selectedUserId.value = adminUsers.value[0]?.Id || '';
   } catch (err) {
@@ -262,10 +288,6 @@ function toggleFolder(id: string, checked: boolean) {
   policyForm.EnabledFolders = [...folders];
 }
 
-function onFolderChange(id: string, event: Event) {
-  toggleFolder(id, (event.target as HTMLInputElement).checked);
-}
-
 function toggleBlockedFolder(id: string, checked: boolean) {
   const folders = new Set(policyForm.BlockedMediaFolders || []);
   checked ? folders.add(id) : folders.delete(id);
@@ -279,289 +301,289 @@ function addSchedule() {
 function removeSchedule(index: number) {
   policyForm.AccessSchedules = (policyForm.AccessSchedules || []).filter((_, i) => i !== index);
 }
+
+function userStatus(account: UserDto) {
+  if (account.Policy?.IsAdministrator) return '管理员';
+  if (account.Policy?.IsDisabled) return '已禁用';
+  return '用户';
+}
 </script>
 
 <template>
-  <section class="settings-shell">
-    <SettingsNav />
+  <SettingsLayout>
+    <div
+      v-if="!isAdmin"
+      class="flex flex-col items-center gap-2 rounded-xl border border-dashed border-default p-10 text-center"
+    >
+      <UIcon name="i-lucide-lock" class="size-10 text-muted" />
+      <h3 class="text-highlighted text-lg font-semibold">需要管理员权限</h3>
+      <p class="text-muted text-sm">当前账户不能查看全部用户列表。</p>
+    </div>
 
-    <div class="settings-content">
-      <div v-if="!isAdmin" class="empty">
-        <p>用户</p>
-        <h2>需要管理员权限</h2>
-        <p>当前账户不能查看全部用户列表。</p>
+    <div v-else class="space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p class="text-muted text-xs uppercase tracking-wider">Users</p>
+          <h2 class="text-highlighted text-xl font-semibold">用户管理</h2>
+        </div>
+        <UButton icon="i-lucide-save" :loading="saving" @click="saveUser">保存更改</UButton>
       </div>
 
-      <div v-else class="settings-page users-page">
-        <header class="settings-header">
-          <div>
-            <p>用户</p>
-            <h2>用户管理</h2>
+      <UAlert v-if="error" color="error" icon="i-lucide-triangle-alert" :description="error" />
+
+      <UCard>
+        <template #header>
+          <h3 class="text-highlighted text-sm font-semibold">新建用户</h3>
+        </template>
+        <div class="grid gap-3 sm:grid-cols-4">
+          <UFormField label="用户名">
+            <UInput v-model="newUserName" class="w-full" />
+          </UFormField>
+          <UFormField label="初始密码" hint="可留空">
+            <UInput v-model="newPassword" type="password" class="w-full" />
+          </UFormField>
+          <UFormField label="复制模板">
+            <USelect v-model="copyFromUserId" :items="copyFromOptions" class="w-full" />
+          </UFormField>
+          <div class="flex items-end">
+            <UButton icon="i-lucide-user-plus" :loading="saving" class="w-full justify-center" @click="createUser">
+              新增用户
+            </UButton>
           </div>
-          <button type="button" :disabled="saving" @click="saveUser">保存更改</button>
-        </header>
+        </div>
+      </UCard>
 
-        <p v-if="error" class="form-error">{{ error }}</p>
+      <div class="grid gap-4 lg:grid-cols-[260px_1fr]">
+        <aside class="space-y-2">
+          <button
+            v-for="account in adminUsers"
+            :key="account.Id"
+            type="button"
+            class="flex w-full items-center gap-3 rounded-lg border border-default p-3 text-start transition"
+            :class="
+              account.Id === selectedUserId
+                ? 'bg-primary/10 ring-1 ring-primary/50'
+                : 'hover:bg-elevated/50'
+            "
+            @click="selectedUserId = account.Id"
+          >
+            <UAvatar :alt="account.Name" :text="account.Name.slice(0, 1).toUpperCase()" size="sm" />
+            <div class="min-w-0 flex-1">
+              <p class="text-highlighted truncate text-sm font-medium">{{ account.Name }}</p>
+              <p class="text-muted truncate text-xs">{{ userStatus(account) }}</p>
+            </div>
+          </button>
+        </aside>
 
-        <section class="settings-band user-create">
-          <input v-model="newUserName" placeholder="用户名" />
-          <input v-model="newPassword" placeholder="初始密码，可留空" type="password" />
-          <select v-model="copyFromUserId">
-            <option value="">从默认结构创建</option>
-            <option v-for="account in adminUsers" :key="account.Id" :value="account.Id">
-              复制 {{ account.Name }}
-            </option>
-          </select>
-          <button type="button" :disabled="saving" @click="createUser">新增用户</button>
-        </section>
-
-        <section class="users-layout">
-          <aside class="user-list">
-            <button
-              v-for="account in adminUsers"
-              :key="account.Id"
-              type="button"
-              :class="{ active: account.Id === selectedUserId }"
-              @click="selectedUserId = account.Id"
-            >
-              <span>{{ account.Name.slice(0, 1).toUpperCase() }}</span>
-              <strong>{{ account.Name }}</strong>
-              <small>{{ account.Policy?.IsAdministrator ? '管理员' : account.Policy?.IsDisabled ? '已禁用' : '用户' }}</small>
-            </button>
-          </aside>
-
-          <div v-if="selectedUser" class="user-editor">
-            <section class="settings-band">
-              <h3>{{ selectedUser.Name }}</h3>
-              <div class="toggle-grid">
-                <label><input v-model="policyForm.IsAdministrator" type="checkbox" /> 管理员</label>
-                <label><input v-model="policyForm.IsHidden" type="checkbox" /> 登录页隐藏</label>
-                <label><input v-model="policyForm.IsDisabled" type="checkbox" /> 禁用用户</label>
-                <label><input v-model="policyForm.EnableRemoteAccess" type="checkbox" /> 允许远程访问</label>
-                <label><input v-model="policyForm.EnableUserPreferenceAccess" type="checkbox" /> 允许修改个人偏好</label>
+        <div v-if="selectedUser" class="space-y-4">
+          <UCard>
+            <template #header>
+              <div class="flex items-center justify-between">
+                <h3 class="text-highlighted text-sm font-semibold">{{ selectedUser.Name }}</h3>
+                <UBadge v-if="policyForm.IsAdministrator" color="primary" variant="subtle">管理员</UBadge>
+                <UBadge v-else-if="policyForm.IsDisabled" color="error" variant="subtle">已禁用</UBadge>
               </div>
-              <div class="form-grid">
-                <label>
-                  认证提供器
-                  <select v-model="policyForm.AuthenticationProviderId">
-                    <option v-for="provider in authProviderOptions" :key="provider" :value="provider">{{ provider }}</option>
-                  </select>
-                </label>
-                <label>
-                  密码重置提供器
-                  <select v-model="policyForm.PasswordResetProviderId">
-                    <option v-for="provider in authProviderOptions" :key="`reset-${provider}`" :value="provider">{{ provider }}</option>
-                  </select>
-                </label>
-              </div>
-            </section>
+            </template>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <USwitch v-model="policyForm.IsAdministrator" label="管理员" />
+              <USwitch v-model="policyForm.IsHidden" label="登录页隐藏" />
+              <USwitch v-model="policyForm.IsDisabled" label="禁用用户" />
+              <USwitch v-model="policyForm.EnableRemoteAccess" label="允许远程访问" />
+              <USwitch v-model="policyForm.EnableUserPreferenceAccess" label="允许修改个人偏好" />
+            </div>
+            <div class="mt-4 grid gap-3 sm:grid-cols-2">
+              <UFormField label="认证提供器">
+                <USelect v-model="policyForm.AuthenticationProviderId" :items="authProviderItems" class="w-full" />
+              </UFormField>
+              <UFormField label="密码重置提供器">
+                <USelect v-model="policyForm.PasswordResetProviderId" :items="authProviderItems" class="w-full" />
+              </UFormField>
+            </div>
+          </UCard>
 
-            <section class="settings-band">
-              <h3>密码与登录方式</h3>
-              <div class="toggle-grid">
-                <label><input v-model="configurationForm.EnableLocalPassword" type="checkbox" /> 允许本地密码登录</label>
-                <label><input v-model="policyForm.EnablePublicSharing" type="checkbox" /> 允许公共分享</label>
-              </div>
-              <div class="form-grid">
-                <label>重置密码<input v-model="resetPassword" type="password" placeholder="留空表示不修改" /></label>
-                <label>确认新密码<input v-model="resetPasswordConfirm" type="password" placeholder="再次输入新密码" /></label>
-              </div>
-            </section>
+          <UCard>
+            <template #header>
+              <h3 class="text-highlighted text-sm font-semibold">密码与登录方式</h3>
+            </template>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <USwitch v-model="configurationForm.EnableLocalPassword" label="允许本地密码登录" />
+              <USwitch v-model="policyForm.EnablePublicSharing" label="允许公共分享" />
+            </div>
+            <div class="mt-4 grid gap-3 sm:grid-cols-2">
+              <UFormField label="重置密码" hint="留空表示不修改">
+                <UInput v-model="resetPassword" type="password" class="w-full" />
+              </UFormField>
+              <UFormField label="确认新密码">
+                <UInput v-model="resetPasswordConfirm" type="password" class="w-full" />
+              </UFormField>
+            </div>
+          </UCard>
 
-            <section class="settings-band">
-              <h3>媒体库访问</h3>
-              <label><input v-model="policyForm.EnableAllFolders" type="checkbox" /> 允许访问所有媒体库</label>
-              <div v-if="!policyForm.EnableAllFolders" class="toggle-grid">
-                <label v-for="library in mediaLibraries" :key="library.Id">
-                  <input
-                    type="checkbox"
-                    :checked="policyForm.EnabledFolders?.includes(library.Id)"
-                    @change="onFolderChange(library.Id, $event)"
-                  />
-                  {{ library.Name }}
-                </label>
+          <UCard>
+            <template #header>
+              <div class="flex items-center justify-between">
+                <h3 class="text-highlighted text-sm font-semibold">媒体库访问</h3>
+                <USwitch v-model="policyForm.EnableAllFolders" label="允许访问所有媒体库" />
               </div>
-              <div class="toggle-grid">
-                <label v-for="library in mediaLibraries" :key="`blocked-${library.Id}`">
-                  <input
-                    type="checkbox"
-                    :checked="policyForm.BlockedMediaFolders?.includes(library.Id)"
-                    @change="toggleBlockedFolder(library.Id, ($event.target as HTMLInputElement).checked)"
+            </template>
+            <div v-if="!policyForm.EnableAllFolders" class="grid gap-2 sm:grid-cols-2">
+              <label
+                v-for="library in mediaLibraries"
+                :key="library.Id"
+                class="flex items-center gap-2 rounded-md border border-default p-2 text-sm"
+              >
+                <UCheckbox
+                  :model-value="policyForm.EnabledFolders?.includes(library.Id)"
+                  @update:model-value="(v: boolean) => toggleFolder(library.Id, v)"
+                />
+                {{ library.Name }}
+              </label>
+            </div>
+            <div class="mt-3">
+              <p class="text-muted mb-2 text-xs">屏蔽媒体库</p>
+              <div class="grid gap-2 sm:grid-cols-2">
+                <label
+                  v-for="library in mediaLibraries"
+                  :key="`blocked-${library.Id}`"
+                  class="flex items-center gap-2 rounded-md border border-default p-2 text-sm"
+                >
+                  <UCheckbox
+                    :model-value="policyForm.BlockedMediaFolders?.includes(library.Id)"
+                    @update:model-value="(v: boolean) => toggleBlockedFolder(library.Id, v)"
                   />
                   屏蔽 {{ library.Name }}
                 </label>
               </div>
-            </section>
+            </div>
+          </UCard>
 
-            <section class="settings-band">
-              <h3>播放与下载</h3>
-              <div class="toggle-grid">
-                <label><input v-model="policyForm.EnableMediaPlayback" type="checkbox" /> 允许播放媒体</label>
-                <label><input v-model="policyForm.EnableContentDownloading" type="checkbox" /> 允许下载媒体</label>
-                <label><input v-model="policyForm.EnableVideoPlaybackTranscoding" type="checkbox" /> 允许视频转码</label>
-                <label><input v-model="policyForm.EnableAudioPlaybackTranscoding" type="checkbox" /> 允许音频转码</label>
-                <label><input v-model="policyForm.EnablePlaybackRemuxing" type="checkbox" /> 允许封装转换</label>
-                <label><input v-model="policyForm.EnableContentDeletion" type="checkbox" /> 允许删除媒体</label>
-                <label><input v-model="policyForm.ForceRemoteSourceTranscoding" type="checkbox" /> 强制远程源转码</label>
-              </div>
-              <div class="form-grid">
-                <label>远程码率上限 bps<input v-model.number="policyForm.RemoteClientBitrateLimit" type="number" min="0" /></label>
-                <label>最大活跃会话<input v-model.number="policyForm.MaxActiveSessions" type="number" min="0" /></label>
-                <label>
-                  SyncPlay 权限
-                  <select v-model="policyForm.SyncPlayAccess">
-                    <option value="CreateAndJoinGroups">CreateAndJoinGroups</option>
-                    <option value="JoinGroups">JoinGroups</option>
-                    <option value="None">None</option>
-                  </select>
-                </label>
-              </div>
-            </section>
+          <UCard>
+            <template #header>
+              <h3 class="text-highlighted text-sm font-semibold">播放与下载</h3>
+            </template>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <USwitch v-model="policyForm.EnableMediaPlayback" label="允许播放媒体" />
+              <USwitch v-model="policyForm.EnableContentDownloading" label="允许下载媒体" />
+              <USwitch v-model="policyForm.EnableVideoPlaybackTranscoding" label="允许视频转码" />
+              <USwitch v-model="policyForm.EnableAudioPlaybackTranscoding" label="允许音频转码" />
+              <USwitch v-model="policyForm.EnablePlaybackRemuxing" label="允许封装转换" />
+              <USwitch v-model="policyForm.EnableContentDeletion" label="允许删除媒体" />
+              <USwitch v-model="policyForm.ForceRemoteSourceTranscoding" label="强制远程源转码" />
+            </div>
+            <div class="mt-4 grid gap-3 sm:grid-cols-3">
+              <UFormField label="远程码率上限 (bps)">
+                <UInput v-model.number="policyForm.RemoteClientBitrateLimit" type="number" :min="0" class="w-full" />
+              </UFormField>
+              <UFormField label="最大活跃会话">
+                <UInput v-model.number="policyForm.MaxActiveSessions" type="number" :min="0" class="w-full" />
+              </UFormField>
+              <UFormField label="SyncPlay 权限">
+                <USelect v-model="policyForm.SyncPlayAccess" :items="syncPlayOptions" class="w-full" />
+              </UFormField>
+            </div>
+          </UCard>
 
-            <section class="settings-band">
-              <h3>家长控制</h3>
-              <div class="form-grid">
-                <label>最高分级值<input v-model.number="policyForm.MaxParentalRating" type="number" min="0" /></label>
-                <label>子分级上限<input v-model.number="policyForm.MaxParentalSubRating" type="number" min="0" /></label>
-                <label>屏蔽标签<input v-model="tagText" placeholder="多个标签用逗号分隔" /></label>
-              </div>
-            </section>
+          <UCard>
+            <template #header>
+              <h3 class="text-highlighted text-sm font-semibold">家长控制</h3>
+            </template>
+            <div class="grid gap-3 sm:grid-cols-3">
+              <UFormField label="最高分级值">
+                <UInput v-model.number="policyForm.MaxParentalRating" type="number" :min="0" class="w-full" />
+              </UFormField>
+              <UFormField label="子分级上限">
+                <UInput v-model.number="policyForm.MaxParentalSubRating" type="number" :min="0" class="w-full" />
+              </UFormField>
+              <UFormField label="屏蔽标签" hint="多个标签用逗号分隔">
+                <UInput v-model="tagText" class="w-full" />
+              </UFormField>
+            </div>
+          </UCard>
 
-            <section class="settings-band">
-              <h3>设备与时间</h3>
-              <div class="toggle-grid">
-                <label><input v-model="policyForm.EnableRemoteControlOfOtherUsers" type="checkbox" /> 允许控制其他用户</label>
-                <label><input v-model="policyForm.EnableSharedDeviceControl" type="checkbox" /> 允许共享设备控制</label>
-                <label><input v-model="policyForm.EnableAllDevices" type="checkbox" /> 允许所有设备</label>
-                <label><input v-model="policyForm.EnableAllChannels" type="checkbox" /> 允许所有频道</label>
+          <UCard>
+            <template #header>
+              <h3 class="text-highlighted text-sm font-semibold">设备与时间</h3>
+            </template>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <USwitch v-model="policyForm.EnableRemoteControlOfOtherUsers" label="允许控制其他用户" />
+              <USwitch v-model="policyForm.EnableSharedDeviceControl" label="允许共享设备控制" />
+              <USwitch v-model="policyForm.EnableAllDevices" label="允许所有设备" />
+              <USwitch v-model="policyForm.EnableAllChannels" label="允许所有频道" />
+            </div>
+            <div class="mt-4 space-y-3">
+              <UFormField v-if="!policyForm.EnableAllDevices" label="允许的 DeviceId" hint="逗号分隔">
+                <UInput v-model="deviceText" class="w-full" />
+              </UFormField>
+              <UFormField v-if="!policyForm.EnableAllChannels" label="允许的 ChannelId" hint="逗号分隔">
+                <UInput v-model="enabledChannelText" class="w-full" />
+              </UFormField>
+              <UFormField label="屏蔽的 ChannelId" hint="逗号分隔">
+                <UInput v-model="blockedChannelText" class="w-full" />
+              </UFormField>
+            </div>
+
+            <div class="mt-4">
+              <p class="text-muted mb-2 text-xs">访问时间段</p>
+              <div class="grid gap-2 sm:grid-cols-[1fr_1fr_1fr_auto]">
+                <USelect v-model="scheduleForm.DayOfWeek" :items="dayOfWeekOptions" class="w-full" />
+                <UInput v-model.number="scheduleForm.StartHour" type="number" :min="0" :max="24" :step="0.5" placeholder="开始" />
+                <UInput v-model.number="scheduleForm.EndHour" type="number" :min="0" :max="24" :step="0.5" placeholder="结束" />
+                <UButton color="neutral" variant="subtle" icon="i-lucide-plus" @click="addSchedule">添加</UButton>
               </div>
-              <input v-if="!policyForm.EnableAllDevices" v-model="deviceText" placeholder="允许的 DeviceId，逗号分隔" />
-              <input v-if="!policyForm.EnableAllChannels" v-model="enabledChannelText" placeholder="允许的 ChannelId，逗号分隔" />
-              <input v-model="blockedChannelText" placeholder="屏蔽的 ChannelId，逗号分隔" />
-              <div class="form-grid">
-                <select v-model="scheduleForm.DayOfWeek">
-                  <option>Monday</option>
-                  <option>Tuesday</option>
-                  <option>Wednesday</option>
-                  <option>Thursday</option>
-                  <option>Friday</option>
-                  <option>Saturday</option>
-                  <option>Sunday</option>
-                </select>
-                <input v-model.number="scheduleForm.StartHour" type="number" min="0" max="24" step="0.5" />
-                <input v-model.number="scheduleForm.EndHour" type="number" min="0" max="24" step="0.5" />
-                <button type="button" @click="addSchedule">添加时间段</button>
-              </div>
-              <div class="schedule-list">
-                <button v-for="(schedule, index) in policyForm.AccessSchedules" :key="`${schedule.DayOfWeek}-${index}`" type="button" @click="removeSchedule(index)">
+              <div v-if="(policyForm.AccessSchedules || []).length" class="mt-3 flex flex-wrap gap-2">
+                <UButton
+                  v-for="(schedule, index) in policyForm.AccessSchedules"
+                  :key="`${schedule.DayOfWeek}-${index}`"
+                  color="neutral"
+                  variant="soft"
+                  size="xs"
+                  trailing-icon="i-lucide-x"
+                  @click="removeSchedule(index)"
+                >
                   {{ schedule.DayOfWeek }} {{ schedule.StartHour }}-{{ schedule.EndHour }}
-                </button>
+                </UButton>
               </div>
-            </section>
+            </div>
+          </UCard>
 
-            <section class="settings-band">
-              <h3>用户偏好</h3>
-              <div class="toggle-grid">
-                <label><input v-model="configurationForm.PlayDefaultAudioTrack" type="checkbox" /> 默认选择音轨</label>
-                <label><input v-model="configurationForm.PlayDefaultSubtitleTrack" type="checkbox" /> 默认选择字幕</label>
-                <label><input v-model="configurationForm.DisplayMissingEpisodes" type="checkbox" /> 显示缺失剧集</label>
-                <label><input v-model="configurationForm.HidePlayedInLatest" type="checkbox" /> 最新内容中隐藏已播放</label>
-                <label><input v-model="configurationForm.RememberAudioSelections" type="checkbox" /> 记住音轨选择</label>
-                <label><input v-model="configurationForm.RememberSubtitleSelections" type="checkbox" /> 记住字幕选择</label>
+          <UCard>
+            <template #header>
+              <h3 class="text-highlighted text-sm font-semibold">用户偏好</h3>
+            </template>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <USwitch v-model="configurationForm.PlayDefaultAudioTrack" label="默认选择音轨" />
+              <USwitch v-model="configurationForm.PlayDefaultSubtitleTrack" label="默认选择字幕" />
+              <USwitch v-model="configurationForm.DisplayMissingEpisodes" label="显示缺失剧集" />
+              <USwitch v-model="configurationForm.HidePlayedInLatest" label="最新内容中隐藏已播放" />
+              <USwitch v-model="configurationForm.RememberAudioSelections" label="记住音轨选择" />
+              <USwitch v-model="configurationForm.RememberSubtitleSelections" label="记住字幕选择" />
+            </div>
+            <div class="mt-4 grid gap-3 sm:grid-cols-3">
+              <UFormField label="字幕模式">
+                <USelect v-model="configurationForm.SubtitleMode" :items="subtitleModeOptions" class="w-full" />
+              </UFormField>
+              <UFormField label="音频语言偏好">
+                <UInput v-model="configurationForm.AudioLanguagePreference" placeholder="如 zh, en, ja" class="w-full" />
+              </UFormField>
+              <UFormField label="字幕语言偏好">
+                <UInput v-model="configurationForm.SubtitleLanguagePreference" placeholder="如 zh, en" class="w-full" />
+              </UFormField>
+            </div>
+            <template #footer>
+              <div class="flex justify-between">
+                <UButton color="error" variant="soft" icon="i-lucide-trash-2" :disabled="saving" @click="removeUser">
+                  删除用户
+                </UButton>
+                <UButton icon="i-lucide-save" :loading="saving" @click="saveUser">保存更改</UButton>
               </div>
-              <div class="form-grid">
-                <label>
-                  字幕模式
-                  <select v-model="configurationForm.SubtitleMode">
-                    <option value="Default">Default</option>
-                    <option value="Always">Always</option>
-                    <option value="OnlyForced">OnlyForced</option>
-                    <option value="None">None</option>
-                    <option value="Smart">Smart</option>
-                  </select>
-                </label>
-                <label>音频语言偏好<input v-model="configurationForm.AudioLanguagePreference" placeholder="如 zh, en, ja" /></label>
-                <label>字幕语言偏好<input v-model="configurationForm.SubtitleLanguagePreference" placeholder="如 zh, en" /></label>
-              </div>
-            </section>
+            </template>
+          </UCard>
+        </div>
 
-            <button class="danger" type="button" :disabled="saving" @click="removeUser">删除用户</button>
-          </div>
-        </section>
+        <div v-else class="text-muted rounded-xl border border-dashed border-default p-8 text-center text-sm">
+          请在左侧选择一个用户
+        </div>
       </div>
     </div>
-  </section>
+  </SettingsLayout>
 </template>
-
-<style scoped>
-.users-layout {
-  display: grid;
-  grid-template-columns: minmax(180px, 260px) 1fr;
-  gap: 18px;
-}
-
-.user-list {
-  display: grid;
-  gap: 8px;
-  align-content: start;
-}
-
-.user-list button {
-  display: grid;
-  grid-template-columns: 36px 1fr;
-  gap: 4px 10px;
-  text-align: left;
-  align-items: center;
-}
-
-.user-list span {
-  grid-row: span 2;
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--surface-muted);
-}
-
-.user-list .active {
-  outline: 2px solid var(--accent);
-}
-
-.user-editor,
-.settings-band,
-.user-create {
-  display: grid;
-  gap: 14px;
-}
-
-.user-create,
-.form-grid,
-.toggle-grid {
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  display: grid;
-  gap: 12px;
-}
-
-.schedule-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.danger {
-  justify-self: start;
-  border-color: #d45b5b;
-  color: #ffd6d6;
-}
-
-.form-error {
-  color: #ffb4b4;
-}
-
-@media (max-width: 760px) {
-  .users-layout {
-    grid-template-columns: 1fr;
-  }
-}
-</style>

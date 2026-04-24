@@ -2,20 +2,37 @@
 import { computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import MediaCard from '../../components/MediaCard.vue';
-import { backToParent, currentParentName, items, loadItems, parentStack, selectedLibrary, selectLibrary, state } from '../../store/app';
+import MediaCardSkeleton from '../../components/MediaCardSkeleton.vue';
+import {
+  backToParent,
+  currentParentName,
+  items,
+  loadItems,
+  parentStack,
+  selectedLibrary,
+  selectLibrary,
+  state
+} from '../../store/app';
 import type { BaseItemDto } from '../../api/emby';
 import { itemRoute, playbackRoute } from '../../utils/navigation';
 
 const route = useRoute();
 const router = useRouter();
 
-const viewTypes = [
-  { label: '全部', value: '' },
-  { label: '电影', value: 'Movie' },
-  { label: '剧集', value: 'Series' },
-  { label: '季', value: 'Season' },
-  { label: '单集', value: 'Episode' },
-  { label: '文件夹', value: 'Folder' }
+const VIEW_TYPES = [
+  { value: '', label: '全部' },
+  { value: 'Movie', label: '电影' },
+  { value: 'Series', label: '剧集' },
+  { value: 'Season', label: '季' },
+  { value: 'Episode', label: '单集' },
+  { value: 'Folder', label: '文件夹' }
+];
+
+const SORT_OPTIONS = [
+  { value: 'SortName', label: '名称' },
+  { value: 'DateCreated', label: '添加时间' },
+  { value: 'ProductionYear', label: '年份' },
+  { value: 'IndexNumber', label: '集数' }
 ];
 
 watch(
@@ -66,50 +83,79 @@ function toggleSortOrder() {
 </script>
 
 <template>
-  <section class="home-sections">
-    <nav class="crumbs">
-      <button v-if="parentStack.length" type="button" title="返回上一层" @click="backToParent">←</button>
-      <span v-for="crumb in breadcrumbs" :key="crumb">{{ crumb }}</span>
+  <div class="flex flex-col gap-4">
+    <nav class="flex flex-wrap items-center gap-2 text-sm">
+      <UButton
+        v-if="parentStack.length"
+        color="neutral"
+        variant="ghost"
+        size="xs"
+        icon="i-lucide-arrow-left"
+        @click="backToParent"
+      >
+        返回
+      </UButton>
+      <template v-for="(crumb, index) in breadcrumbs" :key="crumb">
+        <UIcon v-if="index" name="i-lucide-chevron-right" class="size-3 text-muted" />
+        <span
+          :class="
+            index === breadcrumbs.length - 1 ? 'text-highlighted font-medium' : 'text-muted'
+          "
+        >
+          {{ crumb }}
+        </span>
+      </template>
     </nav>
 
-    <section class="media-row">
-      <div class="section-heading">
-        <div>
-          <h3>{{ currentParentName }}</h3>
-          <span>{{ items.length }} 个条目</span>
-        </div>
-        <div class="button-row">
-          <select v-model="state.libraryViewType">
-            <option v-for="option in viewTypes" :key="option.value || 'all'" :value="option.value">
-              {{ option.label }}
-            </option>
-          </select>
-          <select v-model="state.librarySortBy">
-            <option value="SortName">名称</option>
-            <option value="DateCreated">添加时间</option>
-            <option value="ProductionYear">年份</option>
-            <option value="IndexNumber">集数</option>
-          </select>
-          <button class="secondary" type="button" @click="toggleSortOrder">
-            {{ state.librarySortAscending ? '升序' : '降序' }}
-          </button>
-        </div>
+    <div
+      class="flex flex-col gap-3 rounded-xl border border-default bg-elevated/20 p-3 sm:flex-row sm:items-center sm:justify-between"
+    >
+      <div>
+        <h2 class="text-highlighted text-base font-semibold">{{ currentParentName }}</h2>
+        <p class="text-muted text-xs">{{ items.length }} 个条目</p>
       </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <USelect v-model="state.libraryViewType" :items="VIEW_TYPES" size="sm" class="w-32" />
+        <USelect v-model="state.librarySortBy" :items="SORT_OPTIONS" size="sm" class="w-36" />
+        <UButton
+          color="neutral"
+          variant="soft"
+          size="sm"
+          :icon="state.librarySortAscending ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow'"
+          @click="toggleSortOrder"
+        >
+          {{ state.librarySortAscending ? '升序' : '降序' }}
+        </UButton>
+      </div>
+    </div>
 
-      <div v-if="items.length" class="poster-grid">
-        <MediaCard
-          v-for="item in items"
-          :key="item.Id"
-          :item="item"
-          @play="playItem"
-          @select="openMedia"
-        />
-      </div>
-      <div v-else class="empty">
-        <p>{{ selectedLibrary?.Name || '媒体库' }}</p>
-        <h2>这里暂时没有内容</h2>
-        <p>可以尝试切换排序、清空筛选，或者先在管理员页面执行一次媒体扫描。</p>
-      </div>
-    </section>
-  </section>
+    <div
+      v-if="state.busy && !items.length"
+      class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7"
+    >
+      <MediaCardSkeleton v-for="i in 14" :key="i" />
+    </div>
+    <div
+      v-else-if="items.length"
+      class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7"
+    >
+      <MediaCard
+        v-for="item in items"
+        :key="item.Id"
+        :item="item"
+        @play="playItem"
+        @select="openMedia"
+      />
+    </div>
+    <div
+      v-else
+      class="flex flex-col items-center gap-2 rounded-xl border border-dashed border-default bg-elevated/20 p-10 text-center"
+    >
+      <UIcon name="i-lucide-inbox" class="size-10 text-muted" />
+      <h3 class="text-highlighted text-lg font-semibold">这里暂时没有内容</h3>
+      <p class="text-muted max-w-md text-sm">
+        可以尝试切换排序、清空筛选，或者先在管理员页面执行一次媒体扫描。
+      </p>
+    </div>
+  </div>
 </template>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import MediaCard from '../../components/MediaCard.vue';
+import MediaRow from '../../components/MediaRow.vue';
 import type { BaseItemDto } from '../../api/emby';
 import { api } from '../../store/app';
 import { genreRoute, itemRoute, playbackRoute } from '../../utils/navigation';
@@ -21,25 +21,31 @@ const seasons = ref<SeasonSection[]>([]);
 const relatedItems = ref<BaseItemDto[]>([]);
 const activeSeasonId = ref('');
 
-const heroImage = computed(() =>
-  series.value ? api.backdropUrl(series.value) || api.itemImageUrl(series.value) : ''
+const backdrop = computed(() => (series.value ? api.backdropUrl(series.value) : ''));
+const poster = computed(() =>
+  series.value ? api.itemImageUrl(series.value) || api.backdropUrl(series.value) : ''
 );
 const activeSeason = computed(
-  () => seasons.value.find((entry) => entry.season.Id === activeSeasonId.value) || seasons.value[0] || null
+  () =>
+    seasons.value.find((entry) => entry.season.Id === activeSeasonId.value) ||
+    seasons.value[0] ||
+    null
 );
 const firstEpisode = computed(() => seasons.value.flatMap((entry) => entry.episodes)[0] || null);
 const metaChips = computed(() => {
-  if (!series.value) {
-    return [];
-  }
-
+  if (!series.value) return [];
   return [
-    'Series',
+    '剧集',
     series.value.ProductionYear ? String(series.value.ProductionYear) : '',
     seasons.value.length ? `${seasons.value.length} 季` : '',
-    firstEpisode.value?.RunTimeTicks ? runtimeText(firstEpisode.value) : ''
+    firstEpisode.value?.RunTimeTicks ? runtimeText(firstEpisode.value) : '',
+    series.value.OfficialRating || ''
   ].filter(Boolean);
 });
+
+const seasonTabs = computed(() =>
+  seasons.value.map((entry) => ({ value: entry.season.Id, label: entry.season.Name || '未命名' }))
+);
 
 watch(
   () => route.params.id,
@@ -122,137 +128,264 @@ async function playSeries() {
 }
 
 async function openGenre(name: string) {
-  if (!series.value) {
-    return;
-  }
-
+  if (!series.value) return;
   await router.push(genreRoute(name, 'Series'));
 }
 
 function runtimeText(item: BaseItemDto) {
-  if (!item.RunTimeTicks) {
-    return '';
-  }
-
+  if (!item.RunTimeTicks) return '';
   const totalMinutes = Math.round(item.RunTimeTicks / 10_000_000 / 60);
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
-
   return hours ? `${hours} 小时 ${minutes} 分钟` : `${minutes} 分钟`;
+}
+
+function episodeThumb(episode: BaseItemDto) {
+  return api.itemImageUrl(episode) || api.backdropUrl(episode);
 }
 </script>
 
 <template>
-  <section v-if="loading" class="empty">
-    <p>剧集详情</p>
-    <h2>正在加载</h2>
-    <p>正在读取季和分集结构。</p>
-  </section>
+  <div v-if="loading" class="flex min-h-[50vh] flex-col items-center justify-center gap-2">
+    <UProgress animation="carousel" class="w-48" />
+    <p class="text-muted text-sm">正在读取剧集结构…</p>
+  </div>
 
-  <section v-else-if="error" class="empty">
-    <p>剧集详情</p>
-    <h2>加载失败</h2>
-    <p>{{ error }}</p>
-  </section>
+  <UAlert
+    v-else-if="error"
+    color="error"
+    variant="subtle"
+    icon="i-lucide-triangle-alert"
+    title="加载失败"
+    :description="error"
+  />
 
-  <section v-else-if="series" class="home-sections">
-    <nav class="crumbs">
-      <button type="button" title="返回上一页" @click="router.back()">←</button>
-      <span>Series</span>
-      <span>{{ series.Name }}</span>
+  <div v-else-if="series" class="flex flex-col gap-6">
+    <nav class="flex items-center gap-2 text-sm">
+      <UButton
+        color="neutral"
+        variant="ghost"
+        size="xs"
+        icon="i-lucide-arrow-left"
+        @click="router.back()"
+      >
+        返回
+      </UButton>
+      <UIcon name="i-lucide-chevron-right" class="size-3 text-muted" />
+      <span class="text-muted">剧集</span>
+      <UIcon name="i-lucide-chevron-right" class="size-3 text-muted" />
+      <span class="text-highlighted font-medium">{{ series.Name }}</span>
     </nav>
 
-    <section class="detail-hero">
-      <img v-if="heroImage" :src="heroImage" :alt="series.Name" />
-      <div v-else class="poster-fallback folder">{{ series.Name.slice(0, 1).toUpperCase() }}</div>
+    <!-- Hero -->
+    <section class="relative overflow-hidden rounded-2xl ring-1 ring-default">
+      <img
+        v-if="backdrop"
+        :src="backdrop"
+        :alt="series.Name"
+        class="absolute inset-0 h-full w-full object-cover opacity-40 blur-sm"
+      />
+      <div class="absolute inset-0 bg-gradient-to-br from-(--ui-bg)/80 via-(--ui-bg)/70 to-(--ui-bg)/95" />
 
-      <div class="detail-copy">
-        <div>
-          <p>剧集</p>
-          <h2>{{ series.Name }}</h2>
+      <div class="relative grid gap-6 p-5 sm:p-8 lg:grid-cols-[220px_1fr] lg:gap-10">
+        <div class="aspect-[2/3] w-44 overflow-hidden rounded-xl bg-elevated ring-1 ring-default lg:w-full">
+          <img
+            v-if="poster"
+            :src="poster"
+            :alt="series.Name"
+            class="h-full w-full object-cover"
+          />
+          <div
+            v-else
+            class="flex h-full w-full items-center justify-center bg-gradient-to-br from-primary/30 to-primary/5 text-3xl font-bold text-primary"
+          >
+            {{ series.Name.slice(0, 1).toUpperCase() }}
+          </div>
         </div>
 
-        <div class="meta">
-          <span v-for="chip in metaChips" :key="chip">{{ chip }}</span>
-        </div>
+        <div class="flex flex-col gap-4">
+          <div>
+            <p class="text-muted text-xs uppercase tracking-wider">剧集</p>
+            <h1 class="text-highlighted mt-1 text-2xl font-bold sm:text-3xl">{{ series.Name }}</h1>
+          </div>
 
-        <p v-if="series.Overview">{{ series.Overview }}</p>
+          <div class="flex flex-wrap items-center gap-2">
+            <UBadge
+              v-for="chip in metaChips"
+              :key="chip"
+              color="neutral"
+              variant="soft"
+            >
+              {{ chip }}
+            </UBadge>
+            <UBadge
+              v-if="series.CommunityRating"
+              color="warning"
+              variant="soft"
+              icon="i-lucide-star"
+            >
+              {{ Number(series.CommunityRating).toFixed(1) }}
+            </UBadge>
+          </div>
 
-        <div class="button-row">
-          <button v-if="firstEpisode" type="button" @click="playSeries">播放</button>
-          <button type="button" class="secondary" @click="router.back()">返回</button>
+          <p
+            v-if="series.Tagline || series.Taglines?.[0]"
+            class="text-primary/90 max-w-3xl text-sm italic"
+          >
+            “{{ series.Tagline || series.Taglines?.[0] }}”
+          </p>
+
+          <p v-if="series.Overview" class="text-default max-w-3xl text-sm leading-relaxed">
+            {{ series.Overview }}
+          </p>
+
+          <div class="flex flex-wrap gap-2">
+            <UButton v-if="firstEpisode" icon="i-lucide-play" size="lg" @click="playSeries">
+              {{ firstEpisode.IndexNumber ? `从 S${firstEpisode.ParentIndexNumber ?? 1}E${firstEpisode.IndexNumber} 开始播放` : '播放' }}
+            </UButton>
+          </div>
         </div>
       </div>
     </section>
 
-    <section v-if="series.Genres?.length" class="media-row">
-      <div class="section-heading">
-        <h3>类型</h3>
-      </div>
-      <div class="meta meta-links">
-        <button
+    <!-- 类型 -->
+    <section v-if="series.Genres?.length" class="space-y-3">
+      <h3 class="text-highlighted text-sm font-semibold">类型</h3>
+      <div class="flex flex-wrap gap-2">
+        <UButton
           v-for="genre in series.Genres"
           :key="genre"
-          type="button"
-          class="chip-button secondary"
+          color="neutral"
+          variant="outline"
+          size="sm"
           @click="openGenre(genre)"
         >
           {{ genre }}
-        </button>
+        </UButton>
       </div>
     </section>
 
-    <section v-if="seasons.length" class="media-row">
-      <div class="section-heading">
-        <h3>季</h3>
-        <span>{{ seasons.length }} 季</span>
-      </div>
-      <div class="admin-tabs">
-        <button
-          v-for="entry in seasons"
-          :key="entry.season.Id"
-          type="button"
-          :class="{ active: activeSeasonId === entry.season.Id }"
-          @click="activeSeasonId = entry.season.Id"
-        >
-          {{ entry.season.Name }}
-        </button>
+    <!-- 季 + 分集 -->
+    <section v-if="seasons.length" class="space-y-3">
+      <div class="flex items-baseline justify-between">
+        <h3 class="text-highlighted text-base font-semibold">分集</h3>
+        <span class="text-muted text-sm">{{ seasons.length }} 季</span>
       </div>
 
-      <div v-if="activeSeason" class="episode-list">
-        <article v-for="episode in activeSeason.episodes" :key="episode.Id" class="episode-row">
-          <div class="episode-number">
-            {{ episode.IndexNumber || '—' }}
-          </div>
-          <div class="episode-copy">
-            <div class="episode-heading">
-              <strong>{{ episode.Name }}</strong>
-              <span>{{ runtimeText(episode) }}</span>
+      <UTabs
+        v-model="activeSeasonId"
+        :items="seasonTabs"
+        variant="pill"
+        size="xs"
+        :content="false"
+      />
+
+      <div v-if="activeSeason" class="flex flex-col gap-3">
+        <article
+          v-for="episode in activeSeason.episodes"
+          :key="episode.Id"
+          class="group flex flex-col gap-3 rounded-xl border border-default bg-elevated/20 p-3 transition hover:bg-elevated/40 sm:flex-row"
+        >
+          <button
+            type="button"
+            class="group/thumb relative block aspect-video w-full shrink-0 overflow-hidden rounded-lg bg-elevated ring-1 ring-default sm:w-56"
+            @click="playItem(episode)"
+          >
+            <img
+              v-if="episodeThumb(episode)"
+              :src="episodeThumb(episode)"
+              :alt="episode.Name"
+              class="h-full w-full object-cover transition-transform group-hover/thumb:scale-105"
+            />
+            <div
+              v-else
+              class="flex h-full w-full items-center justify-center bg-gradient-to-br from-primary/20 to-primary/5 text-primary"
+            >
+              <UIcon name="i-lucide-film" class="size-6" />
             </div>
-            <p>{{ episode.Overview || '暂无剧情简介。' }}</p>
-            <div class="button-row">
-              <button type="button" @click="playItem(episode)">播放</button>
-              <button class="secondary" type="button" @click="openItem(episode)">详情</button>
+            <div class="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover/thumb:opacity-100">
+              <span
+                class="flex h-11 w-11 items-center justify-center rounded-full bg-primary text-primary-contrast shadow-lg"
+              >
+                <UIcon name="i-lucide-play" class="size-5" />
+              </span>
+            </div>
+          </button>
+
+          <div class="flex min-w-0 flex-1 flex-col gap-2">
+            <div class="flex flex-wrap items-baseline gap-2">
+              <span class="text-primary font-mono text-sm">
+                {{ episode.IndexNumber ? String(episode.IndexNumber).padStart(2, '0') : '—' }}
+              </span>
+              <strong class="text-highlighted text-sm">{{ episode.Name }}</strong>
+              <span v-if="episode.RunTimeTicks" class="text-muted ms-auto text-xs">
+                {{ runtimeText(episode) }}
+              </span>
+            </div>
+            <p class="text-muted line-clamp-2 text-xs">
+              {{ episode.Overview || '暂无剧情简介。' }}
+            </p>
+            <div class="flex flex-wrap gap-2">
+              <UButton size="xs" icon="i-lucide-play" @click="playItem(episode)">播放</UButton>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="subtle"
+                icon="i-lucide-info"
+                @click="openItem(episode)"
+              >
+                详情
+              </UButton>
             </div>
           </div>
         </article>
       </div>
     </section>
 
-    <section v-if="relatedItems.length" class="media-row">
-      <div class="section-heading">
-        <h3>更多剧集</h3>
-        <span>{{ relatedItems.length }} 项</span>
+    <!-- 演职人员 -->
+    <section v-if="series.People?.length" class="space-y-3">
+      <div class="flex items-baseline justify-between">
+        <h3 class="text-highlighted text-base font-semibold">演职人员</h3>
+        <span class="text-muted text-sm">{{ series.People.length }} 人</span>
       </div>
-      <div class="rail poster-rail">
-        <MediaCard
-          v-for="item in relatedItems"
-          :key="item.Id"
-          :item="item"
-          @play="playItem"
-          @select="openItem"
-        />
+      <div
+        class="flex snap-x snap-mandatory gap-3 overflow-x-auto pb-2
+               [-ms-overflow-style:none] [scrollbar-width:thin]
+               [&::-webkit-scrollbar]:h-1.5
+               [&::-webkit-scrollbar-thumb]:rounded-full
+               [&::-webkit-scrollbar-thumb]:bg-default"
+      >
+        <div
+          v-for="(person, index) in series.People"
+          :key="`${person.Id || person.Name}-${index}`"
+          class="flex w-28 shrink-0 snap-start flex-col items-center gap-2 rounded-lg border border-default bg-elevated/20 p-3 text-center"
+        >
+          <UAvatar
+            :alt="person.Name"
+            :src="api.personImageUrl(person) || undefined"
+            :text="(person.Name || '?').slice(0, 1).toUpperCase()"
+            size="xl"
+          />
+          <div class="min-w-0">
+            <p class="text-highlighted truncate text-xs font-medium" :title="person.Name">
+              {{ person.Name }}
+            </p>
+            <p v-if="person.Role || person.Type" class="text-muted truncate text-[10px]" :title="person.Role || person.Type">
+              {{ person.Role || person.Type }}
+            </p>
+          </div>
+        </div>
       </div>
     </section>
-  </section>
+
+    <!-- 相关 -->
+    <MediaRow
+      v-if="relatedItems.length"
+      title="更多剧集"
+      icon="i-lucide-tv"
+      :items="relatedItems"
+      @play="playItem"
+      @select="openItem"
+    />
+  </div>
 </template>

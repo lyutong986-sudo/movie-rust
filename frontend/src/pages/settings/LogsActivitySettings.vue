@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
-import SettingsNav from '../../components/SettingsNav.vue';
+import SettingsLayout from '../../layouts/SettingsLayout.vue';
 import type { ActivityLogEntry, LogFileDto } from '../../api/emby';
 import { api, isAdmin } from '../../store/app';
 
@@ -13,7 +13,6 @@ onMounted(async () => {
   if (!isAdmin.value) {
     return;
   }
-
   loading.value = true;
   try {
     const [logFiles, activityResponse] = await Promise.all([api.serverLogs(), api.activity(50)]);
@@ -32,54 +31,72 @@ function formatDate(value: string) {
 </script>
 
 <template>
-  <section class="settings-shell">
-    <SettingsNav />
-
-    <div class="settings-content">
-      <div v-if="!isAdmin" class="empty">
-        <p>日志与活动</p>
-        <h2>需要管理员权限</h2>
-        <p>当前账户不能查看活动流和服务端日志。</p>
-      </div>
-
-      <div v-else-if="loading" class="empty">
-        <p>日志与活动</p>
-        <h2>正在加载</h2>
-        <p>正在读取播放活动和日志列表。</p>
-      </div>
-
-      <div v-else-if="error" class="empty">
-        <p>日志与活动</p>
-        <h2>加载失败</h2>
-        <p>{{ error }}</p>
-      </div>
-
-      <div v-else class="settings-page">
-        <div class="split-grid">
-          <section class="settings-panel">
-            <h3>日志</h3>
-            <div v-if="logs.length" class="log-list">
-              <article v-for="log in logs" :key="log.Name">
-                <strong>{{ log.Name }}</strong>
-                <p>{{ formatDate(log.DateModified) }}</p>
-              </article>
-            </div>
-            <p v-else>当前版本暂未输出独立日志文件列表。</p>
-          </section>
-
-          <section class="settings-panel">
-            <h3>活动</h3>
-            <div v-if="activity.length" class="activity-list">
-              <article v-for="entry in activity" :key="entry.Id">
-                <strong>{{ entry.Name }}</strong>
-                <p>{{ entry.ShortOverview || entry.Type }}</p>
-                <small>{{ formatDate(entry.Date) }}</small>
-              </article>
-            </div>
-            <p v-else>暂时没有播放活动记录。</p>
-          </section>
-        </div>
-      </div>
+  <SettingsLayout>
+    <div
+      v-if="!isAdmin"
+      class="flex flex-col items-center gap-2 rounded-xl border border-dashed border-default p-10 text-center"
+    >
+      <UIcon name="i-lucide-lock" class="size-10 text-muted" />
+      <h3 class="text-highlighted text-lg font-semibold">需要管理员权限</h3>
+      <p class="text-muted text-sm">当前账户不能查看活动流和服务端日志。</p>
     </div>
-  </section>
+
+    <div v-else-if="loading" class="flex min-h-[30vh] flex-col items-center justify-center gap-2">
+      <UProgress animation="carousel" class="w-48" />
+      <p class="text-muted text-sm">正在读取播放活动和日志列表…</p>
+    </div>
+
+    <UAlert v-else-if="error" color="error" icon="i-lucide-triangle-alert" title="加载失败" :description="error" />
+
+    <div v-else class="grid gap-4 lg:grid-cols-2">
+      <UCard>
+        <template #header>
+          <div class="flex items-center justify-between">
+            <h3 class="text-highlighted text-sm font-semibold">日志</h3>
+            <UBadge variant="subtle" color="neutral">{{ logs.length }}</UBadge>
+          </div>
+        </template>
+        <div v-if="logs.length" class="space-y-2">
+          <div
+            v-for="log in logs"
+            :key="log.Name"
+            class="flex items-center gap-3 rounded-lg border border-default p-3"
+          >
+            <UIcon name="i-lucide-file-text" class="text-primary size-4" />
+            <div class="min-w-0 flex-1">
+              <p class="text-highlighted truncate text-sm font-medium">{{ log.Name }}</p>
+              <p class="text-muted text-xs">{{ formatDate(log.DateModified) }}</p>
+            </div>
+          </div>
+        </div>
+        <p v-else class="text-muted text-sm">当前版本暂未输出独立日志文件列表。</p>
+      </UCard>
+
+      <UCard>
+        <template #header>
+          <div class="flex items-center justify-between">
+            <h3 class="text-highlighted text-sm font-semibold">活动</h3>
+            <UBadge variant="subtle" color="neutral">{{ activity.length }}</UBadge>
+          </div>
+        </template>
+        <div v-if="activity.length" class="space-y-3">
+          <div
+            v-for="entry in activity"
+            :key="entry.Id"
+            class="flex items-start gap-3 rounded-lg border border-default p-3"
+          >
+            <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <UIcon name="i-lucide-activity" class="size-4" />
+            </div>
+            <div class="min-w-0 flex-1">
+              <p class="text-highlighted truncate text-sm font-medium">{{ entry.Name }}</p>
+              <p class="text-muted truncate text-xs">{{ entry.ShortOverview || entry.Type }}</p>
+              <p class="text-dimmed mt-1 text-[11px]">{{ formatDate(entry.Date) }}</p>
+            </div>
+          </div>
+        </div>
+        <p v-else class="text-muted text-sm">暂时没有播放活动记录。</p>
+      </UCard>
+    </div>
+  </SettingsLayout>
 </template>

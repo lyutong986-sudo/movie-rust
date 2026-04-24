@@ -24,7 +24,9 @@ let lastProgressSecond = -10;
 const itemId = computed(() => String(route.query.itemId || ''));
 const currentTrack = computed(() => queue.value[currentIndex.value] || null);
 const coverImage = computed(() =>
-  currentTrack.value ? api.itemImageUrl(currentTrack.value) || api.backdropUrl(currentTrack.value) : ''
+  currentTrack.value
+    ? api.itemImageUrl(currentTrack.value) || api.backdropUrl(currentTrack.value)
+    : ''
 );
 const progressValue = computed(() =>
   duration.value ? Math.min(100, (currentTime.value / duration.value) * 100) : 0
@@ -48,7 +50,6 @@ onBeforeUnmount(async () => {
 async function loadQueue(startId: string) {
   loading.value = true;
   error.value = '';
-
   try {
     const firstItem = await api.item(startId);
     let items = [firstItem];
@@ -65,7 +66,7 @@ async function loadQueue(startId: string) {
         items = siblings.Items;
         startIndex = Math.max(
           0,
-          siblings.Items.findIndex((item) => item.Id === firstItem.Id)
+          siblings.Items.findIndex((i) => i.Id === firstItem.Id)
         );
       }
     } else if (firstItem.IsFolder || firstItem.Type === 'MusicAlbum') {
@@ -92,10 +93,7 @@ async function loadQueue(startId: string) {
 }
 
 async function prepareTrack(index: number) {
-  if (!queue.value.length) {
-    return;
-  }
-
+  if (!queue.value.length) return;
   await stopPlayback();
 
   const target = queue.value[index];
@@ -142,10 +140,7 @@ function toTicks(seconds: number) {
 }
 
 async function reportProgress(isPaused = false) {
-  if (!currentTrack.value || !playSessionId.value || !audioRef.value) {
-    return;
-  }
-
+  if (!currentTrack.value || !playSessionId.value || !audioRef.value) return;
   await api.playbackProgress({
     ItemId: currentTrack.value.Id,
     PlaySessionId: playSessionId.value,
@@ -157,10 +152,7 @@ async function reportProgress(isPaused = false) {
 }
 
 async function stopPlayback(forceCompleted = false) {
-  if (!currentTrack.value || !playSessionId.value || hasStopped || !audioRef.value) {
-    return;
-  }
-
+  if (!currentTrack.value || !playSessionId.value || hasStopped || !audioRef.value) return;
   hasStopped = true;
   await api.playbackStopped({
     ItemId: currentTrack.value.Id,
@@ -174,10 +166,7 @@ async function stopPlayback(forceCompleted = false) {
 
 async function handlePlay() {
   paused.value = false;
-  if (!currentTrack.value) {
-    return;
-  }
-
+  if (!currentTrack.value) return;
   if (!hasStarted) {
     hasStarted = true;
     await api.playbackStarted({
@@ -197,10 +186,7 @@ async function handlePause() {
 }
 
 function handleTimeUpdate() {
-  if (!audioRef.value) {
-    return;
-  }
-
+  if (!audioRef.value) return;
   currentTime.value = audioRef.value.currentTime;
   duration.value = Number.isFinite(audioRef.value.duration) ? audioRef.value.duration : 0;
 
@@ -217,7 +203,6 @@ async function handleEnded() {
     await prepareTrack(currentIndex.value + 1);
     return;
   }
-
   await stopPlayback(true);
 }
 
@@ -234,10 +219,7 @@ async function nextTrack() {
 }
 
 function togglePlayback() {
-  if (!audioRef.value) {
-    return;
-  }
-
+  if (!audioRef.value) return;
   if (audioRef.value.paused) {
     void audioRef.value.play();
   } else {
@@ -246,10 +228,7 @@ function togglePlayback() {
 }
 
 function seek(event: Event) {
-  if (!audioRef.value) {
-    return;
-  }
-
+  if (!audioRef.value) return;
   const target = event.target as HTMLInputElement;
   const ratio = Number(target.value) / 100;
   audioRef.value.currentTime = duration.value * ratio;
@@ -264,19 +243,33 @@ function timeText(value: number) {
 </script>
 
 <template>
-  <section v-if="loading" class="player-loading">
-    <p>正在准备音乐播放器</p>
-  </section>
+  <div
+    v-if="loading"
+    class="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white"
+  >
+    <UProgress animation="carousel" class="w-48" />
+    <p class="text-sm opacity-80">正在准备音乐播放器…</p>
+  </div>
 
-  <section v-else-if="error || !currentTrack" class="player-loading">
-    <div>
-      <p>播放失败</p>
-      <h2>{{ error || '没有找到音频内容' }}</h2>
-      <button type="button" @click="router.back()">返回</button>
-    </div>
-  </section>
+  <div
+    v-else-if="error || !currentTrack"
+    class="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-slate-950 text-white"
+  >
+    <UIcon name="i-lucide-circle-alert" class="size-12 opacity-80" />
+    <h2 class="text-xl font-semibold">{{ error || '没有找到音频内容' }}</h2>
+    <UButton color="neutral" variant="subtle" icon="i-lucide-arrow-left" @click="router.back()">返回</UButton>
+  </div>
 
-  <section v-else class="player-shell music-player-shell">
+  <div
+    v-else
+    class="relative h-screen w-screen overflow-hidden bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white"
+  >
+    <img
+      v-if="coverImage"
+      :src="coverImage"
+      :alt="currentTrack.Name"
+      class="pointer-events-none absolute inset-0 h-full w-full scale-110 object-cover opacity-30 blur-3xl"
+    />
     <audio
       ref="audioRef"
       :src="sourceUrl"
@@ -287,61 +280,111 @@ function timeText(value: number) {
       @ended="handleEnded"
     />
 
-    <div class="music-stage">
-      <div class="music-cover">
-        <img v-if="coverImage" :src="coverImage" :alt="currentTrack.Name" />
-        <div v-else class="poster-fallback">{{ currentTrack.Name.slice(0, 1).toUpperCase() }}</div>
-      </div>
-
-      <div class="music-panel">
-        <p>正在播放</p>
-        <h2>{{ currentTrack.Name }}</h2>
-        <span>{{ currentTrack.SeriesName || currentTrack.SeasonName || currentTrack.Type }}</span>
-
-        <div class="button-row">
-          <button class="secondary" type="button" @click="router.back()">返回</button>
+    <div class="relative flex h-full flex-col lg:grid lg:grid-cols-[1.2fr_1fr] lg:gap-0">
+      <div class="flex flex-col items-center justify-center gap-6 p-6 sm:p-10">
+        <div class="aspect-square w-full max-w-md overflow-hidden rounded-2xl bg-white/5 shadow-2xl ring-1 ring-white/10">
+          <img
+            v-if="coverImage"
+            :src="coverImage"
+            :alt="currentTrack.Name"
+            class="h-full w-full object-cover"
+          />
+          <div v-else class="flex h-full w-full items-center justify-center text-6xl font-bold text-white/50">
+            {{ currentTrack.Name.slice(0, 1).toUpperCase() }}
+          </div>
         </div>
 
-        <div class="music-progress">
-          <span>{{ timeText(currentTime) }}</span>
-          <input type="range" min="0" max="100" step="0.1" :value="progressValue" @input="seek" />
-          <span>{{ timeText(duration) }}</span>
+        <div class="w-full max-w-md text-center">
+          <p class="text-xs uppercase tracking-[0.3em] text-white/50">正在播放</p>
+          <h2 class="mt-2 text-2xl font-semibold">{{ currentTrack.Name }}</h2>
+          <p class="text-muted mt-1 text-sm text-white/60">
+            {{ currentTrack.SeriesName || currentTrack.SeasonName || currentTrack.Type }}
+          </p>
         </div>
 
-        <div class="button-row">
-          <button class="secondary" type="button" :disabled="currentIndex === 0" @click="previousTrack">
-            上一首
-          </button>
-          <button type="button" @click="togglePlayback">{{ paused ? '播放' : '暂停' }}</button>
-          <button
-            class="secondary"
-            type="button"
+        <div class="w-full max-w-md">
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="0.1"
+            :value="progressValue"
+            class="h-1 w-full cursor-pointer appearance-none rounded-full bg-white/10 accent-[var(--ui-primary)]"
+            @input="seek"
+          />
+          <div class="mt-1 flex justify-between text-xs text-white/60 tabular-nums">
+            <span>{{ timeText(currentTime) }}</span>
+            <span>{{ timeText(duration) }}</span>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <UButton
+            color="neutral"
+            variant="soft"
+            size="lg"
+            icon="i-lucide-skip-back"
+            :disabled="currentIndex === 0"
+            @click="previousTrack"
+          />
+          <UButton
+            color="primary"
+            variant="solid"
+            size="xl"
+            :icon="paused ? 'i-lucide-play' : 'i-lucide-pause'"
+            @click="togglePlayback"
+          />
+          <UButton
+            color="neutral"
+            variant="soft"
+            size="lg"
+            icon="i-lucide-skip-forward"
             :disabled="currentIndex >= queue.length - 1"
             @click="nextTrack"
+          />
+          <UButton
+            color="neutral"
+            variant="ghost"
+            size="lg"
+            icon="i-lucide-x"
+            @click="router.back()"
+          />
+        </div>
+      </div>
+
+      <aside class="flex flex-col overflow-hidden bg-black/30 p-6 backdrop-blur-xl ring-1 ring-white/10">
+        <div class="mb-3 flex items-center justify-between">
+          <h3 class="text-sm font-semibold">播放队列</h3>
+          <span class="text-xs text-white/60">{{ queue.length }} 首</span>
+        </div>
+        <div class="flex-1 space-y-1 overflow-y-auto pr-2">
+          <button
+            v-for="(track, index) in queue"
+            :key="track.Id"
+            type="button"
+            class="flex w-full items-start gap-3 rounded-lg p-2 text-start transition"
+            :class="
+              index === currentIndex
+                ? 'bg-white/15 ring-1 ring-white/30'
+                : 'hover:bg-white/10'
+            "
+            @click="prepareTrack(index)"
           >
-            下一首
+            <div
+              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-white/10 text-xs text-white/80"
+            >
+              <UIcon v-if="index === currentIndex && !paused" name="i-lucide-audio-lines" class="size-4 text-primary" />
+              <span v-else>{{ index + 1 }}</span>
+            </div>
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-sm">{{ track.Name }}</p>
+              <p class="truncate text-xs text-white/50">
+                {{ track.ProductionYear || track.Type }}
+              </p>
+            </div>
           </button>
         </div>
-
-        <section class="queue-panel">
-          <div class="section-heading">
-            <h3>播放队列</h3>
-            <span>{{ queue.length }} 首</span>
-          </div>
-          <div class="track-list">
-            <button
-              v-for="(track, index) in queue"
-              :key="track.Id"
-              type="button"
-              :class="{ active: index === currentIndex }"
-              @click="prepareTrack(index)"
-            >
-              <strong>{{ track.Name }}</strong>
-              <span>{{ track.ProductionYear || track.Type }}</span>
-            </button>
-          </div>
-        </section>
-      </div>
+      </aside>
     </div>
-  </section>
+  </div>
 </template>

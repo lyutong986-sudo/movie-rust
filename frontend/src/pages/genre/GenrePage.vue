@@ -15,7 +15,6 @@ const items = ref<BaseItemDto[]>([]);
 
 const genreName = computed(() => {
   const raw = String(route.params.id || '');
-
   try {
     return decodeURIComponent(raw);
   } catch {
@@ -72,45 +71,66 @@ async function playItem(item: BaseItemDto) {
 </script>
 
 <template>
-  <section class="home-sections">
-    <nav class="crumbs">
-      <button type="button" title="返回上一页" @click="router.back()">←</button>
-      <span>类型</span>
-      <span>{{ genreName }}</span>
+  <div class="flex flex-col gap-4">
+    <nav class="flex items-center gap-2 text-sm">
+      <UButton
+        color="neutral"
+        variant="ghost"
+        size="xs"
+        icon="i-lucide-arrow-left"
+        @click="router.back()"
+      >
+        返回
+      </UButton>
+      <UIcon name="i-lucide-chevron-right" class="size-3 text-muted" />
+      <span class="text-muted">类型</span>
+      <UIcon name="i-lucide-chevron-right" class="size-3 text-muted" />
+      <span class="text-highlighted font-medium">{{ genreName }}</span>
     </nav>
 
-    <section class="media-row">
-      <div class="section-heading">
-        <div>
-          <h3>{{ genreName }}</h3>
-          <span>{{ selectedType || '全部类型' }}</span>
-        </div>
+    <div class="flex items-center gap-3">
+      <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <UIcon name="i-lucide-tag" class="size-5" />
       </div>
+      <div>
+        <h2 class="text-highlighted text-lg font-semibold">{{ genreName }}</h2>
+        <p class="text-muted text-xs">{{ selectedType || '全部类型' }} · {{ items.length }} 项</p>
+      </div>
+    </div>
 
-      <div v-if="loading" class="empty">
-        <p>{{ genreName }}</p>
-        <h2>正在整理内容</h2>
-        <p>正在按类型筛选媒体项目。</p>
-      </div>
-      <div v-else-if="error" class="empty">
-        <p>{{ genreName }}</p>
-        <h2>加载失败</h2>
-        <p>{{ error }}</p>
-      </div>
-      <div v-else-if="items.length" class="poster-grid">
-        <MediaCard
-          v-for="item in items"
-          :key="item.Id"
-          :item="item"
-          @play="playItem"
-          @select="openItem"
-        />
-      </div>
-      <div v-else class="empty">
-        <p>{{ genreName }}</p>
-        <h2>这个类型下还没有内容</h2>
-        <p>等更多媒体被扫描并写入类型字段后，这里会自动丰富起来。</p>
-      </div>
-    </section>
-  </section>
+    <div v-if="loading" class="flex min-h-[40vh] flex-col items-center justify-center gap-2">
+      <UProgress animation="carousel" class="w-48" />
+      <p class="text-muted text-sm">正在按类型筛选媒体项目…</p>
+    </div>
+    <UAlert
+      v-else-if="error"
+      color="error"
+      variant="subtle"
+      icon="i-lucide-triangle-alert"
+      title="加载失败"
+      :description="error"
+    />
+    <div
+      v-else-if="items.length"
+      class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7"
+    >
+      <MediaCard
+        v-for="item in items"
+        :key="item.Id"
+        :item="item"
+        @play="playItem"
+        @select="openItem"
+      />
+    </div>
+    <div
+      v-else
+      class="flex flex-col items-center gap-2 rounded-xl border border-dashed border-default bg-elevated/20 p-10 text-center"
+    >
+      <UIcon name="i-lucide-tag" class="size-10 text-muted" />
+      <h3 class="text-highlighted text-lg font-semibold">这个类型下还没有内容</h3>
+      <p class="text-muted max-w-md text-sm">
+        等更多媒体被扫描并写入类型字段后，这里会自动丰富起来。
+      </p>
+    </div>
+  </div>
 </template>

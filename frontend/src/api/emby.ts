@@ -174,6 +174,21 @@ export interface BaseItemDto {
   }>;
   MediaStreams?: MediaStreamDto[];
   ChildCount?: number;
+  OfficialRating?: string;
+  CommunityRating?: number;
+  CriticRating?: number;
+  Tags?: string[];
+  Studios?: Array<{ Id?: string; Name: string }>;
+  People?: Array<{
+    Id?: string;
+    Name: string;
+    Role?: string;
+    Type?: string;
+    PrimaryImageTag?: string;
+    ImageBlurHashes?: Record<string, Record<string, string>>;
+  }>;
+  Taglines?: string[];
+  Tagline?: string;
 }
 
 export interface MediaStreamDto {
@@ -724,6 +739,11 @@ export class EmbyApi {
 
   backdropUrl(item: BaseItemDto) {
     return this.imageUrl(item, 'Backdrop', item.BackdropImageTags?.[0], 0);
+  }
+
+  personImageUrl(person: { Id?: string; PrimaryImageTag?: string }) {
+    if (!person.Id || !person.PrimaryImageTag) return '';
+    return `${this.baseUrl}/Items/${person.Id}/Images/Primary?api_key=${encodeURIComponent(this.token)}&tag=${encodeURIComponent(person.PrimaryImageTag)}`;
   }
 
   private imageUrl(item: BaseItemDto, imageType: string, tag?: string, imageIndex?: number) {

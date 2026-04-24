@@ -10,70 +10,99 @@ async function submitLogin(name = state.username, password = state.password) {
     await router.replace('/');
   }
 }
+
+function pickUser(name: string) {
+  state.username = name;
+  state.password = '';
+  state.loginAsOther = true;
+}
 </script>
 
 <template>
-  <section class="server-screen">
-    <div class="server-card">
-      <div class="server-brand centered">
-        <div class="mark">MR</div>
-        <h1>{{ state.serverName }}</h1>
-        <p>{{ currentServer?.Url || '当前服务器' }}</p>
+  <div class="space-y-6">
+    <header class="space-y-1">
+      <p class="text-muted text-xs">{{ currentServer?.Url || '当前服务器' }}</p>
+      <h2 class="text-highlighted text-xl font-semibold">登录</h2>
+    </header>
+
+    <!-- 用户选择器 -->
+    <div v-if="publicUsers.length && !state.loginAsOther" class="space-y-4">
+      <p class="text-muted text-sm">选择一位用户登录</p>
+      <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <button
+          v-for="publicUser in publicUsers"
+          :key="publicUser.Id"
+          type="button"
+          class="group flex flex-col items-center gap-2 rounded-xl border border-default bg-elevated/30 p-4 transition hover:bg-elevated/70 hover:ring-1 hover:ring-primary/40"
+          @click="pickUser(publicUser.Name)"
+        >
+          <UAvatar size="lg" :alt="publicUser.Name" />
+          <span class="text-highlighted truncate text-sm font-medium">{{ publicUser.Name }}</span>
+        </button>
       </div>
 
-      <div v-if="publicUsers.length && !state.loginAsOther" class="user-picker">
-        <h2>选择用户</h2>
-        <div class="user-grid">
-          <button
-            v-for="publicUser in publicUsers"
-            :key="publicUser.Id"
-            type="button"
-            @click="state.username = publicUser.Name; state.loginAsOther = true"
-          >
-            <span>{{ publicUser.Name.slice(0, 1).toUpperCase() }}</span>
-            {{ publicUser.Name }}
-          </button>
-        </div>
-        <div class="button-row">
-          <button class="secondary" type="button" @click="state.loginAsOther = true">手动登录</button>
-          <button class="secondary" type="button" @click="router.push('/server/select')">切换服务器</button>
-          <button class="secondary" type="button" @click="router.push('/server/add')">添加服务器</button>
-        </div>
+      <div class="flex flex-wrap gap-2 pt-2">
+        <UButton color="neutral" variant="subtle" icon="i-lucide-key" @click="state.loginAsOther = true">
+          手动输入
+        </UButton>
+        <UButton color="neutral" variant="ghost" icon="i-lucide-server" @click="router.push('/server/select')">
+          切换服务器
+        </UButton>
+        <UButton color="neutral" variant="ghost" icon="i-lucide-plus" @click="router.push('/server/add')">
+          添加服务器
+        </UButton>
       </div>
-
-      <form v-else class="form-stack" @submit.prevent="submitLogin()">
-        <h2>登录</h2>
-        <label>
-          用户名
-          <input v-model="state.username" autocomplete="username" />
-        </label>
-        <label>
-          密码
-          <div class="password-field">
-            <input
-              v-model="state.password"
-              :type="state.showLoginPassword ? 'text' : 'password'"
-              autocomplete="current-password"
-            />
-            <button
-              type="button"
-              :title="state.showLoginPassword ? '隐藏密码' : '显示密码'"
-              @click="state.showLoginPassword = !state.showLoginPassword"
-            >
-              {{ state.showLoginPassword ? '隐藏' : '显示' }}
-            </button>
-          </div>
-        </label>
-        <div class="button-row">
-          <button v-if="publicUsers.length" class="secondary" type="button" @click="state.loginAsOther = false">
-            返回
-          </button>
-          <button class="secondary" type="button" @click="router.push('/server/select')">服务器</button>
-          <button :disabled="state.busy" type="submit">登录</button>
-        </div>
-      </form>
-
-      <p v-if="state.error" class="notice error">{{ state.error }}</p>
     </div>
-  </section>
+
+    <!-- 登录表单 -->
+    <form v-else class="space-y-4" @submit.prevent="submitLogin()">
+      <UFormField label="用户名" required>
+        <UInput
+          v-model="state.username"
+          autocomplete="username"
+          icon="i-lucide-user"
+          class="w-full"
+        />
+      </UFormField>
+      <UFormField label="密码" required>
+        <UInput
+          v-model="state.password"
+          :type="state.showLoginPassword ? 'text' : 'password'"
+          autocomplete="current-password"
+          icon="i-lucide-lock"
+          class="w-full"
+          :ui="{ trailing: 'pe-1' }"
+        >
+          <template #trailing>
+            <UButton
+              color="neutral"
+              variant="link"
+              size="sm"
+              :icon="state.showLoginPassword ? 'i-lucide-eye-off' : 'i-lucide-eye'"
+              :aria-label="state.showLoginPassword ? '隐藏密码' : '显示密码'"
+              @click="state.showLoginPassword = !state.showLoginPassword"
+            />
+          </template>
+        </UInput>
+      </UFormField>
+
+      <div class="flex flex-wrap items-center gap-2 pt-2">
+        <UButton
+          v-if="publicUsers.length"
+          color="neutral"
+          variant="ghost"
+          icon="i-lucide-arrow-left"
+          @click="state.loginAsOther = false"
+        >
+          返回
+        </UButton>
+        <UButton color="neutral" variant="ghost" icon="i-lucide-server" @click="router.push('/server/select')">
+          服务器
+        </UButton>
+        <UButton type="submit" :loading="state.busy" class="ms-auto" icon="i-lucide-log-in">
+          登录
+        </UButton>
+      </div>
+    </form>
+  </div>
 </template>

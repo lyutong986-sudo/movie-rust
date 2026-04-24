@@ -27,29 +27,33 @@ async function submit() {
 </script>
 
 <template>
-  <section class="server-screen">
-    <div class="server-card">
-      <div class="server-brand">
-        <div class="mark">MR</div>
-        <div>
-          <p>Movie Rust</p>
-          <h1>添加服务器</h1>
-        </div>
+  <div class="space-y-6">
+    <header>
+      <p class="text-muted text-xs">Movie Rust</p>
+      <h2 class="text-highlighted text-xl font-semibold">添加服务器</h2>
+    </header>
+
+    <form class="space-y-4" @submit.prevent="submit">
+      <UFormField label="服务器地址" required hint="示例：http://127.0.0.1:10004 或 https://example.com/emby">
+        <UInput
+          v-model="serverUrl"
+          icon="i-lucide-globe"
+          placeholder="http://127.0.0.1:10004"
+          class="w-full"
+        />
+      </UFormField>
+      <p class="text-muted text-xs">
+        会先探测 <code class="rounded bg-elevated px-1.5 py-0.5 text-[11px]">/System/Info/Public</code>，成功后保存到本地服务器列表。
+      </p>
+
+      <UAlert v-if="error" color="error" variant="subtle" icon="i-lucide-triangle-alert" :title="error" />
+
+      <div class="flex justify-end gap-2 pt-2">
+        <UButton color="neutral" variant="ghost" icon="i-lucide-arrow-left" @click="router.push('/server/select')">
+          返回
+        </UButton>
+        <UButton type="submit" :loading="busy" icon="i-lucide-plug-2">添加并连接</UButton>
       </div>
-
-      <form class="form-stack" @submit.prevent="submit">
-        <label>
-          服务器地址
-          <input v-model="serverUrl" placeholder="http://127.0.0.1:10004 或 https://example.com/emby" />
-        </label>
-        <p>会先探测 `/System/Info/Public`，成功后保存到本地服务器列表。</p>
-        <div class="button-row">
-          <button class="secondary" type="button" @click="router.push('/server/select')">返回</button>
-          <button :disabled="busy" type="submit">添加并连接</button>
-        </div>
-      </form>
-
-      <p v-if="error" class="notice error">{{ error }}</p>
-    </div>
-  </section>
+    </form>
+  </div>
 </template>

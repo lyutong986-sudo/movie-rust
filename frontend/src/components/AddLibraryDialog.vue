@@ -19,10 +19,12 @@ import type {
 } from '../api/emby';
 
 const props = defineProps<{
+  open: boolean;
   folder?: VirtualFolderInfo | null;
 }>();
 
 const emit = defineEmits<{
+  'update:open': [value: boolean];
   close: [];
 }>();
 
@@ -36,6 +38,11 @@ const COUNTRY_OPTIONS = [
   { value: 'DE', label: '德国' },
   { value: 'HK', label: '中国香港' },
   { value: 'TW', label: '中国台湾' }
+];
+
+const COLLECTION_TYPES = [
+  { value: 'movies', label: '电影' },
+  { value: 'tvshows', label: '电视剧' }
 ];
 
 const form = reactive({
@@ -221,7 +228,7 @@ function removePath(index: number) {
   form.paths.splice(index, 1);
 }
 
-function options(): LibraryOptions {
+function buildOptions(): LibraryOptions {
   return {
     ...defaultLibraryOptions(cleanPaths.value),
     Enabled: form.enabled,
@@ -265,7 +272,7 @@ async function submit() {
       if (trimmedName && trimmedName !== props.folder.Name) {
         await api.renameVirtualFolder(props.folder.Name, trimmedName);
       }
-      await api.updateLibraryOptions(props.folder.ItemId, options());
+      await api.updateLibraryOptions(props.folder.ItemId, buildOptions());
       await Promise.all([
         loadLibraries(),
         loadVirtualFolders(),
@@ -273,7 +280,7 @@ async function submit() {
         loadLatestByLibrary()
       ]);
       state.message = '媒体库设置已保存';
-      emit('close');
+      close();
       return;
     }
 
@@ -282,12 +289,12 @@ async function submit() {
       CollectionType: form.collectionType,
       Path: cleanPaths.value[0] || '',
       Paths: cleanPaths.value,
-      LibraryOptions: options()
+      LibraryOptions: buildOptions()
     };
 
     await createLibrary(payload);
     if (!state.error) {
-      emit('close');
+      close();
     }
   } catch (error) {
     state.error = error instanceof Error ? error.message : '保存媒体库失败';
@@ -295,201 +302,233 @@ async function submit() {
     state.busy = false;
   }
 }
+
+function close() {
+  emit('update:open', false);
+  emit('close');
+}
 </script>
 
 <template>
-  <div class="dialog-backdrop" @click.self="emit('close')">
-    <section class="library-dialog">
-      <button class="close" type="button" aria-label="关闭" @click="emit('close')">×</button>
-
-      <form class="form-stack settings-form library-form" @submit.prevent="submit">
-        <div>
-          <p>媒体库</p>
-          <h2>{{ isEditing ? '编辑媒体库' : '添加媒体库' }}</h2>
+  <UModal
+    :open="props.open"
+    :title="isEditing ? '编辑媒体库' : '添加媒体库'"
+    description="选择文件夹、调整媒体库的元数据与扫描行为。"
+    :ui="{ content: 'sm:max-w-3xl' }"
+    @update:open="emit('update:open', $event)"
+  >
+    <template #body>
+      <form class="space-y-6" @submit.prevent="submit">
+        <div class="grid gap-4 sm:grid-cols-2">
+          <UFormField label="名称" required>
+            <UInput v-model="form.name" placeholder="电影" class="w-full" />
+          </UFormField>
+          <UFormField label="内容类型">
+            <USelect
+              v-model="form.collectionType"
+              :items="COLLECTION_TYPES"
+              :disabled="isEditing"
+              class="w-full"
+            />
+          </UFormField>
         </div>
 
-        <div class="form-grid two">
-          <label>
-            名称
-            <input v-model="form.name" required placeholder="电影" />
-          </label>
-
-          <label>
-            内容类型
-            <select v-model="form.collectionType" :disabled="isEditing">
-              <option value="movies">电影</option>
-              <option value="tvshows">电视剧</option>
-            </select>
-          </label>
-        </div>
-
-        <div class="path-editor">
-          <div class="section-heading compact">
-            <h3>文件夹</h3>
-            <button class="secondary" type="button" @click="openBrowser">选择文件夹</button>
+        <div class="space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-highlighted text-sm font-semibold">文件夹</h3>
+            <UButton
+              color="neutral"
+              variant="soft"
+              icon="i-lucide-folder-plus"
+              size="xs"
+              @click="openBrowser"
+            >
+              选择文件夹
+            </UButton>
           </div>
 
-          <div v-if="cleanPaths.length" class="selected-path-list">
-            <div v-for="(path, index) in cleanPaths" :key="path" class="path-row selected">
-              <span>{{ path }}</span>
-              <button class="secondary icon-button" type="button" title="移除路径" @click="removePath(index)">×</button>
+          <div v-if="cleanPaths.length" class="flex flex-col gap-2">
+            <div
+              v-for="(path, index) in cleanPaths"
+              :key="path"
+              class="flex items-center gap-2 rounded-lg border border-default bg-elevated/30 px-3 py-2 text-sm"
+            >
+              <UIcon name="i-lucide-folder" class="size-4 text-primary" />
+              <span class="text-default flex-1 truncate font-mono text-xs">{{ path }}</span>
+              <UButton
+                color="neutral"
+                variant="ghost"
+                size="xs"
+                icon="i-lucide-x"
+                square
+                @click="removePath(index)"
+              />
             </div>
           </div>
-          <div v-else class="path-empty">还没有选择媒体文件夹</div>
+          <p
+            v-else
+            class="rounded-lg border border-dashed border-default px-3 py-4 text-center text-muted text-sm"
+          >
+            还没有选择媒体文件夹
+          </p>
         </div>
 
-        <div class="library-option-section" v-if="showInternetMetadata">
-          <div class="section-heading compact">
-            <h3>元数据</h3>
+        <section v-if="showInternetMetadata" class="space-y-3">
+          <h3 class="text-highlighted text-sm font-semibold">元数据</h3>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <USwitch v-model="form.enableInternetProviders" label="下载互联网元数据" />
+            <USwitch v-model="form.downloadImagesInAdvance" label="扫描时预下载图片" />
           </div>
-          <div class="switch-grid">
-            <label><input v-model="form.enableInternetProviders" type="checkbox" />下载互联网元数据</label>
-            <label><input v-model="form.downloadImagesInAdvance" type="checkbox" />扫描时预下载图片</label>
+          <div class="grid gap-3 sm:grid-cols-3">
+            <UFormField label="元数据语言">
+              <USelect v-model="form.preferredMetadataLanguage" :items="selectedCultureOptions" class="w-full" />
+            </UFormField>
+            <UFormField label="图片语言">
+              <USelect v-model="form.preferredImageLanguage" :items="selectedCultureOptions" class="w-full" />
+            </UFormField>
+            <UFormField label="国家/地区">
+              <USelect v-model="form.metadataCountryCode" :items="COUNTRY_OPTIONS" class="w-full" />
+            </UFormField>
+            <UFormField v-if="showTvSettings" label="特别篇名称">
+              <UInput v-model="form.seasonZeroDisplayName" placeholder="Specials" class="w-full" />
+            </UFormField>
           </div>
-          <div class="form-grid three">
-            <label>
-              元数据语言
-              <select v-model="form.preferredMetadataLanguage">
-                <option v-for="culture in selectedCultureOptions" :key="culture.value" :value="culture.value">
-                  {{ culture.label }}
-                </option>
-              </select>
-            </label>
+        </section>
 
-            <label>
-              图片语言
-              <select v-model="form.preferredImageLanguage">
-                <option v-for="culture in selectedCultureOptions" :key="`image-${culture.value}`" :value="culture.value">
-                  {{ culture.label }}
-                </option>
-              </select>
-            </label>
+        <section class="space-y-3">
+          <h3 class="text-highlighted text-sm font-semibold">扫描与读取</h3>
+          <UFormField label="自动刷新间隔（天）">
+            <UInput v-model.number="form.automaticRefreshIntervalDays" type="number" min="0" />
+          </UFormField>
+          <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <USwitch v-model="form.enabled" label="启用媒体库" />
+            <USwitch v-model="form.enableRealtimeMonitor" label="实时监控" />
+            <USwitch v-model="form.enablePhotos" label="导入图片" />
+            <USwitch v-if="showSaveLocal" v-model="form.saveLocalMetadata" label="保存图片和 NFO 到媒体目录" />
+            <USwitch v-model="form.saveMetadataHidden" label="元数据文件保存为隐藏" />
+            <USwitch v-model="form.ignoreHiddenFiles" label="忽略隐藏文件" />
+            <USwitch v-model="form.excludeFromSearch" label="从全局搜索排除" />
+            <USwitch v-model="form.mergeTopLevelFolders" label="合并顶层同名文件夹" />
+            <USwitch v-model="form.enableEmbeddedTitles" label="读取内嵌标题" />
+            <USwitch v-model="form.enableEmbeddedEpisodeInfos" label="读取内嵌集信息" />
+            <USwitch v-model="form.enableMultiPartItems" label="识别多分段媒体" />
+            <USwitch v-model="form.enableMultiVersionByFiles" label="按文件名识别多版本" />
+            <USwitch v-model="form.enableMultiVersionByMetadata" label="按元数据合并多版本" />
+          </div>
+          <UFormField label="占位条目元数据刷新间隔（天）">
+            <UInput v-model.number="form.placeholderMetadataRefreshIntervalDays" type="number" min="0" />
+          </UFormField>
+        </section>
 
-            <label>
-              国家/地区
-              <select v-model="form.metadataCountryCode">
-                <option v-for="country in COUNTRY_OPTIONS" :key="country.value" :value="country.value">
-                  {{ country.label }}
-                </option>
-              </select>
-            </label>
+        <section v-if="showTvSettings" class="space-y-3">
+          <h3 class="text-highlighted text-sm font-semibold">电视剧</h3>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <USwitch v-model="form.importMissingEpisodes" label="导入缺失剧集占位" />
+            <USwitch v-model="form.enableAutomaticSeriesGrouping" label="自动合并同名剧集" />
+          </div>
+        </section>
 
-            <label v-if="showTvSettings">
-              特别篇名称
-              <input v-model="form.seasonZeroDisplayName" placeholder="Specials" />
-            </label>
+        <section v-if="showMovieSettings" class="space-y-3">
+          <h3 class="text-highlighted text-sm font-semibold">电影集合</h3>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <USwitch v-model="form.importCollections" label="导入电影合集" />
+            <UFormField label="自动合集最少影片数">
+              <UInput v-model.number="form.minCollectionItems" type="number" min="2" />
+            </UFormField>
           </div>
-        </div>
+        </section>
 
-        <div class="library-option-section">
-          <div class="section-heading compact">
-            <h3>扫描与读取</h3>
+        <section v-if="showChapterSettings" class="space-y-3">
+          <h3 class="text-highlighted text-sm font-semibold">章节图片</h3>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <USwitch v-model="form.enableChapterImageExtraction" label="提取章节图片" />
+            <USwitch v-model="form.extractChapterImagesDuringLibraryScan" label="扫描时提取章节图片" />
           </div>
-          <label>
-            自动刷新间隔（天）
-            <input v-model.number="form.automaticRefreshIntervalDays" min="0" type="number" />
-          </label>
-          <div class="switch-grid">
-            <label><input v-model="form.enabled" type="checkbox" />启用媒体库</label>
-            <label><input v-model="form.enableRealtimeMonitor" type="checkbox" />实时监控</label>
-            <label><input v-model="form.enablePhotos" type="checkbox" />导入图片</label>
-            <label v-if="showSaveLocal"><input v-model="form.saveLocalMetadata" type="checkbox" />保存图片和 NFO 到媒体目录</label>
-            <label><input v-model="form.saveMetadataHidden" type="checkbox" />把元数据文件保存为隐藏文件</label>
-            <label><input v-model="form.ignoreHiddenFiles" type="checkbox" />忽略隐藏文件和文件夹</label>
-            <label><input v-model="form.excludeFromSearch" type="checkbox" />从全局搜索中排除该媒体库</label>
-            <label><input v-model="form.mergeTopLevelFolders" type="checkbox" />合并顶层同名文件夹</label>
-            <label><input v-model="form.enableEmbeddedTitles" type="checkbox" />读取内嵌标题</label>
-            <label><input v-model="form.enableEmbeddedEpisodeInfos" type="checkbox" />读取内嵌集信息</label>
-            <label><input v-model="form.enableMultiPartItems" type="checkbox" />识别多分段媒体</label>
-            <label><input v-model="form.enableMultiVersionByFiles" type="checkbox" />按文件名识别多版本</label>
-            <label><input v-model="form.enableMultiVersionByMetadata" type="checkbox" />按元数据合并多版本</label>
-          </div>
-          <div class="form-grid two">
-            <label>
-              占位条目元数据刷新间隔（天）
-              <input v-model.number="form.placeholderMetadataRefreshIntervalDays" min="0" type="number" />
-            </label>
-          </div>
-        </div>
+        </section>
 
-        <div v-if="showTvSettings" class="library-option-section">
-          <div class="section-heading compact">
-            <h3>电视剧</h3>
-          </div>
-          <div class="switch-grid">
-            <label><input v-model="form.importMissingEpisodes" type="checkbox" />导入缺失剧集占位条目</label>
-            <label><input v-model="form.enableAutomaticSeriesGrouping" type="checkbox" />自动合并同名剧集</label>
-          </div>
-        </div>
-
-        <div v-if="showMovieSettings" class="library-option-section">
-          <div class="section-heading compact">
-            <h3>电影集合</h3>
-          </div>
-          <div class="switch-grid">
-            <label><input v-model="form.importCollections" type="checkbox" />导入电影合集信息</label>
-          </div>
-          <div class="form-grid two">
-            <label>
-              自动合集最少影片数
-              <input v-model.number="form.minCollectionItems" min="2" type="number" />
-            </label>
-          </div>
-        </div>
-
-        <div v-if="showChapterSettings" class="library-option-section">
-          <div class="section-heading compact">
-            <h3>章节图片</h3>
-          </div>
-          <div class="switch-grid">
-            <label><input v-model="form.enableChapterImageExtraction" type="checkbox" />提取章节图片</label>
-            <label><input v-model="form.extractChapterImagesDuringLibraryScan" type="checkbox" />扫描时提取章节图片</label>
-          </div>
-        </div>
-
-        <div class="button-row">
-          <button class="secondary" type="button" @click="emit('close')">取消</button>
-          <button :disabled="state.busy || !cleanPaths.length" type="submit">
+        <div class="flex justify-end gap-2 pt-2">
+          <UButton color="neutral" variant="subtle" @click="close">取消</UButton>
+          <UButton
+            type="submit"
+            :loading="state.busy"
+            :disabled="!cleanPaths.length"
+            icon="i-lucide-save"
+          >
             {{ isEditing ? '保存' : '创建' }}
-          </button>
+          </UButton>
         </div>
       </form>
-    </section>
+    </template>
+  </UModal>
 
-    <section v-if="browser.open" class="folder-picker-backdrop" @click.self="browser.open = false">
-      <div class="folder-picker">
-        <div class="folder-picker-head">
-          <div>
-            <p>服务器目录</p>
-            <h3>{{ browser.currentPath || '选择驱动器' }}</h3>
-          </div>
-          <button class="close" type="button" aria-label="关闭" @click="browser.open = false">×</button>
+  <!-- 文件夹选择器 -->
+  <UModal
+    :open="browser.open"
+    title="服务器目录"
+    :description="browser.currentPath || '选择驱动器'"
+    :ui="{ content: 'sm:max-w-2xl' }"
+    @update:open="browser.open = $event"
+  >
+    <template #body>
+      <div class="space-y-3">
+        <div class="flex flex-wrap gap-2">
+          <UButton
+            color="neutral"
+            variant="soft"
+            icon="i-lucide-hard-drive"
+            :disabled="browser.loading"
+            @click="loadDrives"
+          >
+            驱动器
+          </UButton>
+          <UButton
+            color="neutral"
+            variant="soft"
+            icon="i-lucide-corner-left-up"
+            :disabled="browser.loading || !browser.currentPath"
+            @click="goUp"
+          >
+            上一级
+          </UButton>
+          <UButton
+            icon="i-lucide-check"
+            :disabled="browser.loading || !canUseCurrentPath"
+            class="ms-auto"
+            @click="useCurrentPath"
+          >
+            使用此文件夹
+          </UButton>
         </div>
 
-        <div class="folder-picker-toolbar">
-          <button class="secondary" type="button" :disabled="browser.loading" @click="loadDrives">驱动器</button>
-          <button class="secondary" type="button" :disabled="browser.loading || !browser.currentPath" @click="goUp">上一级</button>
-          <button type="button" :disabled="browser.loading || !canUseCurrentPath" @click="useCurrentPath">使用此文件夹</button>
-        </div>
+        <UAlert v-if="browser.error" color="error" variant="subtle" :title="browser.error" />
 
-        <p v-if="browser.error" class="form-error">{{ browser.error }}</p>
-        <div class="folder-list" :aria-busy="browser.loading">
+        <div
+          class="max-h-[50vh] overflow-y-auto rounded-lg border border-default"
+          :aria-busy="browser.loading"
+        >
           <button
             v-for="entry in browser.entries"
             :key="entry.Path"
-            class="folder-entry"
             type="button"
             :disabled="browser.loading"
+            class="flex w-full items-center gap-3 border-b border-default px-3 py-2 text-start text-sm last:border-b-0 hover:bg-elevated disabled:opacity-60"
             @click="browse(entry.Path)"
           >
-            <span class="folder-entry-icon">▸</span>
-            <span>{{ entry.Name }}</span>
-            <small>{{ entry.Path }}</small>
+            <UIcon name="i-lucide-folder" class="size-4 text-primary" />
+            <span class="text-highlighted font-medium">{{ entry.Name }}</span>
+            <span class="text-muted ms-auto truncate font-mono text-xs">{{ entry.Path }}</span>
           </button>
-          <div v-if="browser.loading" class="folder-empty">正在读取目录...</div>
-          <div v-else-if="!browser.entries.length" class="folder-empty">此目录没有可选择的子文件夹</div>
+          <div v-if="browser.loading" class="px-3 py-6 text-center text-muted text-sm">
+            正在读取目录…
+          </div>
+          <div
+            v-else-if="!browser.entries.length"
+            class="px-3 py-6 text-center text-muted text-sm"
+          >
+            此目录没有可选择的子文件夹
+          </div>
         </div>
       </div>
-    </section>
-  </div>
+    </template>
+  </UModal>
 </template>

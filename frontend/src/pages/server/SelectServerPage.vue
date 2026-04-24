@@ -17,53 +17,61 @@ function remove(url: string) {
 </script>
 
 <template>
-  <section class="server-screen">
-    <div class="server-card wizard-card">
-      <div class="server-brand">
-        <div class="mark">MR</div>
-        <div>
-          <p>Movie Rust</p>
-          <h1>选择服务器</h1>
+  <div class="space-y-6">
+    <header>
+      <p class="text-muted text-xs">Movie Rust</p>
+      <h2 class="text-highlighted text-xl font-semibold">选择服务器</h2>
+    </header>
+
+    <div v-if="serverList.length" class="flex flex-col gap-3">
+      <article
+        v-for="server in serverList"
+        :key="server.Url"
+        class="flex flex-col gap-3 rounded-xl border border-default bg-elevated/30 p-4 sm:flex-row sm:items-center sm:justify-between"
+      >
+        <div class="min-w-0">
+          <strong class="text-highlighted text-sm">{{ server.Name }}</strong>
+          <p class="text-muted truncate font-mono text-xs">{{ server.Url }}</p>
+          <p class="text-muted text-xs">
+            {{ server.ProductName || 'Movie Rust' }} {{ server.Version || '' }}
+          </p>
         </div>
-      </div>
-
-      <div v-if="serverList.length" class="server-list">
-        <article v-for="server in serverList" :key="server.Url" class="server-entry">
-          <div>
-            <strong>{{ server.Name }}</strong>
-            <p>{{ server.Url }}</p>
-            <p>{{ server.ProductName || 'Movie Rust' }} {{ server.Version || '' }}</p>
-          </div>
-          <div class="button-row">
-            <button
-              :class="{ secondary: server.Url !== currentServerUrl }"
-              type="button"
-              @click="select(server.Url)"
-            >
-              {{ server.Url === currentServerUrl ? '当前服务器' : '连接' }}
-            </button>
-            <button
-              v-if="serverList.length > 1"
-              class="secondary"
-              type="button"
-              @click="remove(server.Url)"
-            >
-              移除
-            </button>
-          </div>
-        </article>
-      </div>
-
-      <div v-else class="empty">
-        <p>服务器列表</p>
-        <h2>还没有保存的服务器</h2>
-        <p>这一页对应 Jellyfin 的服务器选择页，适合管理多个地址。</p>
-      </div>
-
-      <div class="button-row">
-        <button type="button" @click="router.push('/server/add')">添加服务器</button>
-        <button class="secondary" type="button" @click="router.push('/server/login')">返回登录</button>
-      </div>
+        <div class="flex flex-wrap gap-2">
+          <UButton
+            :variant="server.Url === currentServerUrl ? 'soft' : 'solid'"
+            :color="server.Url === currentServerUrl ? 'primary' : 'primary'"
+            icon="i-lucide-plug"
+            @click="select(server.Url)"
+          >
+            {{ server.Url === currentServerUrl ? '当前服务器' : '连接' }}
+          </UButton>
+          <UButton
+            v-if="serverList.length > 1"
+            color="neutral"
+            variant="ghost"
+            icon="i-lucide-trash-2"
+            @click="remove(server.Url)"
+          >
+            移除
+          </UButton>
+        </div>
+      </article>
     </div>
-  </section>
+
+    <div
+      v-else
+      class="flex flex-col items-center gap-2 rounded-xl border border-dashed border-default bg-elevated/10 p-8 text-center"
+    >
+      <UIcon name="i-lucide-server-off" class="size-8 text-muted" />
+      <p class="text-highlighted text-sm font-medium">还没有保存的服务器</p>
+      <p class="text-muted text-xs">这一页对应 Jellyfin 的服务器选择页，适合管理多个地址。</p>
+    </div>
+
+    <div class="flex justify-end gap-2">
+      <UButton color="neutral" variant="ghost" icon="i-lucide-arrow-left" @click="router.push('/server/login')">
+        返回登录
+      </UButton>
+      <UButton icon="i-lucide-plus" @click="router.push('/server/add')">添加服务器</UButton>
+    </div>
+  </div>
 </template>

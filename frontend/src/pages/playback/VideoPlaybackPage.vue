@@ -25,12 +25,18 @@ let lastProgressSecond = -10;
 const itemId = computed(() => String(route.query.itemId || ''));
 const currentSource = computed(() => item.value?.MediaSources?.[currentSourceIndex.value]);
 const sourceUrl = computed(() =>
-  currentSource.value ? api.streamUrlForSource(currentSource.value) : item.value ? api.streamUrl(item.value) : ''
+  currentSource.value
+    ? api.streamUrlForSource(currentSource.value)
+    : item.value
+    ? api.streamUrl(item.value)
+    : ''
 );
 const posterImage = computed(() =>
   item.value ? api.backdropUrl(item.value) || api.itemImageUrl(item.value) : ''
 );
-const currentStreams = computed(() => currentSource.value?.MediaStreams || item.value?.MediaStreams || []);
+const currentStreams = computed(
+  () => currentSource.value?.MediaStreams || item.value?.MediaStreams || []
+);
 const subtitleTracks = computed(() =>
   currentStreams.value
     .filter((stream) => stream.Type === 'Subtitle' && stream.DeliveryUrl)
@@ -58,15 +64,13 @@ watch(
     if (!videoRef.value || !sourceUrl.value) {
       return;
     }
-
     const currentTime = videoRef.value.currentTime;
     videoRef.value.load();
-
     try {
       await videoRef.value.play();
       videoRef.value.currentTime = currentTime;
     } catch {
-      // Ignore autoplay failures; native controls remain available.
+      // Ignore autoplay failures
     }
   }
 );
@@ -114,15 +118,11 @@ function playedToCompletion() {
   if (!player || !player.duration || Number.isNaN(player.duration)) {
     return false;
   }
-
   return player.currentTime / player.duration >= 0.9;
 }
 
 async function reportProgress(isPaused = false) {
-  if (!item.value || !playSessionId.value || !videoRef.value) {
-    return;
-  }
-
+  if (!item.value || !playSessionId.value || !videoRef.value) return;
   await api.playbackProgress({
     ItemId: item.value.Id,
     PlaySessionId: playSessionId.value,
@@ -134,10 +134,7 @@ async function reportProgress(isPaused = false) {
 }
 
 async function stopPlayback(forceCompleted = false) {
-  if (!item.value || !playSessionId.value || hasStopped || !videoRef.value) {
-    return;
-  }
-
+  if (!item.value || !playSessionId.value || hasStopped || !videoRef.value) return;
   hasStopped = true;
   await api.playbackStopped({
     ItemId: item.value.Id,
@@ -152,11 +149,7 @@ async function stopPlayback(forceCompleted = false) {
 async function handlePlay() {
   paused.value = false;
   touchOverlay();
-
-  if (!item.value || !playSessionId.value) {
-    return;
-  }
-
+  if (!item.value || !playSessionId.value) return;
   if (!hasStarted) {
     hasStarted = true;
     await api.playbackStarted({
@@ -183,10 +176,7 @@ async function handleEnded() {
 
 function handleTimeUpdate() {
   const player = videoRef.value;
-  if (!player) {
-    return;
-  }
-
+  if (!player) return;
   const second = Math.floor(player.currentTime);
   if (second - lastProgressSecond >= 10) {
     lastProgressSecond = second;
@@ -196,11 +186,11 @@ function handleTimeUpdate() {
 
 function skip(seconds: number) {
   const player = videoRef.value;
-  if (!player) {
-    return;
-  }
-
-  player.currentTime = Math.max(0, Math.min(player.duration || Infinity, player.currentTime + seconds));
+  if (!player) return;
+  player.currentTime = Math.max(
+    0,
+    Math.min(player.duration || Infinity, player.currentTime + seconds)
+  );
 }
 
 async function closePlayer() {
@@ -210,10 +200,7 @@ async function closePlayer() {
 
 function togglePlayback() {
   const player = videoRef.value;
-  if (!player) {
-    return;
-  }
-
+  if (!player) return;
   if (player.paused) {
     void player.play();
   } else {
@@ -224,7 +211,6 @@ function togglePlayback() {
 function touchOverlay() {
   overlayVisible.value = true;
   window.clearTimeout(overlayTimer);
-
   if (!paused.value) {
     overlayTimer = window.setTimeout(() => {
       overlayVisible.value = false;
@@ -234,27 +220,33 @@ function touchOverlay() {
 </script>
 
 <template>
-  <section v-if="loading" class="player-loading">
-    <p>正在准备播放器</p>
-  </section>
+  <div
+    v-if="loading"
+    class="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-black text-white"
+  >
+    <UProgress animation="carousel" class="w-48" />
+    <p class="text-sm opacity-80">正在准备播放器…</p>
+  </div>
 
-  <section v-else-if="error || !item" class="player-loading">
-    <div>
-      <p>播放失败</p>
-      <h2>{{ error || '没有找到播放内容' }}</h2>
-      <button type="button" @click="router.back()">返回</button>
-    </div>
-  </section>
+  <div
+    v-else-if="error || !item"
+    class="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-black text-white"
+  >
+    <UIcon name="i-lucide-circle-alert" class="size-12 opacity-80" />
+    <p class="text-sm opacity-70">播放失败</p>
+    <h2 class="text-xl font-semibold">{{ error || '没有找到播放内容' }}</h2>
+    <UButton color="neutral" variant="subtle" icon="i-lucide-arrow-left" @click="router.back()">返回</UButton>
+  </div>
 
-  <section
+  <div
     v-else
-    class="player-shell video-player-shell"
+    class="relative h-screen w-screen overflow-hidden bg-black text-white"
     @mousemove="touchOverlay"
     @touchstart.passive="touchOverlay"
   >
     <video
       ref="videoRef"
-      class="video-surface"
+      class="absolute inset-0 h-full w-full bg-black object-contain"
       :src="sourceUrl"
       :poster="posterImage"
       controls
@@ -275,52 +267,97 @@ function touchOverlay() {
       />
     </video>
 
-    <div class="player-overlay" :class="{ hidden: !overlayVisible }">
-      <div class="player-topbar">
-        <div>
-          <p>{{ item.SeriesName || item.SeasonName || item.Type }}</p>
-          <h2>{{ item.Name }}</h2>
+    <transition
+      enter-active-class="transition-opacity duration-200"
+      leave-active-class="transition-opacity duration-500"
+      enter-from-class="opacity-0"
+      leave-to-class="opacity-0"
+    >
+      <div
+        v-show="overlayVisible"
+        class="pointer-events-none absolute inset-0 flex flex-col justify-between"
+      >
+        <div
+          class="pointer-events-auto flex items-start justify-between gap-4 bg-gradient-to-b from-black/70 via-black/40 to-transparent p-4 sm:p-6"
+        >
+          <div class="min-w-0">
+            <p class="text-xs uppercase tracking-wider text-white/60">
+              {{ item.SeriesName || item.SeasonName || item.Type }}
+            </p>
+            <h2 class="mt-1 truncate text-2xl font-semibold">{{ item.Name }}</h2>
+          </div>
+          <UButton color="neutral" variant="solid" icon="i-lucide-x" @click="closePlayer">关闭</UButton>
         </div>
-        <div class="button-row">
-          <button class="secondary" type="button" @click="closePlayer">关闭</button>
-        </div>
-      </div>
 
-      <div class="player-bottombar">
-        <div class="button-row">
-          <button class="secondary" type="button" @click="skip(-10)">-10s</button>
-          <button type="button" @click="togglePlayback">{{ paused ? '播放' : '暂停' }}</button>
-          <button class="secondary" type="button" @click="skip(10)">+10s</button>
-        </div>
-
-        <div class="player-panels">
-          <div class="player-panel">
-            <h3>播放源</h3>
-            <div class="admin-tabs">
-              <button
-                v-for="(source, index) in item.MediaSources"
-                :key="source.Id"
-                type="button"
-                :class="{ active: currentSourceIndex === index }"
-                @click="currentSourceIndex = index"
-              >
-                {{ source.Container || `版本 ${index + 1}` }}
-              </button>
-            </div>
-            <p v-if="currentSource?.Size" class="panel-note">大小：{{ fileSize(currentSource.Size) }}</p>
+        <div
+          class="pointer-events-auto flex flex-col gap-4 bg-gradient-to-t from-black/80 via-black/50 to-transparent p-4 sm:p-6"
+        >
+          <div class="flex items-center justify-center gap-3">
+            <UButton
+              color="neutral"
+              variant="solid"
+              size="lg"
+              icon="i-lucide-rewind"
+              @click="skip(-10)"
+            >
+              -10s
+            </UButton>
+            <UButton
+              color="primary"
+              variant="solid"
+              size="xl"
+              :icon="paused ? 'i-lucide-play' : 'i-lucide-pause'"
+              @click="togglePlayback"
+            >
+              {{ paused ? '播放' : '暂停' }}
+            </UButton>
+            <UButton
+              color="neutral"
+              variant="solid"
+              size="lg"
+              icon="i-lucide-fast-forward"
+              @click="skip(10)"
+            >
+              +10s
+            </UButton>
           </div>
 
-          <div class="player-panel">
-            <h3>媒体流</h3>
-            <div class="streams compact">
-              <div v-for="stream in currentStreams" :key="`${stream.Type}-${stream.Index}`">
-                <strong>{{ streamLabel(stream.Type) }}</strong>
-                <span>{{ streamText(stream) || '默认轨道' }}</span>
+          <div class="grid gap-3 md:grid-cols-2">
+            <div class="rounded-xl border border-white/10 bg-black/40 p-3 backdrop-blur">
+              <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-white/70">播放源</h3>
+              <div class="flex flex-wrap gap-2">
+                <UButton
+                  v-for="(source, index) in item.MediaSources"
+                  :key="source.Id"
+                  :color="currentSourceIndex === index ? 'primary' : 'neutral'"
+                  :variant="currentSourceIndex === index ? 'solid' : 'subtle'"
+                  size="xs"
+                  @click="currentSourceIndex = index"
+                >
+                  {{ source.Container || `版本 ${index + 1}` }}
+                </UButton>
+              </div>
+              <p v-if="currentSource?.Size" class="mt-2 text-xs text-white/60">
+                大小：{{ fileSize(currentSource.Size) }}
+              </p>
+            </div>
+
+            <div class="rounded-xl border border-white/10 bg-black/40 p-3 backdrop-blur">
+              <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-white/70">媒体流</h3>
+              <div class="space-y-1 text-xs">
+                <div
+                  v-for="stream in currentStreams"
+                  :key="`${stream.Type}-${stream.Index}`"
+                  class="flex gap-2"
+                >
+                  <span class="w-12 shrink-0 text-white/50">{{ streamLabel(stream.Type) }}</span>
+                  <span class="text-white/80">{{ streamText(stream) || '默认轨道' }}</span>
+                </div>
               </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
-  </section>
+    </transition>
+  </div>
 </template>
