@@ -12,7 +12,7 @@ use axum::{
     response::Response,
 };
 use chrono::NaiveDate;
-use reqwest::Client;
+use reqwest::{redirect::Policy, Client};
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::{
@@ -1600,14 +1600,17 @@ async fn send_remote_stream_request(
     method: &Method,
     request_headers: &HeaderMap,
 ) -> Result<reqwest::Response, AppError> {
-    let client = Client::new();
+    let client = Client::builder()
+        .redirect(Policy::none())
+        .build()
+        .map_err(AppError::from)?;
     let normalized_method = if *method == Method::HEAD {
         Method::HEAD
     } else {
         Method::GET
     };
 
-    for attempt in 0..2 {
+    'auth_attempt: for attempt in 0..2 {
         let user_id = ensure_authenticated(pool, source, attempt > 0).await?;
         let token = source
             .access_token
@@ -1683,64 +1686,128 @@ async fn send_remote_stream_request(
         {
             endpoint = append_query_pair(endpoint.as_str(), "api_key", token.as_str());
         }
-
-        let mut builder = if normalized_method == Method::HEAD {
-            client.head(&endpoint)
-        } else {
-            client.get(&endpoint)
-        };
-        builder = builder
-            .header(
+        let mut redirect_count = 0usize;
+        let mut redirected_from: Option<String> = None;
+        loop {
+            let mut builder = if normalized_method == Method::HEAD {
+                client.head(&endpoint)
+            } else {
+                client.get(&endpoint)
+            };
+            builder = builder.header(
                 header::USER_AGENT.as_str(),
                 source.spoofed_user_agent.as_str(),
-            )
-            .header("X-Emby-Token", token.as_str())
-            .header(
-                "X-Emby-Authorization",
-                emby_auth_header(source, Some(token.as_str())),
             );
-        for (key, value) in &media_source.required_http_headers {
-            if key.trim().is_empty() || value.trim().is_empty() {
+            if is_same_origin_url(endpoint.as_str(), server_url.as_str()) {
+                builder = builder.header("X-Emby-Token", token.as_str()).header(
+                    "X-Emby-Authorization",
+                    emby_auth_header(source, Some(token.as_str())),
+                );
+            }
+            for (key, value) in &media_source.required_http_headers {
+                if key.trim().is_empty() || value.trim().is_empty() {
+                    continue;
+                }
+                if is_hop_by_hop_header(key.as_str())
+                    || key.eq_ignore_ascii_case("Host")
+                    || key.eq_ignore_ascii_case("Content-Length")
+                {
+                    continue;
+                }
+                builder = builder.header(key.as_str(), value.as_str());
+            }
+
+            for name in [
+                header::RANGE,
+                header::IF_RANGE,
+                header::ACCEPT,
+                header::ACCEPT_LANGUAGE,
+            ] {
+                if let Some(value) = request_headers
+                    .get(&name)
+                    .and_then(|value| value.to_str().ok())
+                {
+                    builder = builder.header(name.as_str(), value);
+                }
+            }
+            if let Some(previous) = redirected_from.as_deref() {
+                builder = builder.header(header::REFERER.as_str(), previous);
+            }
+
+            let response = builder.send().await?;
+            if matches!(
+                response.status(),
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            ) && attempt == 0
+            {
+                repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
+                source.access_token = None;
+                source.remote_user_id = None;
+                continue 'auth_attempt;
+            }
+
+            if response.status().is_redirection() {
+                let location = response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        AppError::Internal(format!(
+                            "远端流重定向缺少 Location: endpoint={}, status={}",
+                            endpoint,
+                            response.status().as_u16()
+                        ))
+                    })?;
+                if redirect_count >= 8 {
+                    return Err(AppError::Internal(format!(
+                        "远端流重定向过多: endpoint={}",
+                        endpoint
+                    )));
+                }
+                let previous_endpoint = endpoint.clone();
+                endpoint =
+                    resolve_redirect_url(previous_endpoint.as_str(), location, server_url.as_str());
+                redirected_from = Some(previous_endpoint);
+                redirect_count += 1;
                 continue;
             }
-            if is_hop_by_hop_header(key.as_str())
-                || key.eq_ignore_ascii_case("Host")
-                || key.eq_ignore_ascii_case("Content-Length")
-            {
-                continue;
-            }
-            builder = builder.header(key.as_str(), value.as_str());
+            return Ok(response);
         }
-
-        for name in [
-            header::RANGE,
-            header::IF_RANGE,
-            header::ACCEPT,
-            header::ACCEPT_LANGUAGE,
-        ] {
-            if let Some(value) = request_headers
-                .get(&name)
-                .and_then(|value| value.to_str().ok())
-            {
-                builder = builder.header(name.as_str(), value);
-            }
-        }
-
-        let response = builder.send().await?;
-        if matches!(
-            response.status(),
-            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-        ) && attempt == 0
-        {
-            repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
-            source.access_token = None;
-            source.remote_user_id = None;
-            continue;
-        }
-        return Ok(response);
     }
 
     Err(AppError::Unauthorized)
+}
+
+fn is_same_origin_url(left: &str, right: &str) -> bool {
+    let Ok(left) = url::Url::parse(left) else {
+        return false;
+    };
+    let Ok(right) = url::Url::parse(right) else {
+        return false;
+    };
+    left.scheme() == right.scheme()
+        && left.domain() == right.domain()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+fn resolve_redirect_url(current_endpoint: &str, location: &str, server_url: &str) -> String {
+    let target = location.trim();
+    if target.starts_with("http://") || target.starts_with("https://") {
+        return target.to_string();
+    }
+    if target.starts_with("//") {
+        if let Ok(base) = url::Url::parse(current_endpoint) {
+            return format!("{}:{}", base.scheme(), target);
+        }
+    }
+    if let Ok(base) = url::Url::parse(current_endpoint) {
+        if let Ok(joined) = base.join(target) {
+            return joined.to_string();
+        }
+    }
+    absolutize_remote_url(server_url, target)
 }
 
 async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
