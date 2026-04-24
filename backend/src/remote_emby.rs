@@ -13,7 +13,7 @@ use axum::{
 };
 use chrono::NaiveDate;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -236,13 +236,63 @@ struct RemoteBaseItem {
     index_number: Option<i32>,
     #[serde(default)]
     provider_ids: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
     genres: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
     studios: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
     tags: Vec<String>,
     media_sources: Option<Vec<RemoteMediaSource>>,
+}
+
+fn deserialize_string_list_lossy<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let mut result = Vec::new();
+    match value {
+        Value::Null => {}
+        Value::Array(items) => {
+            for item in items {
+                if let Some(text) = value_to_lossy_string(&item) {
+                    result.push(text);
+                }
+            }
+        }
+        other => {
+            if let Some(text) = value_to_lossy_string(&other) {
+                result.push(text);
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn value_to_lossy_string(value: &Value) -> Option<String> {
+    let raw = match value {
+        Value::String(text) => Some(text.trim().to_string()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Object(map) => {
+            for key in [
+                "Name", "name", "Value", "value", "Text", "text", "Title", "title",
+            ] {
+                if let Some(found) = map.get(key) {
+                    if let Some(normalized) = value_to_lossy_string(found) {
+                        return Some(normalized);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }?;
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
