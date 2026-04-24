@@ -66,13 +66,39 @@ const hlsSourceUrl = computed(() => {
   if (!item.value) return '';
   return api.hlsUrlForSource(item.value.Id, currentSource.value, playSessionId.value);
 });
+
+function inferDirectMimeType(url: string, container?: string) {
+  const inferredContainer =
+    (container || '').trim().toLowerCase() ||
+    (url.split('?')[0].match(/\.([a-z0-9]+)$/i)?.[1] || '').toLowerCase();
+  if (inferredContainer === 'ts' || inferredContainer.includes('mpegts')) {
+    return 'video/mp2t';
+  }
+  if (inferredContainer.includes('mkv')) {
+    return 'video/x-matroska';
+  }
+  if (inferredContainer.includes('webm')) {
+    return 'video/webm';
+  }
+  if (inferredContainer.includes('mov')) {
+    return 'video/quicktime';
+  }
+  if (inferredContainer.includes('avi')) {
+    return 'video/x-msvideo';
+  }
+  return 'video/mp4';
+}
+
 const sourceCandidates = computed(() => {
   const candidates: Array<{ src: string; type: string }> = [];
   if (hlsSourceUrl.value) {
     candidates.push({ src: hlsSourceUrl.value, type: 'application/x-mpegURL' });
   }
   if (directSourceUrl.value) {
-    candidates.push({ src: directSourceUrl.value, type: 'video/mp4' });
+    candidates.push({
+      src: directSourceUrl.value,
+      type: inferDirectMimeType(directSourceUrl.value, currentSource.value?.Container)
+    });
   }
   return candidates;
 });

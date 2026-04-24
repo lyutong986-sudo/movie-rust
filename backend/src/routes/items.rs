@@ -3330,11 +3330,12 @@ async fn playback_info(
     if matches!(item.item_type.as_str(), "Series" | "Season" | "Folder") {
         return Err(AppError::BadRequest("目录条目没有播放源".to_string()));
     }
+    let remote_virtual_ref = remote_emby::parse_virtual_media_path(&item.path);
 
     let needs_metadata =
         item.video_codec.is_none() || item.audio_codec.is_none() || item.runtime_ticks.is_none();
     if needs_metadata {
-        if remote_emby::parse_virtual_media_path(&item.path).is_some() {
+        if remote_virtual_ref.is_some() {
             tracing::debug!("PlaybackInfo 跳过远端虚拟条目本地探测: {}", item.path);
         } else {
             work_limiter_config(&state).await?;
@@ -3417,20 +3418,59 @@ async fn playback_info(
         }
     }
 
-    let play_session_id = info
+    let mut play_session_id = info
         .current_play_session_id
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
 
-    let mut media_sources =
-        repository::get_media_sources_for_item(&state.pool, &item, state.config.server_id).await?;
-    if media_sources.is_empty() {
-        media_sources.push(
-            repository::get_media_source_with_streams(&state.pool, &item, state.config.server_id)
+    let mut media_sources = if let Some(virtual_ref) = remote_virtual_ref.as_ref() {
+        let local_media_source_id =
+            format!("mediasource_{}", crate::models::uuid_to_emby_guid(&item.id));
+        let requested_remote_media_source_id = info
+            .media_source_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|value| !value.eq_ignore_ascii_case(local_media_source_id.as_str()));
+        let resolution = remote_emby::resolve_virtual_playback_sources(
+            &state.pool,
+            virtual_ref.source_id,
+            virtual_ref.remote_item_id.as_str(),
+            requested_remote_media_source_id,
+            info.is_playback.unwrap_or(true),
+        )
+        .await?;
+        if let Some(remote_play_session_id) = resolution
+            .play_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            play_session_id = remote_play_session_id.to_string();
+        }
+        if resolution.media_sources.is_empty() {
+            return Err(AppError::BadRequest(
+                "远端 PlaybackInfo 未返回可用媒体源".to_string(),
+            ));
+        }
+        resolution.media_sources
+    } else {
+        let mut media_sources =
+            repository::get_media_sources_for_item(&state.pool, &item, state.config.server_id)
+                .await?;
+        if media_sources.is_empty() {
+            media_sources.push(
+                repository::get_media_source_with_streams(
+                    &state.pool,
+                    &item,
+                    state.config.server_id,
+                )
                 .await?,
-        );
-    }
+            );
+        }
+        media_sources
+    };
 
     let selected_media_source_index = info
         .media_source_id

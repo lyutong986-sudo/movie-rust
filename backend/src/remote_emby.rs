@@ -2,7 +2,7 @@ use crate::{
     config::Config,
     error::AppError,
     media_analyzer::{MediaAnalysisResult, MediaChapterInfo, MediaFormatInfo, MediaStreamInfo},
-    models::{DbLibrary, DbRemoteEmbySource, ScanSummary},
+    models::{DbLibrary, DbRemoteEmbySource, MediaSourceDto, MediaStreamDto, ScanSummary},
     repository, scanner,
     state::AppState,
 };
@@ -16,7 +16,7 @@ use reqwest::{redirect::Policy, Client};
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -358,15 +358,47 @@ struct RemotePlaybackMediaSource {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
+    item_id: Option<String>,
+    #[serde(default)]
     path: Option<String>,
     #[serde(default)]
+    protocol: Option<String>,
+    #[serde(default, rename = "Type")]
+    source_type: Option<String>,
+    #[serde(default)]
     container: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    is_remote: Option<bool>,
+    #[serde(default)]
+    supports_direct_play: Option<bool>,
+    #[serde(default)]
+    supports_direct_stream: Option<bool>,
+    #[serde(default)]
+    supports_transcoding: Option<bool>,
     #[serde(default)]
     size: Option<i64>,
     #[serde(default)]
     bitrate: Option<i64>,
     #[serde(default)]
     run_time_ticks: Option<i64>,
+    #[serde(default)]
+    default_audio_stream_index: Option<i32>,
+    #[serde(default)]
+    default_subtitle_stream_index: Option<i32>,
+    #[serde(default)]
+    is_infinite_stream: Option<bool>,
+    #[serde(default)]
+    requires_opening: Option<bool>,
+    #[serde(default)]
+    requires_closing: Option<bool>,
+    #[serde(default)]
+    requires_looping: Option<bool>,
+    #[serde(default)]
+    supports_probing: Option<bool>,
+    #[serde(default)]
+    formats: Vec<String>,
     #[serde(default)]
     direct_stream_url: Option<String>,
     #[serde(default)]
@@ -390,7 +422,13 @@ struct RemotePlaybackMediaStream {
     #[serde(default)]
     codec: Option<String>,
     #[serde(default)]
+    codec_tag: Option<String>,
+    #[serde(default)]
     language: Option<String>,
+    #[serde(default)]
+    display_language: Option<String>,
+    #[serde(default)]
+    display_title: Option<String>,
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
@@ -420,11 +458,29 @@ struct RemotePlaybackMediaStream {
     #[serde(default)]
     is_forced: bool,
     #[serde(default)]
+    is_external: bool,
+    #[serde(default)]
     is_hearing_impaired: bool,
     #[serde(default)]
     is_interlaced: bool,
     #[serde(default)]
     is_text_subtitle_stream: Option<bool>,
+    #[serde(default)]
+    delivery_method: Option<String>,
+    #[serde(default)]
+    delivery_url: Option<String>,
+    #[serde(default)]
+    is_chunked_response: Option<bool>,
+    #[serde(default)]
+    supports_external_stream: Option<bool>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    subtitle_location_type: Option<String>,
+    #[serde(default)]
+    server_id: Option<String>,
+    #[serde(default)]
+    item_id: Option<String>,
     #[serde(default)]
     color_space: Option<String>,
     #[serde(default)]
@@ -462,6 +518,12 @@ struct RemotePlaybackChapter {
     name: Option<String>,
     #[serde(default)]
     marker_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemotePlaybackResolution {
+    pub media_sources: Vec<MediaSourceDto>,
+    pub play_session_id: Option<String>,
 }
 
 pub fn default_spoofed_user_agent() -> &'static str {
@@ -953,6 +1015,300 @@ pub fn remote_default_media_source_id(provider_ids: &Value) -> Option<String> {
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+pub async fn resolve_virtual_playback_sources(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    remote_item_id: &str,
+    requested_media_source_id: Option<&str>,
+    is_playback: bool,
+) -> Result<RemotePlaybackResolution, AppError> {
+    let mut source = repository::get_remote_emby_source(pool, source_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("远端 Emby 源不存在".to_string()))?;
+    if !source.enabled {
+        return Err(AppError::NotFound("远端 Emby 源已禁用".to_string()));
+    }
+    let user_id = ensure_authenticated(pool, &mut source, false).await?;
+    let requested_media_source_id = requested_media_source_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut playback_info = fetch_remote_playback_info(
+        pool,
+        &mut source,
+        user_id.as_str(),
+        remote_item_id,
+        requested_media_source_id,
+        is_playback,
+    )
+    .await?;
+    let has_stream = select_remote_playback_media_source(
+        playback_info.media_sources.as_slice(),
+        requested_media_source_id,
+    )
+    .is_some_and(remote_playback_source_has_stream);
+    if !has_stream {
+        let fallback_info = fetch_remote_playback_info(
+            pool,
+            &mut source,
+            user_id.as_str(),
+            remote_item_id,
+            requested_media_source_id,
+            true,
+        )
+        .await?;
+        if !fallback_info.media_sources.is_empty() {
+            playback_info = fallback_info;
+        }
+    }
+    let media_sources = playback_info
+        .media_sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            remote_playback_source_to_media_source_dto(remote_item_id, source, index)
+        })
+        .collect::<Vec<_>>();
+    Ok(RemotePlaybackResolution {
+        media_sources,
+        play_session_id: playback_info.play_session_id,
+    })
+}
+
+fn remote_playback_source_has_stream(source: &RemotePlaybackMediaSource) -> bool {
+    source
+        .direct_stream_url
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || source
+            .transcoding_url
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn remote_playback_source_to_media_source_dto(
+    remote_item_id: &str,
+    source: &RemotePlaybackMediaSource,
+    index: usize,
+) -> MediaSourceDto {
+    let fallback_id = format!("remote-{remote_item_id}-{}", index + 1);
+    let id = source
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_id.as_str())
+        .to_string();
+    let container = source
+        .container
+        .as_deref()
+        .map(str::trim)
+        .and_then(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .find(|value| !value.is_empty())
+        })
+        .unwrap_or("mp4")
+        .to_string();
+    let formats = if source.formats.is_empty() {
+        vec![container.clone()]
+    } else {
+        source
+            .formats
+            .iter()
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let default_audio_stream_index = source.default_audio_stream_index.or_else(|| {
+        source
+            .media_streams
+            .iter()
+            .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio") && stream.is_default)
+            .map(|stream| stream.index)
+    });
+    let default_subtitle_stream_index = source.default_subtitle_stream_index.or_else(|| {
+        source
+            .media_streams
+            .iter()
+            .find(|stream| stream.stream_type.eq_ignore_ascii_case("Subtitle") && stream.is_default)
+            .map(|stream| stream.index)
+    });
+    let required_http_headers = source
+        .required_http_headers
+        .iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim();
+            let value = value.trim();
+            if key.is_empty() || value.is_empty() {
+                None
+            } else {
+                Some((key.to_string(), value.to_string()))
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+    let chapters = source
+        .chapters
+        .iter()
+        .map(|chapter| {
+            json!({
+                "ChapterIndex": chapter.chapter_index,
+                "StartPositionTicks": chapter.start_position_ticks,
+                "Name": chapter.name,
+                "MarkerType": chapter.marker_type,
+            })
+        })
+        .collect::<Vec<_>>();
+    MediaSourceDto {
+        chapters,
+        id,
+        path: source
+            .path
+            .clone()
+            .unwrap_or_else(|| format!("REMOTE_EMBY/unknown/items/{remote_item_id}")),
+        protocol: source
+            .protocol
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Http")
+            .to_string(),
+        source_type: source
+            .source_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Default")
+            .to_string(),
+        container,
+        name: source
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(remote_item_id)
+            .to_string(),
+        sort_name: None,
+        is_remote: source.is_remote.unwrap_or(true),
+        encoder_path: None,
+        encoder_protocol: None,
+        probe_path: None,
+        probe_protocol: None,
+        has_mixed_protocols: Some(false),
+        supports_direct_play: source.supports_direct_play.unwrap_or(true),
+        supports_direct_stream: source.supports_direct_stream.unwrap_or(true),
+        supports_transcoding: source
+            .supports_transcoding
+            .unwrap_or_else(|| source.transcoding_url.is_some()),
+        direct_stream_url: source.direct_stream_url.clone(),
+        formats,
+        size: source.size,
+        e_tag: None,
+        bitrate: source.bitrate.and_then(|value| i32::try_from(value).ok()),
+        default_audio_stream_index,
+        default_subtitle_stream_index,
+        run_time_ticks: source.run_time_ticks,
+        container_start_time_ticks: None,
+        is_infinite_stream: source.is_infinite_stream,
+        requires_opening: source.requires_opening,
+        open_token: None,
+        requires_closing: source.requires_closing,
+        live_stream_id: None,
+        buffer_ms: None,
+        requires_looping: source.requires_looping,
+        supports_probing: source.supports_probing,
+        video_3d_format: None,
+        timestamp: None,
+        required_http_headers,
+        add_api_key_to_direct_stream_url: source.add_api_key_to_direct_stream_url,
+        transcoding_url: source.transcoding_url.clone(),
+        transcoding_sub_protocol: None,
+        transcoding_container: None,
+        analyze_duration_ms: None,
+        read_at_native_framerate: None,
+        item_id: source.item_id.clone(),
+        server_id: None,
+        media_streams: source
+            .media_streams
+            .iter()
+            .map(|stream| remote_playback_stream_to_media_stream_dto(stream, remote_item_id))
+            .collect::<Vec<_>>(),
+    }
+}
+
+fn remote_playback_stream_to_media_stream_dto(
+    stream: &RemotePlaybackMediaStream,
+    remote_item_id: &str,
+) -> MediaStreamDto {
+    let stream_type = stream.stream_type.trim().to_string();
+    MediaStreamDto {
+        index: stream.index,
+        stream_type,
+        codec: stream.codec.clone(),
+        codec_tag: stream.codec_tag.clone(),
+        language: stream.language.clone(),
+        display_title: stream
+            .display_title
+            .clone()
+            .or_else(|| stream.title.clone()),
+        is_default: stream.is_default,
+        is_forced: stream.is_forced,
+        width: stream.width,
+        height: stream.height,
+        bit_rate: stream.bit_rate.and_then(|value| i32::try_from(value).ok()),
+        channels: stream.channels,
+        sample_rate: stream.sample_rate,
+        is_external: stream.is_external,
+        delivery_method: stream.delivery_method.clone(),
+        delivery_url: stream.delivery_url.clone(),
+        is_chunked_response: stream.is_chunked_response,
+        supports_external_stream: stream.supports_external_stream.unwrap_or(false),
+        path: None,
+        aspect_ratio: stream.aspect_ratio.clone(),
+        attachment_size: stream.attachment_size,
+        average_frame_rate: stream.average_frame_rate,
+        bit_depth: stream.bit_depth,
+        color_primaries: stream.color_primaries.clone(),
+        color_space: stream.color_space.clone(),
+        color_transfer: stream.color_transfer.clone(),
+        display_language: stream.display_language.clone(),
+        extended_video_sub_type: stream.extended_video_sub_type.clone(),
+        extended_video_sub_type_description: stream.extended_video_sub_type_description.clone(),
+        extended_video_type: stream.extended_video_type.clone(),
+        is_anamorphic: stream.is_anamorphic,
+        is_avc: stream
+            .codec
+            .as_deref()
+            .map(|value| value.eq_ignore_ascii_case("h264")),
+        is_external_url: None,
+        is_hearing_impaired: Some(stream.is_hearing_impaired),
+        is_interlaced: Some(stream.is_interlaced),
+        is_text_subtitle_stream: stream.is_text_subtitle_stream,
+        level: stream.level,
+        pixel_format: stream.pixel_format.clone(),
+        profile: stream.profile.clone(),
+        protocol: Some("File".to_string()),
+        real_frame_rate: stream.real_frame_rate,
+        ref_frames: stream.ref_frames,
+        rotation: None,
+        stream_start_time_ticks: None,
+        time_base: stream.time_base.clone(),
+        title: stream.title.clone(),
+        comment: None,
+        video_range: stream.video_range.clone(),
+        channel_layout: stream.channel_layout.clone(),
+        item_id: stream
+            .item_id
+            .clone()
+            .or_else(|| Some(remote_item_id.to_string())),
+        server_id: stream.server_id.clone(),
+        mime_type: stream.mime_type.clone(),
+        subtitle_location_type: stream.subtitle_location_type.clone(),
+    }
 }
 
 fn build_virtual_root_path(source_id: Uuid) -> String {
@@ -1850,7 +2206,7 @@ fn build_fallback_playback_stream_url(
             requested_media_source_id
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-        })?;
+        });
     let remote_item_id = remote_item_id.trim();
     if remote_item_id.is_empty() {
         return None;
@@ -1863,7 +2219,9 @@ fn build_fallback_playback_stream_url(
         .unwrap_or("mp4");
     let mut endpoint = format!("{server_url}/videos/{remote_item_id}/original.{container}");
     endpoint = append_query_pair(endpoint.as_str(), "DeviceId", device_id);
-    endpoint = append_query_pair(endpoint.as_str(), "MediaSourceId", media_source_id);
+    if let Some(media_source_id) = media_source_id {
+        endpoint = append_query_pair(endpoint.as_str(), "MediaSourceId", media_source_id);
+    }
     let play_session_id = play_session_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
