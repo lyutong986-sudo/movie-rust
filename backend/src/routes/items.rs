@@ -744,7 +744,7 @@ async fn list_items_for_user(
                 ),
             )
             .await?;
-            return media_items_to_dto_result(state, user_id, result).await;
+            return media_items_to_dto_result(state, user_id, result, &query).await;
         }
     }
 
@@ -762,7 +762,7 @@ async fn list_items_for_user(
     )
     .await?;
 
-    media_items_to_dto_result(state, user_id, result).await
+    media_items_to_dto_result(state, user_id, result, &query).await
 }
 
 async fn item_filters(
@@ -1114,6 +1114,7 @@ async fn media_items_to_dto_result(
     state: &AppState,
     user_id: Uuid,
     result: QueryResult<crate::models::DbMediaItem>,
+    query: &ItemsQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     // 列表接口的 N+1 优化：一次查 user_data、一次查 Folder 子代计数、一次查剧集的季数，
     // 替代原本 1 条 item = 3~5 次独立 SQL 的模式（50 条列表大约从 150~250 次调用降到 3 次）。
@@ -1148,17 +1149,16 @@ async fn media_items_to_dto_result(
             recursive_item_count: recursive_counts.get(&item.id).copied(),
             season_count: season_counts.get(&item.id).copied(),
         };
-        items.push(
-            repository::media_item_to_dto_for_list(
-                &state.pool,
-                &item,
-                Some(user_id),
-                state.config.server_id,
-                prefetched_user,
-                counts,
-            )
-            .await?,
-        );
+        let dto = repository::media_item_to_dto_for_list(
+            &state.pool,
+            &item,
+            Some(user_id),
+            state.config.server_id,
+            prefetched_user,
+            counts,
+        )
+        .await?;
+        items.push(apply_item_response_shape(dto, query));
     }
 
     Ok(Json(QueryResult {
@@ -4412,6 +4412,136 @@ fn parse_emby_uuid_list(value: Option<&str>) -> Vec<Uuid> {
         .collect()
 }
 
+fn apply_item_response_shape(mut item: BaseItemDto, query: &ItemsQuery) -> BaseItemDto {
+    let enable_image_types = parse_list(query.enable_image_types.as_deref());
+    let images_disabled = query.enable_images == Some(false)
+        || query.image_type_limit == Some(0)
+        || (query.image_type_limit.is_some_and(|limit| limit <= 0));
+
+    if images_disabled {
+        clear_item_images(&mut item);
+    } else if !enable_image_types.is_empty() {
+        retain_item_images(&mut item, &enable_image_types);
+    }
+
+    if query.enable_user_data == Some(false) {
+        item.user_data = repository::empty_user_data_for_item(
+            emby_id_to_uuid(&item.id).unwrap_or_else(|_| Uuid::nil()),
+        );
+    }
+
+    let requested_fields = parse_list(query.fields.as_deref());
+    if !requested_fields.is_empty() {
+        trim_item_heavy_fields(&mut item, &requested_fields);
+    }
+
+    item
+}
+
+fn trim_item_heavy_fields(item: &mut BaseItemDto, requested_fields: &[String]) {
+    if !contains_ignore_case(requested_fields, "Overview") {
+        item.overview = None;
+    }
+    if !contains_ignore_case(requested_fields, "Path") {
+        item.path = None;
+    }
+    if !contains_ignore_case(requested_fields, "People") {
+        item.people.clear();
+    }
+    if !contains_ignore_case(requested_fields, "MediaSources") {
+        item.media_sources.clear();
+    }
+    if !contains_ignore_case(requested_fields, "MediaStreams") {
+        item.media_streams.clear();
+    }
+    if !contains_ignore_case(requested_fields, "Chapters") {
+        item.chapters.clear();
+    }
+    if !contains_ignore_case(requested_fields, "RemoteTrailers") {
+        item.remote_trailers.clear();
+        item.local_trailer_count = 0;
+    }
+    if !contains_ignore_case(requested_fields, "Genres") {
+        item.genres.clear();
+        item.genre_items.clear();
+    }
+    if !contains_ignore_case(requested_fields, "Studios") {
+        item.studios.clear();
+        item.series_studio = None;
+    }
+    if !contains_ignore_case(requested_fields, "Tags") {
+        item.tags.clear();
+        item.tag_items.clear();
+        item.taglines.clear();
+    }
+    if !contains_ignore_case(requested_fields, "ProviderIds") {
+        item.provider_ids.clear();
+    }
+    if !contains_ignore_case(requested_fields, "ExternalUrls") {
+        item.external_urls.clear();
+    }
+    if !contains_ignore_case(requested_fields, "ProductionLocations") {
+        item.production_locations.clear();
+    }
+    if !contains_ignore_case(requested_fields, "RecursiveItemCount") {
+        item.recursive_item_count = None;
+    }
+    if !contains_ignore_case(requested_fields, "SeasonCount") {
+        item.season_count = None;
+    }
+    if !contains_ignore_case(requested_fields, "ChildCount") {
+        item.child_count = None;
+    }
+    if !contains_ignore_case(requested_fields, "ExtraFields") {
+        item.extra_fields.clear();
+    }
+}
+
+fn clear_item_images(item: &mut BaseItemDto) {
+    item.primary_image_tag = None;
+    item.image_tags.clear();
+    item.backdrop_image_tags.clear();
+    item.parent_logo_item_id = None;
+    item.parent_logo_image_tag = None;
+    item.parent_backdrop_item_id = None;
+    item.parent_backdrop_image_tags.clear();
+    item.parent_thumb_item_id = None;
+    item.parent_thumb_image_tag = None;
+    item.series_primary_image_tag = None;
+    item.primary_image_item_id = None;
+    item.primary_image_aspect_ratio = None;
+}
+
+fn retain_item_images(item: &mut BaseItemDto, image_types: &[String]) {
+    item.image_tags
+        .retain(|key, _| contains_ignore_case(image_types, key));
+    if !contains_ignore_case(image_types, "Primary") {
+        item.primary_image_tag = None;
+        item.series_primary_image_tag = None;
+        item.primary_image_item_id = None;
+        item.primary_image_aspect_ratio = None;
+    }
+    if !contains_ignore_case(image_types, "Backdrop") {
+        item.backdrop_image_tags.clear();
+        item.parent_backdrop_item_id = None;
+        item.parent_backdrop_image_tags.clear();
+    }
+    if !contains_ignore_case(image_types, "Logo") {
+        item.parent_logo_item_id = None;
+        item.parent_logo_image_tag = None;
+    }
+    if !contains_ignore_case(image_types, "Thumb") {
+        item.parent_thumb_item_id = None;
+        item.parent_thumb_image_tag = None;
+    }
+}
+
+fn contains_ignore_case(values: &[String], candidate: &str) -> bool {
+    values
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(candidate))
+}
+
 fn apply_requested_stream_selection(
     media_source: &mut crate::models::MediaSourceDto,
     requested_audio_stream_index: Option<i32>,
@@ -4474,13 +4604,19 @@ async fn user_resume_items(
         recursive,
     );
     options.resume_only = true;
-    options.sort_by = query.sort_by.or_else(|| Some("DatePlayed".to_string()));
-    options.sort_order = query.sort_order.or_else(|| Some("Descending".to_string()));
+    options.sort_by = query
+        .sort_by
+        .clone()
+        .or_else(|| Some("DatePlayed".to_string()));
+    options.sort_order = query
+        .sort_order
+        .clone()
+        .or_else(|| Some("Descending".to_string()));
     options.limit = query.limit.unwrap_or(50);
 
     let result = repository::list_media_items(&state.pool, options).await?;
 
-    media_items_to_dto_result(&state, user_id, result).await
+    media_items_to_dto_result(&state, user_id, result, &query).await
 }
 
 async fn get_similar_items(

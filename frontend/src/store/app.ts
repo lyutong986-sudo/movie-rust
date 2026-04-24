@@ -145,7 +145,12 @@ export async function initialize(force = false) {
     if (api.isAuthenticated) {
       user.value = api.user;
       try {
-        await enterHome();
+        await loadLibraries();
+        if (shouldLoadHomeDashboardOnInitialize()) {
+          await loadHomeDashboardData();
+        }
+        // 不阻塞首屏，后台恢复扫描任务状态。
+        void hydrateScanOperation();
       } catch (error) {
         if (!api.isAuthenticated) {
           handleUnauthorized();
@@ -306,7 +311,7 @@ export async function enterHome() {
   state.selectedLibraryId = '';
   parentStack.value = [];
   await loadLibraries();
-  await Promise.all([loadHome(), loadRecentlyAddedTitles(), loadLatestByLibrary()]);
+  await loadHomeDashboardData();
   // 刷新页面后恢复正在进行的扫描任务状态。
   void hydrateScanOperation();
 }
@@ -391,49 +396,21 @@ export async function loadHome() {
     const result = await api.items(undefined, state.search, true, {
       sortBy: searching ? 'SortName' : 'DateCreated',
       sortOrder: searching ? 'Ascending' : 'Descending',
-      limit: 180
+      // 首页推荐无需一次拉满 180 条，降低首屏体积可显著改善慢库响应。
+      limit: searching ? 120 : 72,
+      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio']
     });
     homeItems.value = itemsFromQuery(result);
   }, '', { rethrow: true });
 }
 
 export async function loadLatestByLibrary() {
-  const entries = await Promise.all(
-    libraries.value.map(async (library) => [library.Id, await loadLibraryHomeItems(library)] as const)
-  );
-  latestByLibrary.value = Object.fromEntries(entries);
+  latestByLibrary.value = await fetchLatestByLibraryMap(libraries.value);
 }
 
 export async function loadRecentlyAddedTitles() {
-  const entries = await Promise.all(
-    libraries.value.map(async (library) => {
-      if (library.CollectionType === 'tvshows') {
-        const result = await api.items(library.Id, '', false, {
-          includeTypes: ['Series'],
-          sortBy: 'DateCreated',
-          sortOrder: 'Descending',
-          limit: 36
-        });
-        return itemsFromQuery(result);
-      }
-
-      if (library.CollectionType === 'movies') {
-        const result = await api.items(library.Id, '', false, {
-          includeTypes: ['Movie'],
-          sortBy: 'DateCreated',
-          sortOrder: 'Descending',
-          limit: 36
-        });
-        return itemsFromQuery(result);
-      }
-
-      return [] as BaseItemDto[];
-    })
-  );
-
-  recentlyAddedTitles.value = dedupeItemsById(entries.flat())
-    .sort(compareDateCreatedDesc)
-    .slice(0, 36);
+  const latestMap = await fetchLatestByLibraryMap(libraries.value);
+  recentlyAddedTitles.value = buildRecentlyAddedTitles(latestMap);
 }
 
 async function loadLibraryHomeItems(library: BaseItemDto) {
@@ -443,7 +420,8 @@ async function loadLibraryHomeItems(library: BaseItemDto) {
       includeTypes: ['Series'],
       sortBy: 'DateCreated',
       sortOrder: 'Descending',
-      limit: 36
+      limit: 18,
+      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio']
     });
     return itemsFromQuery(result);
   }
@@ -453,7 +431,8 @@ async function loadLibraryHomeItems(library: BaseItemDto) {
       includeTypes: ['Movie'],
       sortBy: 'DateCreated',
       sortOrder: 'Descending',
-      limit: 36
+      limit: 18,
+      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio']
     });
     return itemsFromQuery(result);
   }
@@ -463,12 +442,36 @@ async function loadLibraryHomeItems(library: BaseItemDto) {
       includeTypes: ['Audio'],
       sortBy: 'DateCreated',
       sortOrder: 'Descending',
-      limit: 36
+      limit: 18,
+      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'PrimaryImageAspectRatio']
     });
     return itemsFromQuery(result);
   }
 
   return api.latest(library.Id, 18);
+}
+
+async function loadHomeDashboardData() {
+  await Promise.all([loadHome(), loadHomeLibraryCollections()]);
+}
+
+async function loadHomeLibraryCollections() {
+  const latestMap = await fetchLatestByLibraryMap(libraries.value);
+  latestByLibrary.value = latestMap;
+  recentlyAddedTitles.value = buildRecentlyAddedTitles(latestMap);
+}
+
+async function fetchLatestByLibraryMap(targetLibraries: BaseItemDto[]) {
+  const entries = await Promise.all(
+    targetLibraries.map(async (library) => [library.Id, await loadLibraryHomeItems(library)] as const)
+  );
+  return Object.fromEntries(entries) as Record<string, BaseItemDto[]>;
+}
+
+function buildRecentlyAddedTitles(latestMap: Record<string, BaseItemDto[]>) {
+  return dedupeItemsById(Object.values(latestMap).flat())
+    .sort(compareDateCreatedDesc)
+    .slice(0, 36);
 }
 
 export async function loadItems() {
@@ -539,7 +542,7 @@ export async function backToHome() {
   state.selectedLibraryId = '';
   state.search = '';
   parentStack.value = [];
-  await Promise.all([loadHome(), loadRecentlyAddedTitles(), loadLatestByLibrary()]);
+  await loadHomeDashboardData();
 }
 
 export async function loadAdminData() {
@@ -631,7 +634,7 @@ export async function createLibrary(payload = libraryPayloadFromState()) {
     state.showAddLibrary = false;
     await loadLibraries();
     await loadVirtualFolders();
-    await Promise.all([loadHome(), loadRecentlyAddedTitles(), loadLatestByLibrary()]);
+    await loadHomeDashboardData();
     state.selectedLibraryId = library.Id;
     await loadItems();
   }, '媒体库已创建，已开始扫描');
@@ -653,7 +656,7 @@ export async function deleteLibrary(library: BaseItemDto | VirtualFolderInfo) {
 
     await loadLibraries();
     await loadVirtualFolders();
-    await Promise.all([loadHome(), loadRecentlyAddedTitles(), loadLatestByLibrary()]);
+    await loadHomeDashboardData();
     await loadItems();
   }, '媒体库已删除');
 }
@@ -675,8 +678,7 @@ export async function scan(libraryId?: string) {
     if ('ImportedItems' in result) {
       await loadLibraries();
       await loadVirtualFolders();
-      await loadRecentlyAddedTitles();
-      await loadLatestByLibrary();
+      await loadHomeLibraryCollections();
       await loadItems();
       state.message = `扫描完成，新增 ${result.ImportedItems} 个条目`;
       return;
@@ -716,8 +718,7 @@ function startScanPolling(operationId: string) {
         if (operation.Status === 'Succeeded') {
           const imported = operation.Result?.ImportedItems ?? 0;
           state.message = `扫描完成，新增 ${imported} 个条目`;
-          await loadRecentlyAddedTitles();
-          await loadLatestByLibrary();
+          await loadHomeLibraryCollections();
           await loadItems();
         } else if (operation.Status === 'Cancelled') {
           state.error = '媒体库扫描已取消';
@@ -982,6 +983,11 @@ function defaultServerUrl() {
   }
 
   return normalizeConfiguredUrl(new URL(configured, window.location.origin).toString());
+}
+
+function shouldLoadHomeDashboardOnInitialize() {
+  // 本地播放器/深链直接进详情页时，避免初始化阶段阻塞式预拉首页大数据。
+  return window.location.pathname === '/';
 }
 
 function normalizeConfiguredUrl(url: string) {

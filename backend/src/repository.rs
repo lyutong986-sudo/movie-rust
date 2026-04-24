@@ -4073,7 +4073,7 @@ pub async fn get_next_up_episodes(
         SELECT
             id, parent_id, name, original_title, sort_name, item_type,
             media_type, path, container, overview, production_year,
-            official_rating, community_rating, runtime_ticks, premiere_date,
+            official_rating, community_rating, critic_rating, runtime_ticks, premiere_date,
             status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids,
             genres, studios, tags, production_locations, width, height,
@@ -4153,7 +4153,7 @@ pub async fn get_upcoming_episodes(
         SELECT
             mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type,
             mi.media_type, mi.path, mi.container, mi.overview, mi.production_year,
-            mi.official_rating, mi.community_rating, mi.runtime_ticks, mi.premiere_date,
+            mi.official_rating, mi.community_rating, mi.critic_rating, mi.runtime_ticks, mi.premiere_date,
             mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
             mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
             mi.genres, mi.studios, mi.tags, mi.production_locations, mi.width, mi.height,
