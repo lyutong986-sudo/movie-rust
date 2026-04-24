@@ -122,10 +122,17 @@ pub async fn scan_all_libraries(
                 while tasks.len() >= limits.library_scan_limit as usize {
                     match tasks.join_next().await {
                         Some(joined) => {
-                            joined.map_err(|error| {
-                                AppError::Internal(format!("扫描任务失败: {error}"))
-                            })??;
-                            imported_items += 1;
+                            match joined {
+                                Ok(Ok(())) => {
+                                    imported_items += 1;
+                                }
+                                Ok(Err(error)) => {
+                                    tracing::error!("文件扫描失败（跳过继续）: {error}");
+                                }
+                                Err(error) => {
+                                    tracing::error!("扫描任务 panic: {error}");
+                                }
+                            }
                         }
                         None => break,
                     }
@@ -171,8 +178,17 @@ pub async fn scan_all_libraries(
             }
 
             while let Some(joined) = tasks.join_next().await {
-                joined.map_err(|error| AppError::Internal(format!("扫描任务失败: {error}")))??;
-                imported_items += 1;
+                match joined {
+                    Ok(Ok(())) => {
+                        imported_items += 1;
+                    }
+                    Ok(Err(error)) => {
+                        tracing::error!("文件扫描失败（跳过继续）: {error}");
+                    }
+                    Err(error) => {
+                        tracing::error!("扫描任务 panic: {error}");
+                    }
+                }
             }
         }
     }

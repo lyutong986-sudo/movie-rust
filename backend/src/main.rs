@@ -257,10 +257,11 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
     ];
 
     for statement in compatibility_sql {
-        sqlx::query(statement)
-            .execute(pool)
-            .await
-            .with_context(|| format!("执行兼容性补齐 SQL 失败: {statement}"))?;
+        if let Err(error) = sqlx::query(statement).execute(pool).await {
+            tracing::warn!(
+                "Schema 兼容性补齐跳过（不影响启动）: {error}"
+            );
+        }
     }
 
     Ok(())

@@ -8140,14 +8140,15 @@ pub async fn save_media_streams(
     media_item_id: Uuid,
     analysis: &crate::media_analyzer::MediaAnalysisResult,
 ) -> Result<(), crate::error::AppError> {
-    // 先删除该媒体项的所有现有流
+    let mut tx = pool.begin().await?;
+
     sqlx::query("DELETE FROM media_streams WHERE media_item_id = $1")
         .bind(media_item_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM media_chapters WHERE media_item_id = $1")
         .bind(media_item_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
     for stream in &analysis.streams {
@@ -8345,7 +8346,7 @@ pub async fn save_media_streams(
         .bind(pixel_format)
         .bind(ref_frames)
         .bind(stream_start_time_ticks)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -8365,9 +8366,11 @@ pub async fn save_media_streams(
         .bind(chapter.start_position_ticks)
         .bind(chapter.name.clone())
         .bind(chapter.marker_type.clone())
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
+
+    tx.commit().await?;
 
     Ok(())
 }
