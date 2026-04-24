@@ -1459,13 +1459,22 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
             .access_token
             .clone()
             .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
+        let mut normalized_query = query.to_vec();
+        if !normalized_query
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("reqformat"))
+        {
+            normalized_query.push(("reqformat".to_string(), "json".to_string()));
+        }
         let mut request = client
             .get(endpoint)
-            .query(query)
+            .query(&normalized_query)
             .header(
                 header::USER_AGENT.as_str(),
                 source.spoofed_user_agent.as_str(),
             )
+            .header(header::ACCEPT.as_str(), "application/json")
+            .header(header::ACCEPT_ENCODING.as_str(), "identity")
             .header("X-Emby-Token", token.as_str())
             .header(
                 "X-Emby-Authorization",
@@ -1494,10 +1503,39 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
                 body
             )));
         }
-        return Ok(response.json::<T>().await?);
+        return parse_remote_json_response(response, endpoint).await;
     }
 
     Err(AppError::Unauthorized)
+}
+
+async fn parse_remote_json_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    endpoint: &str,
+) -> Result<T, AppError> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-")
+        .to_string();
+    let bytes = response.bytes().await.map_err(|error| {
+        AppError::Internal(format!(
+            "远端响应读取失败: endpoint={endpoint}, status={}, content_type={content_type}, error={error}",
+            status.as_u16()
+        ))
+    })?;
+    serde_json::from_slice::<T>(bytes.as_ref()).map_err(|error| {
+        let preview = String::from_utf8_lossy(bytes.as_ref())
+            .chars()
+            .take(280)
+            .collect::<String>();
+        AppError::Internal(format!(
+            "远端JSON解析失败: endpoint={endpoint}, status={}, content_type={content_type}, error={error}, body预览={preview}",
+            status.as_u16()
+        ))
+    })
 }
 
 async fn fetch_remote_playback_info(
@@ -1816,11 +1854,14 @@ async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse
         normalize_server_url(&source.server_url)
     );
     let response = client
-        .post(endpoint)
+        .post(&endpoint)
+        .query(&[("reqformat", "json")])
         .header(
             header::USER_AGENT.as_str(),
             source.spoofed_user_agent.as_str(),
         )
+        .header(header::ACCEPT.as_str(), "application/json")
+        .header(header::ACCEPT_ENCODING.as_str(), "identity")
         .header("X-Emby-Authorization", emby_auth_header(source, None))
         .json(&serde_json::json!({
             "Username": source.username,
@@ -1839,7 +1880,7 @@ async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse
             body
         )));
     }
-    Ok(response.json::<RemoteLoginResponse>().await?)
+    parse_remote_json_response(response, endpoint.as_str()).await
 }
 
 fn build_relative_strm_path(item: &RemoteSyncItem) -> Option<PathBuf> {
