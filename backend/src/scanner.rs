@@ -19,12 +19,114 @@ use std::{
     collections::HashSet,
     ffi::OsStr,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock,
+    },
 };
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinSet,
+};
 use walkdir::WalkDir;
 
 const TICKS_PER_SECOND: i64 = 10_000_000;
+
+/// 扫描进度快照，用于前端实时展示
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ScanProgressSnapshot {
+    pub phase: String,
+    pub current_library: Option<String>,
+    pub total_files: u64,
+    pub scanned_files: u64,
+    pub imported_items: u64,
+    pub percent: f64,
+}
+
+/// 扫描进度句柄。通过原子计数器和 RwLock 在扫描过程中并发更新，
+/// 然后由外部（任务注册表）定期 snapshot 读取。
+#[derive(Clone, Default)]
+pub struct ScanProgress {
+    total_files: Arc<AtomicU64>,
+    scanned_files: Arc<AtomicU64>,
+    imported_items: Arc<AtomicU64>,
+    phase: Arc<RwLock<String>>,
+    current_library: Arc<RwLock<Option<String>>>,
+}
+
+impl ScanProgress {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_phase(&self, phase: impl Into<String>) {
+        if let Ok(mut guard) = self.phase.try_write() {
+            *guard = phase.into();
+        } else {
+            let phase = phase.into();
+            let cell = self.phase.clone();
+            tokio::spawn(async move {
+                *cell.write().await = phase;
+            });
+        }
+    }
+
+    pub fn set_current_library(&self, name: Option<String>) {
+        if let Ok(mut guard) = self.current_library.try_write() {
+            *guard = name;
+        } else {
+            let cell = self.current_library.clone();
+            tokio::spawn(async move {
+                *cell.write().await = name;
+            });
+        }
+    }
+
+    pub fn add_total_files(&self, count: u64) {
+        self.total_files.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn inc_scanned(&self) {
+        self.scanned_files.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_imported(&self) {
+        self.imported_items.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub async fn snapshot(&self) -> ScanProgressSnapshot {
+        let total = self.total_files.load(Ordering::Relaxed);
+        let scanned = self.scanned_files.load(Ordering::Relaxed);
+        let imported = self.imported_items.load(Ordering::Relaxed);
+        // 96% 主扫描 + 4% 后扫描，对齐 Jellyfin ValidateMediaLibraryInternal 的分配。
+        let percent = if total == 0 {
+            0.0
+        } else {
+            (scanned as f64 / total as f64 * 96.0).min(96.0)
+        };
+        let phase = self.phase.read().await.clone();
+        let current_library = self.current_library.read().await.clone();
+        ScanProgressSnapshot {
+            phase,
+            current_library,
+            total_files: total,
+            scanned_files: scanned,
+            imported_items: imported,
+            percent,
+        }
+    }
+
+    pub fn mark_post_scan(&self, percent_within_post: f64) {
+        // 后扫描阶段：96% + 4% 内按 percent_within_post（0..1）线性分配
+        let pct = percent_within_post.clamp(0.0, 1.0);
+        let total = 96.0 + pct * 4.0;
+        self.scanned_files.store(
+            ((total / 100.0) * self.total_files.load(Ordering::Relaxed) as f64) as u64,
+            Ordering::Relaxed,
+        );
+    }
+}
 
 #[derive(Clone)]
 struct ScanRuntime {
@@ -93,8 +195,18 @@ pub async fn scan_all_libraries(
     config: &Config,
     work_limiters: WorkLimiters,
 ) -> Result<ScanSummary, AppError> {
+    scan_all_libraries_with_progress(pool, metadata_manager, config, work_limiters, None).await
+}
+
+pub async fn scan_all_libraries_with_progress(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<Arc<MetadataProviderManager>>,
+    config: &Config,
+    work_limiters: WorkLimiters,
+    progress: Option<ScanProgress>,
+) -> Result<ScanSummary, AppError> {
     let libraries = repository::list_libraries(pool).await?;
-    scan_libraries(pool, metadata_manager, config, work_limiters, libraries).await
+    scan_libraries(pool, metadata_manager, config, work_limiters, libraries, progress).await
 }
 
 pub async fn scan_single_library(
@@ -104,10 +216,37 @@ pub async fn scan_single_library(
     work_limiters: WorkLimiters,
     library_id: uuid::Uuid,
 ) -> Result<ScanSummary, AppError> {
+    scan_single_library_with_progress(
+        pool,
+        metadata_manager,
+        config,
+        work_limiters,
+        library_id,
+        None,
+    )
+    .await
+}
+
+pub async fn scan_single_library_with_progress(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<Arc<MetadataProviderManager>>,
+    config: &Config,
+    work_limiters: WorkLimiters,
+    library_id: uuid::Uuid,
+    progress: Option<ScanProgress>,
+) -> Result<ScanSummary, AppError> {
     let library = repository::get_library(pool, library_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
-    scan_libraries(pool, metadata_manager, config, work_limiters, vec![library]).await
+    scan_libraries(
+        pool,
+        metadata_manager,
+        config,
+        work_limiters,
+        vec![library],
+        progress,
+    )
+    .await
 }
 
 async fn scan_libraries(
@@ -116,6 +255,7 @@ async fn scan_libraries(
     config: &Config,
     work_limiters: WorkLimiters,
     libraries: Vec<DbLibrary>,
+    progress: Option<ScanProgress>,
 ) -> Result<ScanSummary, AppError> {
     let startup = repository::startup_configuration(pool, config).await?;
     let limits = WorkLimiterConfig {
@@ -128,92 +268,140 @@ async fn scan_libraries(
     let mut scanned_files = 0_i64;
     let mut imported_items = 0_i64;
 
+    // ---- Phase A：收集文件（Jellyfin 的 ValidateTopLibraryFolders 等价物）
+    if let Some(p) = &progress {
+        p.set_phase("CollectingFiles");
+    }
+
+    let mut library_files: Vec<(DbLibrary, LibraryOptionsDto, PathBuf, Vec<PathBuf>)> = Vec::new();
     for library in &libraries {
         let library_options = repository::library_options(library);
+        if let Some(p) = &progress {
+            p.set_current_library(Some(library.name.clone()));
+        }
         for library_path in repository::library_paths(library) {
             let path = PathBuf::from(&library_path);
             if !path.exists() {
                 tracing::warn!("媒体库路径不存在: {}", library_path);
                 continue;
             }
-
             let files = collect_video_files(path.clone()).await?;
+            if let Some(p) = &progress {
+                p.add_total_files(files.len() as u64);
+            }
             scanned_files += files.len() as i64;
+            library_files.push((library.clone(), library_options.clone(), path, files));
+        }
+    }
 
-            let mut tasks = JoinSet::new();
-            for file in files {
-                while tasks.len() >= limits.library_scan_limit as usize {
-                    match tasks.join_next().await {
-                        Some(joined) => {
-                            match joined {
-                                Ok(Ok(())) => {
-                                    imported_items += 1;
-                                }
-                                Ok(Err(error)) => {
-                                    tracing::error!("文件扫描失败（跳过继续）: {error}");
-                                }
-                                Err(error) => {
-                                    tracing::error!("扫描任务 panic: {error}");
-                                }
+    // ---- Phase B：入库（Jellyfin 的 RootFolder.ValidateChildren 等价物）
+    if let Some(p) = &progress {
+        p.set_phase("Importing");
+    }
+
+    for (library, library_options, path, files) in library_files {
+        if let Some(p) = &progress {
+            p.set_current_library(Some(library.name.clone()));
+        }
+
+        let mut tasks = JoinSet::new();
+        for file in files {
+            while tasks.len() >= limits.library_scan_limit as usize {
+                match tasks.join_next().await {
+                    Some(joined) => match joined {
+                        Ok(Ok(())) => {
+                            imported_items += 1;
+                            if let Some(p) = &progress {
+                                p.inc_scanned();
+                                p.inc_imported();
                             }
                         }
-                        None => break,
-                    }
+                        Ok(Err(error)) => {
+                            tracing::error!("文件扫描失败（跳过继续）: {error}");
+                            if let Some(p) = &progress {
+                                p.inc_scanned();
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!("扫描任务 panic: {error}");
+                            if let Some(p) = &progress {
+                                p.inc_scanned();
+                            }
+                        }
+                    },
+                    None => break,
                 }
-
-                let pool = pool.clone();
-                let metadata_manager = metadata_manager.clone();
-                let config = config.clone();
-                let runtime = runtime.clone();
-                let library = library.clone();
-                let library_options = library_options.clone();
-                let path = path.clone();
-
-                tasks.spawn(async move {
-                    let _scan_permit = runtime.acquire(WorkLimiterKind::LibraryScan).await;
-                    if library.collection_type.eq_ignore_ascii_case("tvshows") {
-                        import_tv_file(
-                            &pool,
-                            metadata_manager.as_deref(),
-                            &config,
-                            &runtime,
-                            &library,
-                            &library_options,
-                            &path,
-                            &file,
-                        )
-                        .await?;
-                    } else {
-                        import_movie_file(
-                            &pool,
-                            metadata_manager.as_deref(),
-                            &config,
-                            &runtime,
-                            &library,
-                            &library_options,
-                            &file,
-                        )
-                        .await?;
-                    }
-
-                    Ok::<(), AppError>(())
-                });
             }
 
-            while let Some(joined) = tasks.join_next().await {
-                match joined {
-                    Ok(Ok(())) => {
-                        imported_items += 1;
+            let pool = pool.clone();
+            let metadata_manager = metadata_manager.clone();
+            let config = config.clone();
+            let runtime = runtime.clone();
+            let library = library.clone();
+            let library_options = library_options.clone();
+            let path = path.clone();
+
+            tasks.spawn(async move {
+                let _scan_permit = runtime.acquire(WorkLimiterKind::LibraryScan).await;
+                if library.collection_type.eq_ignore_ascii_case("tvshows") {
+                    import_tv_file(
+                        &pool,
+                        metadata_manager.as_deref(),
+                        &config,
+                        &runtime,
+                        &library,
+                        &library_options,
+                        &path,
+                        &file,
+                    )
+                    .await?;
+                } else {
+                    import_movie_file(
+                        &pool,
+                        metadata_manager.as_deref(),
+                        &config,
+                        &runtime,
+                        &library,
+                        &library_options,
+                        &file,
+                    )
+                    .await?;
+                }
+
+                Ok::<(), AppError>(())
+            });
+        }
+
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok(Ok(())) => {
+                    imported_items += 1;
+                    if let Some(p) = &progress {
+                        p.inc_scanned();
+                        p.inc_imported();
                     }
-                    Ok(Err(error)) => {
-                        tracing::error!("文件扫描失败（跳过继续）: {error}");
+                }
+                Ok(Err(error)) => {
+                    tracing::error!("文件扫描失败（跳过继续）: {error}");
+                    if let Some(p) = &progress {
+                        p.inc_scanned();
                     }
-                    Err(error) => {
-                        tracing::error!("扫描任务 panic: {error}");
+                }
+                Err(error) => {
+                    tracing::error!("扫描任务 panic: {error}");
+                    if let Some(p) = &progress {
+                        p.inc_scanned();
                     }
                 }
             }
         }
+    }
+
+    // ---- Phase C：后扫描（对齐 Jellyfin RunPostScanTasks 的 4%）
+    if let Some(p) = &progress {
+        p.set_phase("PostProcessing");
+        p.set_current_library(None);
+        p.mark_post_scan(1.0);
     }
 
     Ok(ScanSummary {

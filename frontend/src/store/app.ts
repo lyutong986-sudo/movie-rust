@@ -650,19 +650,24 @@ export async function saveServerSettings() {
 export async function scan(libraryId?: string) {
   await run(async () => {
     const result = await api.scan(false, libraryId);
-    await loadLibraries();
-    await loadVirtualFolders();
     if ('ImportedItems' in result) {
+      await loadLibraries();
+      await loadVirtualFolders();
       await loadRecentlyAddedTitles();
       await loadLatestByLibrary();
       await loadItems();
       state.message = `扫描完成，新增 ${result.ImportedItems} 个条目`;
       return;
     }
+    // 异步路径：先把 Operation 写入 store，UI 立即切到 Queued/Running。
     scanOperation.value = result.Operation;
     const scopeName = result.Operation.LibraryName || (libraryId ? '指定媒体库' : '全部媒体库');
     state.message = result.Message || `${scopeName}已开始后台扫描`;
+    // 启动轮询（内部自己 setTimeout，不阻塞 run 结束）。
     startScanPolling(result.Operation.Id);
+    // 库列表/虚拟文件夹刷新放到后台，不阻塞按钮恢复可用。
+    void loadLibraries();
+    void loadVirtualFolders();
   });
 }
 
@@ -700,10 +705,10 @@ function startScanPolling(operationId: string) {
         return;
       }
       // 扫描进行中时定期刷新媒体库计数，侧边栏与设置页统计会实时变化。
-      await loadLibraries();
+      void loadLibraries();
       scanPollTimer = window.setTimeout(() => {
         void poll();
-      }, 3000);
+      }, 1500);
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
     }

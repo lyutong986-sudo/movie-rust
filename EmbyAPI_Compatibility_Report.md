@@ -1,4 +1,4 @@
-# Emby API 兼容性审计报告
+﻿# Emby API 兼容性审计报告
 
 - 审计日期：2026-04-24（第十六轮：部署 / SPA 状态码 / Docker·CI 补充后）
 - 项目：movie-rust（Rust + Axum 0.8 + PostgreSQL 后端）
@@ -1067,3 +1067,52 @@ npx vite build         # 构建成功
 ### G. 本批次显式未做
 
 - **Emby Connect 登录入口**：依赖 `emby.media/connect` 外部账号体系，按你的明确要求跳过。
+
+## 三十、第三十轮：扫描链路进度模型重构（对齐 Jellyfin `IProgress<double>`，2026-04-24）
+
+> 背景：用户反馈"点击扫描看不到任何执行"。对照 `jellyfin后端模板/Emby.Server.Implementations/Library/LibraryManager.cs::ValidateMediaLibraryInternal`，Jellyfin 使用 `IProgress<double>` + "96% 主扫描 / 4% 后扫描"的分段模型逐文件上报。旧实现 `progress = (attempt-1)/max_attempts * 100` 永远停在 0%，且 `scan_all_libraries` 无任何实时进度接口。
+
+### A. 扫描进度模型（`backend/src/scanner.rs`）
+
+| 新增 | 说明 |
+| --- | --- |
+| `ScanProgressSnapshot` | PascalCase 对外可序列化结构：`Phase/CurrentLibrary/TotalFiles/ScannedFiles/ImportedItems/Percent`。 |
+| `ScanProgress` | 基于 `Arc<AtomicU64>` + `Arc<RwLock<String/Option<String>>>` 的并发进度句柄，提供 `set_phase`、`set_current_library`、`add_total_files`、`inc_scanned`、`inc_imported`、`snapshot`、`mark_post_scan`。 |
+| 相位划分 | `CollectingFiles` → `Importing` → `PostProcessing` → `Completed/Cancelled/Failed`。 |
+| 百分比算法 | Jellyfin 等价：主扫描占 96%，按 `scanned_files / total_files * 96`；后处理占 4%，通过 `mark_post_scan` 线性分配。 |
+
+### B. 扫描函数改造
+
+- `scan_all_libraries_with_progress(..., progress: Option<ScanProgress>)` / `scan_single_library_with_progress(...)`：新入口，可传 `Option<ScanProgress>`。原 `scan_all_libraries` / `scan_single_library` 保留，透传 `None` 保持向后兼容。
+- 内部流程：
+  1. 遍历所有库与路径，先一次性走 `collect_video_files` 得到总数，`add_total_files` 累加；
+  2. 切换到 `Importing` 相位后启动并发入库，每个文件完成（成功/失败/panic）都 `inc_scanned` 一次，成功时额外 `inc_imported`；
+  3. 完成后 `mark_post_scan(1.0)`，相位置为 `PostProcessing`。
+
+### C. 任务注册表（`backend/src/routes/admin.rs`）
+
+| 改造 | 说明 |
+| --- | --- |
+| `ScanOperationState` / `ScanOperationDto` 字段 | 新增 `phase`、`current_library`、`total_files`、`scanned_files`、`imported_items`；DTO 以 PascalCase 对外。 |
+| 进度轮询 | `enqueue_library_scan` 现在每次 attempt 都会创建 `ScanProgress`，然后 `tokio::spawn` 一个 1s 间隔的 poller 任务把 snapshot 写回 `ScanOperationState`；扫描结束后 `poller_handle.abort()`。 |
+| 清零 / 成功 / 失败 | 新扫描开始时 `phase="CollectingFiles"`, `progress=0`, 计数归零；成功后相位 `Completed`、`progress=100`；失败 `Failed`、取消 `Cancelled`。 |
+
+### D. 前端（`api/emby.ts` + `store/app.ts` + `pages/settings/LibrarySettings.vue`）
+
+| 改造 | 说明 |
+| --- | --- |
+| `ScanOperation` 类型 | 新增 `Phase/CurrentLibrary/TotalFiles/ScannedFiles/ImportedItems`。 |
+| `scan(libraryId?)` UX | 旧版在 `loadLibraries/loadVirtualFolders` 完成**后**才更新 `scanOperation`，用户点下按钮要等几秒才看到反馈。现在立即把 `scanOperation.value = result.Operation` 写入并 `startScanPolling`，再把库刷新丢到 `void` 后台。 |
+| 轮询间隔 | 由 3s 调到 1.5s，和后端 1s poller 对齐，进度条更顺滑。 |
+| 任务面板 | 新增"收集文件中 / 入库中 / 后处理"中文相位标签；显示 `ScannedFiles / TotalFiles` 计数、`ImportedItems` 入库数量、`CurrentLibrary` 当前库。 |
+
+### E. 结果
+
+- 点击"扫描所有媒体库"后 UI **立即**显示 `Queued → Running`（原来要等 1~5 秒）。
+- 进度条按"已处理文件 / 总文件"计算，能稳定从 0 爬到 96%，后处理阶段补到 100%。
+- 任务面板能看到当前扫描的库名和文件计数。
+
+### F. 校验
+
+- `backend> cargo build` —— ✅ 通过
+- `frontend> npm run build` —— ✅ 通过

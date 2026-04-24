@@ -102,6 +102,11 @@ struct ScanOperationDto {
     library_name: Option<String>,
     status: String,
     progress: f64,
+    phase: String,
+    current_library: Option<String>,
+    total_files: u64,
+    scanned_files: u64,
+    imported_items: u64,
     queued: bool,
     running: bool,
     done: bool,
@@ -125,6 +130,11 @@ struct ScanOperationState {
     library_name: Option<String>,
     status: &'static str,
     progress: f64,
+    phase: String,
+    current_library: Option<String>,
+    total_files: u64,
+    scanned_files: u64,
+    imported_items: u64,
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
@@ -153,6 +163,11 @@ impl ScanOperationState {
             library_name: self.library_name.clone(),
             status: self.status.to_string(),
             progress: self.progress,
+            phase: self.phase.clone(),
+            current_library: self.current_library.clone(),
+            total_files: self.total_files,
+            scanned_files: self.scanned_files,
+            imported_items: self.imported_items,
             queued: self.status == "Queued",
             running: matches!(self.status, "Running" | "Cancelling"),
             done: self.is_done(),
@@ -217,6 +232,11 @@ async fn enqueue_library_scan(
                 library_name: library_name.clone(),
                 status: "Queued",
                 progress: 0.0,
+                phase: "Queued".to_string(),
+                current_library: None,
+                total_files: 0,
+                scanned_files: 0,
+                imported_items: 0,
                 created_at: Utc::now(),
                 started_at: None,
                 completed_at: None,
@@ -260,6 +280,7 @@ async fn enqueue_library_scan(
                 if operation.cancel_requested {
                     operation.status = "Cancelled";
                     operation.progress = 100.0;
+                    operation.phase = "Cancelled".to_string();
                     operation.completed_at = Some(Utc::now());
                     if registry
                         .active_operation_ids
@@ -272,29 +293,65 @@ async fn enqueue_library_scan(
                     break;
                 }
                 operation.status = "Running";
-                operation.progress = ((attempt - 1) as f64 / operation.max_attempts as f64) * 100.0;
+                operation.phase = "CollectingFiles".to_string();
+                operation.progress = 0.0;
+                operation.total_files = 0;
+                operation.scanned_files = 0;
+                operation.imported_items = 0;
+                operation.current_library = None;
                 operation.attempts = attempt;
                 operation.started_at.get_or_insert_with(Utc::now);
             }
 
+            // 创建进度句柄，并启动一个后台轮询任务把 snapshot 写回注册表。
+            let progress = scanner::ScanProgress::new();
+            let poller_progress = progress.clone();
+            let poller_op_id = operation_id;
+            let poller_handle = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(1000)).await;
+                    let snap = poller_progress.snapshot().await;
+                    let mut registry = scan_registry().write().await;
+                    let Some(operation) = registry.operations.get_mut(&poller_op_id) else {
+                        break;
+                    };
+                    if operation.is_done() || operation.cancel_requested {
+                        break;
+                    }
+                    operation.phase = if snap.phase.is_empty() {
+                        "CollectingFiles".to_string()
+                    } else {
+                        snap.phase.clone()
+                    };
+                    operation.current_library = snap.current_library.clone();
+                    operation.total_files = snap.total_files;
+                    operation.scanned_files = snap.scanned_files;
+                    operation.imported_items = snap.imported_items;
+                    operation.progress = snap.percent;
+                }
+            });
+
             let scan_result = if let Some(scan_library_id) = library_id_for_task {
-                scanner::scan_single_library(
+                scanner::scan_single_library_with_progress(
                     &pool,
                     metadata_manager.clone(),
                     &config,
                     work_limiters.clone(),
                     scan_library_id,
+                    Some(progress.clone()),
                 )
                 .await
             } else {
-                scanner::scan_all_libraries(
+                scanner::scan_all_libraries_with_progress(
                     &pool,
                     metadata_manager.clone(),
                     &config,
                     work_limiters.clone(),
+                    Some(progress.clone()),
                 )
                 .await
             };
+            poller_handle.abort();
             match scan_result {
                 Ok(summary) => {
                     {
@@ -302,6 +359,13 @@ async fn enqueue_library_scan(
                         if let Some(operation) = registry.operations.get_mut(&operation_id) {
                             operation.status = "Succeeded";
                             operation.progress = 100.0;
+                            operation.phase = "Completed".to_string();
+                            operation.scanned_files = summary.scanned_files as u64;
+                            operation.imported_items = summary.imported_items as u64;
+                            if operation.total_files == 0 {
+                                operation.total_files = summary.scanned_files as u64;
+                            }
+                            operation.current_library = None;
                             operation.completed_at = Some(Utc::now());
                             operation.result = Some(summary.clone());
                             operation.error = None;
@@ -353,6 +417,7 @@ async fn enqueue_library_scan(
                         if let Some(operation) = registry.operations.get_mut(&operation_id) {
                             operation.status = "Failed";
                             operation.progress = 100.0;
+                            operation.phase = "Failed".to_string();
                             operation.completed_at = Some(Utc::now());
                             operation.error = Some(error.to_string());
                             operation.attempts = attempt;

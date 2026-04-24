@@ -60,6 +60,42 @@ const scanProgressText = computed(() => {
   return `${Math.round(progress)}%`;
 });
 
+const scanPhaseLabel = computed(() => {
+  const phase = scanOperation.value?.Phase;
+  switch (phase) {
+    case 'CollectingFiles':
+      return '收集文件中';
+    case 'Importing':
+      return '入库中';
+    case 'PostProcessing':
+      return '后处理';
+    case 'Completed':
+      return '已完成';
+    case 'Cancelled':
+      return '已取消';
+    case 'Failed':
+      return '已失败';
+    case 'Queued':
+      return '排队中';
+    default:
+      return phase || '—';
+  }
+});
+
+const scanFileCounter = computed(() => {
+  const op = scanOperation.value;
+  if (!op) return '';
+  const total = op.TotalFiles || 0;
+  const scanned = op.ScannedFiles || 0;
+  if (total === 0) return scanned ? `${scanned} 个` : '';
+  return `${scanned} / ${total}`;
+});
+
+const scanImportedCounter = computed(() => {
+  const imported = scanOperation.value?.ImportedItems || 0;
+  return imported ? `已入库 ${imported} 个` : '';
+});
+
 function formatTime(value?: string | null) {
   if (!value) return '-';
   const date = new Date(value);
@@ -207,8 +243,14 @@ async function remove(folder: VirtualFolderInfo) {
             <p class="text-highlighted mt-1 text-2xl font-semibold">{{ totalLibraryItems }}</p>
           </div>
           <div class="rounded-lg border border-default p-3">
-            <p class="text-muted text-xs">扫描进度</p>
+            <p class="text-muted text-xs">扫描进度 · {{ scanPhaseLabel }}</p>
             <p class="text-highlighted mt-1 text-2xl font-semibold">{{ scanProgressText }}</p>
+            <p v-if="scanFileCounter" class="text-muted mt-1 text-xs">
+              文件 {{ scanFileCounter }}<span v-if="scanImportedCounter"> · {{ scanImportedCounter }}</span>
+            </p>
+            <p v-if="scanOperation?.CurrentLibrary" class="text-muted text-xs">
+              当前：{{ scanOperation.CurrentLibrary }}
+            </p>
             <UProgress
               class="mt-2"
               :model-value="scanOperation?.Progress || 0"

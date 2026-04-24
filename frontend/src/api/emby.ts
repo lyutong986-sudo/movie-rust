@@ -380,6 +380,11 @@ export interface ScanOperation {
   ScopeKey?: string;
   LibraryId?: string;
   LibraryName?: string;
+  Phase?: string;
+  CurrentLibrary?: string | null;
+  TotalFiles?: number;
+  ScannedFiles?: number;
+  ImportedItems?: number;
   Status: string;
   Progress: number;
   Queued: boolean;
