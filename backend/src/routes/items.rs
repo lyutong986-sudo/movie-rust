@@ -1115,14 +1115,47 @@ async fn media_items_to_dto_result(
     user_id: Uuid,
     result: QueryResult<crate::models::DbMediaItem>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    // 列表接口的 N+1 优化：一次查 user_data、一次查 Folder 子代计数、一次查剧集的季数，
+    // 替代原本 1 条 item = 3~5 次独立 SQL 的模式（50 条列表大约从 150~250 次调用降到 3 次）。
+    let item_ids: Vec<uuid::Uuid> = result.items.iter().map(|item| item.id).collect();
+    let user_data_map =
+        repository::get_user_item_data_batch(&state.pool, user_id, &item_ids).await?;
+
+    let folder_ids: Vec<uuid::Uuid> = result
+        .items
+        .iter()
+        .filter(|item| repository::is_folder_item_public(item))
+        .map(|item| item.id)
+        .collect();
+    let child_counts =
+        repository::count_item_children_batch(&state.pool, &folder_ids).await?;
+    let recursive_counts =
+        repository::count_recursive_children_batch(&state.pool, &folder_ids).await?;
+    let series_ids: Vec<uuid::Uuid> = result
+        .items
+        .iter()
+        .filter(|item| item.item_type.eq_ignore_ascii_case("Series"))
+        .map(|item| item.id)
+        .collect();
+    let season_counts =
+        repository::count_series_seasons_batch(&state.pool, &series_ids).await?;
+
     let mut items = Vec::with_capacity(result.items.len());
     for item in result.items {
+        let prefetched_user = Some(user_data_map.get(&item.id).cloned());
+        let counts = repository::DtoCountPrefetch {
+            child_count: child_counts.get(&item.id).copied(),
+            recursive_item_count: recursive_counts.get(&item.id).copied(),
+            season_count: season_counts.get(&item.id).copied(),
+        };
         items.push(
-            repository::media_item_to_dto(
+            repository::media_item_to_dto_for_list(
                 &state.pool,
                 &item,
                 Some(user_id),
                 state.config.server_id,
+                prefetched_user,
+                counts,
             )
             .await?,
         );

@@ -19,7 +19,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use sqlx::{FromRow, Postgres, QueryBuilder, Row};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -2663,6 +2663,85 @@ pub async fn count_item_children(pool: &sqlx::PgPool, parent_id: Uuid) -> Result
     )
 }
 
+/// 批量版：一次 SQL 拿回多个 parent 的子条目数量，消除列表场景的 N+1。
+pub async fn count_item_children_batch(
+    pool: &sqlx::PgPool,
+    parent_ids: &[Uuid],
+) -> Result<HashMap<Uuid, i64>, AppError> {
+    if parent_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+        r#"
+        SELECT parent_id, COUNT(*)::bigint
+        FROM media_items
+        WHERE parent_id = ANY($1)
+        GROUP BY parent_id
+        "#,
+    )
+    .bind(parent_ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// 批量版的递归子代计数。把每个 root 的递归 CTE 合成一次查询，
+/// 避免 `count_recursive_children` 在列表里被 N 次独立执行（递归 CTE 很贵）。
+pub async fn count_recursive_children_batch(
+    pool: &sqlx::PgPool,
+    parent_ids: &[Uuid],
+) -> Result<HashMap<Uuid, i64>, AppError> {
+    if parent_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+        r#"
+        WITH RECURSIVE descendants AS (
+            SELECT id, parent_id, parent_id AS root_id
+            FROM media_items
+            WHERE parent_id = ANY($1)
+            UNION ALL
+            SELECT m.id, m.parent_id, d.root_id
+            FROM media_items m
+            INNER JOIN descendants d ON m.parent_id = d.id
+        )
+        SELECT root_id, COUNT(*)::bigint
+        FROM descendants
+        GROUP BY root_id
+        "#,
+    )
+    .bind(parent_ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// 批量版：一次 SQL 拿回多部剧的季数。
+pub async fn count_series_seasons_batch(
+    pool: &sqlx::PgPool,
+    series_ids: &[Uuid],
+) -> Result<HashMap<Uuid, i32>, AppError> {
+    if series_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+        r#"
+        SELECT parent_id, COUNT(*)::bigint
+        FROM media_items
+        WHERE parent_id = ANY($1)
+          AND item_type = 'Season'
+        GROUP BY parent_id
+        "#,
+    )
+    .bind(series_ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, count)| (id, i32::try_from(count).unwrap_or(i32::MAX)))
+        .collect())
+}
+
 pub async fn count_library_items_by_type(
     pool: &sqlx::PgPool,
     library_id: Uuid,
@@ -3929,9 +4008,16 @@ pub async fn get_next_up_episodes(
     .fetch_all(pool)
     .await?;
 
+    let row_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let user_data_map = get_user_item_data_batch(pool, user_id, &row_ids).await?;
+
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
-        items.push(media_item_to_dto(pool, &row, Some(user_id), server_id).await?);
+        let prefetched = Some(user_data_map.get(&row.id).cloned());
+        items.push(
+            media_item_to_dto_with_user_data(pool, &row, Some(user_id), server_id, prefetched)
+                .await?,
+        );
     }
 
     Ok(QueryResult {
@@ -4015,9 +4101,16 @@ pub async fn get_upcoming_episodes(
     .fetch_all(pool)
     .await?;
 
+    let row_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let user_data_map = get_user_item_data_batch(pool, user_id, &row_ids).await?;
+
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
-        items.push(media_item_to_dto(pool, &row, Some(user_id), server_id).await?);
+        let prefetched = Some(user_data_map.get(&row.id).cloned());
+        items.push(
+            media_item_to_dto_with_user_data(pool, &row, Some(user_id), server_id, prefetched)
+                .await?,
+        );
     }
 
     Ok(QueryResult {
@@ -4830,6 +4923,53 @@ pub async fn get_user_item_data(
     .bind(item_id)
     .fetch_optional(pool)
     .await?)
+}
+
+/// 列表接口专用：一次拉回 N 个条目的 UserItemData，消除逐条 N+1。
+/// Key 为 item_id，找不到的条目会在调用方退化为空 UserData（已有 `empty_user_data_for_item`）。
+pub async fn get_user_item_data_batch(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    item_ids: &[Uuid],
+) -> Result<HashMap<Uuid, DbUserItemData>, AppError> {
+    if item_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        item_id: Uuid,
+        playback_position_ticks: i64,
+        play_count: i32,
+        is_favorite: bool,
+        is_played: bool,
+        last_played_date: Option<DateTime<Utc>>,
+    }
+    let rows = sqlx::query_as::<_, Row>(
+        r#"
+        SELECT item_id, playback_position_ticks, play_count, is_favorite, is_played, last_played_date
+        FROM user_item_data
+        WHERE user_id = $1 AND item_id = ANY($2)
+        "#,
+    )
+    .bind(user_id)
+    .bind(item_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = HashMap::with_capacity(rows.len());
+    for row in rows {
+        out.insert(
+            row.item_id,
+            DbUserItemData {
+                playback_position_ticks: row.playback_position_ticks,
+                play_count: row.play_count,
+                is_favorite: row.is_favorite,
+                is_played: row.is_played,
+                last_played_date: row.last_played_date,
+            },
+        );
+    }
+    Ok(out)
 }
 
 pub async fn get_user_item_data_dto(
@@ -6136,6 +6276,69 @@ pub async fn media_item_to_dto(
     user_id: Option<Uuid>,
     server_id: Uuid,
 ) -> Result<BaseItemDto, AppError> {
+    media_item_to_dto_inner(
+        pool,
+        item,
+        user_id,
+        server_id,
+        None,
+        DtoCountPrefetch::default(),
+    )
+    .await
+}
+
+/// 列表专用：调用方已经批量预取好 UserItemData 就通过 `prefetched_user_data` 传入，
+/// 避免在 `media_item_to_dto` 内部按条重复 SELECT（N+1）。
+/// - `Some(Some(data))` —— 已知 DB 存在该行；
+/// - `Some(None)`       —— 已知 DB 不存在（走 empty 默认值）；
+/// - `None`             —— 未提供预取，走老逻辑内部查询。
+pub async fn media_item_to_dto_with_user_data(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+    user_id: Option<Uuid>,
+    server_id: Uuid,
+    prefetched_user_data: Option<Option<DbUserItemData>>,
+) -> Result<BaseItemDto, AppError> {
+    media_item_to_dto_inner(
+        pool,
+        item,
+        user_id,
+        server_id,
+        prefetched_user_data,
+        DtoCountPrefetch::default(),
+    )
+    .await
+}
+
+/// 列表接口给 Folder 类型条目预取子代计数，避免每条 item 重复跑
+/// `count_item_children` / `count_recursive_children` / `count_series_seasons` 三次独立 SQL。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DtoCountPrefetch {
+    pub child_count: Option<i64>,
+    pub recursive_item_count: Option<i64>,
+    pub season_count: Option<i32>,
+}
+
+/// 给列表路径把预取好的 user_data + folder counts 一起喂给 DTO 组装。
+pub async fn media_item_to_dto_for_list(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+    user_id: Option<Uuid>,
+    server_id: Uuid,
+    prefetched_user_data: Option<Option<DbUserItemData>>,
+    counts: DtoCountPrefetch,
+) -> Result<BaseItemDto, AppError> {
+    media_item_to_dto_inner(pool, item, user_id, server_id, prefetched_user_data, counts).await
+}
+
+async fn media_item_to_dto_inner(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+    user_id: Option<Uuid>,
+    server_id: Uuid,
+    prefetched_user_data: Option<Option<DbUserItemData>>,
+    prefetched_counts: DtoCountPrefetch,
+) -> Result<BaseItemDto, AppError> {
     let mut image_tags = BTreeMap::new();
     if item.image_primary_path.is_some() {
         image_tags.insert(
@@ -6162,13 +6365,14 @@ pub async fn media_item_to_dto(
         Vec::new()
     };
 
-    let mut user_data = if let Some(user_id) = user_id {
-        get_user_item_data(pool, user_id, item.id)
+    let mut user_data = match (user_id, prefetched_user_data) {
+        (_, Some(Some(data))) => user_item_data_to_dto_for_item(data, item.id),
+        (_, Some(None)) => empty_user_data_for_item(item.id),
+        (Some(user_id), None) => get_user_item_data(pool, user_id, item.id)
             .await?
             .map(|data| user_item_data_to_dto_for_item(data, item.id))
-            .unwrap_or_else(|| empty_user_data_for_item(item.id))
-    } else {
-        empty_user_data_for_item(item.id)
+            .unwrap_or_else(|| empty_user_data_for_item(item.id)),
+        (None, None) => empty_user_data_for_item(item.id),
     };
     user_data.server_id = Some(uuid_to_emby_guid(&server_id));
 
@@ -6210,17 +6414,26 @@ pub async fn media_item_to_dto(
     let primary_image_aspect_ratio = infer_primary_image_aspect_ratio(item, width, height);
     let item_detail_media_sources = sanitize_media_sources_for_item_detail(media_sources);
     let child_count = if is_folder {
-        Some(count_item_children(pool, item.id).await?)
+        Some(match prefetched_counts.child_count {
+            Some(value) => value,
+            None => count_item_children(pool, item.id).await?,
+        })
     } else {
         None
     };
     let recursive_item_count = if is_folder {
-        Some(count_recursive_children(pool, item.id).await?)
+        Some(match prefetched_counts.recursive_item_count {
+            Some(value) => value,
+            None => count_recursive_children(pool, item.id).await?,
+        })
     } else {
         None
     };
     let season_count = if item.item_type.eq_ignore_ascii_case("Series") {
-        Some(count_series_seasons(pool, item.id).await?)
+        Some(match prefetched_counts.season_count {
+            Some(value) => value,
+            None => count_series_seasons(pool, item.id).await?,
+        })
     } else {
         None
     };
@@ -7322,6 +7535,11 @@ fn is_folder_item(item: &DbMediaItem) -> bool {
         item.item_type.as_str(),
         "AggregateFolder" | "BoxSet" | "CollectionFolder" | "Folder" | "Season" | "Series"
     )
+}
+
+/// 公开版本：列表接口预取阶段判断是否需要 Folder counts 时使用。
+pub fn is_folder_item_public(item: &DbMediaItem) -> bool {
+    is_folder_item(item)
 }
 
 fn provider_ids_to_map(value: &Value) -> BTreeMap<String, String> {

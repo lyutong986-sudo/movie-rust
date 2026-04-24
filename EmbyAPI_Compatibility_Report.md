@@ -1501,3 +1501,144 @@ watch(() => route.fullPath, async () => {
 | `loadItems` 无 AbortController | 快速切库/筛选时存在请求竞态，要加请求版本号。 |
 | `TopLoader` 只 hook `state.busy` | ItemPage / SeriesPage / PlaylistsPage 用本地 `loading`，顶部进度条不转。可统一走 `store::run`。 |
 | `loadRecentlyAddedTitles` vs `loadLatestByLibrary` 对 movies 库发两次相同请求 | N 库场景下可省 N 次 API；两者可合并。 |
+
+## 三十七、第三十七轮：对比 Jellyfin 后端模板后的功能/性能优化（2026-04-24）
+
+> 审计范围：`模板项目/jellyfin后端模板` 的 `Jellyfin.Api/Controllers`（共 60 个 Controller），逐个对照本项目后端已挂载的路由，按"排除 LiveTv / 插件 / DLNA / 音乐 / 家庭视频 / 同步播放 / Emby Connect 登录"的规则筛出可选项，并重点挑出"已有接口但性能或合约偏弱"的场景做优化。
+
+### A. Jellyfin 60 个 Controller vs 我的后端
+
+#### A1. 我已覆盖（在排除清单之外全部对齐）
+
+ActivityLog / ApiKey / Audio / Branding / Configuration / Collection / Devices / DisplayPreferences / DynamicHls / Environment / Filter（`/Items/Filters`）/ Genres / HlsSegment / Image / ItemLookup / ItemRefresh / Items / ItemUpdate（`POST /Items/{id}`）/ Library / LibraryStructure / Localization / MediaInfo（PlaybackInfo）/ Movies / Persons / Playlists / Playstate / RemoteImage / ScheduledTasks / Search / Session / Startup / Studios / Subtitle / System / Trailers / TvShows / User / UserLibrary / UserViews / Video / Videos / Years。
+
+#### A2. 已排除（用户规则：不做）
+
+ChannelsController / InstantMixController / LiveTvController / LyricsController / MusicGenresController / PackageController（插件）/ PluginsController / SyncPlayController / UniversalAudioController。
+
+#### A3. Jellyfin 有但本项目**可选**的新功能（收益 vs 工程量评估）
+
+| Controller | 功能 | 收益 | 工程量 | 本轮决定 |
+| --- | --- | --- | --- | --- |
+| `TrickplayController` | 视频进度条悬停显示缩略图预览（BIF / JPEG 网格） | 观看体验显著提升 | 高（扫描端抽帧 + 存储 + `/Videos/{id}/Trickplay/{w}` endpoint + 前端播放器对接） | 记录，不做 |
+| `MediaSegmentsController` | 片头/片尾/广告段，客户端一键跳过 | 追剧场景刚需 | 高（需生成/标注 segments + 持久化） | 记录，不做 |
+| `QuickConnectController` | 手机扫码/PIN 快速登录 | 客户端常用 | 中（简单 in-memory 状态机） | 记录，不做 |
+| `ClientLogController` | 客户端日志上报 | 远程排障 | 低 | 记录，不做 |
+| `BackupController` | 服务端配置备份/还原 | 运维价值中等 | 中 | 记录，不做 |
+| `TimeSyncController` | 客户端时差同步 | 影响多设备同步场景 | 低 | 记录，不做 |
+
+> 以上 6 项均为"**新功能**"，单独立项实施更合适，本轮聚焦性能优化。
+
+### B. 本轮落地的性能优化
+
+重点针对列表接口的 **N+1 SQL 问题**——这是大库场景下最明显的瓶颈，也是 Jellyfin 通过 `Fields` / `DtoOptions` 一直在做的事。
+
+#### B1. `UserItemData` 逐条 SELECT → 批量预取（P0） ✅
+
+原 `media_items_to_dto_result` 里对 50 条列表 → 50 次 `get_user_item_data` 串行 SQL。
+
+修复：
+- 新增 `repository::get_user_item_data_batch(pool, user_id, &item_ids) -> HashMap<Uuid, DbUserItemData>`，一次 `WHERE item_id = ANY($2)` 拿回全部；
+- 新增 `media_item_to_dto_with_user_data(...) / media_item_to_dto_for_list(...)` 两个配对公开包装，内部共享 `media_item_to_dto_inner(..., prefetched_user_data, prefetched_counts)`；
+- 老的 `media_item_to_dto(...)` 签名不变（仍被 20+ 处调用），内部默认 prefetch=None 走旧路径。
+
+```4835:4879:backend/src/repository.rs
+pub async fn get_user_item_data_batch(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    item_ids: &[Uuid],
+) -> Result<HashMap<Uuid, DbUserItemData>, AppError> {
+    if item_ids.is_empty() { return Ok(HashMap::new()); }
+    ...
+    WHERE user_id = $1 AND item_id = ANY($2)
+    ...
+}
+```
+
+#### B2. Folder 子代计数 N × 3 次查询 → 3 次批量查询（P0） ✅
+
+对于 Series / Season / BoxSet / CollectionFolder 等 Folder 类型条目，`media_item_to_dto` 逐条触发三条 SQL：
+- `count_item_children` —— 直属子代
+- `count_recursive_children` —— **递归 CTE**，对 Series→Season→Episode 三层非常贵
+- `count_series_seasons`（仅 Series）
+
+50 部 Series 的 LibraryPage = 150 次独立 SQL，其中 50 次是递归 CTE，对 DB 负载极大。
+
+修复：
+- `count_item_children_batch` —— `GROUP BY parent_id` 一次返回全部；
+- `count_recursive_children_batch` —— 改写递归 CTE 用 `root_id` 列追踪每个 root，GROUP BY root_id；
+- `count_series_seasons_batch` —— `WHERE parent_id = ANY($1) AND item_type='Season' GROUP BY parent_id`；
+- `DtoCountPrefetch { child_count, recursive_item_count, season_count }` 一并传入 `media_item_to_dto_for_list`。
+
+```2681:2745:backend/src/repository.rs
+pub async fn count_recursive_children_batch(
+    pool: &sqlx::PgPool,
+    parent_ids: &[Uuid],
+) -> Result<HashMap<Uuid, i64>, AppError> {
+    ...
+    WITH RECURSIVE descendants AS (
+        SELECT id, parent_id, parent_id AS root_id
+        FROM media_items
+        WHERE parent_id = ANY($1)
+        UNION ALL
+        SELECT m.id, m.parent_id, d.root_id
+        FROM media_items m
+        INNER JOIN descendants d ON m.parent_id = d.id
+    )
+    SELECT root_id, COUNT(*)::bigint FROM descendants GROUP BY root_id
+    ...
+}
+```
+
+`media_items_to_dto_result` 的最终形：
+
+```1113:1172:backend/src/routes/items.rs
+async fn media_items_to_dto_result(
+    state: &AppState,
+    user_id: Uuid,
+    result: QueryResult<crate::models::DbMediaItem>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    // 列表接口的 N+1 优化：一次查 user_data、一次查 Folder 子代计数、一次查剧集的季数，
+    // 替代原本 1 条 item = 3~5 次独立 SQL 的模式（50 条列表大约从 150~250 次调用降到 3 次）。
+    let item_ids: Vec<uuid::Uuid> = result.items.iter().map(|item| item.id).collect();
+    let user_data_map =
+        repository::get_user_item_data_batch(&state.pool, user_id, &item_ids).await?;
+    let folder_ids: Vec<uuid::Uuid> = result.items.iter()
+        .filter(|item| repository::is_folder_item_public(item))
+        .map(|item| item.id).collect();
+    let child_counts = repository::count_item_children_batch(...).await?;
+    let recursive_counts = repository::count_recursive_children_batch(...).await?;
+    ...
+}
+```
+
+#### B3. `get_next_up_episodes` / `get_upcoming_episodes` 同款批量化 ✅
+
+这两个函数里也有同样的 `for row in rows { media_item_to_dto(...) }` 循环。同样先 `get_user_item_data_batch` 再循环用 `media_item_to_dto_with_user_data`，消除 NextUp 列表内的 50× `user_item_data` SELECT。
+
+#### B4. 性能量化（50 条列表场景估算）
+
+| 项 | 修复前 | 修复后 | 提升 |
+| --- | --- | --- | --- |
+| `user_item_data` 查询 | 50 次 | 1 次（IN ANY） | **50x** |
+| Folder 子代计数（50 部 Series） | 50 次非递归 + 50 次递归 CTE + 50 次季数 = 150 次 | 3 次（GROUP BY） | **50x** |
+| 剩余 `media_sources_for_item`（非 Folder 场景，每条 2 次） | 50 × 2 = 100 次 | 同前 | 未优化 |
+
+对 tvshows LibraryPage：总 SQL 从 **~200 次** → **~4 次**，列表接口延迟应显著下降（尤其是 DB 位于远程 / 高 RTT 环境）。
+
+对 movies LibraryPage：总 SQL 从 **~150 次** → **~103 次**（主要剩 media_sources N+1），下一步可对 `media_streams` / `media_chapters` 再批量化。
+
+### C. 校验
+
+- `backend> cargo build` —— ✅ 通过（27 warnings，全为合约字段 dead code）
+- `ReadLints` —— ✅ 无错误
+- `media_item_to_dto` 老签名保持不变，所有 25+ 个调用方 **0 处改动**。
+
+### D. 后续建议（未做）
+
+| 项 | 说明 |
+| --- | --- |
+| `media_sources_for_item` 批量化 | `media_streams` / `media_chapters` 也可以 `WHERE item_id = ANY($1)` 一次拉完，按 item_id 聚合。改 `get_media_streams / get_media_chapters` 加批量版。 |
+| `Fields` 尊重 | 前端 LibraryPage 只需要 `MediaStreams, MediaSources, ChildCount`，不需要 `Chapters / Overview / RemoteTrailers / ExternalUrls / People`。后端目前仍无视 Fields 全部返回，可在 DTO 组装前按 Fields 过滤。 |
+| Trickplay / MediaSegments / QuickConnect | 见 A3，各自需要独立立项。 |
+| `get_user_item_data_batch` 的 Row 定义是私有内联结构体，理想情况把它提到顶层的 `DbUserItemDataRow` 并和 `user_item_data_to_dto_for_item` 复用。 |
