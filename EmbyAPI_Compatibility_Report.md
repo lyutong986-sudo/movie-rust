@@ -559,3 +559,5 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 - /Users/AuthenticateByName 和 /Users/{user_id}/Authenticate 现在会把不存在用户、密码错误以及禁用本地密码登录统一收口为认证失败响应，避免通过 401/403/404 差异探测账号存在性和本地密码登录状态。
 
 - /Auth/Keys 现在使用 sessions.session_type 区分 ApiKey 和 Interactive：创建 API key 会写入 ApiKey 类型，列表只返回 ApiKey，删除也只允许删除真实 API key，不再把普通登录会话混进 Auth Keys。/Sessions 系列入口和 WebSocket 仅接受交互式会话，避免 API key 冒充在线会话或远程控制会话。
+
+- 启动向导现在会在创建首个管理员后立即登录该管理员；随后 /Startup/Configuration、/Startup/RemoteAccess、/Startup/Complete 会使用已建立的管理员会话继续完成初始化，从而兼顾首个用户创建后的安全收口与向导可用性。

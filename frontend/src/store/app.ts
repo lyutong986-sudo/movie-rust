@@ -225,6 +225,8 @@ export async function createWizardAdmin() {
         Password: state.adminPassword
       });
       state.adminCreated = true;
+      const result = await api.login(adminName, state.adminPassword);
+      user.value = result.User;
     }
 
     state.adminName = adminName;
@@ -249,9 +251,12 @@ export async function completeWizard() {
     state.startupWizardCompleted = true;
     publicUsers.value = await safePublicUsers();
 
-    if (state.adminPassword) {
+    if (!user.value && state.adminPassword) {
       const result = await api.login(state.adminName.trim(), state.adminPassword);
       user.value = result.User;
+    }
+
+    if (user.value) {
       await enterHome();
     }
   }, state.adminPassword ? '设置完成' : '设置完成，请登录');

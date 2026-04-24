@@ -411,7 +411,6 @@ export class EmbyApi {
   async updateStartupConfiguration(payload: StartupConfiguration) {
     return this.request<void>('/Startup/Configuration', {
       method: 'POST',
-      auth: false,
       body: payload
     });
   }
@@ -419,15 +418,13 @@ export class EmbyApi {
   async updateRemoteAccess(payload: StartupRemoteAccess) {
     return this.request<void>('/Startup/RemoteAccess', {
       method: 'POST',
-      auth: false,
       body: payload
     });
   }
 
   async completeStartup() {
     return this.request<void>('/Startup/Complete', {
-      method: 'POST',
-      auth: false
+      method: 'POST'
     });
   }
 
