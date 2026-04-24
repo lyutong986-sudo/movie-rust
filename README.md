@@ -52,8 +52,7 @@ npm run dev
 项目采用 **单一镜像**（没有单独的「前端镜像」「后端镜像」）：
 
 - `Dockerfile`：多阶段 —— 先构建 Vue，再构建 Rust，最终 **一个** 运行时镜像里同时包含 `movie-rust-backend` 与 `frontend/dist`（默认 `/app/public`）。
-- Rust 进程既提供 Emby 兼容 API，也托管静态资源与 SPA 回退；`docker-image.yml` 推送的也只有 **`movie-rust` 这一个仓库**（`:latest` 与 `:<git-sha>` 是同一镜像的两个标签）。
-- `frontend-ci.yml` 只做 GitHub 上的 `npm run build` 校验，**不推送任何 Docker 镜像**。
+- Rust 进程既提供 Emby 兼容 API，也托管静态资源与 SPA 回退；GitHub 上仅 **`docker-image.yml` 一条流水线**：构建镜像时 Dockerfile 第一阶段会执行 `npm run build`，前端不通过则整次构建失败，无需单独前端工作流。
 
 1. 使用 compose 启动：
 
