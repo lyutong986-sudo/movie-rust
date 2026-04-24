@@ -56,28 +56,15 @@ pub fn router() -> Router<AppState> {
             "/Items/{item_id}/Images/{image_type}/Delete",
             post(delete_item_image).delete(delete_item_image),
         )
+        // 所有 `/Items/{id}/Images/{type}/...` 的子路径都落到这一条 wildcard
+        // 上，由 tail 解析具体动作（index/Url/Index/Delete/多参数图片地址等）
+        // 以避免和 axum 0.8 里的更具体路由发生冲突。
         .route(
             "/Items/{item_id}/Images/{image_type}/{*image_tail}",
             get(get_item_image_with_tail)
                 .head(get_item_image_with_tail)
                 .post(upload_item_image_with_tail)
                 .delete(delete_item_image_with_tail),
-        )
-        .route(
-            "/Items/{item_id}/Images/{image_type}/{image_index}/Delete",
-            post(delete_item_image_index).delete(delete_item_image_index),
-        )
-        .route(
-            "/Items/{item_id}/Images/{image_type}/{image_index}/Url",
-            get(get_item_image_index_url),
-        )
-        .route(
-            "/Items/{item_id}/Images/{image_type}/{image_index}/Index",
-            post(set_item_image_index),
-        )
-        .route(
-            "/Items/{item_id}/Images/{image_type}/{image_index}/{tag}/{format}/{max_width}/{max_height}/{percent_played}/{unplayed_count}",
-            get(get_item_image_extended).head(get_item_image_extended),
         )
         .route(
             "/Persons/{name}/Images/{image_type}",
@@ -115,13 +102,13 @@ pub fn router() -> Router<AppState> {
             "/Users/{user_id}/Images/{image_type}/Delete",
             post(delete_user_image).delete(delete_user_image),
         )
+        // 同上，`{*image_tail}` 会同时捕获 `{image_index}/Delete` 等路径。
         .route(
             "/Users/{user_id}/Images/{image_type}/{*image_tail}",
-            get(get_user_image_with_tail).head(get_user_image_with_tail),
-        )
-        .route(
-            "/Users/{user_id}/Images/{image_type}/{image_index}/Delete",
-            post(delete_user_image_index).delete(delete_user_image_index),
+            get(get_user_image_with_tail)
+                .head(get_user_image_with_tail)
+                .post(delete_user_image_tail)
+                .delete(delete_user_image_tail),
         )
 }
 
@@ -958,11 +945,32 @@ async fn upload_item_image(
 async fn upload_item_image_with_tail(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((item_id_str, image_type, _image_tail)): Path<(String, String, String)>,
+    Path((item_id_str, image_type, image_tail)): Path<(String, String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
+    // 统一将 POST `/{image_index}/Delete`、`/Delete` 视作删除动作，
+    // 与 Emby Web Dashboard 的行为保持一致；而 `/Index` 结尾的 POST
+    // 仅表示调整显示顺序，目前按管理员校验后返回 NO_CONTENT。
+    match last_tail_segment(&image_tail).to_ascii_lowercase().as_str() {
+        "delete" => {
+            return delete_item_image_impl(session, state, item_id_str, image_type).await;
+        }
+        "index" => {
+            if !session.is_admin {
+                return Err(AppError::Forbidden);
+            }
+            return Ok(StatusCode::NO_CONTENT);
+        }
+        _ => {}
+    }
     upload_item_image_impl(session, state, item_id_str, image_type, headers, body).await
+}
+
+fn last_tail_segment(tail: &str) -> &str {
+    tail.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("")
 }
 
 async fn delete_item_image(
@@ -1033,6 +1041,14 @@ async fn get_user_image_with_tail(
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     serve_user_image(session.0, state, user_id, image_type, request).await
+}
+
+async fn delete_user_image_tail(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path((user_id_str, image_type, _image_tail)): Path<(String, String, String)>,
+) -> Result<StatusCode, AppError> {
+    delete_user_image(session, State(state), Path((user_id_str, image_type))).await
 }
 
 async fn serve_person_image(

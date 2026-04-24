@@ -708,3 +708,47 @@ fn merge_json(target: &mut Value, patch: Value) {
         (slot, value) => *slot = value,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rating_query_accepts_both_casings() {
+        let upper: RatingQuery = serde_json::from_value(json!({"Likes": true, "Rating": 4.5}))
+            .expect("PascalCase 名称应可解析");
+        assert_eq!(upper.likes, Some(true));
+        assert_eq!(upper.rating, Some(4.5));
+
+        let lower: RatingQuery = serde_json::from_value(json!({"likes": false, "rating": 2.0}))
+            .expect("lower-case aliases should work");
+        assert_eq!(lower.likes, Some(false));
+        assert_eq!(lower.rating, Some(2.0));
+    }
+
+    #[test]
+    fn merge_json_overlays_patch_onto_existing_user_config() {
+        let mut target = json!({
+            "PlayDefaultAudioTrack": true,
+            "SubtitleMode": "Default",
+            "LatestItemsExcludes": ["movies"]
+        });
+        let patch = json!({
+            "SubtitleMode": "Always",
+            "DisplayCollectionsView": true,
+            "LatestItemsExcludes": ["shows"]
+        });
+
+        merge_json(&mut target, patch);
+        assert_eq!(target["PlayDefaultAudioTrack"], json!(true));
+        assert_eq!(target["SubtitleMode"], json!("Always"));
+        assert_eq!(target["DisplayCollectionsView"], json!(true));
+        assert_eq!(target["LatestItemsExcludes"], json!(["shows"]));
+    }
+
+    #[test]
+    fn users_router_builds_with_new_settings_and_rating_endpoints() {
+        let _router = super::router();
+    }
+}

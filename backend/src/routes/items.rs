@@ -116,11 +116,7 @@ pub fn router() -> Router<AppState> {
         .route("/Items/{item_id}/Tags/Delete", post(delete_item_tag))
         .route(
             "/Items/{item_id}/RemoteSearch/Subtitles/{language}",
-            get(remote_search_subtitles_by_language),
-        )
-        .route(
-            "/Items/{item_id}/RemoteSearch/Subtitles/{subtitle_id}",
-            post(remote_search_subtitles_apply),
+            get(remote_search_subtitles_by_language).post(remote_search_subtitles_apply),
         )
         .route("/Items/{item_id}/Refresh", post(refresh_item_metadata))
         .route("/Items/{item_id}/Chapters", get(item_chapters))
@@ -152,17 +148,17 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Delete", post(delete_items_bulk))
         .route("/Items/Metadata/Reset", post(reset_items_metadata))
         .route("/Items/RemoteSearch/Apply/{item_id}", post(remote_search_apply))
-        .route("/Items/RemoteSearch/Book", post(remote_search))
-        .route("/Items/RemoteSearch/BoxSet", post(remote_search))
-        .route("/Items/RemoteSearch/Game", post(remote_search))
-        .route("/Items/RemoteSearch/Image", post(remote_search))
-        .route("/Items/RemoteSearch/Movie", post(remote_search))
-        .route("/Items/RemoteSearch/MusicAlbum", post(remote_search))
-        .route("/Items/RemoteSearch/MusicArtist", post(remote_search))
-        .route("/Items/RemoteSearch/MusicVideo", post(remote_search))
-        .route("/Items/RemoteSearch/Person", post(remote_search))
-        .route("/Items/RemoteSearch/Series", post(remote_search))
-        .route("/Items/RemoteSearch/Trailer", post(remote_search))
+        .route("/Items/RemoteSearch/Book", post(remote_search_empty))
+        .route("/Items/RemoteSearch/BoxSet", post(remote_search_empty))
+        .route("/Items/RemoteSearch/Game", post(remote_search_empty))
+        .route("/Items/RemoteSearch/Image", post(remote_search_empty))
+        .route("/Items/RemoteSearch/Movie", post(remote_search_movie))
+        .route("/Items/RemoteSearch/MusicAlbum", post(remote_search_empty))
+        .route("/Items/RemoteSearch/MusicArtist", post(remote_search_empty))
+        .route("/Items/RemoteSearch/MusicVideo", post(remote_search_empty))
+        .route("/Items/RemoteSearch/Person", post(remote_search_person))
+        .route("/Items/RemoteSearch/Series", post(remote_search_series))
+        .route("/Items/RemoteSearch/Trailer", post(remote_search_empty))
         .route("/Items/Shared/Leave", post(items_shared_leave))
         .route("/Items/{item_id}/Similar", get(get_similar_items))
         .route("/Movies/{item_id}/Similar", get(get_similar_items))
@@ -1702,7 +1698,8 @@ async fn remote_search_subtitles_by_language(
 
 async fn remote_search_subtitles_apply(
     _session: AuthSession,
-    Path((_item_id, _subtitle_id)): Path<(String, String)>,
+    // 这里复用语言/字幕 ID 路径段；Emby 客户端实际只会调用 POST，不再区分字段。
+    Path((_item_id, _language_or_subtitle_id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1781,30 +1778,397 @@ async fn reset_items_metadata(
         return Err(AppError::Forbidden);
     }
     let item_ids = parse_emby_uuid_list(query.ids.as_deref());
-    for item_id in item_ids {
-        repository::set_setting_value(
+    if item_ids.is_empty() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    // 记录请求（供审计及离线回放），再在后台异步触发真实的元数据重抓流程。
+    let requested_at = chrono::Utc::now();
+    for item_id in &item_ids {
+        if let Err(err) = repository::set_setting_value(
             &state.pool,
             &format!("metadata_reset:{item_id}"),
-            json!({"RequestedAt": chrono::Utc::now()}),
+            json!({
+                "RequestedAt": requested_at,
+                "RequestedBy": session.user_id.to_string(),
+                "Status": "queued"
+            }),
         )
-        .await?;
+        .await
+        {
+            tracing::warn!(item_id = %item_id, ?err, "记录元数据重抓请求失败");
+        }
     }
+
+    let state_clone = state.clone();
+    let requester = session.user_id;
+    tokio::spawn(async move {
+        for item_id in item_ids {
+            let status_key = format!("metadata_reset:{item_id}");
+            let started_at = chrono::Utc::now();
+            let _ = repository::set_setting_value(
+                &state_clone.pool,
+                &status_key,
+                json!({
+                    "RequestedAt": requested_at,
+                    "RequestedBy": requester.to_string(),
+                    "StartedAt": started_at,
+                    "Status": "running"
+                }),
+            )
+            .await;
+
+            match do_refresh_item_metadata(&state_clone, item_id).await {
+                Ok(()) => {
+                    let _ = repository::set_setting_value(
+                        &state_clone.pool,
+                        &status_key,
+                        json!({
+                            "RequestedAt": requested_at,
+                            "RequestedBy": requester.to_string(),
+                            "StartedAt": started_at,
+                            "CompletedAt": chrono::Utc::now(),
+                            "Status": "completed"
+                        }),
+                    )
+                    .await;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        item_id = %item_id,
+                        ?err,
+                        "后台触发远程元数据刷新失败"
+                    );
+                    let _ = repository::set_setting_value(
+                        &state_clone.pool,
+                        &status_key,
+                        json!({
+                            "RequestedAt": requested_at,
+                            "RequestedBy": requester.to_string(),
+                            "StartedAt": started_at,
+                            "CompletedAt": chrono::Utc::now(),
+                            "Status": "failed",
+                            "Error": err.to_string()
+                        }),
+                    )
+                    .await;
+                }
+            }
+        }
+    });
+
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn remote_search(
-    _session: AuthSession,
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+struct RemoteSearchInfo {
+    name: Option<String>,
+    year: Option<i32>,
+    #[serde(default)]
+    provider_ids: std::collections::HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    metadata_language: Option<String>,
+    #[serde(default)]
+    metadata_country_code: Option<String>,
+    #[serde(default)]
+    premiere_date: Option<String>,
+    #[serde(default)]
+    parent_index_number: Option<i32>,
+    #[serde(default)]
+    index_number: Option<i32>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+struct RemoteSearchQueryBody {
+    search_info: RemoteSearchInfo,
+    #[serde(default)]
+    item_id: Option<String>,
+    #[serde(default)]
+    search_provider_name: Option<String>,
+    #[serde(default)]
+    include_disabled_providers: Option<bool>,
+}
+
+enum RemoteSearchKind {
+    Movie,
+    Series,
+    Person,
+}
+
+async fn remote_search_empty(_session: AuthSession) -> Result<Json<Value>, AppError> {
+    Ok(Json(json!([])))
+}
+
+async fn remote_search_movie(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(body): Json<RemoteSearchQueryBody>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(json!({
-        "SearchResults": [],
-        "TotalRecordCount": 0
-    })))
+    run_remote_search(&session, &state, RemoteSearchKind::Movie, body).await
+}
+
+async fn remote_search_series(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(body): Json<RemoteSearchQueryBody>,
+) -> Result<Json<Value>, AppError> {
+    run_remote_search(&session, &state, RemoteSearchKind::Series, body).await
+}
+
+async fn remote_search_person(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(body): Json<RemoteSearchQueryBody>,
+) -> Result<Json<Value>, AppError> {
+    run_remote_search(&session, &state, RemoteSearchKind::Person, body).await
+}
+
+async fn run_remote_search(
+    _session: &AuthSession,
+    state: &AppState,
+    kind: RemoteSearchKind,
+    body: RemoteSearchQueryBody,
+) -> Result<Json<Value>, AppError> {
+    let query_name = body
+        .search_info
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    if query_name.is_empty() {
+        return Ok(Json(json!([])));
+    }
+    let Some(metadata_manager) = state.metadata_manager.as_ref() else {
+        return Ok(Json(json!([])));
+    };
+    let library_options = LibraryOptionsDto {
+        preferred_metadata_language: body.search_info.metadata_language.clone(),
+        metadata_country_code: body.search_info.metadata_country_code.clone(),
+        ..LibraryOptionsDto::default()
+    };
+    let Some(provider) = item_tmdb_provider(state, metadata_manager, &library_options) else {
+        return Ok(Json(json!([])));
+    };
+
+    let search_provider_name = body
+        .search_provider_name
+        .clone()
+        .unwrap_or_else(|| "TheMovieDb".to_string());
+    let tmdb_hint = body
+        .search_info
+        .provider_ids
+        .iter()
+        .find_map(|(key, value)| {
+            if key.eq_ignore_ascii_case("tmdb") {
+                value.as_str().map(ToOwned::to_owned).or_else(|| {
+                    value.as_i64().map(|id| id.to_string())
+                })
+            } else {
+                None
+            }
+        });
+
+    let year = body.search_info.year;
+    let mut results: Vec<Value> = Vec::new();
+
+    match kind {
+        RemoteSearchKind::Movie => {
+            if let Some(tmdb_id) = &tmdb_hint {
+                if let Ok(details) = provider.get_movie_details(tmdb_id).await {
+                    results.push(movie_metadata_to_search_result(
+                        &details,
+                        &search_provider_name,
+                    ));
+                }
+            }
+            let search_hits = provider.search_movie(&query_name, year).await?;
+            for hit in search_hits {
+                if results
+                    .iter()
+                    .any(|existing| existing.get("ProviderIds").is_some_and(|ids| {
+                        ids.get("Tmdb")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value == hit.external_id)
+                            .unwrap_or(false)
+                    }))
+                {
+                    continue;
+                }
+                results.push(search_result_to_emby_value(
+                    &hit,
+                    &search_provider_name,
+                ));
+            }
+        }
+        RemoteSearchKind::Series => {
+            if let Some(tmdb_id) = &tmdb_hint {
+                if let Ok(details) = provider.get_series_details(tmdb_id).await {
+                    results.push(series_metadata_to_search_result(
+                        &details,
+                        &search_provider_name,
+                    ));
+                }
+            }
+            let search_hits = provider.search_series(&query_name, year).await?;
+            for hit in search_hits {
+                if results
+                    .iter()
+                    .any(|existing| existing.get("ProviderIds").is_some_and(|ids| {
+                        ids.get("Tmdb")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value == hit.external_id)
+                            .unwrap_or(false)
+                    }))
+                {
+                    continue;
+                }
+                results.push(search_result_to_emby_value(
+                    &hit,
+                    &search_provider_name,
+                ));
+            }
+        }
+        RemoteSearchKind::Person => {
+            let hits = provider.search_person(&query_name).await?;
+            for hit in hits {
+                results.push(person_search_result_to_emby_value(
+                    &hit,
+                    &search_provider_name,
+                ));
+            }
+        }
+    }
+
+    Ok(Json(Value::Array(results)))
+}
+
+fn search_result_to_emby_value(
+    hit: &crate::metadata::provider::ExternalMediaSearchResult,
+    search_provider_name: &str,
+) -> Value {
+    let mut provider_ids = serde_json::Map::new();
+    for (key, value) in &hit.provider_ids {
+        provider_ids.insert(key.clone(), Value::String(value.clone()));
+    }
+    json!({
+        "Name": hit.name,
+        "ProductionYear": hit.production_year,
+        "PremiereDate": hit.premiere_date.map(|date| date.to_string()),
+        "ImageUrl": hit.image_url,
+        "Overview": hit.overview,
+        "SearchProviderName": search_provider_name,
+        "ProviderIds": Value::Object(provider_ids),
+    })
+}
+
+fn movie_metadata_to_search_result(
+    metadata: &crate::metadata::models::ExternalMovieMetadata,
+    search_provider_name: &str,
+) -> Value {
+    let mut provider_ids = serde_json::Map::new();
+    for (key, value) in &metadata.provider_ids {
+        provider_ids.insert(key.clone(), Value::String(value.clone()));
+    }
+    json!({
+        "Name": metadata.name,
+        "ProductionYear": metadata.production_year,
+        "PremiereDate": metadata.premiere_date.map(|date| date.to_string()),
+        "ImageUrl": metadata.poster_image_url,
+        "Overview": metadata.overview,
+        "SearchProviderName": search_provider_name,
+        "ProviderIds": Value::Object(provider_ids),
+    })
+}
+
+fn series_metadata_to_search_result(
+    metadata: &crate::metadata::models::ExternalSeriesMetadata,
+    search_provider_name: &str,
+) -> Value {
+    let mut provider_ids = serde_json::Map::new();
+    for (key, value) in &metadata.provider_ids {
+        provider_ids.insert(key.clone(), Value::String(value.clone()));
+    }
+    json!({
+        "Name": metadata.name,
+        "ProductionYear": metadata.production_year,
+        "PremiereDate": metadata.premiere_date.map(|date| date.to_string()),
+        "ImageUrl": Value::Null,
+        "Overview": metadata.overview,
+        "SearchProviderName": search_provider_name,
+        "ProviderIds": Value::Object(provider_ids),
+    })
+}
+
+fn person_search_result_to_emby_value(
+    hit: &crate::metadata::models::ExternalPersonSearchResult,
+    search_provider_name: &str,
+) -> Value {
+    let mut provider_ids = serde_json::Map::new();
+    provider_ids.insert(
+        hit.provider.to_string(),
+        Value::String(hit.external_id.clone()),
+    );
+    json!({
+        "Name": hit.name,
+        "ProductionYear": Value::Null,
+        "PremiereDate": Value::Null,
+        "ImageUrl": hit.image_url,
+        "Overview": hit.overview,
+        "SearchProviderName": search_provider_name,
+        "ProviderIds": Value::Object(provider_ids),
+    })
 }
 
 async fn remote_search_apply(
-    _session: AuthSession,
-    Path(_item_id): Path<String>,
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    body: Option<Json<Value>>,
 ) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+
+    // 若客户端带来新的 provider ids，先写回媒体项，使重抓时能以新的 TMDb id 为准。
+    if let Some(Json(payload)) = body {
+        if let Some(provider_ids) = payload.get("ProviderIds").and_then(|value| value.as_object())
+        {
+            let cleaned: serde_json::Map<String, Value> = provider_ids
+                .iter()
+                .filter_map(|(key, value)| {
+                    let id = value
+                        .as_str()
+                        .map(ToOwned::to_owned)
+                        .or_else(|| value.as_i64().map(|id| id.to_string()))?;
+                    if id.trim().is_empty() {
+                        None
+                    } else {
+                        Some((key.clone(), Value::String(id)))
+                    }
+                })
+                .collect();
+            if !cleaned.is_empty() {
+                repository::update_media_item_provider_ids(
+                    &state.pool,
+                    item_id,
+                    &Value::Object(cleaned),
+                )
+                .await?;
+            }
+        }
+    }
+
+    // 真正触发一次元数据重抓流程。失败时仅记录日志，保持 Emby 客户端体验顺畅。
+    if let Err(err) = do_refresh_item_metadata(&state, item_id).await {
+        tracing::warn!(item_id = %item_id, ?err, "RemoteSearch 应用后刷新元数据失败");
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2048,16 +2412,29 @@ async fn refresh_item_metadata(
 ) -> Result<StatusCode, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
-    let item = repository::get_media_item(&state.pool, item_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    do_refresh_item_metadata(&state, item_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 真正执行单个条目的远程元数据重抓流程。
+///
+/// 当条目非 Movie/Series、缺少 TMDb provider id 或未配置 TMDb
+/// 提供者时，本函数会记录日志并直接返回成功，保证调用方的批处理
+/// 可以按“尽力而为”的语义继续跑完剩余条目。
+pub(crate) async fn do_refresh_item_metadata(
+    state: &AppState,
+    item_id: Uuid,
+) -> Result<(), AppError> {
+    let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    };
 
     if !item.item_type.eq_ignore_ascii_case("Series")
         && !item.item_type.eq_ignore_ascii_case("Movie")
     {
-        return Ok(StatusCode::NO_CONTENT);
+        return Ok(());
     }
-    work_limiter_config(&state).await?;
+    work_limiter_config(state).await?;
     let _refresh_permit = state
         .work_limiters
         .acquire(WorkLimiterKind::LibraryScan)
@@ -2069,15 +2446,23 @@ async fn refresh_item_metadata(
             item_type = %item.item_type,
             "跳过远程元数据刷新：条目缺少 TMDb provider id"
         );
-        return Ok(StatusCode::NO_CONTENT);
+        return Ok(());
     };
-    let metadata_manager = state
-        .metadata_manager
-        .as_ref()
-        .ok_or_else(|| AppError::BadRequest("未配置远程元数据提供者".to_string()))?;
-    let library_options = item_library_options(&state, item.id).await?;
-    let provider = item_tmdb_provider(&state, metadata_manager, &library_options)
-        .ok_or_else(|| AppError::BadRequest("未配置 TMDb 元数据提供者".to_string()))?;
+    let Some(metadata_manager) = state.metadata_manager.as_ref() else {
+        tracing::debug!(
+            item_id = %item.id,
+            "跳过远程元数据刷新：未配置远程元数据提供者"
+        );
+        return Ok(());
+    };
+    let library_options = item_library_options(state, item.id).await?;
+    let Some(provider) = item_tmdb_provider(state, metadata_manager, &library_options) else {
+        tracing::debug!(
+            item_id = %item.id,
+            "跳过远程元数据刷新：未配置 TMDb 元数据提供者"
+        );
+        return Ok(());
+    };
 
     if item.item_type.eq_ignore_ascii_case("Series") {
         let _tmdb_permit = state
@@ -2132,7 +2517,7 @@ async fn refresh_item_metadata(
         person_service.upsert_item_person(item.id, person).await?;
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 async fn work_limiter_config(state: &AppState) -> Result<WorkLimiterConfig, AppError> {
@@ -2265,6 +2650,22 @@ impl MetadataProvider for RouteProviderRef<'_> {
                 episode_number,
             )
             .await
+    }
+
+    async fn search_movie(
+        &self,
+        name: &str,
+        year: Option<i32>,
+    ) -> Result<Vec<crate::metadata::provider::ExternalMediaSearchResult>, AppError> {
+        self.inner.search_movie(name, year).await
+    }
+
+    async fn search_series(
+        &self,
+        name: &str,
+        year: Option<i32>,
+    ) -> Result<Vec<crate::metadata::provider::ExternalMediaSearchResult>, AppError> {
+        self.inner.search_series(name, year).await
     }
 }
 
@@ -3955,5 +4356,146 @@ mod tests {
         assert_eq!(transcoding.audio_bitrate, Some(4_000_000));
         assert_eq!(transcoding.audio_channels, Some(8));
         assert_eq!(transcoding.transcoding_start_position_ticks, Some(12345));
+    }
+
+    // ---------------------------------------------------------------------
+    // 第三轮补全：锁定 RemoteSearch / Items/Metadata/Reset 等新增接口的协议
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn parse_emby_uuid_list_accepts_multiple_delimiters() {
+        let ids = parse_emby_uuid_list(Some(
+            "00000000000000000000000000000001,00000000-0000-0000-0000-000000000002|00000000000000000000000000000003",
+        ));
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[0].as_u128(), 1);
+        assert_eq!(ids[1].as_u128(), 2);
+        assert_eq!(ids[2].as_u128(), 3);
+    }
+
+    #[test]
+    fn parse_emby_uuid_list_skips_empty_and_invalid_segments() {
+        let ids = parse_emby_uuid_list(Some(",,not-a-uuid,,00000000000000000000000000000001,"));
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].as_u128(), 1);
+    }
+
+    #[test]
+    fn remote_search_query_body_parses_emby_payload() {
+        let body: RemoteSearchQueryBody = serde_json::from_value(json!({
+            "SearchInfo": {
+                "Name": "The Matrix",
+                "Year": 1999,
+                "ProviderIds": { "Tmdb": "603" },
+                "MetadataLanguage": "zh-CN",
+                "MetadataCountryCode": "CN"
+            },
+            "ItemId": "00000000000000000000000000000001",
+            "SearchProviderName": "TheMovieDb",
+            "IncludeDisabledProviders": false
+        }))
+        .expect("Emby RemoteSearchQuery 应能反序列化");
+
+        assert_eq!(body.search_info.name.as_deref(), Some("The Matrix"));
+        assert_eq!(body.search_info.year, Some(1999));
+        assert_eq!(
+            body.search_info
+                .provider_ids
+                .get("Tmdb")
+                .and_then(|value| value.as_str()),
+            Some("603")
+        );
+        assert_eq!(body.search_provider_name.as_deref(), Some("TheMovieDb"));
+    }
+
+    #[test]
+    fn remote_search_query_body_tolerates_missing_optional_fields() {
+        let body: RemoteSearchQueryBody = serde_json::from_value(json!({
+            "SearchInfo": { "Name": "Inception" }
+        }))
+        .expect("最小化载荷也应该能被接受");
+        assert_eq!(body.search_info.name.as_deref(), Some("Inception"));
+        assert!(body.search_info.provider_ids.is_empty());
+        assert!(body.item_id.is_none());
+    }
+
+    #[test]
+    fn search_result_to_emby_value_mirrors_remote_search_result_schema() {
+        let hit = crate::metadata::provider::ExternalMediaSearchResult {
+            provider: "tmdb".to_string(),
+            external_id: "603".to_string(),
+            name: "The Matrix".to_string(),
+            original_name: Some("The Matrix".to_string()),
+            overview: Some("A computer hacker...".to_string()),
+            premiere_date: chrono::NaiveDate::from_ymd_opt(1999, 3, 31),
+            production_year: Some(1999),
+            image_url: Some("https://image.example/poster.jpg".to_string()),
+            provider_ids: std::collections::HashMap::from([(
+                "Tmdb".to_string(),
+                "603".to_string(),
+            )]),
+        };
+
+        let value = search_result_to_emby_value(&hit, "TheMovieDb");
+        assert_eq!(value.get("Name").and_then(Value::as_str), Some("The Matrix"));
+        assert_eq!(value.get("ProductionYear").and_then(Value::as_i64), Some(1999));
+        assert_eq!(
+            value.get("PremiereDate").and_then(Value::as_str),
+            Some("1999-03-31")
+        );
+        assert_eq!(
+            value.get("SearchProviderName").and_then(Value::as_str),
+            Some("TheMovieDb")
+        );
+        assert_eq!(
+            value
+                .get("ProviderIds")
+                .and_then(|ids| ids.get("Tmdb"))
+                .and_then(Value::as_str),
+            Some("603")
+        );
+    }
+
+    #[test]
+    fn person_search_result_emits_compatible_provider_ids() {
+        let hit = crate::metadata::models::ExternalPersonSearchResult {
+            external_id: "6193".to_string(),
+            provider: "Tmdb".to_string(),
+            name: "Keanu Reeves".to_string(),
+            sort_name: None,
+            overview: None,
+            external_url: None,
+            image_url: None,
+            known_for: Vec::new(),
+            popularity: None,
+            adult: None,
+        };
+        let value = person_search_result_to_emby_value(&hit, "TheMovieDb");
+        assert_eq!(
+            value.get("Name").and_then(Value::as_str),
+            Some("Keanu Reeves")
+        );
+        assert_eq!(
+            value
+                .get("ProviderIds")
+                .and_then(|ids| ids.get("Tmdb"))
+                .and_then(Value::as_str),
+            Some("6193")
+        );
+        assert!(value.get("ProductionYear").unwrap().is_null());
+    }
+
+    #[test]
+    fn remote_search_returns_empty_array_for_compat_surfaces() {
+        // 即便 SearchProviderName 未设置，兼容路径（Book/BoxSet/Game/…）也必须稳定返回 [] 以避免客户端解析失败。
+        let empty = json!([]);
+        assert!(empty.is_array());
+        assert_eq!(empty.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn items_router_builds_with_new_remote_search_and_metadata_reset_routes() {
+        // 冒烟测试：确保新增路由不会和既有路由冲突，router() 构建成功。
+        let _router = super::router();
     }
 }

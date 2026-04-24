@@ -7,6 +7,23 @@ use super::models::{
     ExternalMovieMetadata, ExternalPerson, ExternalPersonSearchResult, ExternalSeriesMetadata,
 };
 
+/// 外部电影/剧集搜索结果。
+///
+/// 字段子集与 Emby `RemoteSearchResult` 兼容，用于 `Items/RemoteSearch/*`
+/// 的返回。`provider_ids` 保留外部提供者给出的各路 id（如 `Tmdb`/`Imdb`）。
+#[derive(Debug, Clone)]
+pub struct ExternalMediaSearchResult {
+    pub provider: String,
+    pub external_id: String,
+    pub name: String,
+    pub original_name: Option<String>,
+    pub overview: Option<String>,
+    pub premiere_date: Option<chrono::NaiveDate>,
+    pub production_year: Option<i32>,
+    pub image_url: Option<String>,
+    pub provider_ids: HashMap<String, String>,
+}
+
 /// 元数据提供者接口
 #[async_trait]
 pub trait MetadataProvider: Send + Sync {
@@ -63,6 +80,24 @@ pub trait MetadataProvider: Send + Sync {
         let _ = season_number;
         let _ = episode_number;
         self.get_remote_images(media_type, series_provider_id).await
+    }
+
+    /// 搜索电影。默认返回空列表，供不支持远程搜索的 Provider 使用。
+    async fn search_movie(
+        &self,
+        _name: &str,
+        _year: Option<i32>,
+    ) -> Result<Vec<ExternalMediaSearchResult>, AppError> {
+        Ok(Vec::new())
+    }
+
+    /// 搜索剧集。默认返回空列表。
+    async fn search_series(
+        &self,
+        _name: &str,
+        _year: Option<i32>,
+    ) -> Result<Vec<ExternalMediaSearchResult>, AppError> {
+        Ok(Vec::new())
     }
 }
 

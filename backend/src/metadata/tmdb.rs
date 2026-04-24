@@ -10,8 +10,8 @@ use super::{
         ExternalMovieMetadata, ExternalPerson, ExternalPersonSearchResult, ExternalSeriesMetadata,
     },
     provider::{
-        ExternalEpisodeCatalogItem, ExternalItemPerson, ExternalPersonCredit, ExternalRemoteImage,
-        MetadataProvider,
+        ExternalEpisodeCatalogItem, ExternalItemPerson, ExternalMediaSearchResult,
+        ExternalPersonCredit, ExternalRemoteImage, MetadataProvider,
     },
 };
 
@@ -295,6 +295,110 @@ impl TmdbProvider {
             .error_for_status()?;
 
         Ok(response.json().await?)
+    }
+
+    async fn search_movie_internal(
+        &self,
+        name: &str,
+        year: Option<i32>,
+    ) -> Result<TmdbMovieSearchResponse, AppError> {
+        let mut params = HashMap::new();
+        self.add_api_key(&mut params);
+        params.insert("query".to_string(), name.to_string());
+        params.insert("page".to_string(), "1".to_string());
+        params.insert("include_adult".to_string(), "false".to_string());
+        if let Some(year) = year {
+            params.insert("year".to_string(), year.to_string());
+        }
+
+        let response = self
+            .client
+            .get(self.build_url("/search/movie"))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
+    }
+
+    async fn search_tv_internal(
+        &self,
+        name: &str,
+        year: Option<i32>,
+    ) -> Result<TmdbTvSearchResponse, AppError> {
+        let mut params = HashMap::new();
+        self.add_api_key(&mut params);
+        params.insert("query".to_string(), name.to_string());
+        params.insert("page".to_string(), "1".to_string());
+        params.insert("include_adult".to_string(), "false".to_string());
+        if let Some(year) = year {
+            params.insert("first_air_date_year".to_string(), year.to_string());
+        }
+
+        let response = self
+            .client
+            .get(self.build_url("/search/tv"))
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
+    }
+
+    fn build_movie_search_result(&self, item: TmdbMovieSearchResult) -> ExternalMediaSearchResult {
+        let premiere_date = parse_tmdb_date(item.release_date.as_deref());
+        let production_year = premiere_date.map(|date| date.year());
+        let image_url = item
+            .poster_path
+            .as_ref()
+            .map(|path| format!("{}/original{}", self.config.image_base_url, path));
+        let mut provider_ids = HashMap::new();
+        provider_ids.insert("Tmdb".to_string(), item.id.to_string());
+
+        ExternalMediaSearchResult {
+            provider: "tmdb".to_string(),
+            external_id: item.id.to_string(),
+            name: item
+                .title
+                .clone()
+                .or_else(|| item.original_title.clone())
+                .unwrap_or_else(|| format!("TMDb movie {}", item.id)),
+            original_name: item.original_title,
+            overview: item.overview.filter(|value| !value.trim().is_empty()),
+            premiere_date,
+            production_year,
+            image_url,
+            provider_ids,
+        }
+    }
+
+    fn build_tv_search_result(&self, item: TmdbTvSearchResult) -> ExternalMediaSearchResult {
+        let premiere_date = parse_tmdb_date(item.first_air_date.as_deref());
+        let production_year = premiere_date.map(|date| date.year());
+        let image_url = item
+            .poster_path
+            .as_ref()
+            .map(|path| format!("{}/original{}", self.config.image_base_url, path));
+        let mut provider_ids = HashMap::new();
+        provider_ids.insert("Tmdb".to_string(), item.id.to_string());
+
+        ExternalMediaSearchResult {
+            provider: "tmdb".to_string(),
+            external_id: item.id.to_string(),
+            name: item
+                .name
+                .clone()
+                .or_else(|| item.original_name.clone())
+                .unwrap_or_else(|| format!("TMDb series {}", item.id)),
+            original_name: item.original_name,
+            overview: item.overview.filter(|value| !value.trim().is_empty()),
+            premiere_date,
+            production_year,
+            image_url,
+            provider_ids,
+        }
     }
 }
 
@@ -806,6 +910,40 @@ impl MetadataProvider for TmdbProvider {
 
         self.get_remote_images(media_type, series_provider_id).await
     }
+
+    async fn search_movie(
+        &self,
+        name: &str,
+        year: Option<i32>,
+    ) -> Result<Vec<ExternalMediaSearchResult>, AppError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let response = self.search_movie_internal(trimmed, year).await?;
+        Ok(response
+            .results
+            .into_iter()
+            .map(|item| self.build_movie_search_result(item))
+            .collect())
+    }
+
+    async fn search_series(
+        &self,
+        name: &str,
+        year: Option<i32>,
+    ) -> Result<Vec<ExternalMediaSearchResult>, AppError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let response = self.search_tv_internal(trimmed, year).await?;
+        Ok(response
+            .results
+            .into_iter()
+            .map(|item| self.build_tv_search_result(item))
+            .collect())
+    }
 }
 
 fn push_tmdb_image_collection(
@@ -933,6 +1071,68 @@ fn tmdb_trailer_urls(videos: &TmdbVideoCollection) -> Vec<String> {
 }
 
 // TMDB API响应结构
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct TmdbMovieSearchResponse {
+    #[serde(default)]
+    pub(crate) page: i32,
+    #[serde(default)]
+    pub(crate) results: Vec<TmdbMovieSearchResult>,
+    #[serde(default)]
+    pub(crate) total_pages: i32,
+    #[serde(default)]
+    pub(crate) total_results: i32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct TmdbMovieSearchResult {
+    pub(crate) id: i32,
+    #[serde(default)]
+    pub(crate) title: Option<String>,
+    #[serde(default)]
+    pub(crate) original_title: Option<String>,
+    #[serde(default)]
+    pub(crate) overview: Option<String>,
+    #[serde(default)]
+    pub(crate) release_date: Option<String>,
+    #[serde(default)]
+    pub(crate) poster_path: Option<String>,
+    #[serde(default)]
+    pub(crate) vote_average: Option<f64>,
+    #[serde(default)]
+    pub(crate) popularity: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct TmdbTvSearchResponse {
+    #[serde(default)]
+    pub(crate) page: i32,
+    #[serde(default)]
+    pub(crate) results: Vec<TmdbTvSearchResult>,
+    #[serde(default)]
+    pub(crate) total_pages: i32,
+    #[serde(default)]
+    pub(crate) total_results: i32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct TmdbTvSearchResult {
+    pub(crate) id: i32,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) original_name: Option<String>,
+    #[serde(default)]
+    pub(crate) overview: Option<String>,
+    #[serde(default)]
+    pub(crate) first_air_date: Option<String>,
+    #[serde(default)]
+    pub(crate) poster_path: Option<String>,
+    #[serde(default)]
+    pub(crate) vote_average: Option<f64>,
+    #[serde(default)]
+    pub(crate) popularity: Option<f64>,
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct TmdbPersonSearchResponse {
@@ -1177,4 +1377,66 @@ struct TmdbSeasonEpisode {
     episode_number: i32,
     season_number: Option<i32>,
     still_path: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_provider() -> TmdbProvider {
+        TmdbProvider::with_config(TmdbConfig {
+            api_key: "test".to_string(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn build_movie_search_result_populates_tmdb_id_year_and_poster_url() {
+        let provider = fixture_provider();
+        let hit = provider.build_movie_search_result(TmdbMovieSearchResult {
+            id: 603,
+            title: Some("The Matrix".to_string()),
+            original_title: Some("The Matrix".to_string()),
+            overview: Some("A hacker learns the truth...".to_string()),
+            release_date: Some("1999-03-31".to_string()),
+            poster_path: Some("/p.jpg".to_string()),
+            vote_average: Some(8.2),
+            popularity: Some(99.0),
+        });
+        assert_eq!(hit.provider, "tmdb");
+        assert_eq!(hit.external_id, "603");
+        assert_eq!(hit.production_year, Some(1999));
+        assert_eq!(
+            hit.image_url.as_deref(),
+            Some("https://image.tmdb.org/t/p/original/p.jpg")
+        );
+        assert_eq!(hit.provider_ids.get("Tmdb").map(String::as_str), Some("603"));
+    }
+
+    #[test]
+    fn build_tv_search_result_handles_missing_release_dates_gracefully() {
+        let provider = fixture_provider();
+        let hit = provider.build_tv_search_result(TmdbTvSearchResult {
+            id: 1399,
+            name: Some("Game of Thrones".to_string()),
+            original_name: None,
+            overview: None,
+            first_air_date: None,
+            poster_path: None,
+            vote_average: None,
+            popularity: None,
+        });
+        assert_eq!(hit.name, "Game of Thrones");
+        assert!(hit.production_year.is_none());
+        assert!(hit.image_url.is_none());
+        assert!(hit.overview.is_none());
+    }
+
+    #[test]
+    fn tmdb_search_response_tolerates_missing_optional_fields() {
+        let raw = serde_json::json!({ "results": [] });
+        let parsed: TmdbMovieSearchResponse =
+            serde_json::from_value(raw).expect("搜索响应容错解析");
+        assert!(parsed.results.is_empty());
+    }
 }

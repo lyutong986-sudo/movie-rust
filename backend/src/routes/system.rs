@@ -505,3 +505,52 @@ fn merge_object(target: &mut Value, patch: &Value) {
         (target_slot, patch_value) => *target_slot = patch_value.clone(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn merge_object_performs_deep_merge_on_nested_configuration() {
+        let mut target = json!({
+            "ServerName": "movie-rust",
+            "EncodingOptions": {
+                "Hardware": "qsv",
+                "Preset": "fast"
+            },
+            "RemoteAccess": {
+                "Enabled": true
+            }
+        });
+        let patch = json!({
+            "ServerName": "movie-rust-edge",
+            "EncodingOptions": {
+                "Preset": "slow",
+                "EnableTonemapping": true
+            },
+            "Plugins": { "Tmdb": true }
+        });
+
+        merge_object(&mut target, &patch);
+
+        assert_eq!(target["ServerName"], json!("movie-rust-edge"));
+        assert_eq!(target["EncodingOptions"]["Hardware"], json!("qsv"));
+        assert_eq!(target["EncodingOptions"]["Preset"], json!("slow"));
+        assert_eq!(target["EncodingOptions"]["EnableTonemapping"], json!(true));
+        assert_eq!(target["RemoteAccess"]["Enabled"], json!(true));
+        assert_eq!(target["Plugins"]["Tmdb"], json!(true));
+    }
+
+    #[test]
+    fn merge_object_overwrites_non_object_values() {
+        let mut target = json!({ "MaxStreamingBitrate": 1_000_000 });
+        merge_object(&mut target, &json!({ "MaxStreamingBitrate": 5_000_000 }));
+        assert_eq!(target["MaxStreamingBitrate"], json!(5_000_000));
+    }
+
+    #[test]
+    fn system_router_builds_with_new_configuration_endpoints() {
+        let _router = super::router();
+    }
+}

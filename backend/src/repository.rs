@@ -617,6 +617,32 @@ pub async fn remove_media_item_tag(
     Ok(result.rows_affected() > 0)
 }
 
+/// 将外部 provider ids 合并到媒体项已有 provider_ids 上。
+///
+/// 使用 jsonb `||` 运算符让新字段覆盖同名旧字段，避免破坏其他 provider 的 id。
+pub async fn update_media_item_provider_ids(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    provider_ids: &serde_json::Value,
+) -> Result<bool, AppError> {
+    if !provider_ids.is_object() {
+        return Ok(false);
+    }
+    let result = sqlx::query(
+        r#"
+        UPDATE media_items
+        SET provider_ids = COALESCE(provider_ids, '{}'::jsonb) || $2::jsonb,
+            date_modified = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(item_id)
+    .bind(provider_ids)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub async fn get_genres(
     pool: &sqlx::PgPool,
     _start_index: Option<i32>,

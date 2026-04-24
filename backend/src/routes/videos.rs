@@ -53,22 +53,17 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/live_subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
         .route("/Video/{item_id}/live_subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
         .route("/video/{item_id}/live_subtitles.m3u8", get(subtitles_playlist).head(subtitles_playlist))
+        // `{segment_file}` 已经包含扩展名（如 `segment0.ts`/`segment0.m4s`），
+        // 因此不需要再单独注册 `{file}.{container}` 形式的路由——axum 0.8 也不
+        // 允许一个路径段出现两个参数，保留单参数版本即可同时命中两种请求。
         .route("/Videos/{item_id}/hls1/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
-        .route("/Videos/{item_id}/hls1/{_playlist_id}/{segment_file}.{_segment_container}", get(video_hls_segment_with_container).head(video_hls_segment_with_container))
         .route("/videos/{item_id}/hls1/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
-        .route("/videos/{item_id}/hls1/{_playlist_id}/{segment_file}.{_segment_container}", get(video_hls_segment_with_container).head(video_hls_segment_with_container))
         .route("/Video/{item_id}/hls1/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
-        .route("/Video/{item_id}/hls1/{_playlist_id}/{segment_file}.{_segment_container}", get(video_hls_segment_with_container).head(video_hls_segment_with_container))
         .route("/video/{item_id}/hls1/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
-        .route("/video/{item_id}/hls1/{_playlist_id}/{segment_file}.{_segment_container}", get(video_hls_segment_with_container).head(video_hls_segment_with_container))
         .route("/Videos/{item_id}/hls/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
-        .route("/Videos/{item_id}/hls/{_playlist_id}/{segment_file}.{_segment_container}", get(video_hls_segment_with_container).head(video_hls_segment_with_container))
         .route("/videos/{item_id}/hls/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
-        .route("/videos/{item_id}/hls/{_playlist_id}/{segment_file}.{_segment_container}", get(video_hls_segment_with_container).head(video_hls_segment_with_container))
         .route("/Video/{item_id}/hls/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
-        .route("/Video/{item_id}/hls/{_playlist_id}/{segment_file}.{_segment_container}", get(video_hls_segment_with_container).head(video_hls_segment_with_container))
         .route("/video/{item_id}/hls/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
-        .route("/video/{item_id}/hls/{_playlist_id}/{segment_file}.{_segment_container}", get(video_hls_segment_with_container).head(video_hls_segment_with_container))
         .route("/Audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/Audio/{item_id}/main.m3u8", get(audio_master_playlist).head(audio_master_playlist))
@@ -252,14 +247,6 @@ struct HlsSegmentPath {
     item_id: String,
     _playlist_id: String,
     segment_file: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct HlsSegmentContainerPath {
-    item_id: String,
-    _playlist_id: String,
-    segment_file: String,
-    _segment_container: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -640,20 +627,6 @@ async fn video_hls_segment(
         request,
     )
     .await
-}
-
-async fn video_hls_segment_with_container(
-    State(state): State<AppState>,
-    Path(path): Path<HlsSegmentContainerPath>,
-    Query(_query): Query<VideoStreamQuery>,
-    request: Request<Body>,
-) -> Result<Response, AppError> {
-    let item_id = emby_id_to_uuid(&path.item_id)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
-    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
-    auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
-    let segment = format!("{}.{}", path.segment_file, path._segment_container);
-    serve_hls_segment(&state, item_id, &path._playlist_id, &segment, request).await
 }
 
 async fn audio_hls_segment(
