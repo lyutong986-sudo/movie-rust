@@ -180,3 +180,46 @@ test result: ok. 58 passed; 0 failed
 - `merge_json_preserves_existing_policy_when_patch_is_empty_object`
 
 至此，本地播放器模板对后端的任一调用都会落到真实业务路径；Emby Web Console 客户端对"设备/任务/合集/推荐/预告/直播/编码选项/备份入口/带宽测试/工作室图片/元数据编辑/远程海报 / 远程预告/用户管理"等页面也能拿到结构正确、字段完整的响应。
+
+## 九、第七轮：扫描入库幂等加固（2026-04-24）
+
+真实扫库过程中客户端反馈"影片库无法扫全"。PostgreSQL 日志揭示了三类硬失败，都会让所在事务整体回滚，最终表现为部分媒体未入库：
+
+1. `column "original_title" does not exist` — 老库 `media_items` 缺少 Emby 元数据字段（迁移 0010 没落到当前实例）。
+2. `duplicate key value violates unique constraint "media_streams_media_item_id_index_stream_type_key"` — 同一条 `media_item_id`、相同 `(index, stream_type)` 被 ffprobe 报出多次（奇怪容器 / 多 program 场景），INSERT 没有冲突兜底。
+3. `duplicate key value violates unique constraint "persons_pkey"` — 历史上 `persons` 的 INSERT 有直接绑 `id`（旧二进制残留），`ON CONFLICT (name, sort_name)` 管不到 pkey 冲突。
+
+### 修复
+
+- **新增迁移 `backend/migrations/0022_scanner_idempotency.sql`**：
+  - 以 `ADD COLUMN IF NOT EXISTS` 的方式再补一遍 `media_items` 的 Emby 字段（`original_title / official_rating / community_rating / critic_rating / series_name / season_name / index_number* / provider_ids / genres / studios / tags / production_locations / width / height / bit_rate / video_codec / audio_codec / logo_path / thumb_path / remote_trailers / status / end_date / air_days / air_time`）。
+  - 使用 `DO $$` 块检查 `media_streams` / `media_chapters` 的 UNIQUE 约束：如不存在，先清重、再补 `UNIQUE (media_item_id, index, stream_type)` / `UNIQUE (media_item_id, chapter_index)`，让后续 `ON CONFLICT` 能稳定命中。
+
+- **`repository::save_media_streams` / 章节 INSERT**：
+  - 流 INSERT 末尾追加 `ON CONFLICT (media_item_id, index, stream_type) DO NOTHING`。
+  - 章节 INSERT 末尾追加 `ON CONFLICT (media_item_id, chapter_index) DO NOTHING`。
+  - 两者仍在同一事务里，先 DELETE 再 INSERT，保证重扫时用最新探测结果覆盖，同时个别重复条目静默跳过、不再炸事务。
+
+- **`repository::create_person`**：
+  - 去掉对 `person.id` 的显式绑定，改为走 `gen_random_uuid()` 默认 + `ON CONFLICT (name, sort_name) DO UPDATE SET ... RETURNING id`。
+  - 这样既兼容老二进制留下的 v5 UUID pkey 冲突，也让第二次扫描到同一 `(name, sort_name)` 的人物复用原 ID，不会丢关联。
+
+### 测试
+
+``````
+cargo test --bin movie-rust-backend
+running 58 tests
+test result: ok. 58 passed; 0 failed
+``````
+
+（本轮只是把"偶发重复数据 → 整个事务炸掉"改成"静默跳过重复 + 幂等 upsert"，不改对外 API，所以没新增单测；`api_router_builds_without_route_conflicts` 等既有测试全部通过。）
+
+### 升级动作
+
+- 用户下次启动后端时会自动执行迁移 `0022_scanner_idempotency.sql`，把缺失的列和 UNIQUE 索引补齐；旧数据的潜在重复行会在迁移里一次性清除。
+- 随后再次扫库即可完整入库，不会再被单个媒体的重复流 / 章节或 person 冲突中断。
+
+至此，剩余官方级待办只剩：
+
+- BackupRestore 真实 `pg_dump` / `pg_restore` 落盘（id 15）。
+- OpenAPI / Swagger 自动化文档（id 16）。

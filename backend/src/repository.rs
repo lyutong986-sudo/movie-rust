@@ -1182,19 +1182,36 @@ pub async fn get_person_by_external_id(
 }
 
 pub async fn create_person(pool: &sqlx::PgPool, person: &DbPerson) -> Result<Uuid, AppError> {
+    // 这里之前直接绑定 `person.id`，一旦 id 与既有行冲突（历史数据 / 老版本生成的 v5 UUID）
+    // 或者 (name, sort_name) 已经被 upsert 过，就会报 persons_pkey / persons_name_sort_name_key，
+    // 从而炸掉外层扫描事务。现在统一走 ON CONFLICT (name, sort_name) 的幂等路径：
+    // 新插入让数据库用 gen_random_uuid() 自己产 id，冲突时直接 DO UPDATE 并复用已有的 id。
     let result = sqlx::query(
         r#"
         INSERT INTO persons (
-            id, name, sort_name, overview, external_url,
+            name, sort_name, overview, external_url,
             provider_ids, premiere_date, production_year,
             primary_image_path, backdrop_image_path, logo_image_path,
             favorite_count, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (name, sort_name)
+        DO UPDATE SET
+            overview = COALESCE(EXCLUDED.overview, persons.overview),
+            external_url = COALESCE(EXCLUDED.external_url, persons.external_url),
+            provider_ids = CASE
+                WHEN persons.provider_ids = '{}'::jsonb THEN EXCLUDED.provider_ids
+                ELSE persons.provider_ids || EXCLUDED.provider_ids
+            END,
+            premiere_date = COALESCE(EXCLUDED.premiere_date, persons.premiere_date),
+            production_year = COALESCE(EXCLUDED.production_year, persons.production_year),
+            primary_image_path = COALESCE(persons.primary_image_path, EXCLUDED.primary_image_path),
+            backdrop_image_path = COALESCE(persons.backdrop_image_path, EXCLUDED.backdrop_image_path),
+            logo_image_path = COALESCE(persons.logo_image_path, EXCLUDED.logo_image_path),
+            updated_at = EXCLUDED.updated_at
         RETURNING id
         "#,
     )
-    .bind(person.id)
     .bind(&person.name)
     .bind(&person.sort_name)
     .bind(&person.overview)
@@ -8559,6 +8576,9 @@ pub async fn save_media_streams(
                 $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39,
                 $40, $41, $42, $43, $44, $45, $46, $47, $48, now(), now()
             )
+            -- 同一物理媒体偶尔会被 ffprobe 报出相同 (index, stream_type)（容器异常/多 program 等）。
+            -- 先到先得即可，后续重复项静默跳过，保证扫描流程整体不被单条流冲突打断。
+            ON CONFLICT (media_item_id, index, stream_type) DO NOTHING
             "#,
         )
         .bind(media_item_id)
@@ -8622,6 +8642,9 @@ pub async fn save_media_streams(
             ) VALUES (
                 gen_random_uuid(), $1, $2, $3, $4, $5, NULL, now(), now()
             )
+            -- 迁移里已补齐 UNIQUE (media_item_id, chapter_index)，
+            -- 再扫描时静默跳过重复章节，避免个别项目炸掉整个事务。
+            ON CONFLICT (media_item_id, chapter_index) DO NOTHING
             "#,
         )
         .bind(media_item_id)
