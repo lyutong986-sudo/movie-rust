@@ -25,6 +25,8 @@ use uuid::Uuid;
 
 const REMOTE_PAGE_SIZE: i64 = 200;
 const DEFAULT_SPOOFED_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) EmbyTheater/3.0.20 Chrome/124.0.0.0 Safari/537.36";
+const REMOTE_DISPLAY_MODE_SEPARATE: &str = "separate";
+const REMOTE_DISPLAY_MODE_MERGE: &str = "merge";
 
 #[derive(Debug, Clone)]
 pub struct RemoteEmbySyncResult {
@@ -454,6 +456,14 @@ pub fn default_spoofed_user_agent() -> &'static str {
     DEFAULT_SPOOFED_USER_AGENT
 }
 
+fn normalize_display_mode(value: &str) -> &'static str {
+    if value.trim().eq_ignore_ascii_case(REMOTE_DISPLAY_MODE_MERGE) {
+        REMOTE_DISPLAY_MODE_MERGE
+    } else {
+        REMOTE_DISPLAY_MODE_SEPARATE
+    }
+}
+
 pub async fn sync_source(
     state: &AppState,
     source_id: Uuid,
@@ -545,7 +555,12 @@ async fn sync_source_inner(
     )
     .await?;
 
-    let root_item_id = upsert_virtual_root_item(&state.pool, source).await?;
+    let display_mode = normalize_display_mode(source.display_mode.as_str());
+    let root_item_id = if display_mode == REMOTE_DISPLAY_MODE_SEPARATE {
+        Some(upsert_virtual_root_item(&state.pool, source).await?)
+    } else {
+        None
+    };
     let mut view_parent_map: HashMap<String, Uuid> = HashMap::new();
     let mut series_parent_map: HashMap<String, Uuid> = HashMap::new();
     let mut season_parent_map: HashMap<String, Uuid> = HashMap::new();
@@ -579,23 +594,34 @@ async fn sync_source_inner(
                     view_name: view.name.clone(),
                 };
 
-                let view_parent_id = ensure_virtual_view_folder(
-                    &state.pool,
-                    source,
-                    root_item_id,
-                    item.view_id.as_str(),
-                    item.view_name.as_str(),
-                    &mut view_parent_map,
-                )
-                .await?;
-
-                let mut parent_id = Some(view_parent_id);
+                let mut parent_id = if display_mode == REMOTE_DISPLAY_MODE_SEPARATE {
+                    let view_parent_id = ensure_virtual_view_folder(
+                        &state.pool,
+                        source,
+                        root_item_id.ok_or_else(|| {
+                            AppError::Internal("远端虚拟根目录不存在".to_string())
+                        })?,
+                        item.view_id.as_str(),
+                        item.view_name.as_str(),
+                        &mut view_parent_map,
+                    )
+                    .await?;
+                    Some(view_parent_id)
+                } else {
+                    None
+                };
                 if item.item.item_type.eq_ignore_ascii_case("Episode") {
+                    let series_view_scope = if display_mode == REMOTE_DISPLAY_MODE_SEPARATE {
+                        item.view_id.as_str()
+                    } else {
+                        "_merged"
+                    };
                     let series_parent_id = ensure_virtual_series_folder(
                         &state.pool,
                         source,
                         &item,
-                        view_parent_id,
+                        parent_id,
+                        series_view_scope,
                         &mut series_parent_map,
                     )
                     .await?;
@@ -1080,7 +1106,8 @@ async fn ensure_virtual_series_folder(
     pool: &sqlx::PgPool,
     source: &DbRemoteEmbySource,
     item: &RemoteSyncItem,
-    view_parent_id: Uuid,
+    parent_id: Option<Uuid>,
+    view_scope: &str,
     series_parent_map: &mut HashMap<String, Uuid>,
 ) -> Result<Uuid, AppError> {
     let raw_series_name = item
@@ -1090,22 +1117,18 @@ async fn ensure_virtual_series_folder(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("Unknown Series");
     let series_name = raw_series_name.trim().to_string();
-    let series_key = format!(
-        "{}::{}",
-        item.view_id,
-        sanitize_segment(series_name.as_str())
-    );
+    let series_key = format!("{view_scope}::{}", sanitize_segment(series_name.as_str()));
     if let Some(existing) = series_parent_map.get(series_key.as_str()).copied() {
         return Ok(existing);
     }
-    let path = build_virtual_series_path(source.id, item.view_id.as_str(), series_name.as_str());
+    let path = build_virtual_series_path(source.id, view_scope, series_name.as_str());
     let path_ref = Path::new(path.as_str());
     let empty = Vec::<String>::new();
     let item_id = repository::upsert_media_item(
         pool,
         repository::UpsertMediaItem {
             library_id: source.target_library_id,
-            parent_id: Some(view_parent_id),
+            parent_id,
             name: series_name.as_str(),
             item_type: "Series",
             media_type: "Video",

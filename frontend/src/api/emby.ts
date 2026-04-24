@@ -413,6 +413,7 @@ export interface RemoteEmbySource {
   ServerUrl: string;
   Username: string;
   TargetLibraryId: string;
+  DisplayMode: 'merge' | 'separate' | string;
   Enabled: boolean;
   SpoofedUserAgent: string;
   RemoteUserId?: string;
@@ -1305,6 +1306,7 @@ export class EmbyApi {
     Username: string;
     Password: string;
     TargetLibraryId: string;
+    DisplayMode?: 'merge' | 'separate';
     SpoofedUserAgent?: string;
     Enabled?: boolean;
   }) {

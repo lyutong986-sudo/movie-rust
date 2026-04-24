@@ -29,6 +29,7 @@ const form = ref({
   username: '',
   password: '',
   targetLibraryId: '',
+  displayMode: 'separate' as 'merge' | 'separate',
   spoofedUserAgent: DEFAULT_SPOOFED_USER_AGENT,
   enabled: true
 });
@@ -44,6 +45,43 @@ const runningSyncCount = computed(
       (operation) => operation && !operation.Done && (operation.Running || operation.Queued)
     ).length
 );
+const displayModeItems = [
+  { label: '单独显示（按远端源分组）', value: 'separate' },
+  { label: '并入现有媒体库（不单独分组）', value: 'merge' }
+];
+const targetLibraryItems = computed(() =>
+  targetLibraries.value.map((folder) => ({
+    label: `${folder.Name} · ${collectionTypeLabel(folder.CollectionType)}`,
+    value: folder.ItemId
+  }))
+);
+const targetLibraryNameMap = computed(() => {
+  const map = new Map<string, string>();
+  for (const folder of targetLibraries.value) {
+    map.set(folder.ItemId.toLowerCase(), folder.Name);
+  }
+  return map;
+});
+
+function collectionTypeLabel(type?: string) {
+  const normalized = (type || '').toLowerCase();
+  if (normalized === 'tvshows') return '电视剧';
+  if (normalized === 'music') return '音乐';
+  if (normalized === 'musicvideos') return '音乐视频';
+  if (normalized === 'photos') return '照片';
+  if (normalized === 'homevideos') return '家庭视频';
+  if (normalized === 'mixed') return '混合';
+  return '电影';
+}
+
+function displayModeLabel(mode?: string) {
+  return mode === 'merge' ? '并入现有媒体库' : '单独显示';
+}
+
+function targetLibraryName(libraryId?: string) {
+  if (!libraryId) return '-';
+  return targetLibraryNameMap.value.get(libraryId.toLowerCase()) || libraryId;
+}
 
 const activeOperationDetail = computed(() => {
   const running = Object.values(operationBySourceId.value).find((operation) => !operation.Done);
@@ -256,6 +294,7 @@ async function createSource() {
       Username: payload.username.trim(),
       Password: payload.password,
       TargetLibraryId: payload.targetLibraryId,
+      DisplayMode: payload.displayMode,
       SpoofedUserAgent: payload.spoofedUserAgent.trim(),
       Enabled: payload.enabled
     });
@@ -393,10 +432,13 @@ onBeforeUnmount(() => {
           <UFormField label="目标媒体库">
             <USelect
               v-model="form.targetLibraryId"
-              :items="targetLibraries.map((folder) => ({ label: folder.Name, value: folder.ItemId }))"
+              :items="targetLibraryItems"
               value-key="value"
               class="w-full"
             />
+          </UFormField>
+          <UFormField label="显示方式">
+            <USelect v-model="form.displayMode" :items="displayModeItems" value-key="value" class="w-full" />
           </UFormField>
           <UFormField label="启用状态">
             <USwitch v-model="form.enabled" />
@@ -465,7 +507,7 @@ onBeforeUnmount(() => {
             </div>
           </template>
 
-          <div class="grid gap-3 md:grid-cols-3">
+          <div class="grid gap-3 md:grid-cols-4">
             <div class="rounded-lg border border-default p-3">
               <p class="text-muted text-xs">远端账号</p>
               <p class="text-highlighted mt-1 text-sm font-medium">{{ source.Username }}</p>
@@ -481,6 +523,12 @@ onBeforeUnmount(() => {
               </p>
               <p class="text-muted text-xs">
                 RemoteUserId: {{ source.RemoteUserId || '-' }}
+              </p>
+            </div>
+            <div class="rounded-lg border border-default p-3">
+              <p class="text-muted text-xs">显示方式</p>
+              <p class="text-highlighted mt-1 text-sm font-medium">
+                {{ displayModeLabel(source.DisplayMode) }}
               </p>
             </div>
           </div>
@@ -531,6 +579,7 @@ onBeforeUnmount(() => {
 
           <template #footer>
             <div class="space-y-1 text-xs">
+              <p class="text-muted">目标媒体库: {{ targetLibraryName(source.TargetLibraryId) }}</p>
               <p class="text-muted break-all font-mono">目标库 ID: {{ source.TargetLibraryId }}</p>
               <p class="text-muted break-all font-mono">UA: {{ source.SpoofedUserAgent }}</p>
             </div>

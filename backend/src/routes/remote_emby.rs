@@ -59,6 +59,8 @@ struct CreateRemoteEmbySourceRequest {
     password: String,
     #[serde(alias = "targetLibraryId")]
     target_library_id: Uuid,
+    #[serde(default, alias = "displayMode")]
+    display_mode: Option<String>,
     #[serde(default, alias = "spoofedUserAgent", alias = "UserAgent")]
     spoofed_user_agent: Option<String>,
     #[serde(default, alias = "isEnabled")]
@@ -73,6 +75,7 @@ struct RemoteEmbySourceDto {
     server_url: String,
     username: String,
     target_library_id: String,
+    display_mode: String,
     enabled: bool,
     spoofed_user_agent: String,
     remote_user_id: Option<String>,
@@ -246,6 +249,7 @@ async fn create_remote_emby_source(
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(remote_emby::default_spoofed_user_agent()),
         payload.target_library_id,
+        payload.display_mode.as_deref().unwrap_or("separate"),
         payload.enabled.unwrap_or(true),
     )
     .await?;
@@ -531,6 +535,7 @@ fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> Remot
         server_url: source.server_url,
         username: source.username,
         target_library_id: source.target_library_id.to_string(),
+        display_mode: source.display_mode,
         enabled: source.enabled,
         spoofed_user_agent: source.spoofed_user_agent,
         remote_user_id: source.remote_user_id,

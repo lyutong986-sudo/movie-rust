@@ -2553,7 +2553,7 @@ pub async fn list_remote_emby_sources(
     Ok(sqlx::query_as::<_, DbRemoteEmbySource>(
         r#"
         SELECT
-            id, name, server_url, username, password, spoofed_user_agent, target_library_id,
+            id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             created_at, updated_at
         FROM remote_emby_sources
@@ -2571,7 +2571,7 @@ pub async fn get_remote_emby_source(
     Ok(sqlx::query_as::<_, DbRemoteEmbySource>(
         r#"
         SELECT
-            id, name, server_url, username, password, spoofed_user_agent, target_library_id,
+            id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             created_at, updated_at
         FROM remote_emby_sources
@@ -2591,6 +2591,7 @@ pub async fn create_remote_emby_source(
     password: &str,
     spoofed_user_agent: &str,
     target_library_id: Uuid,
+    display_mode: &str,
     enabled: bool,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
@@ -2616,6 +2617,10 @@ pub async fn create_remote_emby_source(
     if get_library(pool, target_library_id).await?.is_none() {
         return Err(AppError::BadRequest("目标媒体库不存在".to_string()));
     }
+    let display_mode = match display_mode.trim().to_ascii_lowercase().as_str() {
+        "merge" => "merge",
+        _ => "separate",
+    };
 
     let id = Uuid::new_v4();
     let source_secret = Uuid::new_v4();
@@ -2623,9 +2628,9 @@ pub async fn create_remote_emby_source(
         r#"
         INSERT INTO remote_emby_sources (
             id, name, server_url, username, password, spoofed_user_agent, target_library_id,
-            enabled, source_secret
+            display_mode, enabled, source_secret
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
     .bind(id)
@@ -2635,6 +2640,7 @@ pub async fn create_remote_emby_source(
     .bind(password)
     .bind(spoofed_user_agent)
     .bind(target_library_id)
+    .bind(display_mode)
     .bind(enabled)
     .bind(source_secret)
     .execute(pool)
