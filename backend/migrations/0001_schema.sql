@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS media_items (
     -- 图片路径（本地绝对路径）
     image_primary_path       text,
     backdrop_path            text,
+    backdrop_paths           text[] NOT NULL DEFAULT ARRAY[]::text[],
     logo_path                text,
     thumb_path               text,
     art_path                 text,
@@ -293,6 +294,7 @@ ALTER TABLE media_items
     ADD COLUMN IF NOT EXISTS art_path                   text,
     ADD COLUMN IF NOT EXISTS banner_path                text,
     ADD COLUMN IF NOT EXISTS disc_path                  text,
+    ADD COLUMN IF NOT EXISTS backdrop_paths             text[] NOT NULL DEFAULT ARRAY[]::text[],
     ADD COLUMN IF NOT EXISTS box_path                   text,
     ADD COLUMN IF NOT EXISTS menu_path                  text,
     ADD COLUMN IF NOT EXISTS image_tags                 jsonb NOT NULL DEFAULT '{}'::jsonb,

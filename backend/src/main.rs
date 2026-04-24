@@ -303,6 +303,7 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             ADD COLUMN IF NOT EXISTS art_path                   TEXT,
             ADD COLUMN IF NOT EXISTS banner_path                TEXT,
             ADD COLUMN IF NOT EXISTS disc_path                  TEXT,
+            ADD COLUMN IF NOT EXISTS backdrop_paths           TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
             ADD COLUMN IF NOT EXISTS box_path                   TEXT,
             ADD COLUMN IF NOT EXISTS menu_path                  TEXT,
             ADD COLUMN IF NOT EXISTS image_tags                 JSONB NOT NULL DEFAULT '{}'::jsonb,

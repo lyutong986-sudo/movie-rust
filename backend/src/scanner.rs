@@ -173,9 +173,13 @@ struct NfoMetadata {
     production_locations: Vec<String>,
     people: Vec<NfoPerson>,
     primary_image: Option<PathBuf>,
-    backdrop_image: Option<PathBuf>,
+    /// NFO 中按顺序出现的 fanart/backdrop（可多张，首张对应 `backdrop_path`）
+    backdrop_images: Vec<PathBuf>,
     logo_image: Option<PathBuf>,
     thumb_image: Option<PathBuf>,
+    banner_image: Option<PathBuf>,
+    disc_image: Option<PathBuf>,
+    art_image: Option<PathBuf>,
     remote_trailers: Vec<String>,
 }
 
@@ -432,6 +436,26 @@ async fn collect_video_files(root: PathBuf) -> Result<Vec<PathBuf>, AppError> {
     .map_err(|error| AppError::Internal(format!("扫描任务失败: {error}")))
 }
 
+/// 合并 NFO 与片夹中的额外壁纸路径（排除主 `backdrop_path`），保持顺序并去重。
+fn merge_extra_backdrop_paths(
+    primary: &Option<PathBuf>,
+    extras: impl Iterator<Item = PathBuf>,
+) -> Vec<String> {
+    let primary_s = primary.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    for p in extras {
+        let s = p.to_string_lossy().into_owned();
+        if primary_s.as_ref() == Some(&s) {
+            continue;
+        }
+        if seen.insert(s.clone()) {
+            out.push(s);
+        }
+    }
+    out
+}
+
 async fn import_movie_file(
     pool: &sqlx::PgPool,
     metadata_manager: Option<&MetadataProviderManager>,
@@ -447,23 +471,44 @@ async fn import_movie_file(
         .extension()
         .and_then(OsStr::to_str)
         .map(str::to_lowercase);
+    let movie_folder = file.parent().unwrap_or_else(|| Path::new("."));
+    let folder_imgs = naming::discover_folder_images(movie_folder);
     let poster = nfo
         .primary_image
         .clone()
-        .or_else(|| naming::find_sidecar_image(file));
+        .or_else(|| naming::find_sidecar_image(file))
+        .or_else(|| folder_imgs.primary.clone());
     let backdrop = nfo
-        .backdrop_image
-        .clone()
+        .backdrop_images
+        .first()
+        .cloned()
+        .or_else(|| folder_imgs.backdrop.clone())
         .or_else(|| file.parent().and_then(naming::find_backdrop_image));
+    let backdrop_paths: Vec<String> = merge_extra_backdrop_paths(
+        &backdrop,
+        nfo.backdrop_images
+            .iter()
+            .skip(1)
+            .cloned()
+            .chain(folder_imgs.backdrops_extra.clone().into_iter()),
+    );
     let logo = nfo
         .logo_image
         .clone()
+        .or_else(|| folder_imgs.logo.clone())
         .or_else(|| find_item_image(file, &["logo", "clearlogo"]));
     let thumb = nfo
         .thumb_image
         .clone()
+        .or_else(|| folder_imgs.thumb.clone())
         .or_else(|| find_item_image(file, &["thumb", "landscape"]))
         .or_else(|| backdrop.clone());
+    let banner = nfo
+        .banner_image
+        .clone()
+        .or_else(|| folder_imgs.banner.clone());
+    let disc = nfo.disc_image.clone().or_else(|| folder_imgs.disc.clone());
+    let art = nfo.art_image.clone().or_else(|| folder_imgs.art.clone());
     let name = nfo.title.as_deref().unwrap_or(&parsed.title);
     let provider_ids = merge_provider_ids(nfo.provider_ids.clone(), provider_ids_from_path(file));
 
@@ -498,6 +543,10 @@ async fn import_movie_file(
             backdrop_path: backdrop.as_deref(),
             logo_path: logo.as_deref(),
             thumb_path: thumb.as_deref(),
+            art_path: art.as_deref(),
+            banner_path: banner.as_deref(),
+            disc_path: disc.as_deref(),
+            backdrop_paths: &backdrop_paths,
             remote_trailers: &nfo.remote_trailers,
             series_name: None,
             season_name: None,
@@ -621,24 +670,52 @@ async fn import_tv_file(
         }
     });
 
+    let series_folder_imgs = naming::discover_folder_images(&series_path);
     let series_poster = series_nfo
         .primary_image
         .clone()
+        .or_else(|| series_folder_imgs.primary.clone())
         .or_else(|| naming::find_folder_image(&series_path))
         .or_else(|| series_path.parent().and_then(naming::find_folder_image));
     let series_backdrop = series_nfo
-        .backdrop_image
-        .clone()
+        .backdrop_images
+        .first()
+        .cloned()
+        .or_else(|| series_folder_imgs.backdrop.clone())
         .or_else(|| naming::find_backdrop_image(&series_path));
+    let series_backdrop_paths: Vec<String> = merge_extra_backdrop_paths(
+        &series_backdrop,
+        series_nfo
+            .backdrop_images
+            .iter()
+            .skip(1)
+            .cloned()
+            .chain(series_folder_imgs.backdrops_extra.clone().into_iter()),
+    );
     let series_logo = series_nfo
         .logo_image
         .clone()
+        .or_else(|| series_folder_imgs.logo.clone())
         .or_else(|| find_folder_art(&series_path, &["logo", "clearlogo"]));
     let series_thumb = series_nfo
         .thumb_image
         .clone()
+        .or_else(|| series_folder_imgs.thumb.clone())
         .or_else(|| find_folder_art(&series_path, &["thumb", "landscape"]))
         .or_else(|| series_backdrop.clone());
+    let series_banner = series_nfo
+        .banner_image
+        .clone()
+        .or_else(|| series_folder_imgs.banner.clone());
+    let series_disc_img = series_nfo
+        .disc_image
+        .clone()
+        .or_else(|| series_folder_imgs.disc.clone());
+    let series_art = series_nfo
+        .art_image
+        .clone()
+        .or_else(|| series_folder_imgs.art.clone());
+    let season_folder_imgs = naming::discover_folder_images(&season_path);
     let season_poster = season_nfo
         .primary_image
         .clone()
@@ -650,11 +727,13 @@ async fn import_tv_file(
                 &["poster", "folder"],
             )
         })
+        .or_else(|| season_folder_imgs.primary.clone())
         .or_else(|| naming::find_folder_image(&season_path))
         .or_else(|| series_poster.clone());
     let season_backdrop = season_nfo
-        .backdrop_image
-        .clone()
+        .backdrop_images
+        .first()
+        .cloned()
         .or_else(|| {
             find_season_art(
                 &series_path,
@@ -663,7 +742,17 @@ async fn import_tv_file(
                 &["fanart", "backdrop", "background"],
             )
         })
+        .or_else(|| season_folder_imgs.backdrop.clone())
         .or_else(|| series_backdrop.clone());
+    let season_backdrop_paths: Vec<String> = merge_extra_backdrop_paths(
+        &season_backdrop,
+        season_nfo
+            .backdrop_images
+            .iter()
+            .skip(1)
+            .cloned()
+            .chain(season_folder_imgs.backdrops_extra.clone().into_iter()),
+    );
     let season_logo = season_nfo
         .logo_image
         .clone()
@@ -675,6 +764,7 @@ async fn import_tv_file(
                 &["logo", "clearlogo"],
             )
         })
+        .or_else(|| season_folder_imgs.logo.clone())
         .or_else(|| series_logo.clone());
     let season_thumb = season_nfo
         .thumb_image
@@ -687,7 +777,23 @@ async fn import_tv_file(
                 &["landscape", "thumb"],
             )
         })
+        .or_else(|| season_folder_imgs.thumb.clone())
         .or_else(|| series_thumb.clone());
+    let season_banner = season_nfo
+        .banner_image
+        .clone()
+        .or_else(|| season_folder_imgs.banner.clone())
+        .or_else(|| series_banner.clone());
+    let season_disc_img = season_nfo
+        .disc_image
+        .clone()
+        .or_else(|| season_folder_imgs.disc.clone())
+        .or_else(|| series_disc_img.clone());
+    let season_art = season_nfo
+        .art_image
+        .clone()
+        .or_else(|| season_folder_imgs.art.clone())
+        .or_else(|| series_art.clone());
 
     let series_id = repository::upsert_media_item(
         pool,
@@ -720,6 +826,10 @@ async fn import_tv_file(
             backdrop_path: series_backdrop.as_deref(),
             logo_path: series_logo.as_deref(),
             thumb_path: series_thumb.as_deref(),
+            art_path: series_art.as_deref(),
+            banner_path: series_banner.as_deref(),
+            disc_path: series_disc_img.as_deref(),
+            backdrop_paths: &series_backdrop_paths,
             remote_trailers: &series_nfo.remote_trailers,
             series_name: Some(&series_name),
             season_name: None,
@@ -841,9 +951,13 @@ async fn import_tv_file(
                 &season_nfo.production_locations
             },
             image_primary_path: season_poster.as_deref(),
-            backdrop_path: series_backdrop.as_deref(),
-            logo_path: series_logo.as_deref(),
-            thumb_path: series_thumb.as_deref(),
+            backdrop_path: season_backdrop.as_deref(),
+            logo_path: season_logo.as_deref(),
+            thumb_path: season_thumb.as_deref(),
+            art_path: season_art.as_deref(),
+            banner_path: season_banner.as_deref(),
+            disc_path: season_disc_img.as_deref(),
+            backdrop_paths: &season_backdrop_paths,
             remote_trailers: &season_nfo.remote_trailers,
             series_name: Some(&series_name),
             season_name: Some(&season_name),
@@ -876,27 +990,58 @@ async fn import_tv_file(
         .extension()
         .and_then(OsStr::to_str)
         .map(str::to_lowercase);
+    let ep_folder = file.parent().unwrap_or_else(|| Path::new("."));
+    let ep_folder_imgs = naming::discover_folder_images(ep_folder);
     let poster = episode_nfo
         .primary_image
         .clone()
         .or_else(|| naming::find_sidecar_image(file))
+        .or_else(|| ep_folder_imgs.primary.clone())
         .or_else(|| season_poster.clone());
     let backdrop = episode_nfo
-        .backdrop_image
-        .clone()
+        .backdrop_images
+        .first()
+        .cloned()
         .or_else(|| find_item_image(file, &["fanart", "backdrop", "background"]))
-        .or_else(|| series_backdrop.clone());
+        .or_else(|| ep_folder_imgs.backdrop.clone())
+        .or_else(|| season_backdrop.clone());
+    let episode_backdrop_paths: Vec<String> = merge_extra_backdrop_paths(
+        &backdrop,
+        episode_nfo
+            .backdrop_images
+            .iter()
+            .skip(1)
+            .cloned()
+            .chain(ep_folder_imgs.backdrops_extra.clone().into_iter()),
+    );
     let episode_logo = episode_nfo
         .logo_image
         .clone()
+        .or_else(|| ep_folder_imgs.logo.clone())
         .or_else(|| find_item_image(file, &["logo", "clearlogo"]))
-        .or_else(|| series_logo.clone());
+        .or_else(|| season_logo.clone());
     let episode_thumb = episode_nfo
         .thumb_image
         .clone()
+        .or_else(|| ep_folder_imgs.thumb.clone())
         .or_else(|| find_item_image(file, &["thumb", "landscape"]))
-        .or_else(|| series_thumb.clone())
+        .or_else(|| season_thumb.clone())
         .or_else(|| backdrop.clone());
+    let episode_banner = episode_nfo
+        .banner_image
+        .clone()
+        .or_else(|| ep_folder_imgs.banner.clone())
+        .or_else(|| season_banner.clone());
+    let episode_disc = episode_nfo
+        .disc_image
+        .clone()
+        .or_else(|| ep_folder_imgs.disc.clone())
+        .or_else(|| season_disc_img.clone());
+    let episode_art = episode_nfo
+        .art_image
+        .clone()
+        .or_else(|| ep_folder_imgs.art.clone())
+        .or_else(|| season_art.clone());
     let episode_name = episode_nfo.title.as_deref().unwrap_or(&parsed.title);
     let episode_number = episode_nfo
         .episode_number
@@ -970,6 +1115,10 @@ async fn import_tv_file(
             backdrop_path: backdrop.as_deref(),
             logo_path: episode_logo.as_deref(),
             thumb_path: episode_thumb.as_deref(),
+            art_path: episode_art.as_deref(),
+            banner_path: episode_banner.as_deref(),
+            disc_path: episode_disc.as_deref(),
+            backdrop_paths: &episode_backdrop_paths,
             remote_trailers: if episode_nfo.remote_trailers.is_empty() {
                 &series_nfo.remote_trailers
             } else {
@@ -1511,6 +1660,7 @@ async fn cache_remote_images_for_item(
             item_id,
             image_type,
             Some(&local_path_text),
+            None,
         )
         .await;
     }
@@ -1821,22 +1971,43 @@ fn read_nfo_file(path: &Path) -> Option<NfoMetadata> {
         production_locations: repeated_tags(&xml, "country"),
         people: nfo_people(&xml, parent),
         primary_image: None,
-        backdrop_image: None,
+        backdrop_images: Vec::new(),
         logo_image: None,
         thumb_image: None,
+        banner_image: None,
+        disc_image: None,
+        art_image: None,
         remote_trailers: remote_trailer_urls(&xml),
     };
 
     for image in nfo_images(&xml, parent) {
         match image.kind.as_deref() {
             Some("fanart") | Some("backdrop") | Some("background") => {
-                metadata.backdrop_image.get_or_insert(image.path);
+                if !metadata.backdrop_images.contains(&image.path) {
+                    metadata.backdrop_images.push(image.path);
+                }
             }
             Some("logo") | Some("clearlogo") => {
                 metadata.logo_image.get_or_insert(image.path);
             }
             Some("thumb") | Some("landscape") => {
                 metadata.thumb_image.get_or_insert(image.path);
+            }
+            Some("banner") => {
+                metadata.banner_image.get_or_insert(image.path);
+            }
+            Some("discart") | Some("cdart") | Some("disc") => {
+                metadata.disc_image.get_or_insert(image.path);
+            }
+            Some("clearart")
+            | Some("characterart")
+            | Some("hdclearart")
+            | Some("character")
+            | Some("art") => {
+                metadata.art_image.get_or_insert(image.path);
+            }
+            Some("poster") => {
+                metadata.primary_image.get_or_insert(image.path);
             }
             _ => {
                 metadata.primary_image.get_or_insert(image.path);

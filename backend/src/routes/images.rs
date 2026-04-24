@@ -153,14 +153,6 @@ async fn list_item_images(
                 path,
             });
         }
-        if let Some(path) = item.backdrop_path {
-            images.push(ImageInfoDto {
-                image_type: "Backdrop".to_string(),
-                image_index: Some(0),
-                image_tag: item.date_modified.timestamp().to_string(),
-                path,
-            });
-        }
         if let Some(path) = item.logo_path {
             images.push(ImageInfoDto {
                 image_type: "Logo".to_string(),
@@ -175,6 +167,46 @@ async fn list_item_images(
                 image_index: None,
                 image_tag: item.date_modified.timestamp().to_string(),
                 path,
+            });
+        }
+        if let Some(path) = item.banner_path {
+            images.push(ImageInfoDto {
+                image_type: "Banner".to_string(),
+                image_index: None,
+                image_tag: item.date_modified.timestamp().to_string(),
+                path,
+            });
+        }
+        if let Some(path) = item.disc_path {
+            images.push(ImageInfoDto {
+                image_type: "Disc".to_string(),
+                image_index: None,
+                image_tag: item.date_modified.timestamp().to_string(),
+                path,
+            });
+        }
+        if let Some(path) = item.art_path {
+            images.push(ImageInfoDto {
+                image_type: "Art".to_string(),
+                image_index: None,
+                image_tag: item.date_modified.timestamp().to_string(),
+                path,
+            });
+        }
+        if let Some(path) = item.backdrop_path {
+            images.push(ImageInfoDto {
+                image_type: "Backdrop".to_string(),
+                image_index: Some(0),
+                image_tag: item.date_modified.timestamp().to_string(),
+                path,
+            });
+        }
+        for (i, path) in item.backdrop_paths.iter().enumerate() {
+            images.push(ImageInfoDto {
+                image_type: "Backdrop".to_string(),
+                image_index: Some((i + 1) as i32),
+                image_tag: item.date_modified.timestamp().to_string(),
+                path: path.clone(),
             });
         }
     } else if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
@@ -210,11 +242,19 @@ async fn item_image_url_response(
     let item_id = emby_id_to_uuid(item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
     let normalized = normalized_item_image_type(image_type);
+    let idx = image_index.unwrap_or(0);
     let has_image = if let Some(item) = repository::get_media_item(&state.pool, item_id).await? {
         match normalized.as_str() {
-            "Backdrop" => item.backdrop_path.is_some(),
+            "Backdrop" if idx == 0 => item.backdrop_path.is_some(),
+            "Backdrop" if idx > 0 => item
+                .backdrop_paths
+                .get((idx - 1) as usize)
+                .is_some(),
             "Logo" => item.logo_path.is_some(),
             "Thumb" => item.thumb_path.is_some(),
+            "Banner" => item.banner_path.is_some(),
+            "Disc" => item.disc_path.is_some(),
+            "Art" => item.art_path.is_some(),
             _ => item.image_primary_path.is_some(),
         }
     } else if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
@@ -376,6 +416,7 @@ async fn download_item_remote_image(
         query.image_type.unwrap_or_else(|| "Primary".to_string()),
         headers,
         bytes,
+        None,
     )
     .await
 }
@@ -390,9 +431,15 @@ async fn remote_images_for_item(
 ) -> Result<Vec<ExternalRemoteImage>, AppError> {
     let mut images = Vec::new();
     push_existing_remote_image(&mut images, item.image_primary_path.as_deref(), "Primary");
-    push_existing_remote_image(&mut images, item.backdrop_path.as_deref(), "Backdrop");
     push_existing_remote_image(&mut images, item.logo_path.as_deref(), "Logo");
     push_existing_remote_image(&mut images, item.thumb_path.as_deref(), "Thumb");
+    push_existing_remote_image(&mut images, item.banner_path.as_deref(), "Banner");
+    push_existing_remote_image(&mut images, item.disc_path.as_deref(), "Disc");
+    push_existing_remote_image(&mut images, item.art_path.as_deref(), "Art");
+    push_existing_remote_image(&mut images, item.backdrop_path.as_deref(), "Backdrop");
+    for path in &item.backdrop_paths {
+        push_existing_remote_image(&mut images, Some(path.as_str()), "Backdrop");
+    }
 
     if tmdb_remote_images_supported(item) {
         let library_options = item_library_options(state, item.id).await?;
@@ -527,6 +574,10 @@ fn remote_image_provider_names(state: &AppState, item: &crate::models::DbMediaIt
         .or(item.backdrop_path.as_deref())
         .or(item.logo_path.as_deref())
         .or(item.thumb_path.as_deref())
+        .or(item.banner_path.as_deref())
+        .or(item.disc_path.as_deref())
+        .or(item.art_path.as_deref())
+        .or(item.backdrop_paths.first().map(String::as_str))
         .is_some_and(|value| value.starts_with("http://") || value.starts_with("https://"))
     {
         providers.push("LocalMetadata".to_string());
@@ -657,36 +708,57 @@ fn item_image_storage_path(
     item: &crate::models::DbMediaItem,
     library_options: &LibraryOptionsDto,
     image_type: &str,
+    backdrop_index: Option<i32>,
     extension: &str,
 ) -> PathBuf {
     if library_options.save_local_metadata {
         let item_path = PathBuf::from(&item.path);
-        if let Some(path) = item_image_target_path(item, &item_path, image_type, extension) {
+        if let Some(path) =
+            item_image_target_path(item, &item_path, image_type, backdrop_index, extension)
+        {
             return path;
         }
     }
 
-    state.config.static_dir.join("item-images").join(format!(
-        "{}-{}.{}",
-        item.id,
-        image_type.to_ascii_lowercase(),
-        extension
-    ))
+    let mut stem = format!("{}-{}", item.id, image_type.to_ascii_lowercase());
+    if image_type.eq_ignore_ascii_case("Backdrop") {
+        let idx = backdrop_index.unwrap_or(0);
+        if idx > 0 {
+            stem.push_str(&format!("-{idx}"));
+        }
+    }
+    state
+        .config
+        .static_dir
+        .join("item-images")
+        .join(format!("{stem}.{extension}"))
 }
 
 fn item_image_target_path(
     item: &crate::models::DbMediaItem,
     item_path: &PathBuf,
     image_type: &str,
+    backdrop_index: Option<i32>,
     extension: &str,
 ) -> Option<PathBuf> {
     let folder = item_path.parent().unwrap_or(item_path.as_path());
     let stem = item_path.file_stem()?.to_string_lossy();
     let normalized = image_type.to_ascii_lowercase();
+    let backdrop_idx = backdrop_index.unwrap_or(0);
 
     if item.item_type.eq_ignore_ascii_case("Episode") {
         return match normalized.as_str() {
             "primary" | "thumb" => Some(folder.join(format!("{stem}-thumb.{extension}"))),
+            "backdrop" => {
+                if backdrop_idx == 0 {
+                    Some(folder.join(format!("{stem}-fanart.{extension}")))
+                } else {
+                    Some(folder.join(format!("{stem}-fanart{backdrop_idx}.{extension}")))
+                }
+            }
+            "banner" => Some(folder.join(format!("{stem}-banner.{extension}"))),
+            "disc" => Some(folder.join(format!("{stem}-disc.{extension}"))),
+            "art" => Some(folder.join(format!("{stem}-clearart.{extension}"))),
             _ => None,
         };
     }
@@ -701,18 +773,36 @@ fn item_image_target_path(
         let prefix = format!("season{marker}");
         return match normalized.as_str() {
             "primary" => Some(folder.join(format!("{prefix}-poster.{extension}"))),
-            "backdrop" => Some(folder.join(format!("{prefix}-fanart.{extension}"))),
+            "backdrop" => {
+                if backdrop_idx == 0 {
+                    Some(folder.join(format!("{prefix}-fanart.{extension}")))
+                } else {
+                    Some(folder.join(format!("{prefix}-fanart{backdrop_idx}.{extension}")))
+                }
+            }
             "logo" => Some(folder.join(format!("{prefix}-logo.{extension}"))),
             "thumb" => Some(folder.join(format!("{prefix}-landscape.{extension}"))),
+            "banner" => Some(folder.join(format!("{prefix}-banner.{extension}"))),
+            "disc" => Some(folder.join(format!("{prefix}-disc.{extension}"))),
+            "art" => Some(folder.join(format!("{prefix}-clearart.{extension}"))),
             _ => None,
         };
     }
 
-    let filename = match normalized.as_str() {
-        "primary" => "poster",
-        "backdrop" => "fanart",
-        "logo" => "logo",
-        "thumb" => "landscape",
+    let filename: String = match normalized.as_str() {
+        "primary" => "poster".to_string(),
+        "backdrop" => {
+            if backdrop_idx == 0 {
+                "fanart".to_string()
+            } else {
+                format!("fanart{backdrop_idx}")
+            }
+        }
+        "logo" => "logo".to_string(),
+        "thumb" => "landscape".to_string(),
+        "banner" => "banner".to_string(),
+        "disc" => "disc".to_string(),
+        "art" => "clearart".to_string(),
         _ => return None,
     };
 
@@ -864,7 +954,7 @@ async fn upload_item_image(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    upload_item_image_impl(session, state, item_id_str, image_type, headers, body).await
+    upload_item_image_impl(session, state, item_id_str, image_type, headers, body, None).await
 }
 
 async fn upload_item_image_with_tail(
@@ -879,7 +969,15 @@ async fn upload_item_image_with_tail(
     // 仅表示调整显示顺序，目前按管理员校验后返回 NO_CONTENT。
     match last_tail_segment(&image_tail).to_ascii_lowercase().as_str() {
         "delete" => {
-            return delete_item_image_impl(session, state, item_id_str, image_type).await;
+            let backdrop_index = tail_leading_backdrop_index(&image_type, &image_tail);
+            return delete_item_image_impl(
+                session,
+                state,
+                item_id_str,
+                image_type,
+                backdrop_index,
+            )
+            .await;
         }
         "index" => {
             if !session.is_admin {
@@ -889,7 +987,17 @@ async fn upload_item_image_with_tail(
         }
         _ => {}
     }
-    upload_item_image_impl(session, state, item_id_str, image_type, headers, body).await
+    let backdrop_index = tail_leading_backdrop_index(&image_type, &image_tail);
+    upload_item_image_impl(
+        session,
+        state,
+        item_id_str,
+        image_type,
+        headers,
+        body,
+        backdrop_index,
+    )
+    .await
 }
 
 fn last_tail_segment(tail: &str) -> &str {
@@ -903,15 +1011,16 @@ async fn delete_item_image(
     State(state): State<AppState>,
     Path((item_id_str, image_type)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
-    delete_item_image_impl(session, state, item_id_str, image_type).await
+    delete_item_image_impl(session, state, item_id_str, image_type, None).await
 }
 
 async fn delete_item_image_with_tail(
     session: AuthSession,
     State(state): State<AppState>,
-    Path((item_id_str, image_type, _image_tail)): Path<(String, String, String)>,
+    Path((item_id_str, image_type, image_tail)): Path<(String, String, String)>,
 ) -> Result<StatusCode, AppError> {
-    delete_item_image_impl(session, state, item_id_str, image_type).await
+    let backdrop_index = tail_leading_backdrop_index(&image_type, &image_tail);
+    delete_item_image_impl(session, state, item_id_str, image_type, backdrop_index).await
 }
 
 async fn get_person_image(
@@ -995,6 +1104,7 @@ async fn upload_item_image_impl(
     image_type: String,
     headers: HeaderMap,
     body: Bytes,
+    backdrop_index: Option<i32>,
 ) -> Result<StatusCode, AppError> {
     if !session.is_admin {
         return Err(AppError::Forbidden);
@@ -1011,7 +1121,14 @@ async fn upload_item_image_impl(
     let image_type = normalized_item_image_type(&image_type);
     let extension = image_extension_from_headers(&headers);
     let library_options = item_library_options(&state, item_id).await?;
-    let path = item_image_storage_path(&state, &item, &library_options, &image_type, &extension);
+    let path = item_image_storage_path(
+        &state,
+        &item,
+        &library_options,
+        &image_type,
+        backdrop_index,
+        &extension,
+    );
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await.map_err(AppError::Io)?;
     }
@@ -1022,6 +1139,7 @@ async fn upload_item_image_impl(
         item_id,
         &image_type,
         Some(&path.to_string_lossy()),
+        backdrop_index,
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1032,6 +1150,7 @@ async fn delete_item_image_impl(
     state: AppState,
     item_id_str: String,
     image_type: String,
+    backdrop_index: Option<i32>,
 ) -> Result<StatusCode, AppError> {
     if !session.is_admin {
         return Err(AppError::Forbidden);
@@ -1042,10 +1161,18 @@ async fn delete_item_image_impl(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
     let image_type = normalized_item_image_type(&image_type);
+    let idx = backdrop_index.unwrap_or(0);
     let current_path = match image_type.as_str() {
+        "Backdrop" if idx > 0 => item
+            .backdrop_paths
+            .get((idx - 1) as usize)
+            .cloned(),
         "Backdrop" => item.backdrop_path,
         "Logo" => item.logo_path,
         "Thumb" => item.thumb_path,
+        "Banner" => item.banner_path,
+        "Disc" => item.disc_path,
+        "Art" => item.art_path,
         _ => item.image_primary_path,
     };
     if let Some(path) = current_path {
@@ -1054,7 +1181,14 @@ async fn delete_item_image_impl(
             let _ = fs::remove_file(path_buf).await;
         }
     }
-    repository::update_media_item_image_path(&state.pool, item_id, &image_type, None).await?;
+    repository::update_media_item_image_path(
+        &state.pool,
+        item_id,
+        &image_type,
+        None,
+        backdrop_index,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1110,10 +1244,19 @@ async fn serve_item_image(
         return Err(AppError::NotFound("媒体条目不存在".to_string()));
     };
 
-    let path = match image_type.to_ascii_lowercase().as_str() {
-        "backdrop" => item.backdrop_path,
-        "logo" => item.logo_path,
-        "thumb" => item.thumb_path.or(item.backdrop_path),
+    let normalized = normalized_item_image_type(&image_type);
+    let idx = image_index.unwrap_or(0);
+    let path = match normalized.as_str() {
+        "Backdrop" if idx == 0 => item.backdrop_path,
+        "Backdrop" if idx > 0 => item
+            .backdrop_paths
+            .get((idx - 1) as usize)
+            .cloned(),
+        "Logo" => item.logo_path,
+        "Thumb" => item.thumb_path.or(item.backdrop_path.clone()),
+        "Banner" => item.banner_path,
+        "Disc" => item.disc_path,
+        "Art" => item.art_path,
         _ => item.image_primary_path,
     }
     .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
@@ -1272,8 +1415,21 @@ fn normalized_item_image_type(image_type: &str) -> String {
         "backdrop" => "Backdrop".to_string(),
         "logo" => "Logo".to_string(),
         "thumb" => "Thumb".to_string(),
+        "banner" => "Banner".to_string(),
+        "disc" => "Disc".to_string(),
+        "art" => "Art".to_string(),
         _ => "Primary".to_string(),
     }
+}
+
+/// Emby 风格：`/Images/Backdrop/1/...` 的首段为索引。
+fn tail_leading_backdrop_index(image_type: &str, tail: &str) -> Option<i32> {
+    if !image_type.eq_ignore_ascii_case("Backdrop") {
+        return None;
+    }
+    tail.split('/')
+        .find(|segment| !segment.is_empty())
+        .and_then(|segment| segment.parse().ok())
 }
 
 fn image_extension_from_headers(headers: &HeaderMap) -> &'static str {

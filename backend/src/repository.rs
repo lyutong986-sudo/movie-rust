@@ -2276,21 +2276,109 @@ pub async fn update_media_item_image_path(
     item_id: Uuid,
     image_type: &str,
     path: Option<&str>,
+    backdrop_index: Option<i32>,
 ) -> Result<(), AppError> {
-    let column = match image_type.to_ascii_lowercase().as_str() {
-        "backdrop" => "backdrop_path",
-        "logo" => "logo_path",
-        "thumb" => "thumb_path",
-        _ => "image_primary_path",
-    };
-
-    let query =
-        format!("UPDATE media_items SET {column} = $1, date_modified = now() WHERE id = $2");
-    sqlx::query(&query)
-        .bind(path)
-        .bind(item_id)
-        .execute(pool)
-        .await?;
+    let image_type_lc = image_type.to_ascii_lowercase();
+    match image_type_lc.as_str() {
+        "backdrop" => {
+            let idx = backdrop_index.unwrap_or(0);
+            if idx == 0 {
+                sqlx::query(
+                    "UPDATE media_items SET backdrop_path = $1, date_modified = now() WHERE id = $2",
+                )
+                .bind(path)
+                .bind(item_id)
+                .execute(pool)
+                .await?;
+            } else if idx < 0 {
+                return Err(AppError::BadRequest("无效的壁纸索引".to_string()));
+            } else {
+                let Some(item) = get_media_item(pool, item_id).await? else {
+                    return Err(AppError::NotFound("媒体条目不存在".to_string()));
+                };
+                let u = (idx - 1) as usize;
+                let mut paths = item.backdrop_paths;
+                match path {
+                    Some(p) => {
+                        if u > paths.len() {
+                            return Err(AppError::BadRequest("无效的壁纸索引".to_string()));
+                        }
+                        if u == paths.len() {
+                            paths.push(p.to_string());
+                        } else {
+                            paths[u] = p.to_string();
+                        }
+                    }
+                    None => {
+                        if u < paths.len() {
+                            paths.remove(u);
+                        }
+                    }
+                }
+                sqlx::query(
+                    "UPDATE media_items SET backdrop_paths = $1, date_modified = now() WHERE id = $2",
+                )
+                .bind(paths)
+                .bind(item_id)
+                .execute(pool)
+                .await?;
+            }
+        }
+        "logo" => {
+            sqlx::query(
+                "UPDATE media_items SET logo_path = $1, date_modified = now() WHERE id = $2",
+            )
+            .bind(path)
+            .bind(item_id)
+            .execute(pool)
+            .await?;
+        }
+        "thumb" => {
+            sqlx::query(
+                "UPDATE media_items SET thumb_path = $1, date_modified = now() WHERE id = $2",
+            )
+            .bind(path)
+            .bind(item_id)
+            .execute(pool)
+            .await?;
+        }
+        "banner" => {
+            sqlx::query(
+                "UPDATE media_items SET banner_path = $1, date_modified = now() WHERE id = $2",
+            )
+            .bind(path)
+            .bind(item_id)
+            .execute(pool)
+            .await?;
+        }
+        "disc" => {
+            sqlx::query(
+                "UPDATE media_items SET disc_path = $1, date_modified = now() WHERE id = $2",
+            )
+            .bind(path)
+            .bind(item_id)
+            .execute(pool)
+            .await?;
+        }
+        "art" => {
+            sqlx::query(
+                "UPDATE media_items SET art_path = $1, date_modified = now() WHERE id = $2",
+            )
+            .bind(path)
+            .bind(item_id)
+            .execute(pool)
+            .await?;
+        }
+        _ => {
+            sqlx::query(
+                "UPDATE media_items SET image_primary_path = $1, date_modified = now() WHERE id = $2",
+            )
+            .bind(path)
+            .bind(item_id)
+            .execute(pool)
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -3124,7 +3212,7 @@ pub async fn list_media_items(
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
-            logo_path, thumb_path, remote_trailers,
+            logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
             date_created, date_modified, COUNT(*) OVER() AS total_count
         FROM media_items
         WHERE 1 = 1
@@ -3990,7 +4078,7 @@ pub async fn get_next_up_episodes(
             index_number, index_number_end, parent_index_number, provider_ids,
             genres, studios, tags, production_locations, width, height,
             bit_rate, video_codec, audio_codec, image_primary_path,
-            backdrop_path, logo_path, thumb_path, remote_trailers,
+            backdrop_path, logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
             date_created, date_modified
         FROM ranked
         WHERE next_rank = 1
@@ -4070,7 +4158,7 @@ pub async fn get_upcoming_episodes(
             mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
             mi.genres, mi.studios, mi.tags, mi.production_locations, mi.width, mi.height,
             mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path,
-            mi.backdrop_path, mi.logo_path, mi.thumb_path, mi.remote_trailers,
+            mi.backdrop_path, mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
             mi.date_created, mi.date_modified
         FROM media_items mi
         WHERE mi.item_type = 'Episode'
@@ -4843,7 +4931,7 @@ pub async fn get_media_item(
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
-            logo_path, thumb_path, remote_trailers,
+            logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
             date_created, date_modified
         FROM media_items
         WHERE id = $1
@@ -4874,7 +4962,7 @@ pub async fn find_items_for_external_person_credit(
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
             width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
-            logo_path, thumb_path, remote_trailers,
+            logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
             date_created, date_modified
         FROM media_items
         WHERE item_type = $1
@@ -5241,7 +5329,8 @@ pub async fn session_play_queue(
             mi.genres, mi.studios, mi.tags, mi.production_locations,
             mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
-            mi.remote_trailers, mi.date_created, mi.date_modified
+            mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
+            mi.date_created, mi.date_modified
         FROM session_play_queue q
         INNER JOIN sessions s ON s.access_token = q.session_id
         INNER JOIN media_items mi ON mi.id = q.item_id
@@ -5292,7 +5381,8 @@ pub async fn session_runtime_state(
             mi.genres, mi.studios, mi.tags, mi.production_locations,
             mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
-            mi.remote_trailers, mi.date_created, mi.date_modified
+            mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
+            mi.date_created, mi.date_modified
         FROM session_play_queue q
         INNER JOIN sessions s ON s.access_token = q.session_id
         INNER JOIN media_items mi ON mi.id = q.item_id
@@ -5762,6 +5852,11 @@ pub struct UpsertMediaItem<'a> {
     pub backdrop_path: Option<&'a Path>,
     pub logo_path: Option<&'a Path>,
     pub thumb_path: Option<&'a Path>,
+    pub art_path: Option<&'a Path>,
+    pub banner_path: Option<&'a Path>,
+    pub disc_path: Option<&'a Path>,
+    /// 除 `backdrop_path` 外的额外壁纸（Emby `Backdrop/1`…）
+    pub backdrop_paths: &'a [String],
     pub remote_trailers: &'a [String],
     pub series_name: Option<&'a str>,
     pub season_name: Option<&'a str>,
@@ -5791,6 +5886,16 @@ pub async fn upsert_media_item(
     let thumb_text = input
         .thumb_path
         .map(|value| value.to_string_lossy().to_string());
+    let art_text = input
+        .art_path
+        .map(|value| value.to_string_lossy().to_string());
+    let banner_text = input
+        .banner_path
+        .map(|value| value.to_string_lossy().to_string());
+    let disc_text = input
+        .disc_path
+        .map(|value| value.to_string_lossy().to_string());
+    let backdrop_paths_vec: Vec<String> = input.backdrop_paths.to_vec();
     let id = Uuid::new_v5(&input.library_id, path_text.as_bytes());
     let sort_name = sort_name_for_item(&input);
 
@@ -5802,7 +5907,8 @@ pub async fn upsert_media_item(
                 container, overview, production_year, official_rating, community_rating, critic_rating,
                 runtime_ticks, premiere_date, status, end_date, air_days, air_time,
                 provider_ids, genres, studios, tags, production_locations,
-                image_primary_path, backdrop_path, logo_path, thumb_path, remote_trailers,
+                image_primary_path, backdrop_path, logo_path, thumb_path,
+                art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
                 series_name, season_name, index_number,
                 index_number_end, parent_index_number, width, height, video_codec, audio_codec,
                 date_modified
@@ -5813,9 +5919,9 @@ pub async fn upsert_media_item(
                 $9, $10, $11, $12, $13, $14,
                 $15, $16, $17, $18, $19, $20,
                 $21, $22, $23, $24, $25,
-                $26, $27, $28, $29, $30,
-                $31, $32, $33, $34, $35, $36,
-                $37, $38, $39, $40,
+                $26, $27, $28, $29, $30, $31, $32, $33, $34,
+                $35, $36, $37, $38, $39, $40,
+                $41, $42, $43, $44,
                 now()
             )
         ON CONFLICT (library_id, path)
@@ -5847,6 +5953,10 @@ pub async fn upsert_media_item(
             backdrop_path = EXCLUDED.backdrop_path,
             logo_path = EXCLUDED.logo_path,
             thumb_path = EXCLUDED.thumb_path,
+            art_path = EXCLUDED.art_path,
+            banner_path = EXCLUDED.banner_path,
+            disc_path = EXCLUDED.disc_path,
+            backdrop_paths = EXCLUDED.backdrop_paths,
             remote_trailers = EXCLUDED.remote_trailers,
             series_name = EXCLUDED.series_name,
             season_name = EXCLUDED.season_name,
@@ -5890,6 +6000,10 @@ pub async fn upsert_media_item(
     .bind(backdrop_text)
     .bind(logo_text)
     .bind(thumb_text)
+    .bind(art_text)
+    .bind(banner_text)
+    .bind(disc_text)
+    .bind(&backdrop_paths_vec)
     .bind(input.remote_trailers)
     .bind(input.series_name)
     .bind(input.season_name)
@@ -6358,12 +6472,33 @@ async fn media_item_to_dto_inner(
             item.date_modified.timestamp().to_string(),
         );
     }
+    if item.banner_path.is_some() {
+        image_tags.insert(
+            "Banner".to_string(),
+            item.date_modified.timestamp().to_string(),
+        );
+    }
+    if item.disc_path.is_some() {
+        image_tags.insert(
+            "Disc".to_string(),
+            item.date_modified.timestamp().to_string(),
+        );
+    }
+    if item.art_path.is_some() {
+        image_tags.insert(
+            "Art".to_string(),
+            item.date_modified.timestamp().to_string(),
+        );
+    }
 
-    let backdrop_image_tags = if item.backdrop_path.is_some() {
-        vec![item.date_modified.timestamp().to_string()]
-    } else {
-        Vec::new()
-    };
+    let backdrop_tag = item.date_modified.timestamp().to_string();
+    let mut backdrop_image_tags: Vec<String> = Vec::new();
+    if item.backdrop_path.is_some() {
+        backdrop_image_tags.push(backdrop_tag.clone());
+    }
+    for _ in &item.backdrop_paths {
+        backdrop_image_tags.push(backdrop_tag.clone());
+    }
 
     let mut user_data = match (user_id, prefetched_user_data) {
         (_, Some(Some(data))) => user_item_data_to_dto_for_item(data, item.id),
@@ -6490,11 +6625,16 @@ async fn media_item_to_dto_inner(
     let parent_backdrop_item_id =
         inherited_backdrop_source.map(|parent| uuid_to_emby_guid(&parent.id));
     let parent_backdrop_image_tags = inherited_backdrop_source
-        .and_then(|parent| {
-            parent
-                .backdrop_path
-                .as_ref()
-                .map(|_| vec![parent.date_modified.timestamp().to_string()])
+        .map(|parent| {
+            let tag = parent.date_modified.timestamp().to_string();
+            let mut tags = Vec::new();
+            if parent.backdrop_path.is_some() {
+                tags.push(tag.clone());
+            }
+            for _ in &parent.backdrop_paths {
+                tags.push(tag.clone());
+            }
+            tags
         })
         .unwrap_or_default();
     let parent_thumb_item_id = inherited_thumb_source.map(|parent| uuid_to_emby_guid(&parent.id));
@@ -7257,7 +7397,7 @@ async fn version_group_items_for_item(
                 index_number, index_number_end, parent_index_number, provider_ids, genres,
                 studios, tags, production_locations,
                 width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
-                logo_path, thumb_path, remote_trailers,
+                logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
                 date_created, date_modified
             FROM media_items
             WHERE item_type = 'Episode'
@@ -7314,7 +7454,7 @@ async fn version_group_items_for_item(
                 index_number, index_number_end, parent_index_number, provider_ids, genres,
                 studios, tags, production_locations,
                 width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
-                logo_path, thumb_path, remote_trailers,
+                logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
                 date_created, date_modified
             FROM media_items
             WHERE item_type = $1

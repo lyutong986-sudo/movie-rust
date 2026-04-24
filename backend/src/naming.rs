@@ -264,6 +264,94 @@ fn folder_backdrop_candidates(folder: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+/// Kodi / Jellyfin 常见片夹图：海报、壁纸、徽标、横幅、光盘、艺术图及多张 fanart。
+#[derive(Debug, Clone, Default)]
+pub struct DiscoveredFolderImages {
+    pub primary: Option<PathBuf>,
+    pub backdrop: Option<PathBuf>,
+    pub backdrops_extra: Vec<PathBuf>,
+    pub logo: Option<PathBuf>,
+    pub thumb: Option<PathBuf>,
+    pub banner: Option<PathBuf>,
+    pub disc: Option<PathBuf>,
+    pub art: Option<PathBuf>,
+}
+
+pub fn discover_folder_images(folder: &Path) -> DiscoveredFolderImages {
+    let mut out = DiscoveredFolderImages::default();
+    out.primary = find_folder_image(folder);
+    out.backdrop = find_backdrop_image(folder);
+    out.backdrops_extra = extra_numbered_backdrops(folder, out.backdrop.as_ref());
+    out.logo = pick_first_stem_image(folder, &["logo", "clearlogo"]);
+    out.thumb = pick_first_stem_image(folder, &["thumb", "landscape"]);
+    out.banner = pick_first_stem_image(folder, &["banner"]);
+    out.disc = pick_first_stem_image(folder, &["disc", "cdart", "discart"]);
+    out.art = pick_first_stem_image(folder, &["clearart", "character", "hdclearart"]);
+    out
+}
+
+fn pick_first_stem_image(folder: &Path, stems: &[&str]) -> Option<PathBuf> {
+    for stem in stems {
+        for extension in IMAGE_EXTENSIONS {
+            let candidate = folder.join(format!("{stem}.{extension}"));
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// `fanart2` / `backdrop1` 等多壁纸（排除已作为首张 backdrop 的路径）。
+fn extra_numbered_backdrops(folder: &Path, primary: Option<&PathBuf>) -> Vec<PathBuf> {
+    let Ok(rd) = fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    let primary_str = primary.map(|p| p.to_string_lossy().into_owned());
+    let mut paths: Vec<PathBuf> = rd
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && extension_matches(p, IMAGE_EXTENSIONS))
+        .filter(|p| {
+            if let Some(ps) = primary_str.as_ref() {
+                if p.to_string_lossy().as_ref() == ps.as_str() {
+                    return false;
+                }
+            }
+            let stem = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            is_extra_backdrop_stem(&stem)
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
+fn is_extra_backdrop_stem(stem: &str) -> bool {
+    for prefix in ["fanart", "backdrop", "background"] {
+        if stem == prefix {
+            continue;
+        }
+        if let Some(rest) = stem.strip_prefix(prefix) {
+            if rest.is_empty() {
+                continue;
+            }
+            if rest.chars().all(|c| c.is_ascii_digit()) {
+                return true;
+            }
+            if let Some(tail) = rest.strip_prefix('_') {
+                if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 struct NumberedEpisode {
     title: String,
     series_name: Option<String>,
