@@ -2,8 +2,9 @@
 import { computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import MediaRow from '../components/MediaRow.vue';
+import HeroCarousel from '../components/HeroCarousel.vue';
+import EmptyState from '../components/EmptyState.vue';
 import {
-  api,
   backToHome,
   continueWatching,
   enterHome,
@@ -13,19 +14,29 @@ import {
   latest,
   latestByLibrary,
   libraries,
-  state
+  playQueue,
+  state,
+  watchLater
 } from '../store/app';
 import type { BaseItemDto } from '../api/emby';
 import { itemRoute, playbackRoute } from '../utils/navigation';
 
 const router = useRouter();
 
-const heroItem = computed(
-  () => continueWatching.value[0] || latest.value[0] || homeItems.value[0] || null
-);
-const heroImage = computed(() =>
-  heroItem.value ? api.backdropUrl(heroItem.value) || api.itemImageUrl(heroItem.value) : ''
-);
+// Hero 轮播：优先继续观看 + 最近添加，最多 5 张，形成 Netflix 式首屏。
+const heroItems = computed(() => {
+  const pool: BaseItemDto[] = [];
+  const seen = new Set<string>();
+  const push = (item?: BaseItemDto) => {
+    if (!item || seen.has(item.Id)) return;
+    seen.add(item.Id);
+    pool.push(item);
+  };
+  continueWatching.value.slice(0, 2).forEach(push);
+  latest.value.slice(0, 5).forEach(push);
+  homeItems.value.slice(0, 5).forEach(push);
+  return pool.slice(0, 5);
+});
 
 const latestSections = computed(() =>
   libraries.value
@@ -74,56 +85,13 @@ async function playItem(item: BaseItemDto) {
 
 <template>
   <div v-if="libraries.length" class="flex flex-col gap-8">
-    <!-- Hero -->
-    <section
-      v-if="heroItem"
-      class="relative overflow-hidden rounded-2xl ring-1 ring-default"
-    >
-      <div class="relative h-[320px] sm:h-[380px] lg:h-[440px]">
-        <img
-          v-if="heroImage"
-          :src="heroImage"
-          :alt="heroItem.Name"
-          class="absolute inset-0 h-full w-full object-cover"
-        />
-        <div
-          v-else
-          class="absolute inset-0 bg-gradient-to-br from-primary/30 to-primary/5"
-        />
-        <div
-          class="absolute inset-0 bg-gradient-to-t from-black via-black/70 to-transparent"
-        />
+    <HeroCarousel
+      v-if="heroItems.length"
+      :items="heroItems"
+      @play="playItem"
+      @select="openItem"
+    />
 
-        <div class="absolute inset-x-0 bottom-0 flex max-w-3xl flex-col gap-3 p-6 sm:p-8">
-          <UBadge color="primary" variant="subtle" class="w-fit">最近添加</UBadge>
-          <h1 class="text-3xl font-bold text-white sm:text-4xl">{{ heroItem.Name }}</h1>
-          <p class="line-clamp-3 max-w-2xl text-white/80">
-            {{ heroItem.Overview || '从这里继续浏览你的媒体库。' }}
-          </p>
-          <div class="mt-2 flex flex-wrap gap-2">
-            <UButton
-              v-if="heroItem.MediaSources?.length"
-              icon="i-lucide-play"
-              size="lg"
-              @click="playItem(heroItem)"
-            >
-              立即播放
-            </UButton>
-            <UButton
-              color="neutral"
-              variant="subtle"
-              size="lg"
-              icon="i-lucide-info"
-              @click="openItem(heroItem)"
-            >
-              查看详情
-            </UButton>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 媒体库 -->
     <section class="space-y-3">
       <div class="flex items-baseline justify-between">
         <h2 class="text-highlighted text-lg font-semibold">媒体库</h2>
@@ -134,11 +102,11 @@ async function playItem(item: BaseItemDto) {
           v-for="library in libraries"
           :key="library.Id"
           type="button"
-          class="group flex flex-col items-start gap-2 rounded-xl border border-default bg-elevated/30 p-4 text-start transition hover:bg-elevated/70 hover:ring-1 hover:ring-primary/40"
+          class="group border-default bg-elevated/30 hover:bg-elevated/70 hover:ring-primary/40 flex flex-col items-start gap-2 rounded-xl border p-4 text-start transition hover:ring-1"
           @click="router.push(`/library/${library.Id}`)"
         >
           <div
-            class="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary transition group-hover:bg-primary group-hover:text-primary-contrast"
+            class="bg-primary/10 text-primary group-hover:bg-primary group-hover:text-primary-contrast flex h-10 w-10 items-center justify-center rounded-lg transition"
           >
             <UIcon :name="libraryIcon(library.CollectionType)" class="size-5" />
           </div>
@@ -156,6 +124,25 @@ async function playItem(item: BaseItemDto) {
       icon="i-lucide-play-circle"
       :items="continueWatching"
       thumb
+      @play="playItem"
+      @select="openItem"
+    />
+
+    <MediaRow
+      v-if="playQueue.length"
+      title="播放队列"
+      icon="i-lucide-list-video"
+      :items="playQueue"
+      thumb
+      @play="playItem"
+      @select="openItem"
+    />
+
+    <MediaRow
+      v-if="watchLater.length"
+      title="稍后观看"
+      icon="i-lucide-clock"
+      :items="watchLater"
       @play="playItem"
       @select="openItem"
     />
@@ -190,34 +177,13 @@ async function playItem(item: BaseItemDto) {
     />
   </div>
 
-  <!-- 空状态 -->
-  <div
+  <EmptyState
     v-else
-    class="flex min-h-[60vh] flex-col items-center justify-center gap-4 rounded-2xl border border-dashed border-default bg-elevated/20 p-10 text-center"
-  >
-    <div class="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-      <UIcon name="i-lucide-film" class="size-8" />
-    </div>
-    <h2 class="text-highlighted text-xl font-semibold">还没有媒体内容</h2>
-    <p class="text-muted max-w-md text-sm">
-      先创建媒体库并执行扫描，首页的继续观看、最近添加、详情页和播放链路才会完整出现。
-    </p>
-    <div class="flex flex-wrap gap-2">
-      <UButton
-        v-if="isAdmin"
-        icon="i-lucide-plus"
-        @click="router.push('/settings/libraries')"
-      >
-        创建媒体库
-      </UButton>
-      <UButton
-        color="neutral"
-        variant="subtle"
-        icon="i-lucide-refresh-cw"
-        @click="enterHome"
-      >
-        重新加载
-      </UButton>
-    </div>
-  </div>
+    icon="i-lucide-film"
+    title="还没有媒体内容"
+    description="先创建媒体库并执行扫描，首页的继续观看、最近添加、详情页和播放链路才会完整出现。"
+    :action-label="isAdmin ? '创建媒体库' : '重新加载'"
+    :action-icon="isAdmin ? 'i-lucide-plus' : 'i-lucide-refresh-cw'"
+    @action="() => (isAdmin ? router.push('/settings/libraries') : enterHome())"
+  />
 </template>

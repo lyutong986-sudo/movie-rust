@@ -1,62 +1,100 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
+  api,
   isAdmin,
   libraries,
   loadAdminData,
   loadLibraries,
   logout,
+  parentStack,
+  selectedItem,
   state,
   user
 } from '../store/app';
+import CommandPalette from '../components/CommandPalette.vue';
+import MiniPlayer from '../components/MiniPlayer.vue';
+import ShortcutsDialog from '../components/ShortcutsDialog.vue';
 
 const router = useRouter();
 const route = useRoute();
 const searchInput = ref('');
+const paletteOpen = ref(false);
+const shortcutsOpen = ref(false);
+const locale = ref(localStorage.getItem('movie-rust-locale') || 'zh-CN');
 
 const isAdminSection = computed(() => Boolean(route.meta.admin));
 const isHome = computed(() => route.path === '/');
 const libraryRouteId = computed(() => String(route.params.id || ''));
-const currentTitle = computed(() => {
+
+// 动态 breadcrumb：根据路由 / parentStack / selectedItem 构造层级。
+const breadcrumb = computed(() => {
+  const crumbs: Array<{ label: string; to?: string }> = [];
+  if (route.name === 'home') {
+    crumbs.push({ label: '首页' });
+    return crumbs;
+  }
+  crumbs.push({ label: '首页', to: '/' });
+  if (route.meta.admin) {
+    crumbs.push({ label: '设置', to: '/settings' });
+    if (route.meta.title) {
+      crumbs.push({ label: String(route.meta.title) });
+    }
+    return crumbs;
+  }
   if (route.name === 'library') {
-    return libraries.value.find((library) => library.Id === libraryRouteId.value)?.Name || '媒体库';
+    const lib = libraries.value.find((l) => l.Id === libraryRouteId.value);
+    crumbs.push({ label: lib?.Name || '媒体库' });
+    for (const parent of parentStack.value) {
+      crumbs.push({ label: parent.Name });
+    }
+    return crumbs;
   }
-
-  return String(route.meta.title || '首页');
+  if (route.name === 'item' || route.name === 'series') {
+    if (selectedItem.value?.Type === 'Episode' && selectedItem.value.SeriesName) {
+      crumbs.push({ label: selectedItem.value.SeriesName });
+    }
+    if (selectedItem.value) {
+      crumbs.push({ label: selectedItem.value.Name });
+    } else {
+      crumbs.push({ label: '详情' });
+    }
+    return crumbs;
+  }
+  if (route.meta.title) {
+    crumbs.push({ label: String(route.meta.title) });
+  }
+  return crumbs;
 });
-const currentSubtitle = computed(() => {
-  if (isAdminSection.value) {
-    return '服务器控制台';
-  }
 
+const currentTitle = computed(() => breadcrumb.value[breadcrumb.value.length - 1]?.label || '首页');
+const currentSubtitle = computed(() => {
+  if (isAdminSection.value) return '服务器控制台';
   return user.value ? `欢迎回来，${user.value.Name}` : state.serverName;
 });
 
-const mainNavItems = computed(() => {
-  const items = [
-    {
-      label: '首页',
-      icon: 'i-lucide-home',
-      to: '/',
-      active: route.path === '/'
-    },
-    {
-      label: '搜索',
-      icon: 'i-lucide-search',
-      to: '/search',
-      active: route.path.startsWith('/search')
-    },
-    {
-      label: '设置',
-      icon: 'i-lucide-settings',
-      to: '/settings',
-      active: route.path.startsWith('/settings')
-    }
-  ];
-
-  return items;
-});
+const mainNavItems = computed(() => [
+  { label: '首页', icon: 'i-lucide-home', to: '/', active: route.path === '/' },
+  {
+    label: '搜索',
+    icon: 'i-lucide-search',
+    to: '/search',
+    active: route.path.startsWith('/search')
+  },
+  {
+    label: '稍后观看',
+    icon: 'i-lucide-clock',
+    to: '/queue',
+    active: route.path.startsWith('/queue')
+  },
+  {
+    label: '设置',
+    icon: 'i-lucide-settings',
+    to: '/settings',
+    active: route.path.startsWith('/settings')
+  }
+]);
 
 const libraryNavItems = computed(() =>
   libraries.value.map((library) => ({
@@ -68,6 +106,8 @@ const libraryNavItems = computed(() =>
   }))
 );
 
+const userAvatarSrc = computed(() => api.userImageUrl(user.value) || undefined);
+
 const userMenuItems = computed(() => [
   [
     {
@@ -77,15 +117,15 @@ const userMenuItems = computed(() => [
     }
   ],
   [
+    { label: '账户设置', icon: 'i-lucide-user', to: '/settings/account' },
+    { label: '应用设置', icon: 'i-lucide-settings', to: '/settings' },
     {
-      label: '账户设置',
-      icon: 'i-lucide-user',
-      to: '/settings/account'
-    },
-    {
-      label: '应用设置',
-      icon: 'i-lucide-settings',
-      to: '/settings'
+      label: '键盘快捷键',
+      icon: 'i-lucide-keyboard',
+      onSelect: () => {
+        shortcutsOpen.value = true;
+      },
+      kbd: ['?']
     }
   ],
   [
@@ -97,6 +137,11 @@ const userMenuItems = computed(() => [
     }
   ]
 ]);
+
+const localeOptions = [
+  { label: '简体中文', value: 'zh-CN' },
+  { label: 'English', value: 'en-US' }
+];
 
 function libraryIcon(collectionType?: string) {
   if (collectionType === 'movies') return 'i-lucide-clapperboard';
@@ -117,61 +162,56 @@ watch(
 watch(
   () => route.fullPath,
   async () => {
-    if (!isAdminSection.value) {
-      return;
-    }
-
+    if (!isAdminSection.value) return;
     if (!isAdmin.value) {
       await router.replace('/');
       return;
     }
-
     await loadAdminData();
   }
 );
 
-onMounted(async () => {
-  if (!libraries.value.length) {
-    await loadLibraries();
-  }
+watch(locale, (value) => {
+  localStorage.setItem('movie-rust-locale', value);
+  document.documentElement.lang = value;
+});
 
+onMounted(async () => {
+  document.documentElement.lang = locale.value;
+  window.addEventListener('keydown', onKeyDown);
+  if (!libraries.value.length) await loadLibraries();
   if (isAdminSection.value) {
     if (!isAdmin.value) {
       await router.replace('/');
       return;
     }
-
     await loadAdminData();
   }
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeyDown);
 });
 
 async function submitSearch() {
   const query = searchInput.value.trim();
   if (!query) {
-    if (route.name === 'search') {
-      await router.replace('/');
-    }
+    if (route.name === 'search') await router.replace('/');
     return;
   }
-
   await router.push({ name: 'search', query: { q: query } });
 }
 
-// 输入时进行节流式实时跳转到搜索页，减少 Enter 才能看结果的摩擦。
 let searchTimer = 0;
 function onSearchInput() {
   window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(() => {
     const query = searchInput.value.trim();
     if (!query) {
-      if (route.name === 'search') {
-        void router.replace('/');
-      }
+      if (route.name === 'search') void router.replace('/');
       return;
     }
-    if (route.name === 'search' && route.query.q === query) {
-      return;
-    }
+    if (route.name === 'search' && route.query.q === query) return;
     void router.replace({ name: 'search', query: { q: query } });
   }, 350);
 }
@@ -179,6 +219,47 @@ function onSearchInput() {
 async function handleLogout() {
   logout();
   await router.replace('/server/login');
+}
+
+// 全局快捷键：⌘K / Ctrl+K 命令面板, ? 快捷键, G H 返回首页, G S 设置
+let gPressed = false;
+let gTimer = 0;
+function onKeyDown(e: KeyboardEvent) {
+  const target = e.target as HTMLElement | null;
+  const inInput = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+  if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+    e.preventDefault();
+    paletteOpen.value = !paletteOpen.value;
+    return;
+  }
+  if (inInput) return;
+  if (e.key === '/') {
+    e.preventDefault();
+    paletteOpen.value = true;
+    return;
+  }
+  if (e.key === '?') {
+    e.preventDefault();
+    shortcutsOpen.value = true;
+    return;
+  }
+  if (e.key === 'g' || e.key === 'G') {
+    gPressed = true;
+    window.clearTimeout(gTimer);
+    gTimer = window.setTimeout(() => {
+      gPressed = false;
+    }, 800);
+    return;
+  }
+  if (gPressed && (e.key === 'h' || e.key === 'H')) {
+    gPressed = false;
+    void router.push('/');
+    return;
+  }
+  if (gPressed && (e.key === 's' || e.key === 'S')) {
+    gPressed = false;
+    void router.push('/settings');
+  }
 }
 </script>
 
@@ -194,13 +275,13 @@ async function handleLogout() {
       <template #header="{ collapsed }">
         <RouterLink to="/" class="flex items-center gap-3">
           <div
-            class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-contrast text-sm font-bold"
+            class="bg-primary text-primary-contrast flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-sm font-bold"
           >
             MR
           </div>
           <div v-if="!collapsed" class="min-w-0">
             <p class="text-muted text-[10px] uppercase tracking-wider">Movie Rust</p>
-            <p class="text-highlighted truncate text-sm font-semibold">
+            <p class="text-highlighted display-font truncate text-base font-semibold">
               {{ state.serverName }}
             </p>
           </div>
@@ -210,18 +291,12 @@ async function handleLogout() {
       </template>
 
       <template #default="{ collapsed }">
-        <UNavigationMenu
-          :collapsed="collapsed"
-          :items="mainNavItems"
-          orientation="vertical"
-        />
+        <UNavigationMenu :collapsed="collapsed" :items="mainNavItems" orientation="vertical" />
 
         <USeparator v-if="libraryNavItems.length" type="dashed" />
 
         <div v-if="!collapsed && libraryNavItems.length" class="px-2 py-1">
-          <p class="text-muted text-[10px] font-medium uppercase tracking-wider">
-            媒体库
-          </p>
+          <p class="text-muted text-[10px] font-medium uppercase tracking-wider">媒体库</p>
         </div>
         <UNavigationMenu
           v-if="libraryNavItems.length"
@@ -243,14 +318,14 @@ async function handleLogout() {
             :block="!collapsed"
             class="justify-start"
           >
-            <UAvatar size="xs" :alt="user?.Name || 'U'" />
+            <UAvatar size="xs" :alt="user?.Name || 'U'" :src="userAvatarSrc" />
             <span v-if="!collapsed" class="truncate text-sm">
               {{ user?.Name || '未登录' }}
             </span>
             <UIcon
               v-if="!collapsed"
               name="i-lucide-chevrons-up-down"
-              class="ms-auto size-4 text-dimmed"
+              class="text-dimmed ms-auto size-4"
             />
           </UButton>
         </UDropdownMenu>
@@ -266,11 +341,45 @@ async function handleLogout() {
         <template #title>
           <div class="flex flex-col leading-tight">
             <span class="text-muted text-xs">{{ currentSubtitle }}</span>
-            <span class="text-highlighted text-base font-semibold">{{ currentTitle }}</span>
+            <div class="flex items-center gap-1">
+              <template v-for="(crumb, idx) in breadcrumb" :key="idx">
+                <button
+                  v-if="crumb.to"
+                  type="button"
+                  class="text-muted hover:text-primary text-base font-semibold"
+                  @click="router.push(crumb.to!)"
+                >
+                  {{ crumb.label }}
+                </button>
+                <span v-else class="text-highlighted display-font truncate text-base font-semibold">
+                  {{ crumb.label }}
+                </span>
+                <UIcon
+                  v-if="idx < breadcrumb.length - 1"
+                  name="i-lucide-chevron-right"
+                  class="text-muted size-4"
+                />
+              </template>
+            </div>
           </div>
         </template>
 
         <template #right>
+          <UButton
+            class="hidden md:inline-flex"
+            color="neutral"
+            variant="outline"
+            size="sm"
+            @click="paletteOpen = true"
+          >
+            <UIcon name="i-lucide-search" class="size-4" />
+            <span class="text-muted">快速搜索</span>
+            <span class="text-muted ms-3 hidden items-center gap-0.5 lg:flex">
+              <UKbd>⌘</UKbd>
+              <UKbd>K</UKbd>
+            </span>
+          </UButton>
+
           <form
             v-if="!isAdminSection"
             class="hidden md:block"
@@ -279,11 +388,28 @@ async function handleLogout() {
             <UInput
               v-model="searchInput"
               icon="i-lucide-search"
-              placeholder="搜索电影、剧集"
-              class="w-64"
+              placeholder="搜索"
+              class="w-56"
               @update:model-value="onSearchInput"
             />
           </form>
+
+          <USelect
+            v-model="locale"
+            :items="localeOptions"
+            value-key="value"
+            class="hidden w-28 md:block"
+            size="sm"
+          />
+
+          <UButton
+            icon="i-lucide-keyboard"
+            color="neutral"
+            variant="ghost"
+            aria-label="键盘快捷键"
+            @click="shortcutsOpen = true"
+          />
+
           <UButton
             v-if="!isHome"
             icon="i-lucide-arrow-left"
@@ -295,32 +421,15 @@ async function handleLogout() {
         </template>
       </UDashboardNavbar>
 
-      <UAlert
-        v-if="state.error"
-        icon="i-lucide-triangle-alert"
-        color="error"
-        variant="subtle"
-        :title="state.error"
-        close
-        class="mx-4 mt-3"
-        @update:model-value="state.error = ''"
-      />
-      <UAlert
-        v-else-if="state.message"
-        icon="i-lucide-info"
-        color="primary"
-        variant="subtle"
-        :title="state.message"
-        close
-        class="mx-4 mt-3"
-        @update:model-value="state.message = ''"
-      />
-
       <template #body>
         <div class="flex flex-col gap-6 p-4 sm:p-6">
           <slot />
         </div>
       </template>
     </UDashboardPanel>
+
+    <CommandPalette v-model:open="paletteOpen" />
+    <ShortcutsDialog v-model:open="shortcutsOpen" />
+    <MiniPlayer />
   </UDashboardGroup>
 </template>

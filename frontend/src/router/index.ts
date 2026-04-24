@@ -146,6 +146,18 @@ export const router = createRouter({
       name: 'wizard',
       component: () => import('../pages/WizardPage.vue'),
       meta: { title: '首次启动', layout: 'server' }
+    },
+    {
+      path: '/queue',
+      name: 'queue',
+      component: () => import('../pages/QueuePage.vue'),
+      meta: { title: '播放队列 / 稍后观看', section: 'home' }
+    },
+    {
+      path: '/:pathMatch(.*)*',
+      name: 'not-found',
+      component: () => import('../pages/NotFoundPage.vue'),
+      meta: { title: '找不到页面' }
     }
   ]
 });

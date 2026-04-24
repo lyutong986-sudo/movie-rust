@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import MediaCard from './MediaCard.vue';
+import MediaCardSkeleton from './MediaCardSkeleton.vue';
 import type { BaseItemDto } from '../api/emby';
 
 const props = withDefaults(
@@ -24,8 +25,11 @@ const emit = defineEmits<{
 }>();
 
 const scroller = ref<HTMLElement | null>(null);
+const sectionEl = ref<HTMLElement | null>(null);
 const canLeft = ref(false);
 const canRight = ref(false);
+const visible = ref(false);
+let io: IntersectionObserver | null = null;
 
 function updateArrows() {
   const el = scroller.value;
@@ -41,12 +45,33 @@ function scrollBy(dir: 1 | -1) {
 }
 
 onMounted(() => {
+  // 用 IntersectionObserver 延迟渲染行内 MediaCard，减少首屏并发图片请求。
+  if (sectionEl.value && 'IntersectionObserver' in window) {
+    io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            visible.value = true;
+            io?.disconnect();
+            io = null;
+            break;
+          }
+        }
+      },
+      { rootMargin: '300px 0px' }
+    );
+    io.observe(sectionEl.value);
+  } else {
+    visible.value = true;
+  }
   updateArrows();
   scroller.value?.addEventListener('scroll', updateArrows, { passive: true });
   window.addEventListener('resize', updateArrows);
 });
 
 onBeforeUnmount(() => {
+  io?.disconnect();
+  io = null;
   scroller.value?.removeEventListener('scroll', updateArrows);
   window.removeEventListener('resize', updateArrows);
 });
@@ -57,7 +82,7 @@ const cardWidth = computed(() =>
 </script>
 
 <template>
-  <section class="space-y-3">
+  <section ref="sectionEl" class="space-y-3">
     <div class="flex items-baseline justify-between gap-3">
       <div class="flex items-center gap-2 min-w-0">
         <UIcon v-if="icon" :name="icon" class="text-primary size-4" />
@@ -97,19 +122,26 @@ const cardWidth = computed(() =>
              [&::-webkit-scrollbar-thumb]:rounded-full
              [&::-webkit-scrollbar-thumb]:bg-default"
     >
-      <div
-        v-for="item in items"
-        :key="item.Id"
-        class="shrink-0 snap-start"
-        :class="cardWidth"
-      >
-        <MediaCard
-          :item="item"
-          :thumb="thumb"
-          @play="emit('play', $event)"
-          @select="emit('select', $event)"
-        />
-      </div>
+      <template v-if="visible">
+        <div
+          v-for="item in items"
+          :key="item.Id"
+          class="shrink-0 snap-start"
+          :class="cardWidth"
+        >
+          <MediaCard
+            :item="item"
+            :thumb="thumb"
+            @play="emit('play', $event)"
+            @select="emit('select', $event)"
+          />
+        </div>
+      </template>
+      <template v-else>
+        <div v-for="i in Math.min(8, items.length)" :key="i" class="shrink-0 snap-start" :class="cardWidth">
+          <MediaCardSkeleton :thumb="thumb" />
+        </div>
+      </template>
     </div>
   </section>
 </template>

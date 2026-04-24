@@ -51,6 +51,12 @@ export const state = reactive({
   libraryViewType: '',
   librarySortBy: 'SortName',
   librarySortAscending: true,
+  libraryGenres: [] as string[],
+  libraryYears: [] as number[],
+  libraryFavoritesOnly: false,
+  libraryOnly4K: false,
+  libraryOnlyHDR: false,
+  librarySubtitlesOnly: false,
   search: '',
   busy: false,
   message: '',
@@ -420,13 +426,30 @@ export async function loadItems() {
 
   await run(async () => {
     const parentId = parentStack.value.at(-1)?.Id || state.selectedLibraryId;
+    const videoTypes: string[] = [];
+    if (state.libraryOnly4K) videoTypes.push('Video4K');
     const result = await api.items(parentId, state.search, Boolean(state.search.trim()), {
       includeTypes: state.libraryViewType ? [state.libraryViewType] : undefined,
+      genres: state.libraryGenres.length ? state.libraryGenres : undefined,
+      years: state.libraryYears.length ? state.libraryYears : undefined,
+      isFavorite: state.libraryFavoritesOnly || undefined,
+      videoTypes: videoTypes.length ? videoTypes : undefined,
+      hasSubtitles: state.librarySubtitlesOnly ? true : undefined,
       sortBy: state.librarySortBy || 'SortName',
       sortOrder: state.librarySortAscending ? 'Ascending' : 'Descending',
-      limit: 180
+      limit: 180,
+      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'Overview']
     });
-    items.value = result.Items;
+    let list = result.Items;
+    if (state.libraryOnlyHDR) {
+      list = list.filter((item) => {
+        const vs = item.MediaStreams?.find((s) => s.Type === 'Video') ||
+          item.MediaSources?.[0]?.MediaStreams?.find((s) => s.Type === 'Video');
+        const vr = (vs as unknown as { VideoRange?: string } | undefined)?.VideoRange || '';
+        return /HDR|DOVI|DOLBY/i.test(vr);
+      });
+    }
+    items.value = list;
   });
 }
 
@@ -435,6 +458,30 @@ export async function selectLibrary(libraryId: string) {
   state.search = '';
   parentStack.value = [];
   await loadItems();
+}
+
+export const libraryGenresCache = ref<Record<string, string[]>>({});
+
+export async function loadLibraryGenres(libraryId: string) {
+  if (libraryGenresCache.value[libraryId]) return libraryGenresCache.value[libraryId];
+  try {
+    const res = await api.genres(libraryId);
+    const names = res.Items.map((g) => g.Name).filter(Boolean);
+    libraryGenresCache.value[libraryId] = names;
+    return names;
+  } catch {
+    libraryGenresCache.value[libraryId] = [];
+    return [];
+  }
+}
+
+export function resetLibraryFilters() {
+  state.libraryGenres = [];
+  state.libraryYears = [];
+  state.libraryFavoritesOnly = false;
+  state.libraryOnly4K = false;
+  state.libraryOnlyHDR = false;
+  state.librarySubtitlesOnly = false;
 }
 
 export async function backToHome() {
@@ -848,4 +895,101 @@ function readJson<T>(key: string): T | null {
 
 function readText(key: string) {
   return localStorage.getItem(key) || '';
+}
+
+// ======== 播放队列 / 稍后观看 ========
+
+const QUEUE_KEY = 'movie-rust-queue';
+const WATCH_LATER_KEY = 'movie-rust-watch-later';
+
+export const playQueue = ref<BaseItemDto[]>(readJson<BaseItemDto[]>(QUEUE_KEY) || []);
+export const watchLater = ref<BaseItemDto[]>(readJson<BaseItemDto[]>(WATCH_LATER_KEY) || []);
+export const playQueueIndex = ref(0);
+
+function persistQueue() {
+  localStorage.setItem(QUEUE_KEY, JSON.stringify(playQueue.value));
+}
+function persistWatchLater() {
+  localStorage.setItem(WATCH_LATER_KEY, JSON.stringify(watchLater.value));
+}
+
+export function enqueue(item: BaseItemDto, position: 'next' | 'last' = 'last') {
+  const existing = playQueue.value.findIndex((entry) => entry.Id === item.Id);
+  if (existing >= 0) {
+    playQueue.value.splice(existing, 1);
+  }
+  if (position === 'next') {
+    const insertAt = Math.min(playQueueIndex.value + 1, playQueue.value.length);
+    playQueue.value.splice(insertAt, 0, item);
+  } else {
+    playQueue.value.push(item);
+  }
+  persistQueue();
+}
+
+export function dequeueAt(index: number) {
+  playQueue.value.splice(index, 1);
+  if (playQueueIndex.value >= playQueue.value.length) {
+    playQueueIndex.value = Math.max(0, playQueue.value.length - 1);
+  }
+  persistQueue();
+}
+
+export function clearQueue() {
+  playQueue.value = [];
+  playQueueIndex.value = 0;
+  persistQueue();
+}
+
+export function setQueue(items: BaseItemDto[], startIndex = 0) {
+  playQueue.value = items.slice();
+  playQueueIndex.value = Math.max(0, Math.min(startIndex, playQueue.value.length - 1));
+  persistQueue();
+}
+
+export function nextInQueue(): BaseItemDto | null {
+  if (playQueueIndex.value + 1 < playQueue.value.length) {
+    playQueueIndex.value += 1;
+    return playQueue.value[playQueueIndex.value];
+  }
+  return null;
+}
+
+export function toggleWatchLater(item: BaseItemDto) {
+  const i = watchLater.value.findIndex((entry) => entry.Id === item.Id);
+  if (i >= 0) {
+    watchLater.value.splice(i, 1);
+  } else {
+    watchLater.value.unshift(item);
+  }
+  persistWatchLater();
+}
+
+export function isInWatchLater(id: string) {
+  return watchLater.value.some((entry) => entry.Id === id);
+}
+
+// ======== 详情栈编码到 URL（刷新保留面包屑） ========
+
+export function serializeParentStack() {
+  if (!parentStack.value.length) return '';
+  return parentStack.value.map((item) => item.Id).join(',');
+}
+
+export async function hydrateParentStack(serialized: string) {
+  if (!serialized) {
+    parentStack.value = [];
+    return;
+  }
+  const ids = serialized.split(',').filter(Boolean);
+  if (!ids.length) {
+    parentStack.value = [];
+    return;
+  }
+  try {
+    const results = await Promise.all(ids.map((id) => api.item(id).catch(() => null)));
+    parentStack.value = results.filter((item): item is BaseItemDto => Boolean(item));
+  } catch {
+    parentStack.value = [];
+  }
 }

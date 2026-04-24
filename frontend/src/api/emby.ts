@@ -4,6 +4,8 @@ export interface UserDto {
   ServerId: string;
   HasPassword?: boolean;
   HasConfiguredPassword?: boolean;
+  PrimaryImageTag?: string;
+  LastLoginDate?: string;
   Policy: UserPolicy;
   Configuration?: UserConfiguration;
 }
@@ -132,6 +134,8 @@ export interface BaseItemDto {
   MediaType?: string;
   Container?: string;
   ParentId?: string;
+  SeriesId?: string;
+  SeasonId?: string;
   Path?: string;
   RunTimeTicks?: number;
   ProductionYear?: number;
@@ -148,6 +152,21 @@ export interface BaseItemDto {
   ImageTags?: Record<string, string>;
   BackdropImageTags?: string[];
   PrimaryImageAspectRatio?: number;
+  ImageBlurHashes?: Record<string, Record<string, string>>;
+  Chapters?: Array<{
+    StartPositionTicks: number;
+    Name?: string;
+    ImageTag?: string;
+  }>;
+  RemoteTrailers?: Array<{ Url: string; Name?: string }>;
+  LocalTrailerCount?: number;
+  SpecialFeatureCount?: number;
+  HasSubtitles?: boolean;
+  IsHD?: boolean;
+  Width?: number;
+  Height?: number;
+  VideoRange?: string;
+  AudioCodec?: string;
   UserData: {
     Rating?: number;
     PlayedPercentage?: number;
@@ -331,10 +350,16 @@ export interface CreateLibraryPayload {
 export interface ItemQueryOptions {
   includeTypes?: string[];
   genres?: string[];
+  years?: number[];
+  isFavorite?: boolean;
+  filters?: string[];
   sortBy?: string;
   sortOrder?: 'Ascending' | 'Descending';
   limit?: number;
   startIndex?: number;
+  fields?: string[];
+  videoTypes?: string[];
+  hasSubtitles?: boolean;
 }
 
 export interface PlaybackReportPayload {
@@ -549,7 +574,31 @@ export class EmbyApi {
     if (options.genres?.length) {
       params.set('Genres', options.genres.join(','));
     }
+    if (options.years?.length) {
+      params.set('Years', options.years.join(','));
+    }
+    if (options.isFavorite) {
+      params.set('IsFavorite', 'true');
+    }
+    if (options.filters?.length) {
+      params.set('Filters', options.filters.join(','));
+    }
+    if (options.videoTypes?.length) {
+      params.set('VideoTypes', options.videoTypes.join(','));
+    }
+    if (options.hasSubtitles !== undefined) {
+      params.set('HasSubtitles', String(options.hasSubtitles));
+    }
+    if (options.fields?.length) {
+      params.set('Fields', options.fields.join(','));
+    }
     return this.request<QueryResult<BaseItemDto>>(`/Users/${userId}/Items?${params}`);
+  }
+
+  async genres(parentId?: string) {
+    const params = new URLSearchParams({ Limit: '200' });
+    if (parentId) params.set('ParentId', parentId);
+    return this.request<QueryResult<BaseItemDto>>(`/Genres?${params}`);
   }
 
   async item(itemId: string) {
@@ -741,9 +790,46 @@ export class EmbyApi {
     return this.imageUrl(item, 'Backdrop', item.BackdropImageTags?.[0], 0);
   }
 
+  logoUrl(item: BaseItemDto) {
+    return this.imageUrl(item, 'Logo', item.ImageTags?.Logo);
+  }
+
+  thumbUrl(item: BaseItemDto) {
+    return this.imageUrl(item, 'Thumb', item.ImageTags?.Thumb);
+  }
+
+  chapterImageUrl(item: BaseItemDto, chapterIndex: number, tag?: string) {
+    if (!tag) return '';
+    return `${this.baseUrl}/Items/${item.Id}/Images/Chapter/${chapterIndex}?api_key=${encodeURIComponent(this.token)}&tag=${encodeURIComponent(tag)}`;
+  }
+
+  userImageUrl(userObj: { Id?: string; PrimaryImageTag?: string } | null | undefined) {
+    if (!userObj?.Id || !userObj.PrimaryImageTag) return '';
+    return `${this.baseUrl}/Users/${userObj.Id}/Images/Primary?api_key=${encodeURIComponent(this.token)}&tag=${encodeURIComponent(userObj.PrimaryImageTag)}`;
+  }
+
   personImageUrl(person: { Id?: string; PrimaryImageTag?: string }) {
     if (!person.Id || !person.PrimaryImageTag) return '';
     return `${this.baseUrl}/Items/${person.Id}/Images/Primary?api_key=${encodeURIComponent(this.token)}&tag=${encodeURIComponent(person.PrimaryImageTag)}`;
+  }
+
+  async similar(itemId: string, limit = 24) {
+    const userId = this.requireUserId();
+    const params = new URLSearchParams({ Limit: String(limit), UserId: userId });
+    return this.request<QueryResult<BaseItemDto>>(`/Items/${itemId}/Similar?${params}`);
+  }
+
+  async resume(parentId?: string, limit = 24) {
+    const userId = this.requireUserId();
+    const params = new URLSearchParams({ Limit: String(limit) });
+    if (parentId) params.set('ParentId', parentId);
+    return this.request<QueryResult<BaseItemDto>>(`/Users/${userId}/Items/Resume?${params}`);
+  }
+
+  async nextUp(seriesId: string, limit = 1) {
+    const userId = this.requireUserId();
+    const params = new URLSearchParams({ SeriesId: seriesId, UserId: userId, Limit: String(limit) });
+    return this.request<QueryResult<BaseItemDto>>(`/Shows/NextUp?${params}`);
   }
 
   private imageUrl(item: BaseItemDto, imageType: string, tag?: string, imageIndex?: number) {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useRouter } from 'vue-router';
-import { currentServer, login, publicUsers, state, user } from '../../store/app';
+import { api, currentServer, login, publicUsers, state, user } from '../../store/app';
 
 const router = useRouter();
 
@@ -25,19 +25,42 @@ function pickUser(name: string) {
       <h2 class="text-highlighted text-xl font-semibold">登录</h2>
     </header>
 
-    <!-- 用户选择器 -->
-    <div v-if="publicUsers.length && !state.loginAsOther" class="space-y-4">
-      <p class="text-muted text-sm">选择一位用户登录</p>
-      <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+    <!-- 用户选择器（Netflix / Jellyfin 风格的 Profile Picker） -->
+    <div v-if="publicUsers.length && !state.loginAsOther" class="space-y-5">
+      <p class="text-muted text-center text-sm">选择一位用户登录</p>
+      <div class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4">
         <button
           v-for="publicUser in publicUsers"
           :key="publicUser.Id"
           type="button"
-          class="group flex flex-col items-center gap-2 rounded-xl border border-default bg-elevated/30 p-4 transition hover:bg-elevated/70 hover:ring-1 hover:ring-primary/40"
+          class="group flex flex-col items-center gap-3 rounded-xl p-3 transition hover:scale-[1.04] focus-visible:outline-2 focus-visible:outline-primary"
           @click="pickUser(publicUser.Name)"
         >
-          <UAvatar size="lg" :alt="publicUser.Name" />
-          <span class="text-highlighted truncate text-sm font-medium">{{ publicUser.Name }}</span>
+          <div
+            class="ring-default group-hover:ring-primary relative size-24 overflow-hidden rounded-2xl ring-2 transition-all sm:size-28"
+          >
+            <img
+              v-if="api.userImageUrl(publicUser)"
+              :src="api.userImageUrl(publicUser)"
+              :alt="publicUser.Name"
+              class="h-full w-full object-cover"
+            />
+            <div
+              v-else
+              class="from-primary/30 to-primary/5 text-primary display-font flex h-full w-full items-center justify-center bg-gradient-to-br text-4xl font-bold"
+            >
+              {{ publicUser.Name.slice(0, 1).toUpperCase() }}
+            </div>
+            <div
+              v-if="publicUser.HasPassword"
+              class="bg-background/90 text-muted absolute bottom-1.5 right-1.5 flex size-6 items-center justify-center rounded-full ring-1 ring-default"
+            >
+              <UIcon name="i-lucide-lock" class="size-3" />
+            </div>
+          </div>
+          <span class="text-highlighted truncate text-sm font-medium group-hover:text-primary">
+            {{ publicUser.Name }}
+          </span>
         </button>
       </div>
 

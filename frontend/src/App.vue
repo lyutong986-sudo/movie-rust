@@ -3,14 +3,38 @@ import { computed, onMounted, watch } from 'vue';
 import { RouterView, useRoute, useRouter } from 'vue-router';
 import AppLayout from './layouts/AppLayout.vue';
 import AuthLayout from './layouts/AuthLayout.vue';
+import TopLoader from './components/TopLoader.vue';
 import { initialize, state, user } from './store/app';
+import { useAppToast } from './composables/toast';
 
 const route = useRoute();
 const router = useRouter();
 
 const layout = computed(() => (route.meta.layout as string | undefined) ?? 'app');
 
+const toast = useAppToast();
+
 onMounted(initialize);
+
+// 集中把 store.error/message 转换成 Toast 推送，页面不再重复写 UAlert。
+watch(
+  () => state.error,
+  (msg) => {
+    if (msg) {
+      toast.error('出错了', msg);
+      state.error = '';
+    }
+  }
+);
+watch(
+  () => state.message,
+  (msg) => {
+    if (msg) {
+      toast.success(msg);
+      state.message = '';
+    }
+  }
+);
 
 watch(
   () => [state.initialized, state.startupWizardCompleted, user.value, route.fullPath] as const,
@@ -43,6 +67,7 @@ watch(
 
 <template>
   <UApp>
+    <TopLoader />
     <!-- 首次加载：简洁 loading 屏 -->
     <div
       v-if="!state.initialized"

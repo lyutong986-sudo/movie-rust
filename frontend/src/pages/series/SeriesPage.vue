@@ -19,12 +19,15 @@ const error = ref('');
 const series = ref<BaseItemDto | null>(null);
 const seasons = ref<SeasonSection[]>([]);
 const relatedItems = ref<BaseItemDto[]>([]);
+const similarItems = ref<BaseItemDto[]>([]);
 const activeSeasonId = ref('');
+const nextUpEpisode = ref<BaseItemDto | null>(null);
 
 const backdrop = computed(() => (series.value ? api.backdropUrl(series.value) : ''));
 const poster = computed(() =>
   series.value ? api.itemImageUrl(series.value) || api.backdropUrl(series.value) : ''
 );
+const logo = computed(() => (series.value ? api.logoUrl(series.value) : ''));
 const activeSeason = computed(
   () =>
     seasons.value.find((entry) => entry.season.Id === activeSeasonId.value) ||
@@ -32,6 +35,21 @@ const activeSeason = computed(
     null
 );
 const firstEpisode = computed(() => seasons.value.flatMap((entry) => entry.episodes)[0] || null);
+// 上次观看的集：取所有集中 PlaybackPositionTicks>0 且最近 LastPlayedDate 的那一集。
+const lastPlayedEpisode = computed(() => {
+  const all = seasons.value.flatMap((s) => s.episodes);
+  const candidates = all
+    .filter((ep) => (ep.UserData?.PlaybackPositionTicks || 0) > 0)
+    .sort((a, b) => {
+      const ta = Date.parse(a.UserData?.LastPlayedDate || '') || 0;
+      const tb = Date.parse(b.UserData?.LastPlayedDate || '') || 0;
+      return tb - ta;
+    });
+  return candidates[0] || null;
+});
+const startEpisode = computed(
+  () => nextUpEpisode.value || lastPlayedEpisode.value || firstEpisode.value
+);
 const metaChips = computed(() => {
   if (!series.value) return [];
   return [
@@ -93,7 +111,17 @@ async function loadSeries(itemId: string) {
       }))
     );
 
-    activeSeasonId.value = seasons.value[0]?.season.Id || '';
+    // 取得下一集
+    try {
+      const nu = await api.nextUp(currentSeries.Id, 1);
+      nextUpEpisode.value = nu.Items?.[0] || null;
+    } catch {
+      nextUpEpisode.value = null;
+    }
+
+    // 默认选中含 nextUp / 最近播放 集对应的季
+    const targetEp = nextUpEpisode.value || lastPlayedEpisode.value;
+    activeSeasonId.value = targetEp?.SeasonId || seasons.value[0]?.season.Id || '';
 
     relatedItems.value = (
       await api.items(undefined, '', true, {
@@ -103,6 +131,12 @@ async function loadSeries(itemId: string) {
         limit: 36
       })
     ).Items.filter((candidate) => candidate.Id !== currentSeries.Id);
+
+    try {
+      similarItems.value = (await api.similar(currentSeries.Id, 20)).Items || [];
+    } catch {
+      similarItems.value = [];
+    }
   } catch (loadError) {
     error.value = loadError instanceof Error ? loadError.message : String(loadError);
     series.value = null;
@@ -122,9 +156,16 @@ async function playItem(item: BaseItemDto) {
 }
 
 async function playSeries() {
-  if (firstEpisode.value) {
-    await playItem(firstEpisode.value);
+  const target = startEpisode.value;
+  if (target) {
+    await playItem(target);
   }
+}
+
+function episodeLabel(ep: BaseItemDto) {
+  const season = ep.ParentIndexNumber ? `S${String(ep.ParentIndexNumber).padStart(2, '0')}` : '';
+  const episode = ep.IndexNumber ? `E${String(ep.IndexNumber).padStart(2, '0')}` : '';
+  return `${season}${episode}`;
 }
 
 async function openGenre(name: string) {
@@ -160,23 +201,7 @@ function episodeThumb(episode: BaseItemDto) {
     :description="error"
   />
 
-  <div v-else-if="series" class="flex flex-col gap-6">
-    <nav class="flex items-center gap-2 text-sm">
-      <UButton
-        color="neutral"
-        variant="ghost"
-        size="xs"
-        icon="i-lucide-arrow-left"
-        @click="router.back()"
-      >
-        返回
-      </UButton>
-      <UIcon name="i-lucide-chevron-right" class="size-3 text-muted" />
-      <span class="text-muted">剧集</span>
-      <UIcon name="i-lucide-chevron-right" class="size-3 text-muted" />
-      <span class="text-highlighted font-medium">{{ series.Name }}</span>
-    </nav>
-
+  <div v-else-if="series" class="flex flex-col gap-10">
     <!-- Hero -->
     <section class="relative overflow-hidden rounded-2xl ring-1 ring-default">
       <img
@@ -206,7 +231,10 @@ function episodeThumb(episode: BaseItemDto) {
         <div class="flex flex-col gap-4">
           <div>
             <p class="text-muted text-xs uppercase tracking-wider">剧集</p>
-            <h1 class="text-highlighted mt-1 text-2xl font-bold sm:text-3xl">{{ series.Name }}</h1>
+            <img v-if="logo" :src="logo" :alt="series.Name" class="mt-1 max-h-16 w-auto" />
+            <h1 v-else class="text-highlighted display-font mt-1 text-2xl font-bold sm:text-3xl">
+              {{ series.Name }}
+            </h1>
           </div>
 
           <div class="flex flex-wrap items-center gap-2">
@@ -240,8 +268,12 @@ function episodeThumb(episode: BaseItemDto) {
           </p>
 
           <div class="flex flex-wrap gap-2">
-            <UButton v-if="firstEpisode" icon="i-lucide-play" size="lg" @click="playSeries">
-              {{ firstEpisode.IndexNumber ? `从 S${firstEpisode.ParentIndexNumber ?? 1}E${firstEpisode.IndexNumber} 开始播放` : '播放' }}
+            <UButton v-if="startEpisode" icon="i-lucide-play" size="lg" @click="playSeries">
+              <template v-if="lastPlayedEpisode">继续观看 {{ episodeLabel(startEpisode) }}</template>
+              <template v-else-if="nextUpEpisode">播放下一集 {{ episodeLabel(startEpisode) }}</template>
+              <template v-else>
+                {{ startEpisode.IndexNumber ? `从 ${episodeLabel(startEpisode)} 开始播放` : '播放' }}
+              </template>
             </UButton>
           </div>
         </div>
@@ -377,6 +409,16 @@ function episodeThumb(episode: BaseItemDto) {
         </div>
       </div>
     </section>
+
+    <!-- 相似 -->
+    <MediaRow
+      v-if="similarItems.length"
+      title="类似剧集"
+      icon="i-lucide-sparkles"
+      :items="similarItems"
+      @play="playItem"
+      @select="openItem"
+    />
 
     <!-- 相关 -->
     <MediaRow

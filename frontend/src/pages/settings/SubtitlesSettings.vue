@@ -104,25 +104,58 @@ function readSubtitleSettings() {
 
       <UCard>
         <template #header>
-          <h3 class="text-highlighted text-sm font-semibold">预览</h3>
+          <div class="flex items-center justify-between">
+            <h3 class="text-highlighted text-sm font-semibold">真实场景预览</h3>
+            <span class="text-muted text-xs">模拟黑色底片 + 亮色底片 + 单行 / 双行</span>
+          </div>
         </template>
-        <div
-          class="relative h-48 overflow-hidden rounded-lg bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900"
-        >
+        <div class="grid gap-3 md:grid-cols-2">
           <div
-            class="absolute left-1/2 -translate-x-1/2 rounded px-4 py-1 text-white transition"
-            :style="{
-              fontFamily: settings.fontFamily,
-              fontSize: `${settings.fontSize}rem`,
-              bottom: `${settings.position}%`,
-              textShadow: settings.stroke
-                ? '0 0 4px rgba(0,0,0,0.9), 0 0 10px rgba(0,0,0,0.8)'
-                : 'none',
-              background: settings.backdrop ? 'rgba(0,0,0,0.45)' : 'transparent',
-              opacity: settings.enabled ? '1' : '0.35'
-            }"
+            class="relative aspect-video overflow-hidden rounded-lg"
+            style="
+              background-image: linear-gradient(135deg, #0f172a, #1e293b 60%, #0f172a),
+                radial-gradient(circle at 20% 20%, #334155 0%, transparent 60%);
+            "
           >
-            这是字幕预览，风格参考 Jellyfin 的客户端字幕设置页。
+            <div
+              class="absolute left-1/2 -translate-x-1/2 rounded px-4 py-1 text-center leading-snug text-white transition"
+              :style="{
+                fontFamily: settings.fontFamily,
+                fontSize: `${settings.fontSize}rem`,
+                bottom: `${settings.position}%`,
+                textShadow: settings.stroke
+                  ? '0 0 4px rgba(0,0,0,0.9), 0 0 10px rgba(0,0,0,0.8)'
+                  : 'none',
+                background: settings.backdrop ? 'rgba(0,0,0,0.45)' : 'transparent',
+                opacity: settings.enabled ? '1' : '0.35'
+              }"
+            >
+              这是字幕预览，风格参考 Jellyfin。<br />
+              可以在这里检查两行文本的换行和间距。
+            </div>
+          </div>
+          <div
+            class="relative aspect-video overflow-hidden rounded-lg"
+            style="
+              background-image: linear-gradient(135deg, #f8fafc, #e2e8f0 60%, #cbd5e1),
+                radial-gradient(circle at 70% 60%, #a5b4fc 0%, transparent 60%);
+            "
+          >
+            <div
+              class="absolute left-1/2 -translate-x-1/2 rounded px-4 py-1 text-center leading-snug text-white transition"
+              :style="{
+                fontFamily: settings.fontFamily,
+                fontSize: `${settings.fontSize}rem`,
+                bottom: `${settings.position}%`,
+                textShadow: settings.stroke
+                  ? '0 0 4px rgba(0,0,0,0.9), 0 0 10px rgba(0,0,0,0.8)'
+                  : 'none',
+                background: settings.backdrop ? 'rgba(0,0,0,0.45)' : 'transparent',
+                opacity: settings.enabled ? '1' : '0.35'
+              }"
+            >
+              明亮底片下的文字描边与底板效果。
+            </div>
           </div>
         </div>
       </UCard>

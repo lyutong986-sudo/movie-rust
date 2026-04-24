@@ -1,16 +1,22 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import MediaCard from '../../components/MediaCard.vue';
 import MediaCardSkeleton from '../../components/MediaCardSkeleton.vue';
+import EmptyState from '../../components/EmptyState.vue';
 import {
   backToParent,
   currentParentName,
+  hydrateParentStack,
   items,
   loadItems,
+  loadLibraryGenres,
+  libraryGenresCache,
   parentStack,
+  resetLibraryFilters,
   selectedLibrary,
   selectLibrary,
+  serializeParentStack,
   state
 } from '../../store/app';
 import type { BaseItemDto } from '../../api/emby';
@@ -32,25 +38,80 @@ const SORT_OPTIONS = [
   { value: 'SortName', label: '名称' },
   { value: 'DateCreated', label: '添加时间' },
   { value: 'ProductionYear', label: '年份' },
+  { value: 'CommunityRating', label: '评分' },
+  { value: 'Random', label: '随机' },
   { value: 'IndexNumber', label: '集数' }
 ];
 
+const yearOptions = computed(() => {
+  const now = new Date().getFullYear();
+  const list: Array<{ label: string; value: number }> = [];
+  for (let y = now; y >= 1960; y -= 1) list.push({ label: String(y), value: y });
+  return list;
+});
+
+const genreOptions = computed(() => {
+  const libraryId = state.selectedLibraryId;
+  if (!libraryId) return [] as Array<{ label: string; value: string }>;
+  return (libraryGenresCache.value[libraryId] || []).map((name) => ({ label: name, value: name }));
+});
+
+const filterBadgeCount = computed(() => {
+  let count = 0;
+  count += state.libraryGenres.length;
+  count += state.libraryYears.length;
+  if (state.libraryFavoritesOnly) count += 1;
+  if (state.libraryOnly4K) count += 1;
+  if (state.libraryOnlyHDR) count += 1;
+  if (state.librarySubtitlesOnly) count += 1;
+  return count;
+});
+
+// 路由 → parent 栈的同步
+// 加入 `?path=a,b,c` 记录 parent 链，刷新时恢复面包屑。
 watch(
   () => route.params.id,
   async (value) => {
-    if (typeof value === 'string' && value) {
+    if (typeof value !== 'string' || !value) return;
+    if (state.selectedLibraryId !== value) {
       await selectLibrary(value);
     }
+    const pathParam = typeof route.query.path === 'string' ? route.query.path : '';
+    await hydrateParentStack(pathParam);
+    await loadItems();
+    await loadLibraryGenres(value);
   },
   { immediate: true }
 );
 
 watch(
-  () => [state.libraryViewType, state.librarySortBy, state.librarySortAscending],
+  () => [
+    state.libraryViewType,
+    state.librarySortBy,
+    state.librarySortAscending,
+    state.libraryGenres.slice(),
+    state.libraryYears.slice(),
+    state.libraryFavoritesOnly,
+    state.libraryOnly4K,
+    state.libraryOnlyHDR,
+    state.librarySubtitlesOnly
+  ],
   async () => {
     if (state.selectedLibraryId) {
       await loadItems();
     }
+  },
+  { deep: true }
+);
+
+// parentStack 变化时同步到 URL
+watch(
+  () => parentStack.value.length,
+  () => {
+    if (!state.selectedLibraryId) return;
+    const path = serializeParentStack();
+    const nextQuery = path ? { ...route.query, path } : { ...route.query, path: undefined };
+    void router.replace({ path: route.path, query: nextQuery });
   }
 );
 
@@ -64,12 +125,10 @@ async function openMedia(item: BaseItemDto) {
       await router.push(`/library/${item.Id}`);
       return;
     }
-
     parentStack.value.push(item);
     await loadItems();
     return;
   }
-
   await router.push(itemRoute(item));
 }
 
@@ -96,7 +155,7 @@ function toggleSortOrder() {
         返回
       </UButton>
       <template v-for="(crumb, index) in breadcrumbs" :key="crumb">
-        <UIcon v-if="index" name="i-lucide-chevron-right" class="size-3 text-muted" />
+        <UIcon v-if="index" name="i-lucide-chevron-right" class="text-muted size-3" />
         <span
           :class="
             index === breadcrumbs.length - 1 ? 'text-highlighted font-medium' : 'text-muted'
@@ -108,20 +167,101 @@ function toggleSortOrder() {
     </nav>
 
     <div
-      class="flex flex-col gap-3 rounded-xl border border-default bg-elevated/20 p-3 sm:flex-row sm:items-center sm:justify-between"
+      class="border-default bg-elevated/20 flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center sm:justify-between"
     >
-      <div>
-        <h2 class="text-highlighted text-base font-semibold">{{ currentParentName }}</h2>
+      <div class="min-w-0">
+        <h2 class="text-highlighted truncate text-base font-semibold">{{ currentParentName }}</h2>
         <p class="text-muted text-xs">{{ items.length }} 个条目</p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <USelect v-model="state.libraryViewType" :items="VIEW_TYPES" size="sm" class="w-32" />
+
+        <UPopover>
+          <UButton
+            color="neutral"
+            variant="soft"
+            size="sm"
+            icon="i-lucide-sliders-horizontal"
+            :badge="filterBadgeCount || undefined"
+          >
+            筛选
+            <UBadge
+              v-if="filterBadgeCount"
+              color="primary"
+              variant="solid"
+              size="xs"
+              class="ms-1"
+            >
+              {{ filterBadgeCount }}
+            </UBadge>
+          </UButton>
+          <template #content>
+            <div class="w-80 space-y-3 p-3">
+              <div>
+                <p class="text-muted mb-1 text-xs font-semibold uppercase tracking-wider">
+                  类型
+                </p>
+                <USelectMenu
+                  v-model="state.libraryGenres"
+                  :items="genreOptions"
+                  value-key="value"
+                  multiple
+                  placeholder="选择类型"
+                  class="w-full"
+                  size="sm"
+                />
+              </div>
+              <div>
+                <p class="text-muted mb-1 text-xs font-semibold uppercase tracking-wider">
+                  年份
+                </p>
+                <USelectMenu
+                  v-model="state.libraryYears"
+                  :items="yearOptions"
+                  value-key="value"
+                  multiple
+                  placeholder="选择年份"
+                  class="w-full"
+                  size="sm"
+                />
+              </div>
+              <USeparator />
+              <div class="space-y-2">
+                <label class="flex items-center gap-2 text-sm">
+                  <UCheckbox v-model="state.libraryFavoritesOnly" />
+                  只显示收藏
+                </label>
+                <label class="flex items-center gap-2 text-sm">
+                  <UCheckbox v-model="state.libraryOnly4K" />
+                  仅 4K 分辨率
+                </label>
+                <label class="flex items-center gap-2 text-sm">
+                  <UCheckbox v-model="state.libraryOnlyHDR" />
+                  仅 HDR / Dolby Vision
+                </label>
+                <label class="flex items-center gap-2 text-sm">
+                  <UCheckbox v-model="state.librarySubtitlesOnly" />
+                  有字幕
+                </label>
+              </div>
+              <div class="flex justify-between pt-1">
+                <UButton size="xs" color="neutral" variant="ghost" @click="resetLibraryFilters">
+                  重置
+                </UButton>
+                <span class="text-muted text-xs">{{ filterBadgeCount }} 个过滤器</span>
+              </div>
+            </div>
+          </template>
+        </UPopover>
+
         <USelect v-model="state.librarySortBy" :items="SORT_OPTIONS" size="sm" class="w-36" />
         <UButton
           color="neutral"
           variant="soft"
           size="sm"
-          :icon="state.librarySortAscending ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow'"
+          :icon="
+            state.librarySortAscending ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow'
+          "
           @click="toggleSortOrder"
         >
           {{ state.librarySortAscending ? '升序' : '降序' }}
@@ -147,15 +287,14 @@ function toggleSortOrder() {
         @select="openMedia"
       />
     </div>
-    <div
+    <EmptyState
       v-else
-      class="flex flex-col items-center gap-2 rounded-xl border border-dashed border-default bg-elevated/20 p-10 text-center"
-    >
-      <UIcon name="i-lucide-inbox" class="size-10 text-muted" />
-      <h3 class="text-highlighted text-lg font-semibold">这里暂时没有内容</h3>
-      <p class="text-muted max-w-md text-sm">
-        可以尝试切换排序、清空筛选，或者先在管理员页面执行一次媒体扫描。
-      </p>
-    </div>
+      icon="i-lucide-inbox"
+      title="这里暂时没有内容"
+      description="可以尝试切换排序、清空筛选，或者先在管理员页面执行一次媒体扫描。"
+      :action-label="filterBadgeCount ? '清空筛选' : ''"
+      action-icon="i-lucide-sliders-horizontal"
+      @action="resetLibraryFilters"
+    />
   </div>
 </template>
