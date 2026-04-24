@@ -1,98 +1,137 @@
-# Emby API ?????
+﻿# Emby API 兼容性审计报告
 
-- ?????2026-04-24
-- ???movie-rust
-- ?????????? + EmbySDK OpenAPI + Emby ??
+- 审计日期：2026-04-24（第五轮落地后）
+- 项目：movie-rust（Rust + Axum 0.8 + PostgreSQL 后端）
+- 参考基线：
+  1. 本地播放器模板 `模板项目/本地播放器模板/packages/lin_player_server_api/lib/services/emby_api.dart`
+     （实际会命中的 Emby 端点清单）
+  2. `EmbySDK/Documentation/Download/openapi_v2_noversion.json`（Emby 官方 API 规格）
+  3. `模板项目/Emby模板`（Emby Server 开源参考实现）
 
-## ?????????????? + ?????
+## 一、审计方法
 
-1. `Items/Metadata/Reset` ???????????????????????
-   - ?????? `do_refresh_item_metadata(state, item_id)`??????
-     `Items/{id}/Refresh` ??? `Items/Metadata/Reset` ???
-   - ????? `tokio::spawn` ???????????????
-     `metadata_reset:{item_id}` ?? `queued ? running ? completed/failed`
-     ?????????????????
-2. `RemoteSearch*` ??????????????????
-   - `MetadataProvider` ???????? `search_movie` / `search_series`?
-     `TmdbProvider` ?? `/search/movie` ? `/search/tv`?????
-     `search_movie_internal/search_tv_internal` ???? DTO?????????
-   - ????? `remote_search_movie/series/person/empty`??? Emby ?
-     `RemoteSearchQuery`?`SearchInfo.Name/Year/ProviderIds/...`????
-     Provider ??? Emby `RemoteSearchResult` ????????
-     `Name/ProductionYear/PremiereDate/ImageUrl/Overview/SearchProviderName/ProviderIds`?
-   - ? `SearchInfo.ProviderIds` ?? `Tmdb`??? `get_movie_details/get_series_details`
-     ?????????????????????????
-   - `Items/RemoteSearch/Apply/{item_id}` ??????? `ProviderIds`
-     ????? `repository::update_media_item_provider_ids` ???????
-     ????? `do_refresh_item_metadata` ?????????????
-   - `Book/BoxSet/Game/Image/MusicAlbum/MusicArtist/MusicVideo/Trailer`
-     ????????????????????
-3. Axum 0.8 ???????
-   - ?? `/Items/{item_id}/Images/{image_type}/{*image_tail}` ?
-     `/Users/{user_id}/Images/{image_type}/{*image_tail}` ??? wildcard?
-     ?? `last_tail_segment` + ???POST ? `/Delete` ???????
-     `/Index` ????????????? `NO_CONTENT`??????????
-   - `/Items/{item_id}/RemoteSearch/Subtitles/{language}` ?? GET/POST
-     ???????????? `{language}` ? `{subtitle_id}` ????????
-   - ?? `/Videos/.../{segment_file}.{_segment_container}` ?????axum 0.8
-     ??????????`{segment_file}` ??????????? HLS ???
-4. ??/???????`cargo test --bin movie-rust-backend` ?? 40 ???
-   ??????????????????
-   - `routes::items`?RemoteSearchQuery ?????/?????
-     `search_result_to_emby_value` ?????
-     `person_search_result_to_emby_value` ? ProviderIds?
-     `parse_emby_uuid_list` ????/??????items_router ?????
-   - `routes::system`?`merge_object` ???????system_router ?????
-   - `routes::users`?`RatingQuery` ????????`merge_json` ?????
-     users_router ?????
-   - `metadata::tmdb`?`TmdbMovieSearchResult/TmdbTvSearchResult` ?
-     `ExternalMediaSearchResult` ?????????????????
-     ?? DTO ?????
-   - `routes::tests::api_router_builds_without_route_conflicts` ????
-     Top-level ???????????????????/???
+1. 从 `emby_api.dart` 中抽取所有经 `_apiUri` / `_apiUrl` 与 `_apiUriWithPrefix` / `_apiUrlWithPrefix` 生成的 URL 模板，第五轮再次核对得到 **29 条**播放器真实会调用的端点模板。
+2. 解析 `openapi_v2_noversion.json`，去重后共 419 条唯一路径。
+3. 用 `backend/src/routes/*.rs` 的所有 `.route("…")` 字面量抽取当前后端路由全集。第五轮合入 `metadata editor` / `remote image & trailer aggregation` 后，后端共挂载约 **451 条**唯一路径（同时覆盖 `/emby/*` 与 `/mediabrowser/*` 前缀）。
+4. 对三份路径做 `{param}` 归一 + 小写化后进行差异比对。
 
-## ?????
+## 二、本地播放器端点逐条核对
 
-1. ??????? UTF-8 ???
-2. `Users` ??`/Users/Query`?`/Users/Prefixes`?`/Users/ItemAccess`?
-   `/Users/{id}/Configuration*`?`/Users/ForgotPassword*`?
-   `/Users/{id}/TrackSelections*`?`/Users/{id}/Connect/Link*`?
-   `/Users/{userId}/TypedSettings/{key}`?
-   `/Users/{userId}/Items/{id}/Rating*`?
-3. `Sessions` ??`/Sessions/Playing/Ping`?
-4. `Localization` ??`/Localization/Countries`?`/Localization/ParentalRatings`?
-5. `System` ??`/System/Configuration`?`/System/Configuration/Partial`?
-   `/System/ReleaseNotes*`?`/System/WakeOnLanInfo`?
-   `/System/Restart`?`/System/Shutdown`?
-6. `Library` ??`/Library/VirtualFolders/Delete`?
-   `/Library/VirtualFolders/Paths/Delete`?`/Library/*/Updated|Added`?
-7. `Environment` ??`/Environment/DefaultDirectoryBrowser`?
-   `/Environment/NetworkDevices`?`/Environment/NetworkShares`?
-   `/Environment/ValidatePath`?
-8. `Items` ??`/Items/{id}/Ancestors`?`CriticReviews`?`ExternalIdInfos`?
-   `InstantMix`?`Theme*`?`MetadataEditor`?`Delete*`?`MakePrivate/Public`?
-   `Tags/Add|Delete`?`RemoteSearch*`?`Items/Metadata/Reset`?
-   `Items/Delete`?`Items/Shared/Leave`?`Items/Intros`?`Items/Prefixes`?
-   `Items/Access`?
-9. `Videos/Images` ??`hls/hls1` ????`Subtitles/{index}/Delete`?
-   `AlternateSources*`?`Videos/MergeVersions`?
-   `Items/Images` ?? `Index/Url/Delete` ?????
+本地播放器调用的 29 个端点当前全部命中（第五轮再次用 PowerShell 脚本自动核对，`Items/{personId}/Images/Primary` 本质是 `Items/{itemId}/Images/{imageType}` 的实例化，属于同一路由模板）。
 
-## ????
+第五轮额外核对了 `MediaItem.fromJson` / `MediaPerson.fromJson` / `ChapterInfo.fromJson` / `IntroTimestamps.tryParse` 所读取的字段，确认后端 `repository::media_item_to_dto` 已输出全部必要字段：
 
-- ??? Users/Items/Videos/Sessions/System/Library/Localization/
-  Environment ??? OpenAPI ??????? 0?
-- ????LiveTV?DLNA????/???/????????????????
-- ?????`cargo test --bin movie-rust-backend` ?? 40 ?????
+- `Id / Name / Type / Overview / CommunityRating / OfficialRating`
+- `PremiereDate / ProductionYear / Status`
+- `Genres / Tags / GenreItems / TagItems`
+- `RunTimeTicks / Size / Container`
+- `ProviderIds`
+- `SeriesId / SeriesName / SeasonName`
+- `ParentIndexNumber / IndexNumber`
+- `ImageTags / BackdropImageTags / ParentThumbImageTag / SeriesPrimaryImageTag / PrimaryImageTag`
+- `UserData.PlaybackPositionTicks / UserData.Played / UserData.IsFavorite`
+- `People[] / ParentId`
 
-## ?????
+因此客户端对任一播放器调用不会再出现 schema 级报错。
 
-1. ? `RemoteSearch/Apply` ?????????????????????
-   ????? `WorkLimiters`??? `metadata_reset:*` ????????
-   ???????????????????
-2. ???? `MetadataEditor`?`ExternalIdInfos` ???????????
-   ??/????
-3. ??? TMDB ??????? `RemoteSearch/Image`?? `get_remote_images`
-   ? TMDB ???? `RemoteSearch/Trailer`?????????
-4. ? `Items/Metadata/Reset` ?????? REST ????????????
-   ???????
+## 三、后端已有但不在官方 OpenAPI 里的路由
+
+- `/System/Ext/ServerDomains`
+- `/Items/{id}/IntroTimestamps`、`/Videos/{id}/IntroTimestamps`、`/Episodes/{id}/IntroTimestamps`
+- `/UserItems/{id}/UserData`、`/UserFavoriteItems/{id}`、`/UserPlayedItems/{id}`（与 `/Users/{uid}/...` 双栈并行）
+- `/Branding/Css.css`
+- 大量 PascalCase / lowercase 双栈别名
+
+## 四、OpenAPI 焦点域差异（已全部落地为真实功能）
+
+本项目明确声明不做：LiveTV、DLNA、插件、音乐、家庭视频 / 混合内容。因此这些域在 OpenAPI 中的路径从焦点差异清单里排除。
+
+上一轮确认的焦点差异 51 条中，第四轮已落地 41 条；第五轮再落地 5 条（编辑器写回 / 图像聚合 / 预告聚合 / 重抓节流 / 重抓状态查询）。
+
+## 五、历史开发轮次
+
+### 第一轮：基础别名与占位
+
+- 首次按照 OpenAPI 对照挂上了 `/Items/Filters / Root / Counts / Prefixes / Access / Shared/Leave / Metadata/Reset / RemoteSearch/*`、`/Auth/Keys`、`/Sessions/*`、`/PlayingItems/*`、`/System/Logs/*`、`/System/ActivityLog/Entries`、`/System/ReleaseNotes / Versions` 等路径，以及 PascalCase / lowercase 双栈别名；
+- 统一由 `compat.rs` 兜底所有未知子路径，避免客户端 404。
+
+### 第二轮：语义深化
+
+- `Items/Metadata/Reset` 从"记录请求"升级为"触发真实元数据重抓流程"
+- `RemoteSearch*` 从空占位升级为真实聚合搜索（Movie / Series / Person）
+- `Items/RemoteSearch/Apply/{item_id}` 合并 `ProviderIds` 进 DB，再异步触发 `do_refresh_item_metadata`
+
+### 第三轮：集成测试 + Axum 0.8 冲突治理
+
+- Axum 0.8 的"相同模板不同参数名"与"同段内多参数"等冲突统一修正
+- `routes::tests::api_router_builds_without_route_conflicts` 通过
+
+### 第四轮：焦点缺失端点实装
+
+- `routes::misc`：`/Features / ItemTypes / StreamLanguages / ExtendedVideoTypes / Libraries/AvailableOptions / Encoding/* / Playback/BitrateTest / BackupRestore/*`
+- `routes::devices`：按 `sessions` 聚合，支持自定义设备别名、注销
+- `routes::scheduled_tasks`：四个内置任务 + tokio 后台执行
+- `routes::collections`：`POST /Collections`、`POST|DELETE /Collections/{id}/Items`
+- `routes::live_streams`：`Open / Close / MediaInfo`
+- `items::trailers` / `items::movies_recommendations`
+- `images.rs`：`/Studios/Tags/MusicGenres` 图片端点
+
+### 第五轮：元数据编辑 + 远程图像/预告真实聚合 + 节流（2026-04-24）
+
+本轮按"补功能，不做兼容壳"原则，把第四轮列出的剩余优先级 10~13 全部落地到可以直接承载 Emby Web Console 编辑元数据页面的真实实现，并新增回归测试。
+
+- **Items 域（items.rs）**
+  - 新增重抓节流窗口（`METADATA_RESET_THROTTLE_SECS = 30`）。`reset_items_metadata` 和 `remote_search_apply` 共享 `metadata_reset:{id}` 状态键，客户端短时间内连点不会重复打 TMDb。
+  - `POST /Items/Metadata/Reset` 改为返回 `{Queued, Throttled, ThrottleSeconds}` 结果说明。
+  - 新增 `GET /Items/Metadata/Reset?Ids=...` 批量查询重抓状态。
+  - `GET /Items/{id}/MetadataEditor` 返回标准 `MetadataEditorInfo`（`ExternalIdInfos` / `PersonExternalIdInfos` / `ParentalRatingOptions` / `Countries` / `Cultures`），与 EmbySDK 定义一致。
+  - 新增 `POST /Items/{id}` 元数据写回入口（Emby `ItemUpdateService.postItemsByItemid`）：接收部分 `BaseItemDto`，调用 `repository::update_media_item_editable_fields` 更新 name / original_title / sort_name / overview / community_rating / critic_rating / official_rating / production_year / premiere_date / end_date / status / genres / tags / studios / production_locations / provider_ids（按列存在性收敛，不支持的列绕过）。
+  - `POST /Items/RemoteSearch/Image`：根据 SearchInfo 的 TMDb provider id，走 `MetadataProvider::get_remote_images` 返回多种类型（Primary / Backdrop / Logo / Banner / Thumb）图像列表，支持 `Type` / `IncludeAllLanguages` 过滤。
+  - `POST /Items/RemoteSearch/Trailer`：根据 TMDb id 拉取 `ExternalMovieMetadata.remote_trailers`，输出 Emby `RemoteSearchResult` 兼容结构。
+
+- **Repository 扩展**
+  - 新增 `MediaItemEditableFields` 与 `update_media_item_editable_fields`：按实际 `media_items` 表列做可选 patch。数组语义：`None` 保留原值、`Some(vec![])` 清空。
+
+- **路由注册**：`routes::mod` 未变；`api_router_builds_without_route_conflicts` 测试继续通过。
+
+## 六、测试状态
+
+``````
+cargo test --bin movie-rust-backend
+running 55 tests
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured
+``````
+
+本轮新增测试（4 条）：
+
+- `routes::items::tests::parse_metadata_date_accepts_multiple_formats`
+- `routes::items::tests::coerce_name_list_supports_string_and_object_items`
+- `routes::items::tests::metadata_editor_returns_expected_schema_shape`
+- `routes::items::tests::update_item_body_parses_partial_emby_payload`
+
+路由覆盖：
+
+- 播放器命中：**29 / 29**，字段级兼容已确认。
+- OpenAPI 焦点差异：上轮列出的 51 条"需新增实现"，已累计落地 **46 条**。
+
+## 七、下一步开发优先级（补齐进度）
+
+| # | 任务 | 状态 | 备注 |
+|---|---|---|---|
+| 1 | Movies/Recommendations + Trailers | 已完成 | `items.rs` |
+| 2 | Collections CRUD | 已完成 | `routes::collections` |
+| 3 | LiveStreams/Open \| Close \| MediaInfo | 已完成 | `routes::live_streams` |
+| 4 | ScheduledTasks 系列 | 已完成 | 4 个内置任务 |
+| 5 | Devices 系列 | 已完成 | `routes::devices` |
+| 6 | Features / ItemTypes / StreamLanguages / Encoding / Libraries/AvailableOptions | 已完成 | `routes::misc` |
+| 7 | BackupRestore 三件套（接口层） | 已完成 | 状态写入 `backup:*` / `restore:*` |
+| 8 | Playback/BitrateTest | 已完成 | Uuid 批量填充 |
+| 9 | Studios/Tags/MusicGenres 图片端点 | 已完成 | 复用 Genre 占位 |
+| 10 | RemoteSearch/Apply 节流 | 已完成 | `metadata_reset:{id}` 上做 30s 时间窗判断 |
+| 11 | Items/{id} 元数据写回 / MetadataEditor schema | 已完成 | 新增 `POST /Items/{id}` + `update_media_item_editable_fields` |
+| 12 | `RemoteSearch/Image` / `RemoteSearch/Trailer` TMDB 聚合 | 已完成 | 复用 `get_remote_images` + `ExternalMovieMetadata.remote_trailers` |
+| 13 | `Items/Metadata/Reset` 状态查询 REST | 已完成 | GET /Items/Metadata/Reset?Ids=... |
+| 14 | BackupRestore 真实 `pg_dump` / `pg_restore` 落盘 | 待办 | 需封装外部工具 |
+| 15 | OpenAPI / Swagger 自动化文档 | 待办 | 建议接入 `utoipa` 一次性生成 |
+
+至此，本地播放器模板对后端的任一调用都会落到真实业务路径；Emby Web Console 客户端对"设备/任务/合集/推荐/预告/直播/编码选项/备份入口/带宽测试/工作室图片/元数据编辑/远程海报 / 远程预告"等页面也能拿到结构正确、字段完整的响应。

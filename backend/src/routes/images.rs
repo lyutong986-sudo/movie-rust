@@ -90,6 +90,30 @@ pub fn router() -> Router<AppState> {
             "/Genres/{name}/Images/{image_type}/{*image_tail}",
             get(get_genre_image_with_tail).head(get_genre_image_with_tail),
         )
+        .route(
+            "/Studios/{name}/Images/{image_type}",
+            get(get_genre_image).head(get_genre_image),
+        )
+        .route(
+            "/Studios/{name}/Images/{image_type}/{*image_tail}",
+            get(get_genre_image_with_tail).head(get_genre_image_with_tail),
+        )
+        .route(
+            "/Tags/{name}/Images/{image_type}",
+            get(get_genre_image).head(get_genre_image),
+        )
+        .route(
+            "/Tags/{name}/Images/{image_type}/{*image_tail}",
+            get(get_genre_image_with_tail).head(get_genre_image_with_tail),
+        )
+        .route(
+            "/MusicGenres/{name}/Images/{image_type}",
+            get(get_genre_image).head(get_genre_image),
+        )
+        .route(
+            "/MusicGenres/{name}/Images/{image_type}/{*image_tail}",
+            get(get_genre_image_with_tail).head(get_genre_image_with_tail),
+        )
         .route("/Images/Remote", get(get_remote_image))
         .route(
             "/Users/{user_id}/Images/{image_type}",

@@ -99,7 +99,7 @@ pub fn router() -> Router<AppState> {
             "/Users/{user_id}/PlayedItems/{item_id}/Delete",
             post(legacy_mark_unplayed),
         )
-        .route("/Items/{item_id}", get(item_by_id))
+        .route("/Items/{item_id}", get(item_by_id).post(update_item))
         .route("/Items/{item_id}/Ancestors", get(item_ancestors))
         .route("/Items/{item_id}/CriticReviews", get(item_critic_reviews))
         .route("/Items/{item_id}/ExternalIdInfos", get(item_external_id_infos))
@@ -146,24 +146,30 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Prefixes", get(item_prefixes))
         .route("/Items/Access", get(items_access))
         .route("/Items/Delete", post(delete_items_bulk))
-        .route("/Items/Metadata/Reset", post(reset_items_metadata))
+        .route(
+            "/Items/Metadata/Reset",
+            get(query_items_metadata_reset_status).post(reset_items_metadata),
+        )
         .route("/Items/RemoteSearch/Apply/{item_id}", post(remote_search_apply))
         .route("/Items/RemoteSearch/Book", post(remote_search_empty))
         .route("/Items/RemoteSearch/BoxSet", post(remote_search_empty))
         .route("/Items/RemoteSearch/Game", post(remote_search_empty))
-        .route("/Items/RemoteSearch/Image", post(remote_search_empty))
+        .route("/Items/RemoteSearch/Image", post(remote_search_image))
         .route("/Items/RemoteSearch/Movie", post(remote_search_movie))
         .route("/Items/RemoteSearch/MusicAlbum", post(remote_search_empty))
         .route("/Items/RemoteSearch/MusicArtist", post(remote_search_empty))
         .route("/Items/RemoteSearch/MusicVideo", post(remote_search_empty))
         .route("/Items/RemoteSearch/Person", post(remote_search_person))
         .route("/Items/RemoteSearch/Series", post(remote_search_series))
-        .route("/Items/RemoteSearch/Trailer", post(remote_search_empty))
+        .route("/Items/RemoteSearch/Trailer", post(remote_search_trailer))
         .route("/Items/Shared/Leave", post(items_shared_leave))
         .route("/Items/{item_id}/Similar", get(get_similar_items))
         .route("/Movies/{item_id}/Similar", get(get_similar_items))
         .route("/Shows/{item_id}/Similar", get(get_similar_items))
         .route("/Trailers/{item_id}/Similar", get(get_similar_items))
+        .route("/Trailers", get(trailers))
+        .route("/Movies/Recommendations", get(movies_recommendations))
+        .route("/movies/recommendations", get(movies_recommendations))
 }
 
 async fn user_views(
@@ -1547,11 +1553,279 @@ async fn item_metadata_editor(
 ) -> Result<Json<Value>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
-    let item = item_dto(&state, session.user_id, item_id).await?;
+    // 访问控制：非管理员仍可读取以便客户端展示详情，但后端实际写回由 `update_item` 把关。
+    let _ = item_dto(&state, session.user_id, item_id).await?;
     Ok(Json(json!({
-        "Item": item.0,
-        "CanEdit": session.is_admin
+        // Emby `MetadataEditorInfo` schema。
+        "ExternalIdInfos": external_id_infos_catalog(false),
+        "PersonExternalIdInfos": external_id_infos_catalog(true),
+        "ParentalRatingOptions": parental_rating_options(),
+        "Countries": country_options(),
+        "Cultures": culture_options(),
     })))
+}
+
+fn external_id_infos_catalog(for_person: bool) -> Vec<Value> {
+    // 后端实际支持的外部 id provider。与 `TmdbProvider` / NFO 解析能力一致。
+    // Emby Web Console 的"编辑元数据"-"ID" 区块用本清单渲染下拉选项。
+    let mut infos = vec![
+        json!({
+            "Name": "TheMovieDb",
+            "Key": "Tmdb",
+            "Website": "https://www.themoviedb.org",
+            "UrlFormatString": if for_person {
+                "https://www.themoviedb.org/person/{0}"
+            } else {
+                "https://www.themoviedb.org/movie/{0}"
+            },
+            "IsSupportedAsIdentifier": true
+        }),
+        json!({
+            "Name": "IMDb",
+            "Key": "Imdb",
+            "Website": "https://www.imdb.com",
+            "UrlFormatString": if for_person {
+                "https://www.imdb.com/name/{0}"
+            } else {
+                "https://www.imdb.com/title/{0}"
+            },
+            "IsSupportedAsIdentifier": true
+        }),
+    ];
+    if !for_person {
+        infos.push(json!({
+            "Name": "TheTVDB",
+            "Key": "Tvdb",
+            "Website": "https://thetvdb.com",
+            "UrlFormatString": "https://thetvdb.com/?tab=series&id={0}",
+            "IsSupportedAsIdentifier": false
+        }));
+    }
+    infos
+}
+
+fn parental_rating_options() -> Vec<Value> {
+    // 常用分级映射。Emby 使用 `(Name, Value)` 键值对。
+    let ratings: &[(&str, i32)] = &[
+        ("G", 1),
+        ("PG", 5),
+        ("PG-13", 7),
+        ("R", 9),
+        ("NC-17", 11),
+        ("NR", 0),
+        ("TV-Y", 1),
+        ("TV-Y7", 3),
+        ("TV-G", 2),
+        ("TV-PG", 5),
+        ("TV-14", 7),
+        ("TV-MA", 11),
+    ];
+    ratings
+        .iter()
+        .map(|(name, value)| json!({ "Name": name, "Value": value }))
+        .collect()
+}
+
+fn country_options() -> Vec<Value> {
+    // 播放器模板里的 `metadataCountryCode`/`ProductionLocations` 选项。
+    const ENTRIES: &[(&str, &str, &str, &str)] = &[
+        ("CN", "China", "CHN", "Asia"),
+        ("US", "United States", "USA", "NorthAmerica"),
+        ("JP", "Japan", "JPN", "Asia"),
+        ("KR", "South Korea", "KOR", "Asia"),
+        ("GB", "United Kingdom", "GBR", "Europe"),
+        ("FR", "France", "FRA", "Europe"),
+        ("DE", "Germany", "DEU", "Europe"),
+        ("IT", "Italy", "ITA", "Europe"),
+        ("ES", "Spain", "ESP", "Europe"),
+        ("RU", "Russia", "RUS", "Europe"),
+        ("HK", "Hong Kong", "HKG", "Asia"),
+        ("TW", "Taiwan", "TWN", "Asia"),
+        ("IN", "India", "IND", "Asia"),
+        ("CA", "Canada", "CAN", "NorthAmerica"),
+        ("AU", "Australia", "AUS", "Oceania"),
+        ("BR", "Brazil", "BRA", "SouthAmerica"),
+    ];
+    ENTRIES
+        .iter()
+        .map(|(code, name, three, region)| {
+            json!({
+                "Name": name,
+                "DisplayName": name,
+                "TwoLetterISORegionName": code,
+                "ThreeLetterISORegionName": three,
+                "Region": region,
+            })
+        })
+        .collect()
+}
+
+fn culture_options() -> Vec<Value> {
+    const ENTRIES: &[(&str, &str, &str, &str)] = &[
+        ("zh-CN", "中文(简体)", "zho", "chi"),
+        ("zh-TW", "中文(繁體)", "zho", "chi"),
+        ("en-US", "English (United States)", "eng", "eng"),
+        ("en-GB", "English (United Kingdom)", "eng", "eng"),
+        ("ja-JP", "日本語", "jpn", "jpn"),
+        ("ko-KR", "한국어", "kor", "kor"),
+        ("fr-FR", "Français", "fra", "fre"),
+        ("de-DE", "Deutsch", "deu", "ger"),
+        ("es-ES", "Español", "spa", "spa"),
+        ("it-IT", "Italiano", "ita", "ita"),
+        ("ru-RU", "Русский", "rus", "rus"),
+        ("pt-BR", "Português (Brasil)", "por", "por"),
+        ("th-TH", "ไทย", "tha", "tha"),
+        ("vi-VN", "Tiếng Việt", "vie", "vie"),
+    ];
+    ENTRIES
+        .iter()
+        .map(|(tag, name, three_letter, two_letter_b)| {
+            json!({
+                "Name": name,
+                "DisplayName": name,
+                "TwoLetterISOLanguageName": tag.split('-').next().unwrap_or(tag),
+                "ThreeLetterISOLanguageName": three_letter,
+                "ThreeLetterISOLanguageNames": [three_letter, two_letter_b],
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+struct UpdateItemBody {
+    name: Option<String>,
+    original_title: Option<String>,
+    sort_name: Option<String>,
+    overview: Option<String>,
+    community_rating: Option<f64>,
+    critic_rating: Option<f64>,
+    official_rating: Option<String>,
+    production_year: Option<i32>,
+    premiere_date: Option<String>,
+    end_date: Option<String>,
+    status: Option<String>,
+    genres: Option<Vec<Value>>,
+    tags: Option<Vec<Value>>,
+    studios: Option<Vec<Value>>,
+    production_locations: Option<Vec<String>>,
+    genre_items: Option<Vec<Value>>,
+    tag_items: Option<Vec<Value>>,
+    provider_ids: Option<Value>,
+    #[serde(alias = "LockedFields")]
+    _locked_fields: Option<Vec<String>>,
+}
+
+fn coerce_name_list(primary: &Option<Vec<Value>>, fallback: &Option<Vec<Value>>) -> Option<Vec<String>> {
+    let source = primary.as_ref().or(fallback.as_ref())?;
+    let mut out: Vec<String> = Vec::new();
+    for value in source {
+        let name = if let Some(s) = value.as_str() {
+            Some(s.to_string())
+        } else if let Some(obj) = value.as_object() {
+            obj.get("Name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+        if let Some(name) = name {
+            let trimmed = name.trim().to_string();
+            if !trimmed.is_empty() && !out.iter().any(|existing| existing.eq_ignore_ascii_case(&trimmed)) {
+                out.push(trimmed);
+            }
+        }
+    }
+    Some(out)
+}
+
+fn parse_metadata_date(raw: &str) -> Option<chrono::NaiveDate> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Emby 客户端常见格式：ISO date / RFC3339 datetime。
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return Some(date);
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%m/%d/%Y") {
+        return Some(date);
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.date_naive());
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
+        return Some(dt.date());
+    }
+    None
+}
+
+/// POST `/Items/{ItemId}` — Emby "保存元数据编辑" 入口。
+///
+/// 接受 Emby 客户端的 BaseItemDto 局部更新，仅把用户可编辑的字段写回数据库。
+/// 其它（如 `Path`、`RunTimeTicks`）属于扫描器/探测器输出，这里不允许篡改。
+async fn update_item(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(item_id_str): Path<String>,
+    Json(body): Json<UpdateItemBody>,
+) -> Result<StatusCode, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let item_id = emby_id_to_uuid(&item_id_str)
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    ensure_media_item_exists(&state, item_id).await?;
+
+    let provider_ids_value = body.provider_ids.as_ref().and_then(|v| {
+        if let Some(obj) = v.as_object() {
+            // 过滤掉空值，保留 string / number 转字符串。
+            let mut cleaned = serde_json::Map::new();
+            for (k, v) in obj {
+                let as_str = v
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .or_else(|| v.as_i64().map(|id| id.to_string()))
+                    .or_else(|| v.as_f64().map(|id| id.to_string()));
+                if let Some(s) = as_str {
+                    let trimmed = s.trim().to_string();
+                    if !trimmed.is_empty() {
+                        cleaned.insert(k.clone(), Value::String(trimmed));
+                    }
+                }
+            }
+            if cleaned.is_empty() {
+                None
+            } else {
+                Some(Value::Object(cleaned))
+            }
+        } else {
+            None
+        }
+    });
+
+    let updates = repository::MediaItemEditableFields {
+        name: body.name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        original_title: body.original_title,
+        sort_name: body.sort_name,
+        overview: body.overview,
+        community_rating: body.community_rating,
+        critic_rating: body.critic_rating,
+        official_rating: body.official_rating,
+        production_year: body.production_year,
+        premiere_date: body.premiere_date.as_deref().and_then(parse_metadata_date),
+        end_date: body.end_date.as_deref().and_then(parse_metadata_date),
+        status: body.status,
+        genres: coerce_name_list(&body.genre_items, &body.genres),
+        tags: coerce_name_list(&body.tag_items, &body.tags),
+        studios: coerce_name_list(&body.studios, &None),
+        production_locations: body.production_locations,
+        provider_ids: provider_ids_value,
+    };
+
+    repository::update_media_item_editable_fields(&state.pool, item_id, &updates).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_item(
@@ -1769,95 +2043,180 @@ async fn delete_items_bulk(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 节流窗口（秒）：在 `CompletedAt` / `StartedAt` 之后的这段时间内，
+/// 重复的元数据重抓请求会被合并为同一次，避免客户端反复点击时把
+/// TMDb 配额打爆。
+const METADATA_RESET_THROTTLE_SECS: i64 = 30;
+
+/// 判断该条目是否应跳过重新排队。若返回 true，调用方应复用已有的
+/// `metadata_reset:{id}` 状态而不是再起一个 tokio 任务。
+pub(crate) async fn is_metadata_reset_throttled(
+    state: &AppState,
+    item_id: Uuid,
+) -> Result<bool, AppError> {
+    let Some(value) =
+        repository::get_setting_value(&state.pool, &format!("metadata_reset:{item_id}")).await?
+    else {
+        return Ok(false);
+    };
+    let status = value
+        .get("Status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if status == "queued" || status == "running" {
+        return Ok(true);
+    }
+    // 已经完成 / 失败时，检查是否仍在节流窗口内。
+    let now = chrono::Utc::now();
+    for key in ["CompletedAt", "StartedAt", "RequestedAt"] {
+        if let Some(ts) = value.get(key).and_then(|v| v.as_str()) {
+            if let Ok(when) = chrono::DateTime::parse_from_rfc3339(ts) {
+                let age = now.signed_duration_since(when.with_timezone(&chrono::Utc));
+                if age.num_seconds() >= 0 && age.num_seconds() < METADATA_RESET_THROTTLE_SECS {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// 真正排队执行一次元数据重抓，并把 `metadata_reset:{id}` 状态机推进。
+pub(crate) async fn enqueue_metadata_reset(
+    state: &AppState,
+    item_id: Uuid,
+    requester: Uuid,
+) -> Result<(), AppError> {
+    let requested_at = chrono::Utc::now();
+    let status_key = format!("metadata_reset:{item_id}");
+    repository::set_setting_value(
+        &state.pool,
+        &status_key,
+        json!({
+            "RequestedAt": requested_at.to_rfc3339(),
+            "RequestedBy": requester.to_string(),
+            "Status": "queued"
+        }),
+    )
+    .await?;
+
+    let state_clone = state.clone();
+    let status_key_clone = status_key.clone();
+    tokio::spawn(async move {
+        let started_at = chrono::Utc::now();
+        let _ = repository::set_setting_value(
+            &state_clone.pool,
+            &status_key_clone,
+            json!({
+                "RequestedAt": requested_at.to_rfc3339(),
+                "RequestedBy": requester.to_string(),
+                "StartedAt": started_at.to_rfc3339(),
+                "Status": "running"
+            }),
+        )
+        .await;
+
+        match do_refresh_item_metadata(&state_clone, item_id).await {
+            Ok(()) => {
+                let _ = repository::set_setting_value(
+                    &state_clone.pool,
+                    &status_key_clone,
+                    json!({
+                        "RequestedAt": requested_at.to_rfc3339(),
+                        "RequestedBy": requester.to_string(),
+                        "StartedAt": started_at.to_rfc3339(),
+                        "CompletedAt": chrono::Utc::now().to_rfc3339(),
+                        "Status": "completed"
+                    }),
+                )
+                .await;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    item_id = %item_id,
+                    ?err,
+                    "后台触发远程元数据刷新失败"
+                );
+                let _ = repository::set_setting_value(
+                    &state_clone.pool,
+                    &status_key_clone,
+                    json!({
+                        "RequestedAt": requested_at.to_rfc3339(),
+                        "RequestedBy": requester.to_string(),
+                        "StartedAt": started_at.to_rfc3339(),
+                        "CompletedAt": chrono::Utc::now().to_rfc3339(),
+                        "Status": "failed",
+                        "Error": err.to_string()
+                    }),
+                )
+                .await;
+            }
+        }
+    });
+    Ok(())
+}
+
 async fn reset_items_metadata(
     session: AuthSession,
     State(state): State<AppState>,
     Query(query): Query<ItemsQuery>,
-) -> Result<StatusCode, AppError> {
+) -> Result<Json<Value>, AppError> {
     if !session.is_admin {
         return Err(AppError::Forbidden);
     }
     let item_ids = parse_emby_uuid_list(query.ids.as_deref());
     if item_ids.is_empty() {
-        return Ok(StatusCode::NO_CONTENT);
+        return Ok(Json(json!({ "Queued": [], "Throttled": [] })));
     }
 
-    // 记录请求（供审计及离线回放），再在后台异步触发真实的元数据重抓流程。
-    let requested_at = chrono::Utc::now();
-    for item_id in &item_ids {
-        if let Err(err) = repository::set_setting_value(
-            &state.pool,
-            &format!("metadata_reset:{item_id}"),
-            json!({
-                "RequestedAt": requested_at,
-                "RequestedBy": session.user_id.to_string(),
-                "Status": "queued"
-            }),
-        )
-        .await
-        {
+    let mut queued: Vec<String> = Vec::new();
+    let mut throttled: Vec<String> = Vec::new();
+    for item_id in item_ids {
+        if is_metadata_reset_throttled(&state, item_id).await? {
+            throttled.push(uuid_to_emby_guid(&item_id));
+            continue;
+        }
+        if let Err(err) = enqueue_metadata_reset(&state, item_id, session.user_id).await {
             tracing::warn!(item_id = %item_id, ?err, "记录元数据重抓请求失败");
+            continue;
         }
+        queued.push(uuid_to_emby_guid(&item_id));
     }
+    Ok(Json(json!({
+        "Queued": queued,
+        "Throttled": throttled,
+        "ThrottleSeconds": METADATA_RESET_THROTTLE_SECS,
+    })))
+}
 
-    let state_clone = state.clone();
-    let requester = session.user_id;
-    tokio::spawn(async move {
-        for item_id in item_ids {
-            let status_key = format!("metadata_reset:{item_id}");
-            let started_at = chrono::Utc::now();
-            let _ = repository::set_setting_value(
-                &state_clone.pool,
-                &status_key,
-                json!({
-                    "RequestedAt": requested_at,
-                    "RequestedBy": requester.to_string(),
-                    "StartedAt": started_at,
-                    "Status": "running"
-                }),
-            )
-            .await;
-
-            match do_refresh_item_metadata(&state_clone, item_id).await {
-                Ok(()) => {
-                    let _ = repository::set_setting_value(
-                        &state_clone.pool,
-                        &status_key,
-                        json!({
-                            "RequestedAt": requested_at,
-                            "RequestedBy": requester.to_string(),
-                            "StartedAt": started_at,
-                            "CompletedAt": chrono::Utc::now(),
-                            "Status": "completed"
-                        }),
-                    )
-                    .await;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        item_id = %item_id,
-                        ?err,
-                        "后台触发远程元数据刷新失败"
-                    );
-                    let _ = repository::set_setting_value(
-                        &state_clone.pool,
-                        &status_key,
-                        json!({
-                            "RequestedAt": requested_at,
-                            "RequestedBy": requester.to_string(),
-                            "StartedAt": started_at,
-                            "CompletedAt": chrono::Utc::now(),
-                            "Status": "failed",
-                            "Error": err.to_string()
-                        }),
-                    )
-                    .await;
-                }
-            }
-        }
-    });
-
-    Ok(StatusCode::NO_CONTENT)
+/// GET `/Items/Metadata/Reset` — 按 `Ids=...` 批量查询重抓状态。
+///
+/// Emby 客户端 "刷新中/已完成" 提示面板用于拉取当前重抓进度。
+async fn query_items_metadata_reset_status(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<Value>, AppError> {
+    if !session.is_admin {
+        return Err(AppError::Forbidden);
+    }
+    let item_ids = parse_emby_uuid_list(query.ids.as_deref());
+    let mut items = Vec::with_capacity(item_ids.len());
+    for item_id in item_ids {
+        let status =
+            repository::get_setting_value(&state.pool, &format!("metadata_reset:{item_id}"))
+                .await?
+                .unwrap_or_else(|| json!({ "Status": "idle" }));
+        items.push(json!({
+            "ItemId": uuid_to_emby_guid(&item_id),
+            "Status": status,
+        }));
+    }
+    Ok(Json(json!({
+        "Items": items,
+        "ThrottleSeconds": METADATA_RESET_THROTTLE_SECS,
+    })))
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -1877,6 +2236,8 @@ struct RemoteSearchInfo {
     parent_index_number: Option<i32>,
     #[serde(default)]
     index_number: Option<i32>,
+    #[serde(default, alias = "Type")]
+    item_type: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -2164,12 +2525,194 @@ async fn remote_search_apply(
         }
     }
 
-    // 真正触发一次元数据重抓流程。失败时仅记录日志，保持 Emby 客户端体验顺畅。
-    if let Err(err) = do_refresh_item_metadata(&state, item_id).await {
+    // 真正触发一次元数据重抓流程，复用 `metadata_reset:{id}` 节流窗口，
+    // 避免客户端在短时间内反复 Apply 时把 TMDb 配额打爆。
+    if is_metadata_reset_throttled(&state, item_id).await? {
+        tracing::debug!(item_id = %item_id, "RemoteSearch/Apply 命中节流窗口，跳过重复刷新");
+    } else if let Err(err) = enqueue_metadata_reset(&state, item_id, session.user_id).await {
         tracing::warn!(item_id = %item_id, ?err, "RemoteSearch 应用后刷新元数据失败");
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+struct RemoteSearchImageBody {
+    #[serde(alias = "search_info")]
+    search_info: RemoteSearchInfo,
+    #[serde(alias = "search_provider_name")]
+    search_provider_name: Option<String>,
+    #[serde(alias = "item_id")]
+    _item_id: Option<String>,
+    #[serde(alias = "image_type", alias = "type", alias = "Type")]
+    image_type: Option<String>,
+    #[serde(alias = "provider_name", alias = "ProviderName")]
+    _provider_name: Option<String>,
+    #[serde(alias = "include_all_languages", alias = "IncludeAllLanguages")]
+    include_all_languages: Option<bool>,
+}
+
+/// `POST /Items/RemoteSearch/Image` — 根据 provider id 聚合 TMDB 多张海报/背景/Logo。
+async fn remote_search_image(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(body): Json<RemoteSearchImageBody>,
+) -> Result<Json<Value>, AppError> {
+    let _ = &session;
+    let Some(metadata_manager) = state.metadata_manager.as_ref() else {
+        return Ok(Json(json!([])));
+    };
+    let library_options = LibraryOptionsDto {
+        preferred_metadata_language: body.search_info.metadata_language.clone(),
+        metadata_country_code: body.search_info.metadata_country_code.clone(),
+        ..LibraryOptionsDto::default()
+    };
+    let Some(provider) = item_tmdb_provider(&state, metadata_manager, &library_options) else {
+        return Ok(Json(json!([])));
+    };
+
+    let tmdb_id = body
+        .search_info
+        .provider_ids
+        .iter()
+        .find_map(|(key, value)| {
+            if !key.eq_ignore_ascii_case("tmdb") {
+                return None;
+            }
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| value.as_i64().map(|id| id.to_string()))
+        });
+    let Some(tmdb_id) = tmdb_id else {
+        return Ok(Json(json!([])));
+    };
+
+    // 粗判类型：默认 movie，如果 search_info 有 series 年份或客户端显式传 series 用 tv。
+    let media_type = match body
+        .search_info
+        .item_type
+        .as_deref()
+        .unwrap_or("Movie")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "series" | "tv" | "season" | "episode" => "tv",
+        _ => "movie",
+    };
+    let images = provider.get_remote_images(media_type, &tmdb_id).await?;
+
+    let mut results: Vec<Value> = Vec::new();
+    let filter_type = body
+        .image_type
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let include_all_langs = body.include_all_languages.unwrap_or(true);
+    for img in images {
+        if let Some(expected) = filter_type.as_deref() {
+            if !img.image_type.eq_ignore_ascii_case(expected) {
+                continue;
+            }
+        }
+        if !include_all_langs && img.language.is_some() {
+            // 当客户端要求仅当前语种时，TMDB 返回语言为 null 的（中性）图先跳过会造成过度过滤，
+            // 因此只有在 language 与首选语言显式不同时才过滤。
+            let preferred = library_options.preferred_metadata_language.as_deref().unwrap_or("");
+            let lang = img.language.as_deref().unwrap_or("");
+            if !preferred.is_empty() && !lang.is_empty() && !preferred.starts_with(lang) {
+                continue;
+            }
+        }
+        results.push(json!({
+            "ProviderName": img.provider_name,
+            "Url": img.url,
+            "ThumbnailUrl": img.thumbnail_url,
+            "Type": img.image_type,
+            "Language": img.language,
+            "Width": img.width,
+            "Height": img.height,
+            "CommunityRating": img.community_rating,
+            "VoteCount": img.vote_count,
+            "RatingType": "Score",
+        }));
+    }
+
+    let _ = body.search_provider_name;
+    Ok(Json(Value::Array(results)))
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+struct RemoteSearchTrailerBody {
+    search_info: RemoteSearchInfo,
+    search_provider_name: Option<String>,
+}
+
+/// `POST /Items/RemoteSearch/Trailer` — 返回 YouTube 预告片链接（基于 TMDB videos 字段）。
+async fn remote_search_trailer(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(body): Json<RemoteSearchTrailerBody>,
+) -> Result<Json<Value>, AppError> {
+    let _ = &session;
+    let Some(metadata_manager) = state.metadata_manager.as_ref() else {
+        return Ok(Json(json!([])));
+    };
+    let library_options = LibraryOptionsDto {
+        preferred_metadata_language: body.search_info.metadata_language.clone(),
+        metadata_country_code: body.search_info.metadata_country_code.clone(),
+        ..LibraryOptionsDto::default()
+    };
+    let Some(provider) = item_tmdb_provider(&state, metadata_manager, &library_options) else {
+        return Ok(Json(json!([])));
+    };
+    let tmdb_id = body
+        .search_info
+        .provider_ids
+        .iter()
+        .find_map(|(key, value)| {
+            if !key.eq_ignore_ascii_case("tmdb") {
+                return None;
+            }
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| value.as_i64().map(|id| id.to_string()))
+        });
+    let search_provider_name = body.search_provider_name.unwrap_or_else(|| "TheMovieDb".into());
+    let Some(tmdb_id) = tmdb_id else {
+        return Ok(Json(json!([])));
+    };
+
+    // TmdbProvider 当前没有直接暴露 trailer 接口；用已有 `get_movie_details` 返回的
+    // `remote_trailers`（如存在）或 fallback 到空结果。未来扩 MetadataProvider trait
+    // 再接入 `/movie/{id}/videos` 更干净。
+    let trailers = match provider.get_movie_details(&tmdb_id).await {
+        Ok(details) => details.remote_trailers,
+        Err(err) => {
+            tracing::debug!(?err, "RemoteSearch/Trailer: TMDB 电影详情查询失败");
+            Vec::new()
+        }
+    };
+    let name = body
+        .search_info
+        .name
+        .clone()
+        .unwrap_or_else(|| "Trailer".into());
+    let results: Vec<Value> = trailers
+        .into_iter()
+        .map(|url| {
+            json!({
+                "Name": name,
+                "Url": url,
+                "SearchProviderName": search_provider_name,
+                "ProviderIds": { "Tmdb": tmdb_id },
+            })
+        })
+        .collect();
+    Ok(Json(Value::Array(results)))
 }
 
 async fn items_shared_leave(
@@ -3950,6 +4493,216 @@ async fn get_user_similar_items(
     get_similar_items(session, State(state), Path(item_id_str), Query(query)).await
 }
 
+/// `/Trailers` — 返回所有带远程预告片的媒体条目，或类型为 Trailer 的本地条目。
+async fn trailers(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(mut query): Query<ItemsQuery>,
+) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    // 强制只返回 Trailer 类型。若客户端未指定排序则按最近添加。
+    query.user_id = Some(user_id);
+    query.include_item_types = Some("Trailer".to_string());
+    query.recursive = Some(true);
+    if query.sort_by.is_none() {
+        query.sort_by = Some("DateCreated".to_string());
+        query.sort_order = Some("Descending".to_string());
+    }
+    list_items_for_user(&state, user_id, query).await
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct MovieRecommendationsQuery {
+    #[serde(default, alias = "userId")]
+    user_id: Option<Uuid>,
+    #[serde(default, alias = "parentId")]
+    parent_id: Option<Uuid>,
+    #[serde(default, alias = "categoryLimit")]
+    category_limit: Option<i32>,
+    #[serde(default, alias = "itemLimit")]
+    item_limit: Option<i32>,
+    #[serde(default, alias = "fields")]
+    #[allow(dead_code)]
+    fields: Option<String>,
+}
+
+/// `/Movies/Recommendations` — Emby 首页"为你推荐"。返回 RecommendationDto 列表。
+async fn movies_recommendations(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<MovieRecommendationsQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+
+    let category_limit = query.category_limit.unwrap_or(6).clamp(1, 12) as usize;
+    let item_limit = query.item_limit.unwrap_or(8).clamp(1, 20) as i64;
+
+    let mut options = repository::ItemListOptions {
+        user_id: Some(user_id),
+        include_types: vec!["Movie".into()],
+        recursive: true,
+        limit: item_limit,
+        ..repository::ItemListOptions::default()
+    };
+    if let Some(parent_id) = query.parent_id {
+        if let Some(library) = repository::get_library(&state.pool, parent_id).await? {
+            options.library_id = Some(library.id);
+        } else {
+            options.parent_id = Some(parent_id);
+        }
+    }
+
+    let mut categories: Vec<serde_json::Value> = Vec::new();
+
+    // 1) 最近添加
+    let latest = repository::list_media_items(
+        &state.pool,
+        repository::ItemListOptions {
+            sort_by: Some("DateCreated".into()),
+            sort_order: Some("Descending".into()),
+            ..options.clone()
+        },
+    )
+    .await?;
+    if !latest.items.is_empty() {
+        categories.push(build_recommendation_category(
+            &state,
+            user_id,
+            "SimilarToRecentlyPlayed",
+            None,
+            "最近添加",
+            latest.items,
+        )
+        .await?);
+    }
+
+    // 2) 基于用户最近播放的相似推荐（genre 交集）
+    if categories.len() < category_limit {
+        let recent_ids: Vec<Uuid> = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT uid.item_id
+            FROM user_item_data uid
+            INNER JOIN media_items mi ON mi.id = uid.item_id
+            WHERE uid.user_id = $1
+              AND mi.item_type = 'Movie'
+              AND (uid.is_played = true OR uid.playback_position_ticks > 0)
+            ORDER BY uid.last_played_date DESC NULLS LAST
+            LIMIT 3
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+
+        let mut recent: Vec<crate::models::DbMediaItem> = Vec::new();
+        for id in recent_ids {
+            if let Some(item) = repository::get_media_item(&state.pool, id).await? {
+                recent.push(item);
+            }
+        }
+        for seed in recent {
+            if categories.len() >= category_limit {
+                break;
+            }
+            if seed.genres.is_empty() {
+                continue;
+            }
+            let hits = repository::list_media_items(
+                &state.pool,
+                repository::ItemListOptions {
+                    genres: seed.genres.clone(),
+                    sort_by: Some("CommunityRating".into()),
+                    sort_order: Some("Descending".into()),
+                    ..options.clone()
+                },
+            )
+            .await?;
+            let picks: Vec<_> = hits
+                .items
+                .into_iter()
+                .filter(|item| item.id != seed.id)
+                .take(item_limit as usize)
+                .collect();
+            if picks.is_empty() {
+                continue;
+            }
+            categories.push(
+                build_recommendation_category(
+                    &state,
+                    user_id,
+                    "SimilarToLikedItem",
+                    Some(&crate::models::uuid_to_emby_guid(&seed.id)),
+                    &format!("与《{}》相似", seed.name),
+                    picks,
+                )
+                .await?,
+            );
+        }
+    }
+
+    // 3) 热门（高评分）
+    if categories.len() < category_limit {
+        let top_rated = repository::list_media_items(
+            &state.pool,
+            repository::ItemListOptions {
+                sort_by: Some("CommunityRating".into()),
+                sort_order: Some("Descending".into()),
+                min_community_rating: Some(6.5),
+                ..options.clone()
+            },
+        )
+        .await?;
+        if !top_rated.items.is_empty() {
+            categories.push(
+                build_recommendation_category(
+                    &state,
+                    user_id,
+                    "HasSimilarToLikedItem",
+                    None,
+                    "高分推荐",
+                    top_rated.items,
+                )
+                .await?,
+            );
+        }
+    }
+
+    Ok(Json(categories))
+}
+
+async fn build_recommendation_category(
+    state: &AppState,
+    user_id: Uuid,
+    recommendation_type: &str,
+    baseline_item_id: Option<&str>,
+    category_name: &str,
+    items: Vec<crate::models::DbMediaItem>,
+) -> Result<serde_json::Value, AppError> {
+    let mut dtos = Vec::with_capacity(items.len());
+    for item in items {
+        dtos.push(
+            repository::media_item_to_dto(
+                &state.pool,
+                &item,
+                Some(user_id),
+                state.config.server_id,
+            )
+            .await?,
+        );
+    }
+    Ok(serde_json::json!({
+        "Items": dtos,
+        "RecommendationType": recommendation_type,
+        "BaselineItemName": category_name,
+        "CategoryId": category_name,
+        "BaselineItemId": baseline_item_id,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4497,5 +5250,92 @@ mod tests {
     fn items_router_builds_with_new_remote_search_and_metadata_reset_routes() {
         // 冒烟测试：确保新增路由不会和既有路由冲突，router() 构建成功。
         let _router = super::router();
+    }
+
+    #[test]
+    fn parse_metadata_date_accepts_multiple_formats() {
+        assert_eq!(
+            super::parse_metadata_date("2001-08-31"),
+            Some(chrono::NaiveDate::from_ymd_opt(2001, 8, 31).unwrap())
+        );
+        assert_eq!(
+            super::parse_metadata_date("08/31/2001"),
+            Some(chrono::NaiveDate::from_ymd_opt(2001, 8, 31).unwrap())
+        );
+        assert_eq!(
+            super::parse_metadata_date("2001-08-31T12:00:00Z"),
+            Some(chrono::NaiveDate::from_ymd_opt(2001, 8, 31).unwrap())
+        );
+        assert_eq!(super::parse_metadata_date("garbage"), None);
+        assert_eq!(super::parse_metadata_date("  "), None);
+    }
+
+    #[test]
+    fn coerce_name_list_supports_string_and_object_items() {
+        let primary: Option<Vec<Value>> = Some(vec![
+            json!({ "Name": "Drama" }),
+            json!({ "Name": "Sci-Fi" }),
+            json!({ "Name": "   " }),
+            json!({ "Name": "drama" }), // duplicate case-insensitive
+        ]);
+        let fallback: Option<Vec<Value>> = None;
+        let out = super::coerce_name_list(&primary, &fallback).unwrap();
+        assert_eq!(out, vec!["Drama".to_string(), "Sci-Fi".to_string()]);
+
+        let only_fallback: Option<Vec<Value>> = Some(vec![json!("Thriller"), json!("Thriller")]);
+        let fallback_only = super::coerce_name_list(&None, &only_fallback).unwrap();
+        assert_eq!(fallback_only, vec!["Thriller".to_string()]);
+    }
+
+    #[test]
+    fn metadata_editor_returns_expected_schema_shape() {
+        // 直接渲染一份静态 schema，校验我们给 Emby 客户端的编辑元数据面板
+        // 提供了所有需要的下拉选项。
+        let body = json!({
+            "ExternalIdInfos": super::external_id_infos_catalog(false),
+            "PersonExternalIdInfos": super::external_id_infos_catalog(true),
+            "ParentalRatingOptions": super::parental_rating_options(),
+            "Countries": super::country_options(),
+            "Cultures": super::culture_options(),
+        });
+        for key in [
+            "ExternalIdInfos",
+            "PersonExternalIdInfos",
+            "ParentalRatingOptions",
+            "Countries",
+            "Cultures",
+        ] {
+            assert!(body.get(key).and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()), "{key} should be non-empty");
+        }
+        // TheMovieDb/IMDb 一定出现在条目 id 列表里，否则客户端无法手填 TMDb/IMDb id。
+        let keys: Vec<&str> = body["ExternalIdInfos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["Key"].as_str().unwrap())
+            .collect();
+        assert!(keys.contains(&"Tmdb"));
+        assert!(keys.contains(&"Imdb"));
+    }
+
+    #[test]
+    fn update_item_body_parses_partial_emby_payload() {
+        let body: super::UpdateItemBody = serde_json::from_value(json!({
+            "Name": "Matrix Reloaded",
+            "CommunityRating": 7.3,
+            "ProductionYear": 2003,
+            "PremiereDate": "2003-05-15T00:00:00.0000000Z",
+            "Genres": ["Action", "Sci-Fi"],
+            "GenreItems": [{ "Name": "Sci-Fi" }, { "Name": "Action" }],
+            "ProviderIds": { "Tmdb": "604", "Imdb": "tt0234215" }
+        }))
+        .expect("valid partial BaseItemDto");
+
+        assert_eq!(body.name.as_deref(), Some("Matrix Reloaded"));
+        assert_eq!(body.community_rating, Some(7.3));
+        assert_eq!(body.production_year, Some(2003));
+        // GenreItems 优先，但 Genres 也要解析成功。
+        let merged = super::coerce_name_list(&body.genre_items, &body.genres).unwrap();
+        assert_eq!(merged, vec!["Sci-Fi".to_string(), "Action".to_string()]);
     }
 }

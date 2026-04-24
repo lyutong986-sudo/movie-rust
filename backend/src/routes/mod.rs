@@ -2,12 +2,17 @@ use crate::state::AppState;
 use axum::Router;
 
 pub mod admin;
+pub mod collections;
 pub mod compat;
+pub mod devices;
 pub mod genres;
 pub mod images;
 pub mod items;
+pub mod live_streams;
 pub mod metadata_routes;
+pub mod misc;
 pub mod persons;
+pub mod scheduled_tasks;
 pub mod sessions;
 pub mod shows;
 pub mod startup;
@@ -45,6 +50,11 @@ fn api_router() -> Router<AppState> {
         .merge(genres::router())
         .merge(persons::router())
         .merge(metadata_routes::router())
+        .merge(misc::router())
+        .merge(devices::router())
+        .merge(scheduled_tasks::router())
+        .merge(collections::router())
+        .merge(live_streams::router())
 }
 
 #[cfg(test)]

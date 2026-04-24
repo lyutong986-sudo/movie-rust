@@ -617,6 +617,86 @@ pub async fn remove_media_item_tag(
     Ok(result.rows_affected() > 0)
 }
 
+/// 来自 Emby "编辑元数据" 表单的用户可写字段集合。
+///
+/// 所有字段都是 `Option` —— `None` 代表该字段未被客户端提交，数据库保留原值；
+/// 数组字段用 `Some(vec![])` 代表"清空"。
+#[derive(Debug, Default, Clone)]
+pub struct MediaItemEditableFields {
+    pub name: Option<String>,
+    pub original_title: Option<String>,
+    pub sort_name: Option<String>,
+    pub overview: Option<String>,
+    pub community_rating: Option<f64>,
+    pub critic_rating: Option<f64>,
+    pub official_rating: Option<String>,
+    pub production_year: Option<i32>,
+    pub premiere_date: Option<chrono::NaiveDate>,
+    pub end_date: Option<chrono::NaiveDate>,
+    pub status: Option<String>,
+    pub genres: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
+    pub studios: Option<Vec<String>>,
+    pub production_locations: Option<Vec<String>>,
+    pub provider_ids: Option<serde_json::Value>,
+}
+
+/// 按 `MediaItemEditableFields` 更新媒体项，只有被显式赋值的字段会被写入。
+///
+/// 与 `update_media_item_movie_metadata` / `series` 版本不同，这里是"用户在编辑
+/// 器里主动改的"字段；数组字段按 `Some(vec![])` 表示清空语义。
+pub async fn update_media_item_editable_fields(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    updates: &MediaItemEditableFields,
+) -> Result<bool, AppError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE media_items
+        SET name             = COALESCE($2, name),
+            original_title   = COALESCE($3, original_title),
+            sort_name        = COALESCE($4, sort_name),
+            overview         = COALESCE($5, overview),
+            community_rating = COALESCE($6, community_rating),
+            critic_rating    = COALESCE($7, critic_rating),
+            official_rating  = COALESCE($8, official_rating),
+            production_year  = COALESCE($9, production_year),
+            premiere_date    = COALESCE($10, premiere_date),
+            end_date         = COALESCE($11, end_date),
+            status           = COALESCE($12, status),
+            genres           = CASE WHEN $13::text[] IS NULL THEN genres ELSE $13 END,
+            tags             = CASE WHEN $14::text[] IS NULL THEN tags ELSE $14 END,
+            studios          = CASE WHEN $15::text[] IS NULL THEN studios ELSE $15 END,
+            production_locations = CASE WHEN $16::text[] IS NULL THEN production_locations ELSE $16 END,
+            provider_ids     = CASE WHEN $17::jsonb IS NULL
+                                    THEN provider_ids
+                                    ELSE COALESCE(provider_ids, '{}'::jsonb) || $17::jsonb END,
+            date_modified    = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(item_id)
+    .bind(updates.name.as_deref())
+    .bind(updates.original_title.as_deref())
+    .bind(updates.sort_name.as_deref())
+    .bind(updates.overview.as_deref())
+    .bind(updates.community_rating)
+    .bind(updates.critic_rating)
+    .bind(updates.official_rating.as_deref())
+    .bind(updates.production_year)
+    .bind(updates.premiere_date)
+    .bind(updates.end_date)
+    .bind(updates.status.as_deref())
+    .bind(updates.genres.as_deref())
+    .bind(updates.tags.as_deref())
+    .bind(updates.studios.as_deref())
+    .bind(updates.production_locations.as_deref())
+    .bind(updates.provider_ids.as_ref())
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// 将外部 provider ids 合并到媒体项已有 provider_ids 上。
 ///
 /// 使用 jsonb `||` 运算符让新字段覆盖同名旧字段，避免破坏其他 provider 的 id。
@@ -2573,6 +2653,7 @@ fn library_paths_from_options_or_path(options: &Value, fallback_path: &str) -> V
     normalize_library_paths(&paths)
 }
 
+#[derive(Clone)]
 pub struct ItemListOptions {
     pub user_id: Option<Uuid>,
     pub library_id: Option<Uuid>,
