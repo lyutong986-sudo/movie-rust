@@ -768,11 +768,11 @@ async fn cleanup_remote_source_items(
     library_id: Uuid,
     source_id: Uuid,
     legacy_source_root: &Path,
-) -> Result<(), AppError> {
+) -> Result<u64, AppError> {
     let virtual_prefix = format!("{}%", build_virtual_root_path(source_id));
     let virtual_prefix_windows = virtual_prefix.replace('/', "\\");
     let legacy_prefix = format!("{}%", legacy_source_root.to_string_lossy());
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         DELETE FROM media_items
         WHERE library_id = $1
@@ -791,7 +791,39 @@ async fn cleanup_remote_source_items(
     .bind(legacy_prefix)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(result.rows_affected())
+}
+
+pub async fn cleanup_source_mapped_items(
+    pool: &sqlx::PgPool,
+    source: &DbRemoteEmbySource,
+) -> Result<u64, AppError> {
+    let Some(library) = repository::get_library(pool, source.target_library_id).await? else {
+        return Ok(0);
+    };
+    let source_root = source_root_path(&library, source);
+    let deleted = cleanup_remote_source_items(
+        pool,
+        source.target_library_id,
+        source.id,
+        source_root.as_path(),
+    )
+    .await?;
+
+    match tokio::fs::remove_dir_all(&source_root).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(
+                source_id = %source.id,
+                source_root = %source_root.to_string_lossy(),
+                error = %error,
+                "删除远端 Emby 旧映射目录失败"
+            );
+        }
+    }
+
+    Ok(deleted)
 }
 
 async fn upsert_virtual_root_item(

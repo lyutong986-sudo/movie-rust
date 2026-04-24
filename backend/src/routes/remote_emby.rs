@@ -195,6 +195,17 @@ struct SyncOperationsQuery {
     limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DeleteRemoteEmbySourceQuery {
+    #[serde(
+        default,
+        rename = "KeepMappedItems",
+        alias = "keepMappedItems",
+        alias = "keep_mapped_items"
+    )]
+    keep_mapped_items: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct RemoteEmbySyncQueuedResponse {
@@ -245,8 +256,21 @@ async fn delete_remote_emby_source(
     session: AuthSession,
     State(state): State<AppState>,
     Path(source_id): Path<Uuid>,
+    Query(query): Query<DeleteRemoteEmbySourceQuery>,
 ) -> Result<StatusCode, AppError> {
     auth::require_admin(&session)?;
+    let source = repository::get_remote_emby_source(&state.pool, source_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("远端 Emby 源不存在".to_string()))?;
+    if !query.keep_mapped_items {
+        let deleted = remote_emby::cleanup_source_mapped_items(&state.pool, &source).await?;
+        tracing::info!(
+            source_id = %source.id,
+            target_library_id = %source.target_library_id,
+            deleted_items = deleted,
+            "删除远端 Emby 源前完成映射媒体清理"
+        );
+    }
     repository::delete_remote_emby_source(&state.pool, source_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
