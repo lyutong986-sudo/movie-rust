@@ -25,6 +25,10 @@ pub fn router() -> Router<AppState> {
             get(list_remote_emby_sources).post(create_remote_emby_source),
         )
         .route(
+            "/api/admin/remote-emby/views/preview",
+            post(preview_remote_emby_views),
+        )
+        .route(
             "/api/admin/remote-emby/sources/{source_id}",
             delete(delete_remote_emby_source),
         )
@@ -61,10 +65,25 @@ struct CreateRemoteEmbySourceRequest {
     target_library_id: Uuid,
     #[serde(default, alias = "displayMode")]
     display_mode: Option<String>,
+    #[serde(default, alias = "remoteViewIds")]
+    remote_view_ids: Vec<String>,
     #[serde(default, alias = "spoofedUserAgent", alias = "UserAgent")]
     spoofed_user_agent: Option<String>,
     #[serde(default, alias = "isEnabled")]
     enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PreviewRemoteEmbyViewsRequest {
+    #[serde(alias = "serverUrl", alias = "url")]
+    server_url: String,
+    #[serde(alias = "userName", alias = "user")]
+    username: String,
+    #[serde(alias = "pw", alias = "pwd")]
+    password: String,
+    #[serde(default, alias = "spoofedUserAgent", alias = "UserAgent")]
+    spoofed_user_agent: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +95,7 @@ struct RemoteEmbySourceDto {
     username: String,
     target_library_id: String,
     display_mode: String,
+    remote_view_ids: Vec<String>,
     enabled: bool,
     spoofed_user_agent: String,
     remote_user_id: Option<String>,
@@ -250,10 +270,30 @@ async fn create_remote_emby_source(
             .unwrap_or(remote_emby::default_spoofed_user_agent()),
         payload.target_library_id,
         payload.display_mode.as_deref().unwrap_or("separate"),
+        payload.remote_view_ids.as_slice(),
         payload.enabled.unwrap_or(true),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))
+}
+
+async fn preview_remote_emby_views(
+    session: AuthSession,
+    Json(payload): Json<PreviewRemoteEmbyViewsRequest>,
+) -> Result<Json<Vec<remote_emby::RemoteViewPreview>>, AppError> {
+    auth::require_admin(&session)?;
+    let views = remote_emby::preview_remote_views(
+        payload.server_url.as_str(),
+        payload.username.as_str(),
+        payload.password.as_str(),
+        payload
+            .spoofed_user_agent
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(remote_emby::default_spoofed_user_agent()),
+    )
+    .await?;
+    Ok(Json(views))
 }
 
 async fn delete_remote_emby_source(
@@ -536,6 +576,7 @@ fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> Remot
         username: source.username,
         target_library_id: source.target_library_id.to_string(),
         display_mode: source.display_mode,
+        remote_view_ids: source.remote_view_ids,
         enabled: source.enabled,
         spoofed_user_agent: source.spoofed_user_agent,
         remote_user_id: source.remote_user_id,

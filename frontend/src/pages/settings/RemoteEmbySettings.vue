@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import SettingsLayout from '../../layouts/SettingsLayout.vue';
 import type {
+  RemoteEmbyView,
   RemoteEmbySource,
   RemoteEmbySyncOperation,
   RemoteEmbySyncResponse,
@@ -16,9 +17,11 @@ const loading = ref(true);
 const saving = ref(false);
 const error = ref('');
 const saved = ref('');
+const previewingViews = ref(false);
 const polling = ref(false);
 const sources = ref<RemoteEmbySource[]>([]);
-const targetLibraries = ref<VirtualFolderInfo[]>([]);
+const localLibraries = ref<VirtualFolderInfo[]>([]);
+const remoteViews = ref<RemoteEmbyView[]>([]);
 const operationBySourceId = ref<Record<string, RemoteEmbySyncOperation>>({});
 let pollTimer = 0;
 let pollingBusy = false;
@@ -28,6 +31,7 @@ const form = ref({
   serverUrl: '',
   username: '',
   password: '',
+  remoteViewIds: [] as string[],
   targetLibraryId: '',
   displayMode: 'separate' as 'merge' | 'separate',
   spoofedUserAgent: DEFAULT_SPOOFED_USER_AGENT,
@@ -47,18 +51,31 @@ const runningSyncCount = computed(
 );
 const displayModeItems = [
   { label: '单独显示（按远端源分组）', value: 'separate' },
-  { label: '并入现有媒体库（不单独分组）', value: 'merge' }
+  { label: '并入项目媒体库', value: 'merge' }
 ];
-const targetLibraryItems = computed(() =>
-  targetLibraries.value.map((folder) => ({
+const localLibraryItems = computed(() =>
+  localLibraries.value.map((folder) => ({
     label: `${folder.Name} · ${collectionTypeLabel(folder.CollectionType)}`,
     value: folder.ItemId
   }))
 );
-const targetLibraryNameMap = computed(() => {
+const remoteViewItems = computed(() =>
+  remoteViews.value.map((view) => ({
+    label: `${view.Name}${view.CollectionType ? ` · ${collectionTypeLabel(view.CollectionType)}` : ''}`,
+    value: view.Id
+  }))
+);
+const localLibraryNameMap = computed(() => {
   const map = new Map<string, string>();
-  for (const folder of targetLibraries.value) {
+  for (const folder of localLibraries.value) {
     map.set(folder.ItemId.toLowerCase(), folder.Name);
+  }
+  return map;
+});
+const remoteViewNameMap = computed(() => {
+  const map = new Map<string, string>();
+  for (const view of remoteViews.value) {
+    map.set(view.Id.toLowerCase(), view.Name);
   }
   return map;
 });
@@ -80,7 +97,14 @@ function displayModeLabel(mode?: string) {
 
 function targetLibraryName(libraryId?: string) {
   if (!libraryId) return '-';
-  return targetLibraryNameMap.value.get(libraryId.toLowerCase()) || libraryId;
+  return localLibraryNameMap.value.get(libraryId.toLowerCase()) || libraryId;
+}
+
+function sourceRemoteViewsText(source: RemoteEmbySource) {
+  if (!source.RemoteViewIds?.length) {
+    return '全部远端媒体库';
+  }
+  return source.RemoteViewIds.map((viewId) => remoteViewNameMap.value.get(viewId.toLowerCase()) || viewId).join(' · ');
 }
 
 const activeOperationDetail = computed(() => {
@@ -190,7 +214,7 @@ function stopPolling() {
 async function refreshSourcesOnly() {
   const [sourceList, folders] = await Promise.all([api.remoteEmbySources(), api.virtualFolders()]);
   sources.value = sourceList;
-  targetLibraries.value = folders;
+  localLibraries.value = folders;
 }
 
 async function pollOperations() {
@@ -245,7 +269,7 @@ async function load() {
   try {
     const [sourceList, folders] = await Promise.all([api.remoteEmbySources(), api.virtualFolders()]);
     sources.value = sourceList;
-    targetLibraries.value = folders;
+    localLibraries.value = folders;
     if (!form.value.targetLibraryId && folders.length) {
       form.value.targetLibraryId = folders[0].ItemId;
     }
@@ -275,12 +299,23 @@ async function createSource() {
     error.value = '请输入远端 Emby 密码';
     return;
   }
-  if (!payload.targetLibraryId) {
-    error.value = '请选择目标媒体库';
+  if (!payload.remoteViewIds.length) {
+    error.value = '请选择至少一个远端媒体库';
+    return;
+  }
+  if (payload.displayMode === 'merge' && !payload.targetLibraryId) {
+    error.value = '并入模式下请选择项目媒体库';
     return;
   }
   if (!payload.spoofedUserAgent.trim()) {
     error.value = '请输入伪装 User-Agent';
+    return;
+  }
+
+  const selectedLocalLibraryId =
+    payload.targetLibraryId || localLibraries.value[0]?.ItemId || '';
+  if (!selectedLocalLibraryId) {
+    error.value = '项目中还没有可用媒体库，请先创建本地媒体库';
     return;
   }
 
@@ -293,8 +328,9 @@ async function createSource() {
       ServerUrl: payload.serverUrl.trim(),
       Username: payload.username.trim(),
       Password: payload.password,
-      TargetLibraryId: payload.targetLibraryId,
+      TargetLibraryId: selectedLocalLibraryId,
       DisplayMode: payload.displayMode,
+      RemoteViewIds: payload.remoteViewIds,
       SpoofedUserAgent: payload.spoofedUserAgent.trim(),
       Enabled: payload.enabled
     });
@@ -303,11 +339,59 @@ async function createSource() {
     form.value.serverUrl = '';
     form.value.username = '';
     form.value.password = '';
+    form.value.remoteViewIds = [];
     await load();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
     saving.value = false;
+  }
+}
+
+async function previewRemoteViews() {
+  const payload = form.value;
+  if (!payload.serverUrl.trim()) {
+    error.value = '请先输入远端地址';
+    return;
+  }
+  if (!payload.username.trim()) {
+    error.value = '请先输入远端 Emby 用户名';
+    return;
+  }
+  if (!payload.password.trim()) {
+    error.value = '请先输入远端 Emby 密码';
+    return;
+  }
+  previewingViews.value = true;
+  error.value = '';
+  saved.value = '';
+  try {
+    const views = await api.previewRemoteEmbyViews({
+      ServerUrl: payload.serverUrl.trim(),
+      Username: payload.username.trim(),
+      Password: payload.password,
+      SpoofedUserAgent: payload.spoofedUserAgent.trim()
+    });
+    remoteViews.value = views;
+    if (!views.length) {
+      form.value.remoteViewIds = [];
+      saved.value = '已连接远端，但未发现可同步媒体库';
+      return;
+    }
+    const existed = new Set(views.map((view) => view.Id.toLowerCase()));
+    form.value.remoteViewIds = form.value.remoteViewIds.filter((id) =>
+      existed.has(id.toLowerCase())
+    );
+    if (!form.value.remoteViewIds.length) {
+      form.value.remoteViewIds = [views[0].Id];
+    }
+    saved.value = `已获取远端媒体库：${views.length} 个`;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+    remoteViews.value = [];
+    form.value.remoteViewIds = [];
+  } finally {
+    previewingViews.value = false;
   }
 }
 
@@ -429,16 +513,41 @@ onBeforeUnmount(() => {
           <UFormField label="密码">
             <UInput v-model="form.password" type="password" placeholder="远端 Emby 密码" class="w-full" />
           </UFormField>
-          <UFormField label="目标媒体库">
+          <UFormField label="远端媒体库">
             <USelect
-              v-model="form.targetLibraryId"
-              :items="targetLibraryItems"
+              v-model="form.remoteViewIds"
+              :items="remoteViewItems"
+              multiple
               value-key="value"
               class="w-full"
+              placeholder="先点击“获取远端媒体库列表”"
             />
           </UFormField>
-          <UFormField label="显示方式">
+          <UFormField label="显示方式（本地）">
             <USelect v-model="form.displayMode" :items="displayModeItems" value-key="value" class="w-full" />
+          </UFormField>
+          <div class="lg:col-span-2 flex items-center justify-end">
+            <UButton
+              color="neutral"
+              variant="soft"
+              icon="i-lucide-list-restart"
+              :loading="previewingViews"
+              @click="previewRemoteViews"
+            >
+              获取远端媒体库列表
+            </UButton>
+          </div>
+          <UFormField v-if="form.displayMode === 'merge'" label="并入项目媒体库">
+            <USelect
+              v-model="form.targetLibraryId"
+              :items="localLibraryItems"
+              value-key="value"
+              class="w-full"
+              placeholder="选择项目本地媒体库"
+            />
+          </UFormField>
+          <UFormField v-else label="本地显示说明">
+            <p class="text-muted text-xs">单独显示模式：远端内容会按远端源分组显示，不并入现有本地媒体库分组。</p>
           </UFormField>
           <UFormField label="启用状态">
             <USwitch v-model="form.enabled" />
@@ -531,6 +640,12 @@ onBeforeUnmount(() => {
                 {{ displayModeLabel(source.DisplayMode) }}
               </p>
             </div>
+            <div class="rounded-lg border border-default p-3 md:col-span-2">
+              <p class="text-muted text-xs">远端媒体库</p>
+              <p class="text-highlighted mt-1 text-sm font-medium">
+                {{ sourceRemoteViewsText(source) }}
+              </p>
+            </div>
           </div>
 
           <UAlert
@@ -579,8 +694,9 @@ onBeforeUnmount(() => {
 
           <template #footer>
             <div class="space-y-1 text-xs">
-              <p class="text-muted">目标媒体库: {{ targetLibraryName(source.TargetLibraryId) }}</p>
+              <p class="text-muted">并入项目媒体库: {{ targetLibraryName(source.TargetLibraryId) }}</p>
               <p class="text-muted break-all font-mono">目标库 ID: {{ source.TargetLibraryId }}</p>
+              <p class="text-muted break-all font-mono">远端库 ID: {{ source.RemoteViewIds?.join(', ') || 'ALL' }}</p>
               <p class="text-muted break-all font-mono">UA: {{ source.SpoofedUserAgent }}</p>
             </div>
           </template>

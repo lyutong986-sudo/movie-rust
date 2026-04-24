@@ -14,6 +14,7 @@ import {
   scanOperation,
   loadVirtualFolders,
   scan,
+  scanIncremental,
   state,
   totalLibraryItems,
   virtualFolders
@@ -102,6 +103,12 @@ const scanImportedCounter = computed(() => {
   return imported ? `已入库 ${imported} 个` : '';
 });
 
+const scanRateText = computed(() => {
+  const rate = scanOperation.value?.ScanRatePerSec;
+  if (typeof rate !== 'number' || !Number.isFinite(rate) || rate <= 0) return '';
+  return `${rate.toFixed(1)} 文件/秒`;
+});
+
 function formatTime(value?: string | null) {
   if (!value) return '-';
   const date = new Date(value);
@@ -176,6 +183,17 @@ async function scanAllLibraries() {
   await scan();
 }
 
+async function scanFolderIncremental(folder: VirtualFolderInfo) {
+  requestedLibraryId.value = folder.ItemId;
+  await scanIncremental(folder.Locations);
+}
+
+async function scanAllLibrariesIncremental() {
+  requestedLibraryId.value = null;
+  const allPaths = virtualFolders.value.flatMap((folder) => folder.Locations || []);
+  await scanIncremental(allPaths);
+}
+
 async function remove(folder: VirtualFolderInfo) {
   const confirmed = window.confirm(`删除媒体库"${folder.Name}"？媒体文件不会被删除。`);
   if (!confirmed) {
@@ -204,6 +222,15 @@ async function remove(folder: VirtualFolderInfo) {
         </div>
         <div class="flex gap-2">
           <UButton icon="i-lucide-plus" @click="state.showAddLibrary = true">添加媒体库</UButton>
+          <UButton
+            color="neutral"
+            variant="outline"
+            icon="i-lucide-git-compare-arrows"
+            :loading="state.busy"
+            @click="scanAllLibrariesIncremental"
+          >
+            增量扫描
+          </UButton>
           <UButton
             color="neutral"
             variant="subtle"
@@ -252,7 +279,7 @@ async function remove(folder: VirtualFolderInfo) {
             <p class="text-muted text-xs">扫描进度 · {{ scanPhaseLabel }}</p>
             <p class="text-highlighted mt-1 text-2xl font-semibold">{{ scanProgressText }}</p>
             <p v-if="scanFileCounter" class="text-muted mt-1 text-xs">
-              文件 {{ scanFileCounter }}<span v-if="scanImportedCounter"> · {{ scanImportedCounter }}</span>
+              文件 {{ scanFileCounter }}<span v-if="scanImportedCounter"> · {{ scanImportedCounter }}</span><span v-if="scanRateText"> · {{ scanRateText }}</span>
             </p>
             <p v-if="scanOperation?.CurrentLibrary" class="text-muted text-xs">
               当前：{{ scanOperation.CurrentLibrary }}
@@ -347,6 +374,15 @@ async function remove(folder: VirtualFolderInfo) {
             <div class="flex flex-wrap gap-2">
               <UButton color="neutral" variant="subtle" icon="i-lucide-pencil" :disabled="state.busy" @click="edit(folder)">
                 编辑
+              </UButton>
+              <UButton
+                color="neutral"
+                variant="outline"
+                icon="i-lucide-git-compare-arrows"
+                :disabled="isFolderScanButtonDisabled(folder)"
+                @click="scanFolderIncremental(folder)"
+              >
+                增量
               </UButton>
               <UButton
                 color="neutral"

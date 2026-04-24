@@ -672,6 +672,8 @@ CREATE TABLE IF NOT EXISTS remote_emby_sources (
     password           text NOT NULL,
     spoofed_user_agent text NOT NULL,
     target_library_id  uuid NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+    display_mode       text NOT NULL DEFAULT 'separate',
+    remote_view_ids    text[] NOT NULL DEFAULT ARRAY[]::text[],
     enabled            boolean NOT NULL DEFAULT true,
     remote_user_id     text,
     access_token       text,

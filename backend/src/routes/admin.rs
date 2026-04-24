@@ -10,7 +10,7 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::{OriginalUri, Path, Query, State},
     http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -19,10 +19,10 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path as StdPath, PathBuf},
     sync::OnceLock,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -122,6 +122,7 @@ struct ScanOperationDto {
     total_files: u64,
     scanned_files: u64,
     imported_items: u64,
+    scan_rate_per_sec: f64,
     queued: bool,
     running: bool,
     done: bool,
@@ -150,6 +151,7 @@ struct ScanOperationState {
     total_files: u64,
     scanned_files: u64,
     imported_items: u64,
+    scan_rate_per_sec: f64,
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
@@ -183,6 +185,7 @@ impl ScanOperationState {
             total_files: self.total_files,
             scanned_files: self.scanned_files,
             imported_items: self.imported_items,
+            scan_rate_per_sec: self.scan_rate_per_sec,
             queued: self.status == "Queued",
             running: matches!(self.status, "Running" | "Cancelling"),
             done: self.is_done(),
@@ -252,6 +255,7 @@ async fn enqueue_library_scan(
                 total_files: 0,
                 scanned_files: 0,
                 imported_items: 0,
+                scan_rate_per_sec: 0.0,
                 created_at: Utc::now(),
                 started_at: None,
                 completed_at: None,
@@ -317,6 +321,7 @@ async fn enqueue_library_scan(
                 operation.total_files = 0;
                 operation.scanned_files = 0;
                 operation.imported_items = 0;
+                operation.scan_rate_per_sec = 0.0;
                 operation.current_library = None;
                 operation.attempts = attempt;
                 operation.started_at.get_or_insert_with(Utc::now);
@@ -327,9 +332,21 @@ async fn enqueue_library_scan(
             let poller_progress = progress.clone();
             let poller_op_id = operation_id;
             let poller_handle = tokio::spawn(async move {
+                let mut last_scanned = 0u64;
+                let mut last_tick = Instant::now();
                 loop {
                     tokio::time::sleep(Duration::from_millis(1000)).await;
                     let snap = poller_progress.snapshot().await;
+                    let now = Instant::now();
+                    let elapsed = now.duration_since(last_tick).as_secs_f64();
+                    let delta = snap.scanned_files.saturating_sub(last_scanned);
+                    let scan_rate_per_sec = if elapsed <= f64::EPSILON {
+                        0.0
+                    } else {
+                        (delta as f64 / elapsed).max(0.0)
+                    };
+                    last_scanned = snap.scanned_files;
+                    last_tick = now;
                     let mut registry = scan_registry().write().await;
                     let Some(operation) = registry.operations.get_mut(&poller_op_id) else {
                         break;
@@ -347,32 +364,96 @@ async fn enqueue_library_scan(
                     operation.scanned_files = snap.scanned_files;
                     operation.imported_items = snap.imported_items;
                     operation.progress = snap.percent;
+                    operation.scan_rate_per_sec = scan_rate_per_sec;
                 }
             });
 
-            let scan_result = if let Some(scan_library_id) = library_id_for_task {
-                scanner::scan_single_library_with_progress(
-                    &pool,
-                    metadata_manager.clone(),
-                    &config,
-                    work_limiters.clone(),
-                    scan_library_id,
-                    Some(progress.clone()),
-                )
-                .await
-            } else {
-                scanner::scan_all_libraries_with_progress(
-                    &pool,
-                    metadata_manager.clone(),
-                    &config,
-                    work_limiters.clone(),
-                    Some(progress.clone()),
-                )
-                .await
+            enum ScanAttemptOutcome {
+                Completed(Result<ScanSummary, AppError>),
+                Cancelled,
+            }
+
+            let scan_future = {
+                let pool = pool.clone();
+                let metadata_manager = metadata_manager.clone();
+                let config = config.clone();
+                let work_limiters = work_limiters.clone();
+                let progress = progress.clone();
+                async move {
+                    if let Some(scan_library_id) = library_id_for_task {
+                        scanner::scan_single_library_with_progress(
+                            &pool,
+                            metadata_manager,
+                            &config,
+                            work_limiters,
+                            scan_library_id,
+                            Some(progress),
+                        )
+                        .await
+                    } else {
+                        scanner::scan_all_libraries_with_progress(
+                            &pool,
+                            metadata_manager,
+                            &config,
+                            work_limiters,
+                            Some(progress),
+                        )
+                        .await
+                    }
+                }
+            };
+            tokio::pin!(scan_future);
+
+            let scan_outcome = loop {
+                tokio::select! {
+                    result = &mut scan_future => {
+                        break ScanAttemptOutcome::Completed(result);
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                        let cancel_requested = {
+                            let registry = scan_registry().read().await;
+                            registry
+                                .operations
+                                .get(&operation_id)
+                                .map(|operation| operation.cancel_requested)
+                                .unwrap_or(true)
+                        };
+                        if cancel_requested {
+                            break ScanAttemptOutcome::Cancelled;
+                        }
+                    }
+                }
             };
             poller_handle.abort();
-            match scan_result {
-                Ok(summary) => {
+            match scan_outcome {
+                ScanAttemptOutcome::Cancelled => {
+                    {
+                        let mut registry = scan_registry().write().await;
+                        if let Some(operation) = registry.operations.get_mut(&operation_id) {
+                            operation.status = "Cancelled";
+                            operation.progress = 100.0;
+                            operation.phase = "Cancelled".to_string();
+                            operation.scan_rate_per_sec = 0.0;
+                            operation.completed_at = Some(Utc::now());
+                        }
+                        if registry
+                            .active_operation_ids
+                            .get(&scope_key_for_task)
+                            .copied()
+                            == Some(operation_id)
+                        {
+                            registry.active_operation_ids.remove(&scope_key_for_task);
+                        }
+                    }
+                    tracing::info!(
+                        operation_id = %operation_id,
+                        trigger = %trigger,
+                        attempt,
+                        "后台媒体库扫描已取消"
+                    );
+                    break;
+                }
+                ScanAttemptOutcome::Completed(Ok(summary)) => {
                     {
                         let mut registry = scan_registry().write().await;
                         if let Some(operation) = registry.operations.get_mut(&operation_id) {
@@ -381,6 +462,7 @@ async fn enqueue_library_scan(
                             operation.phase = "Completed".to_string();
                             operation.scanned_files = summary.scanned_files as u64;
                             operation.imported_items = summary.imported_items as u64;
+                            operation.scan_rate_per_sec = 0.0;
                             if operation.total_files == 0 {
                                 operation.total_files = summary.scanned_files as u64;
                             }
@@ -410,13 +492,16 @@ async fn enqueue_library_scan(
                     );
                     break;
                 }
-                Err(AppError::Sqlx(error)) if attempt < MAX_ATTEMPTS => {
+                ScanAttemptOutcome::Completed(Err(AppError::Sqlx(error)))
+                    if attempt < MAX_ATTEMPTS =>
+                {
                     {
                         let mut registry = scan_registry().write().await;
                         if let Some(operation) = registry.operations.get_mut(&operation_id) {
                             operation.status = "Queued";
                             operation.error = Some(error.to_string());
                             operation.attempts = attempt;
+                            operation.scan_rate_per_sec = 0.0;
                         }
                     }
                     tracing::warn!(
@@ -430,13 +515,14 @@ async fn enqueue_library_scan(
                     attempt += 1;
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                Err(error) => {
+                ScanAttemptOutcome::Completed(Err(error)) => {
                     {
                         let mut registry = scan_registry().write().await;
                         if let Some(operation) = registry.operations.get_mut(&operation_id) {
                             operation.status = "Failed";
                             operation.progress = 100.0;
                             operation.phase = "Failed".to_string();
+                            operation.scan_rate_per_sec = 0.0;
                             operation.completed_at = Some(Utc::now());
                             operation.error = Some(error.to_string());
                             operation.attempts = attempt;
@@ -807,6 +893,7 @@ async fn cancel_scan_operation(
         } else if operation.status == "Queued" {
             operation.status = "Cancelled";
             operation.progress = 100.0;
+            operation.scan_rate_per_sec = 0.0;
             operation.completed_at = Some(Utc::now());
             clear_active = true;
             operation.to_dto()
@@ -825,8 +912,116 @@ async fn cancel_scan_operation(
     Ok(Json(dto))
 }
 
-async fn library_notify(session: AuthSession) -> Result<StatusCode, AppError> {
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LibraryMediaUpdateInfo {
+    #[serde(default, alias = "path")]
+    path: String,
+    #[serde(default, alias = "updateType")]
+    update_type: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LibraryMediaUpdatedRequest {
+    #[serde(default, alias = "updates")]
+    updates: Vec<LibraryMediaUpdateInfo>,
+}
+
+fn normalize_match_path(path: &str) -> String {
+    let mut normalized = path.trim().replace('\\', "/");
+    while normalized.ends_with('/') {
+        normalized.pop();
+    }
+    #[cfg(windows)]
+    {
+        normalized = normalized.to_ascii_lowercase();
+    }
+    normalized
+}
+
+fn path_matches_library(update_path: &str, library_path: &str) -> bool {
+    let update = normalize_match_path(update_path);
+    let library = normalize_match_path(library_path);
+    if update.is_empty() || library.is_empty() {
+        return false;
+    }
+    update == library
+        || update.starts_with(&(library.clone() + "/"))
+        || library.starts_with(&(update + "/"))
+}
+
+async fn resolve_libraries_for_media_updates(
+    state: &AppState,
+    updates: &[LibraryMediaUpdateInfo],
+) -> Result<Vec<Uuid>, AppError> {
+    let libraries = repository::list_libraries(&state.pool).await?;
+    let mut target_ids = BTreeSet::new();
+    for update in updates {
+        let update_path = update.path.trim();
+        if update_path.is_empty() {
+            continue;
+        }
+        for library in &libraries {
+            let _update_type = update.update_type.trim();
+            let matches = repository::library_paths(library)
+                .iter()
+                .any(|library_path| path_matches_library(update_path, library_path));
+            if matches {
+                target_ids.insert(library.id);
+            }
+        }
+    }
+    Ok(target_ids.into_iter().collect())
+}
+
+async fn list_library_ids_by_collection_type(
+    state: &AppState,
+    collection_type: &str,
+) -> Result<Vec<Uuid>, AppError> {
+    let libraries = repository::list_libraries(&state.pool).await?;
+    Ok(libraries
+        .into_iter()
+        .filter(|library| {
+            library
+                .collection_type
+                .eq_ignore_ascii_case(collection_type)
+        })
+        .map(|library| library.id)
+        .collect())
+}
+
+async fn library_notify(
+    session: AuthSession,
+    State(state): State<AppState>,
+    uri: OriginalUri,
+    payload: Option<Json<LibraryMediaUpdatedRequest>>,
+) -> Result<StatusCode, AppError> {
     auth::require_admin(&session)?;
+    let request_path = uri.0.path().to_ascii_lowercase();
+    let mut target_library_ids = if request_path.ends_with("/library/movies/added")
+        || request_path.ends_with("/library/movies/updated")
+    {
+        list_library_ids_by_collection_type(&state, "movies").await?
+    } else if request_path.ends_with("/library/series/added")
+        || request_path.ends_with("/library/series/updated")
+    {
+        list_library_ids_by_collection_type(&state, "tvshows").await?
+    } else {
+        let updates = payload.map(|json| json.0.updates).unwrap_or_default();
+        resolve_libraries_for_media_updates(&state, &updates).await?
+    };
+    target_library_ids.sort_unstable();
+    target_library_ids.dedup();
+
+    if target_library_ids.is_empty() {
+        // 没提供变更路径，或路径无法映射到具体媒体库时，回退为全库扫描。
+        let _ = enqueue_library_scan(&state, "library_media_updated_fallback", None).await?;
+    } else {
+        for library_id in target_library_ids {
+            let _ = enqueue_library_scan(&state, "library_media_updated", Some(library_id)).await?;
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

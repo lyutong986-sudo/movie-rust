@@ -16,7 +16,7 @@ use reqwest::Client;
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -35,6 +35,14 @@ pub struct RemoteEmbySyncResult {
     pub written_files: usize,
     pub source_root: String,
     pub scan_summary: ScanSummary,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemoteViewPreview {
+    pub id: String,
+    pub name: String,
+    pub collection_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -232,6 +240,8 @@ struct RemoteViewsResult {
 struct RemoteLibraryView {
     id: String,
     name: String,
+    #[serde(default)]
+    collection_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -456,6 +466,106 @@ pub fn default_spoofed_user_agent() -> &'static str {
     DEFAULT_SPOOFED_USER_AGENT
 }
 
+pub async fn preview_remote_views(
+    server_url: &str,
+    username: &str,
+    password: &str,
+    spoofed_user_agent: &str,
+) -> Result<Vec<RemoteViewPreview>, AppError> {
+    let server_url = normalize_server_url(server_url);
+    if server_url.trim().is_empty() {
+        return Err(AppError::BadRequest("远端 Emby 地址不能为空".to_string()));
+    }
+    let username = username.trim();
+    if username.is_empty() {
+        return Err(AppError::BadRequest("远端 Emby 用户名不能为空".to_string()));
+    }
+    if password.trim().is_empty() {
+        return Err(AppError::BadRequest("远端 Emby 密码不能为空".to_string()));
+    }
+    let spoofed_user_agent = spoofed_user_agent.trim();
+    if spoofed_user_agent.is_empty() {
+        return Err(AppError::BadRequest("伪装 User-Agent 不能为空".to_string()));
+    }
+
+    let source_id = Uuid::new_v4();
+    let device_id = format!("movie-rust-preview-{}", source_id.simple());
+    let client = Client::new();
+    let auth_endpoint = format!("{server_url}/Users/AuthenticateByName");
+    let login_response = client
+        .post(&auth_endpoint)
+        .query(&[("reqformat", "json")])
+        .header(header::USER_AGENT.as_str(), spoofed_user_agent)
+        .header(header::ACCEPT.as_str(), "application/json")
+        .header(header::ACCEPT_ENCODING.as_str(), "identity")
+        .header(
+            "X-Emby-Authorization",
+            emby_auth_header_for_device(device_id.as_str(), None),
+        )
+        .json(&serde_json::json!({
+            "Username": username,
+            "Pw": password,
+            "Password": password,
+        }))
+        .send()
+        .await?;
+
+    if !login_response.status().is_success() {
+        let status = login_response.status();
+        let body = login_response.text().await.unwrap_or_default();
+        return Err(AppError::BadRequest(format!(
+            "远端 Emby 登录失败: {} {}",
+            status.as_u16(),
+            body
+        )));
+    }
+    let login: RemoteLoginResponse =
+        parse_remote_json_response(login_response, auth_endpoint.as_str()).await?;
+
+    let views_endpoint = format!("{server_url}/Users/{}/Views", login.user.id);
+    let views_response = client
+        .get(&views_endpoint)
+        .query(&[
+            ("Fields", "CollectionType,ChildCount,RecursiveItemCount"),
+            ("EnableTotalRecordCount", "true"),
+            ("reqformat", "json"),
+            ("api_key", login.access_token.as_str()),
+        ])
+        .header(header::USER_AGENT.as_str(), spoofed_user_agent)
+        .header(header::ACCEPT.as_str(), "application/json")
+        .header(header::ACCEPT_ENCODING.as_str(), "identity")
+        .header("X-Emby-Token", login.access_token.as_str())
+        .header(
+            "X-Emby-Authorization",
+            emby_auth_header_for_device(device_id.as_str(), Some(login.access_token.as_str())),
+        )
+        .send()
+        .await?;
+    if !views_response.status().is_success() {
+        let status = views_response.status();
+        let body = views_response.text().await.unwrap_or_default();
+        return Err(AppError::Internal(format!(
+            "拉取远端媒体库失败: {} {}",
+            status.as_u16(),
+            body
+        )));
+    }
+    let mut views: RemoteViewsResult =
+        parse_remote_json_response(views_response, views_endpoint.as_str()).await?;
+    views
+        .items
+        .retain(|view| !view.id.trim().is_empty() && !view.name.trim().is_empty());
+    Ok(views
+        .items
+        .into_iter()
+        .map(|view| RemoteViewPreview {
+            id: view.id,
+            name: view.name,
+            collection_type: view.collection_type,
+        })
+        .collect())
+}
+
 fn normalize_display_mode(value: &str) -> &'static str {
     if value.trim().eq_ignore_ascii_case(REMOTE_DISPLAY_MODE_MERGE) {
         REMOTE_DISPLAY_MODE_MERGE
@@ -529,7 +639,20 @@ async fn sync_source_inner(
         handle.set_phase("CountingRemoteItems", 3.0);
     }
     let user_id = ensure_authenticated(&state.pool, source, false).await?;
-    let views = fetch_remote_views(&state.pool, source, user_id.as_str()).await?;
+    let mut views = fetch_remote_views(&state.pool, source, user_id.as_str()).await?;
+    let selected_remote_views = normalize_remote_view_ids(source.remote_view_ids.as_slice());
+    if !selected_remote_views.is_empty() {
+        let selected_set: HashSet<String> = selected_remote_views
+            .iter()
+            .map(|value| value.to_ascii_lowercase())
+            .collect();
+        views.retain(|view| selected_set.contains(&view.id.to_ascii_lowercase()));
+        if views.is_empty() {
+            return Err(AppError::BadRequest(
+                "未匹配到已选择的远端媒体库，请重新获取远端媒体库列表并保存".to_string(),
+            ));
+        }
+    }
     let mut total_items = 0u64;
     for view in &views {
         let view_count = fetch_remote_items_total_count_for_view(
@@ -2148,20 +2271,43 @@ fn first_media_source_id(item: &RemoteSyncItem) -> Option<&str> {
 }
 
 fn emby_auth_header(source: &DbRemoteEmbySource, token: Option<&str>) -> String {
+    let device_id = format!("movie-rust-{}", source.id.simple());
+    emby_auth_header_for_device(device_id.as_str(), token)
+}
+
+fn emby_auth_header_for_device(device_id: &str, token: Option<&str>) -> String {
     let client = "MovieRustTransit";
     let device = "MovieRustProxy";
-    let device_id = format!("movie-rust-{}", source.id.simple());
     let version = "1.0.0";
     if let Some(token) = token.filter(|value| !value.trim().is_empty()) {
         format!(
-            "MediaBrowser Client=\"{client}\", Device=\"{device}\", DeviceId=\"{device_id}\", Version=\"{version}\", Token=\"{}\"",
+            "MediaBrowser Client=\"{client}\", Device=\"{device}\", DeviceId=\"{}\", Version=\"{version}\", Token=\"{}\"",
+            device_id.trim(),
             token.trim()
         )
     } else {
         format!(
-            "MediaBrowser Client=\"{client}\", Device=\"{device}\", DeviceId=\"{device_id}\", Version=\"{version}\""
+            "MediaBrowser Client=\"{client}\", Device=\"{device}\", DeviceId=\"{}\", Version=\"{version}\"",
+            device_id.trim()
         )
     }
+}
+
+fn normalize_remote_view_ids(values: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for raw in values {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if !normalized
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(value))
+        {
+            normalized.push(value.to_string());
+        }
+    }
+    normalized
 }
 
 fn normalize_server_url(value: &str) -> String {

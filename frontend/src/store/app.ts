@@ -5,6 +5,7 @@ import type {
   CreateLibraryPayload,
   LocalizationCulture,
   LibraryOptions,
+  MediaUpdateInfo,
   ScanOperation,
   SystemInfo,
   UserDto,
@@ -791,6 +792,26 @@ export async function cancelCurrentScan() {
   });
 }
 
+export async function scanIncremental(paths: string[] = []) {
+  await run(async () => {
+    const normalizedPaths = Array.from(
+      new Set(paths.map((path) => path.trim()).filter((path) => path.length > 0))
+    );
+    const updates: MediaUpdateInfo[] = normalizedPaths.map((path) => ({
+      Path: path,
+      UpdateType: 'Modified'
+    }));
+    await api.libraryMediaUpdated(updates);
+    state.message =
+      normalizedPaths.length > 0
+        ? `增量扫描任务已提交（${normalizedPaths.length} 条变更路径）`
+        : '增量扫描任务已提交';
+    await hydrateScanOperation();
+    void loadLibraries();
+    void loadVirtualFolders();
+  });
+}
+
 function startScanPolling(operationId: string) {
   if (scanPollTimer) {
     window.clearTimeout(scanPollTimer);
@@ -863,6 +884,11 @@ function clearClientState(keepInitialized: boolean) {
   adminUsers.value = [];
   virtualFolders.value = [];
   selectedItem.value = null;
+  scanOperation.value = null;
+  if (scanPollTimer) {
+    window.clearTimeout(scanPollTimer);
+    scanPollTimer = 0;
+  }
   parentStack.value = [];
   state.username = '';
   state.password = '';

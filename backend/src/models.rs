@@ -43,6 +43,8 @@ pub struct DbRemoteEmbySource {
     pub spoofed_user_agent: String,
     pub target_library_id: Uuid,
     pub display_mode: String,
+    #[sqlx(default)]
+    pub remote_view_ids: Vec<String>,
     pub enabled: bool,
     pub remote_user_id: Option<String>,
     pub access_token: Option<String>,

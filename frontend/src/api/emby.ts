@@ -385,6 +385,7 @@ export interface ScanOperation {
   TotalFiles?: number;
   ScannedFiles?: number;
   ImportedItems?: number;
+  ScanRatePerSec?: number;
   Status: string;
   Progress: number;
   Queued: boolean;
@@ -407,6 +408,11 @@ export interface ScanQueuedResponse {
   Operation: ScanOperation;
 }
 
+export interface MediaUpdateInfo {
+  Path: string;
+  UpdateType?: string;
+}
+
 export interface RemoteEmbySource {
   Id: string;
   Name: string;
@@ -414,6 +420,7 @@ export interface RemoteEmbySource {
   Username: string;
   TargetLibraryId: string;
   DisplayMode: 'merge' | 'separate' | string;
+  RemoteViewIds: string[];
   Enabled: boolean;
   SpoofedUserAgent: string;
   RemoteUserId?: string;
@@ -422,6 +429,12 @@ export interface RemoteEmbySource {
   LastSyncError?: string;
   CreatedAt: string;
   UpdatedAt: string;
+}
+
+export interface RemoteEmbyView {
+  Id: string;
+  Name: string;
+  CollectionType?: string;
 }
 
 export interface RemoteEmbySyncResponse {
@@ -1278,6 +1291,15 @@ export class EmbyApi {
     });
   }
 
+  async libraryMediaUpdated(updates: MediaUpdateInfo[]) {
+    return this.request<void>('/Library/Media/Updated', {
+      method: 'POST',
+      body: {
+        Updates: updates
+      }
+    });
+  }
+
   async scanOperation(operationId: string) {
     return this.request<ScanOperation>(`/api/admin/scan/operations/${encodeURIComponent(operationId)}`);
   }
@@ -1307,10 +1329,23 @@ export class EmbyApi {
     Password: string;
     TargetLibraryId: string;
     DisplayMode?: 'merge' | 'separate';
+    RemoteViewIds?: string[];
     SpoofedUserAgent?: string;
     Enabled?: boolean;
   }) {
     return this.request<RemoteEmbySource>('/api/admin/remote-emby/sources', {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async previewRemoteEmbyViews(payload: {
+    ServerUrl: string;
+    Username: string;
+    Password: string;
+    SpoofedUserAgent?: string;
+  }) {
+    return this.request<RemoteEmbyView[]>('/api/admin/remote-emby/views/preview', {
       method: 'POST',
       body: payload
     });
