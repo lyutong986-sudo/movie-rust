@@ -571,7 +571,15 @@ async fn import_tv_file(
         .or(parsed.series_name.as_deref());
     let preliminary_series_name = series_name_for_file(file, preliminary_series_name);
     let preliminary_series_path = series_virtual_path(library_root, file, &preliminary_series_name);
-    let series_nfo = read_nfo_file(&preliminary_series_path.join("tvshow.nfo")).unwrap_or_default();
+    // Jellyfin/Kodi：从剧集文件所在目录向上查找最近的 tvshow.nfo（剧集根目录可能在任意层级），
+    // 不能仅依赖 series_virtual_path（与真实文件夹不一致时会漏掉整剧元数据）。
+    let walked_tvshow = read_tvshow_nfo_walking_up(library_root, file);
+    let series_nfo = walked_tvshow
+        .as_ref()
+        .map(|(_, meta)| meta.clone())
+        .or_else(|| read_nfo_file(&preliminary_series_path.join("tvshow.nfo")))
+        .or_else(|| read_nfo_file(&preliminary_series_path.join("series.nfo")))
+        .unwrap_or_default();
 
     let series_name = series_nfo
         .title
@@ -580,7 +588,10 @@ async fn import_tv_file(
         .or(parsed.series_name.as_deref())
         .map(ToOwned::to_owned)
         .unwrap_or(preliminary_series_name);
-    let series_path = series_virtual_path(library_root, file, &series_name);
+    // 若磁盘上已找到 tvshow.nfo，剧集根路径以该目录为准。
+    let series_path = walked_tvshow
+        .map(|(dir, _)| dir)
+        .unwrap_or_else(|| series_virtual_path(library_root, file, &series_name));
     let series_provider_ids = merge_provider_ids(
         series_nfo.provider_ids.clone(),
         provider_ids_from_path(&series_path),
@@ -596,7 +607,12 @@ async fn import_tv_file(
         .or_else(|| season_number_from_file(file))
         .unwrap_or(1);
     let season_path = season_virtual_path(library_root, file, &series_path, season_number);
-    let season_nfo = read_nfo_file(&season_path.join("season.nfo")).unwrap_or_default();
+    // 优先读取磁盘上季文件夹内的 season.nfo（季目录名可能是 Season 05 等与虚拟路径不一致）。
+    let season_nfo = file
+        .parent()
+        .and_then(|p| read_nfo_file(&p.join("season.nfo")))
+        .or_else(|| read_nfo_file(&season_path.join("season.nfo")))
+        .unwrap_or_default();
     let season_name = season_nfo.title.clone().unwrap_or_else(|| {
         if season_number == 0 {
             "Specials".to_string()
@@ -701,9 +717,9 @@ async fn import_tv_file(
             tags: &series_nfo.tags,
             production_locations: &series_nfo.production_locations,
             image_primary_path: series_poster.as_deref(),
-            backdrop_path: season_backdrop.as_deref(),
-            logo_path: season_logo.as_deref(),
-            thumb_path: season_thumb.as_deref(),
+            backdrop_path: series_backdrop.as_deref(),
+            logo_path: series_logo.as_deref(),
+            thumb_path: series_thumb.as_deref(),
             remote_trailers: &series_nfo.remote_trailers,
             series_name: Some(&series_name),
             season_name: None,
@@ -1688,6 +1704,27 @@ fn read_movie_nfo(file: &Path) -> Option<NfoMetadata> {
         }
     }
 
+    None
+}
+
+/// 自视频文件父目录起向上查找 `tvshow.nfo` / `series.nfo`，直到到达媒体库根目录或路径耗尽。
+/// 与 Jellyfin `LocalSeriesProvider` / Kodi 行为一致：剧集根可在 Season 之上任意层级。
+/// 返回 `(包含 NFO 的目录, 解析结果)`，便于 `series_path` 与磁盘结构对齐。
+fn read_tvshow_nfo_walking_up(library_root: &Path, file: &Path) -> Option<(PathBuf, NfoMetadata)> {
+    let mut dir = file.parent()?;
+    const MAX_DEPTH: usize = 48;
+    for _ in 0..MAX_DEPTH {
+        for name in ["tvshow.nfo", "series.nfo"] {
+            let candidate = dir.join(name);
+            if let Some(metadata) = read_nfo_file(&candidate) {
+                return Some((dir.to_path_buf(), metadata));
+            }
+        }
+        if dir == library_root {
+            break;
+        }
+        dir = dir.parent()?;
+    }
     None
 }
 

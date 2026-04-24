@@ -7612,30 +7612,41 @@ fn nfo_candidates_for_item(item: &DbMediaItem, media_path: &Path) -> Vec<PathBuf
         }
         "Series" => {
             candidates.push(media_path.join("tvshow.nfo"));
+            candidates.push(media_path.join("series.nfo"));
             if let Some(parent) = media_path.parent() {
                 candidates.push(parent.join("tvshow.nfo"));
+                candidates.push(parent.join("series.nfo"));
             }
         }
         "Season" => {
             candidates.push(media_path.join("season.nfo"));
             candidates.push(media_path.join("tvshow.nfo"));
+            candidates.push(media_path.join("series.nfo"));
             if let Some(parent) = media_path.parent() {
                 candidates.push(parent.join("tvshow.nfo"));
+                candidates.push(parent.join("series.nfo"));
             }
         }
         "Episode" => {
-            if let Some(parent) = media_path.parent() {
+            if let Some(mut dir) = media_path.parent() {
                 if let Some(stem) = media_path
                     .file_stem()
                     .map(|value| value.to_string_lossy().to_string())
                 {
-                    candidates.push(parent.join(format!("{stem}.nfo")));
+                    candidates.push(dir.join(format!("{stem}.nfo")));
                 }
-                candidates.push(parent.join("episodedetails.nfo"));
-                candidates.push(parent.join("episode.nfo"));
-                candidates.push(parent.join("season.nfo"));
-                if let Some(series_parent) = parent.parent() {
-                    candidates.push(series_parent.join("tvshow.nfo"));
+                candidates.push(dir.join("episodedetails.nfo"));
+                candidates.push(dir.join("episode.nfo"));
+                candidates.push(dir.join("season.nfo"));
+                // 向上遍历每一级父目录的 tvshow.nfo（多季/子文件夹结构与虚拟路径不一致时仍需命中剧集根 NFO）。
+                for _ in 0..48 {
+                    candidates.push(dir.join("tvshow.nfo"));
+                    candidates.push(dir.join("series.nfo"));
+                    if let Some(p) = dir.parent() {
+                        dir = p;
+                    } else {
+                        break;
+                    }
                 }
             }
         }
