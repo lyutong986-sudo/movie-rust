@@ -647,9 +647,9 @@ export async function saveServerSettings() {
   }, '服务器设置已保存');
 }
 
-export async function scan() {
+export async function scan(libraryId?: string) {
   await run(async () => {
-    const result = await api.scan(false);
+    const result = await api.scan(false, libraryId);
     await loadLibraries();
     await loadVirtualFolders();
     if ('ImportedItems' in result) {
@@ -660,7 +660,8 @@ export async function scan() {
       return;
     }
     scanOperation.value = result.Operation;
-    state.message = result.Message || '媒体库已开始后台扫描';
+    const scopeName = result.Operation.LibraryName || (libraryId ? '指定媒体库' : '全部媒体库');
+    state.message = result.Message || `${scopeName}已开始后台扫描`;
     startScanPolling(result.Operation.Id);
   });
 }

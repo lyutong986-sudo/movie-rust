@@ -917,3 +917,37 @@ npx vite build         # 构建成功
 ### C. 校验
 
 - `frontend> npm run build` —— ✅ 通过
+
+## 二十七、第二十七轮：每个媒体库独立扫描 operationId（真库级任务追踪，2026-04-24）
+
+> 目标：把“库级状态”从前端推断升级为后端真实任务域，支持 `LibraryId` 级别独立 operationId、独立单飞和独立取消/轮询。
+
+### A. 后端（`backend/src/routes/admin.rs` + `backend/src/scanner.rs`）
+
+| 改造点 | 说明 |
+| --- | --- |
+| `POST /api/admin/scan` 支持 `LibraryId` | 新增查询参数 `LibraryId/libraryId/library_id`，可触发“只扫描单个媒体库”。 |
+| 同步模式兼容 | `WaitForCompletion=true` 下也支持按 `LibraryId` 同步扫描。 |
+| 任务域单飞 | 扫描注册表从单一 `active_operation_id` 改为 `active_operation_ids: BTreeMap<scope_key, operation_id>`；全库 scope 为 `all`，单库 scope 为 `library:{uuid}`。同一 scope 重复点击复用同一个 operationId。 |
+| 任务 DTO 增强 | `ScanOperationDto` 增加 `ScopeKey`、`LibraryId`、`LibraryName` 字段，前端可直接知道任务属于哪个库。 |
+| 扫描执行能力 | `scanner.rs` 新增 `scan_single_library(...)`，并抽取通用 `scan_libraries(...)`，复用同一扫描实现。 |
+
+### B. 前端（`frontend/src/api/emby.ts` + `frontend/src/store/app.ts` + `frontend/src/pages/settings/LibrarySettings.vue`）
+
+| 改造点 | 说明 |
+| --- | --- |
+| API 入参 | `api.scan(waitForCompletion, libraryId?)` 支持携带 `LibraryId`。 |
+| 任务类型 | `ScanOperation` 类型补充 `ScopeKey/LibraryId/LibraryName`。 |
+| store 触发 | `scan(libraryId?)` 可直接发起库级扫描；消息文案按 `LibraryName` 输出。 |
+| 库页状态绑定 | 库卡片扫描状态/按钮禁用逻辑优先使用后端返回的 `scanOperation.LibraryId`，不再仅靠前端本地记忆。 |
+
+### C. 结果
+
+- 每个媒体库现在有真实独立任务域，避免不同库扫描互相覆盖状态；
+- 同一库重复点击不再重复入队（复用 operationId）；
+- 前端可以精准显示“哪个库在扫描”，并对该库按钮做精确防重。
+
+### D. 校验
+
+- `backend> cargo build` —— ✅ 通过
+- `frontend> npm run build` —— ✅ 通过

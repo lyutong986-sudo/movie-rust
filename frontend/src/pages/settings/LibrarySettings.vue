@@ -110,21 +110,23 @@ function folderCount(folder: VirtualFolderInfo) {
 
 function folderScanStatus(folder: VirtualFolderInfo) {
   if (!scanRunning.value) return 'Idle';
-  if (!requestedLibraryId.value) return 'Running (All)';
-  if (requestedLibraryId.value === folder.ItemId) return scanOperation.value?.Status || 'Running';
+  const activeLibraryId = scanOperation.value?.LibraryId || requestedLibraryId.value;
+  if (!activeLibraryId) return 'Running (All)';
+  if (activeLibraryId === folder.ItemId) return scanOperation.value?.Status || 'Running';
   return 'Queued';
 }
 
 function isFolderScanButtonDisabled(folder: VirtualFolderInfo) {
   if (state.busy) return true;
   if (!scanRunning.value) return false;
-  if (!requestedLibraryId.value) return true;
-  return requestedLibraryId.value === folder.ItemId;
+  const activeLibraryId = scanOperation.value?.LibraryId || requestedLibraryId.value;
+  if (!activeLibraryId) return true;
+  return activeLibraryId === folder.ItemId;
 }
 
 async function scanFolder(folder: VirtualFolderInfo) {
   requestedLibraryId.value = folder.ItemId;
-  await scan();
+  await scan(folder.ItemId);
 }
 
 async function scanAllLibraries() {
@@ -265,7 +267,7 @@ async function remove(folder: VirtualFolderInfo) {
                 <UBadge
                   v-if="scanRunning"
                   variant="soft"
-                  :color="requestedLibraryId === folder.ItemId ? scanStatusColor : 'neutral'"
+                  :color="(scanOperation?.LibraryId || requestedLibraryId) === folder.ItemId ? scanStatusColor : 'neutral'"
                   size="xs"
                 >
                   {{ folderScanStatus(folder) }}
@@ -305,7 +307,7 @@ async function remove(folder: VirtualFolderInfo) {
                 :disabled="isFolderScanButtonDisabled(folder)"
                 @click="scanFolder(folder)"
               >
-                {{ requestedLibraryId === folder.ItemId && scanRunning ? '扫描中' : '扫描' }}
+                {{ (scanOperation?.LibraryId || requestedLibraryId) === folder.ItemId && scanRunning ? '扫描中' : '扫描' }}
               </UButton>
               <UButton color="error" variant="soft" icon="i-lucide-trash-2" :disabled="state.busy" @click="remove(folder)">
                 删除

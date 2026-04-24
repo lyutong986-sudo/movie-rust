@@ -93,6 +93,30 @@ pub async fn scan_all_libraries(
     config: &Config,
     work_limiters: WorkLimiters,
 ) -> Result<ScanSummary, AppError> {
+    let libraries = repository::list_libraries(pool).await?;
+    scan_libraries(pool, metadata_manager, config, work_limiters, libraries).await
+}
+
+pub async fn scan_single_library(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<Arc<MetadataProviderManager>>,
+    config: &Config,
+    work_limiters: WorkLimiters,
+    library_id: uuid::Uuid,
+) -> Result<ScanSummary, AppError> {
+    let library = repository::get_library(pool, library_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体库不存在".to_string()))?;
+    scan_libraries(pool, metadata_manager, config, work_limiters, vec![library]).await
+}
+
+async fn scan_libraries(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<Arc<MetadataProviderManager>>,
+    config: &Config,
+    work_limiters: WorkLimiters,
+    libraries: Vec<DbLibrary>,
+) -> Result<ScanSummary, AppError> {
     let startup = repository::startup_configuration(pool, config).await?;
     let limits = WorkLimiterConfig {
         library_scan_limit: startup.library_scan_thread_count.max(1) as u32,
@@ -101,7 +125,6 @@ pub async fn scan_all_libraries(
     };
     work_limiters.configure(limits).await;
     let runtime = ScanRuntime::new(work_limiters);
-    let libraries = repository::list_libraries(pool).await?;
     let mut scanned_files = 0_i64;
     let mut imported_items = 0_i64;
 

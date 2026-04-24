@@ -250,6 +250,9 @@ export interface ScanSummary {
 export interface ScanOperation {
   Id: string;
   Trigger: string;
+  ScopeKey?: string;
+  LibraryId?: string;
+  LibraryName?: string;
   Status: string;
   Progress: number;
   Queued: boolean;
@@ -783,10 +786,13 @@ export class EmbyApi {
     });
   }
 
-  async scan(waitForCompletion = false) {
+  async scan(waitForCompletion = false, libraryId?: string) {
     const params = new URLSearchParams({
       WaitForCompletion: waitForCompletion ? 'true' : 'false'
     });
+    if (libraryId) {
+      params.set('LibraryId', libraryId);
+    }
     return this.request<ScanSummary | ScanQueuedResponse>(`/api/admin/scan?${params}`, {
       method: 'POST'
     });
