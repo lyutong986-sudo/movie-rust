@@ -672,3 +672,12 @@ npx vite build         # 构建成功
 | `libraries.value = result.Items` 在 **`Items` 缺失** 时变成 `undefined`，模板访问 `.length` **渲染抛错**，整页空白 | `store/app.ts` 增加 `itemsFromQuery()`，凡从 `QueryResult` 取列表处统一 `Items ?? []`。 |
 | 向导 **`completeWizard` 内** `enterHome()` 与 `run()` 同层 try/catch，失败时与「设置完成」混在一起 | `enterHome` 移到 `run` **之后**，单独 try/catch 写入 `state.error`。 |
 | 模板依赖跨文件 `libraries` ref 的解包 + 面板未占满高度 | `HomePage.vue` 使用 **`libraryList` computed**；`UDashboardGroup` 增加 **`min-h-svh`**，`UDashboardPanel` 增加 **`flex min-h-0 flex-1 flex-col`**；首页根节点 **`min-w-0 flex-1`**。 |
+
+**H. 首页 / 设置页仍只显示外壳（MCP 第三轮定位，2026-04-24）**
+
+| 现象 | MCP 结论 | 修复 |
+| --- | --- | --- |
+| `https://test.emby.yun:4443/` 顶栏、侧栏、用户菜单正常，但主内容区没有媒体库、空状态或设置卡片；点击「设置」后也只剩面包屑与返回按钮。 | DevTools DOM 中 `#dashboard-panel-main` 的 Navbar 后只有空注释，页面 `RouterView` 内容未进入 DOM；当前 Nuxt UI 版本没有消费 `UDashboardPanel` 内的 `<template #body>`。接口层面 `/Users/.../Views`、`/Items` 均为 200，控制台无 Vue 崩溃。 | `frontend/src/layouts/AppLayout.vue` 将主内容滚动容器从 `UDashboardPanel` 的 `#body` 命名 slot 改为**直接子节点**，保证 `<slot />`（也就是路由页面）真实挂载。 |
+| 线上强刷后仍加载 `index-h926ZtrD.js`、`SettingsIndex-BZTo4CvI.js` 等旧 chunk。 | 线上服务当前仍是旧静态资源；本地构建后新 chunk 为 `index-DoSIH5zm.js`、`SettingsIndex-CK393fAx.js`。 | 需要用新源码重新构建并部署镜像 / 静态目录；若使用 `docker-compose.yml` 当前的 `yuanhu66/movie-rust:latest`，需重新构建推送该镜像或切到本地 `build: .`。 |
+
+**校验**：`frontend> npm run build` —— ✅ 通过。

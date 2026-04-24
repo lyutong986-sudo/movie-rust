@@ -20,74 +20,81 @@ import {
 const router = useRouter();
 const query = ref('');
 
-const userEntries = computed(() => [
+type SettingsEntry = {
+  icon: string;
+  title: string;
+  description: string;
+  to: string;
+};
+
+const userEntries = computed<SettingsEntry[]>(() => [
   {
     icon: 'i-lucide-user',
     title: '账户',
-    description: '查看当前登录用户并修改密码',
+    description: '查看当前登录用户，修改密码和个人偏好。',
     to: '/settings/account'
   },
   {
     icon: 'i-lucide-circle-play',
     title: '播放',
-    description: '本地播放器、直链和会话兼容状态',
+    description: '本地播放器、直链播放和会话兼容状态。',
     to: '/settings/playback'
   },
   {
     icon: 'i-lucide-subtitles',
     title: '字幕',
-    description: '客户端字幕样式预设',
+    description: '客户端字幕样式与默认字幕偏好。',
     to: '/settings/subtitles'
   }
 ]);
 
-const adminEntries = computed(() => [
+const adminEntries = computed<SettingsEntry[]>(() => [
   {
     icon: 'i-lucide-server',
     title: '服务器',
-    description: '名称、语言、元数据和引导配置',
+    description: '名称、语言、扫描线程和元数据配置。',
     to: '/settings/server'
   },
   {
     icon: 'i-lucide-cpu',
     title: '转码',
-    description: 'ffmpeg、硬件加速、线程和 H264 质量',
+    description: 'FFmpeg、硬件加速、并发限制和 H.264 质量。',
     to: '/settings/transcoding'
   },
   {
     icon: 'i-lucide-library',
     title: '媒体库',
-    description: '创建媒体库、查看路径并执行扫描',
+    description: '创建媒体库、管理路径并执行扫描。',
     to: '/settings/libraries'
   },
   {
     icon: 'i-lucide-users',
     title: '用户',
-    description: '管理员与普通用户列表',
+    description: '管理账号、密码、权限、媒体库访问和偏好。',
     to: '/settings/users'
   },
   {
     icon: 'i-lucide-monitor',
     title: '设备',
-    description: '查看已建立的会话设备',
+    description: '查看已经建立的客户端会话设备。',
     to: '/settings/devices'
   },
   {
     icon: 'i-lucide-key-round',
     title: 'API Key',
-    description: '当前版本的令牌和接口兼容说明',
+    description: '管理长期 API Key 和外部集成令牌。',
     to: '/settings/apikeys'
   },
   {
     icon: 'i-lucide-activity',
-    title: '日志活动',
-    description: '近期播放活动和服务状态',
+    title: '日志与活动',
+    description: '查看近期播放活动和服务状态。',
     to: '/settings/logs-and-activity'
   },
   {
     icon: 'i-lucide-network',
     title: '网络',
-    description: '远程访问、端口和 Emby 兼容入口',
+    description: '远程访问、端口和 Emby 兼容入口。',
     to: '/settings/network'
   }
 ]);
@@ -98,18 +105,15 @@ onMounted(async () => {
   }
 });
 
-function matches(entry: { title: string; description: string }) {
+function matches(entry: SettingsEntry) {
   const q = query.value.trim().toLowerCase();
   if (!q) return true;
-  return (
-    entry.title.toLowerCase().includes(q) || entry.description.toLowerCase().includes(q)
-  );
+  return entry.title.toLowerCase().includes(q) || entry.description.toLowerCase().includes(q);
 }
 
 const filteredUserEntries = computed(() => userEntries.value.filter(matches));
 const filteredAdminEntries = computed(() => adminEntries.value.filter(matches));
 
-// 管理员概览图表数据：媒体库类型占比 / 内容数量。
 const collectionStats = computed(() => {
   const map = new Map<string, number>();
   for (const lib of libraries.value) {
@@ -120,15 +124,11 @@ const collectionStats = computed(() => {
   const labelMap: Record<string, string> = {
     movies: '电影',
     tvshows: '剧集',
-    music: '音乐',
-    books: '图书',
     other: '其他'
   };
   const colorMap: Record<string, string> = {
     movies: 'bg-sky-500',
     tvshows: 'bg-indigo-500',
-    music: 'bg-pink-500',
-    books: 'bg-amber-500',
     other: 'bg-neutral-500'
   };
   return Array.from(map.entries()).map(([type, count]) => ({
@@ -147,14 +147,16 @@ const collectionStats = computed(() => {
       <UInput
         v-model="query"
         icon="i-lucide-search"
-        placeholder="在设置中搜索（账户、字幕、转码、日志…）"
+        placeholder="在设置中搜索：账户、字幕、转码、日志..."
         class="w-full"
       />
 
       <div class="grid gap-3 sm:grid-cols-3">
         <UCard variant="soft">
           <p class="text-muted text-xs">当前用户</p>
-          <p class="text-highlighted mt-1 text-lg font-semibold">{{ user?.Name || '未登录' }}</p>
+          <p class="text-highlighted mt-1 text-lg font-semibold">
+            {{ user?.Name || '未登录' }}
+          </p>
           <p class="text-muted text-xs">{{ isAdmin ? '管理员账户' : '标准账户' }}</p>
         </UCard>
         <UCard variant="soft">
@@ -226,19 +228,19 @@ const collectionStats = computed(() => {
       <UCard v-if="isAdmin" variant="soft">
         <h3 class="text-highlighted mb-4 text-sm font-semibold">管理员概览</h3>
         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div class="bg-elevated/50 rounded-lg p-3">
+          <div class="rounded-lg bg-elevated/50 p-3">
             <p class="text-muted text-xs">媒体库</p>
             <p class="text-highlighted mt-1 text-2xl font-semibold">{{ libraries.length }}</p>
           </div>
-          <div class="bg-elevated/50 rounded-lg p-3">
+          <div class="rounded-lg bg-elevated/50 p-3">
             <p class="text-muted text-xs">条目总数</p>
             <p class="text-highlighted mt-1 text-2xl font-semibold">{{ totalLibraryItems }}</p>
           </div>
-          <div class="bg-elevated/50 rounded-lg p-3">
+          <div class="rounded-lg bg-elevated/50 p-3">
             <p class="text-muted text-xs">用户数</p>
             <p class="text-highlighted mt-1 text-2xl font-semibold">{{ adminUsers.length }}</p>
           </div>
-          <div class="bg-elevated/50 rounded-lg p-3">
+          <div class="rounded-lg bg-elevated/50 p-3">
             <p class="text-muted text-xs">首页呈现</p>
             <p class="text-highlighted mt-1 text-2xl font-semibold">{{ homeItems.length }}</p>
           </div>
@@ -246,7 +248,7 @@ const collectionStats = computed(() => {
 
         <div v-if="collectionStats.length" class="mt-4 space-y-2">
           <p class="text-muted text-xs">内容分布</p>
-          <div class="bg-elevated flex h-3 overflow-hidden rounded-full">
+          <div class="flex h-3 overflow-hidden rounded-full bg-elevated">
             <div
               v-for="stat in collectionStats"
               :key="stat.type"
@@ -262,7 +264,7 @@ const collectionStats = computed(() => {
               class="text-muted flex items-center gap-1.5"
             >
               <span class="inline-block size-2 rounded-full" :class="stat.color" />
-              {{ stat.label }} · {{ stat.count }}
+              {{ stat.label }} / {{ stat.count }}
             </span>
           </div>
         </div>

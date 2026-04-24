@@ -25,24 +25,27 @@ const shortcutsOpen = ref(false);
 const locale = ref(localStorage.getItem('movie-rust-locale') || 'zh-CN');
 
 const isAdminSection = computed(() => Boolean(route.meta.admin));
+const isSettingsSection = computed(() => route.path.startsWith('/settings'));
 const isHome = computed(() => route.path === '/');
 const libraryRouteId = computed(() => String(route.params.id || ''));
 
-// 动态 breadcrumb：根据路由 / parentStack / selectedItem 构造层级。
 const breadcrumb = computed(() => {
   const crumbs: Array<{ label: string; to?: string }> = [];
   if (route.name === 'home') {
     crumbs.push({ label: '首页' });
     return crumbs;
   }
+
   crumbs.push({ label: '首页', to: '/' });
-  if (route.meta.admin) {
-    crumbs.push({ label: '设置', to: '/settings' });
-    if (route.meta.title) {
+
+  if (isSettingsSection.value) {
+    crumbs.push({ label: '设置', to: route.path === '/settings' ? undefined : '/settings' });
+    if (route.path !== '/settings' && route.meta.title) {
       crumbs.push({ label: String(route.meta.title) });
     }
     return crumbs;
   }
+
   if (route.name === 'library') {
     const lib = libraries.value.find((l) => l.Id === libraryRouteId.value);
     crumbs.push({ label: lib?.Name || '媒体库' });
@@ -51,6 +54,7 @@ const breadcrumb = computed(() => {
     }
     return crumbs;
   }
+
   if (route.name === 'item' || route.name === 'series') {
     if (selectedItem.value?.Type === 'Episode' && selectedItem.value.SeriesName) {
       crumbs.push({ label: selectedItem.value.SeriesName });
@@ -62,6 +66,7 @@ const breadcrumb = computed(() => {
     }
     return crumbs;
   }
+
   if (route.meta.title) {
     crumbs.push({ label: String(route.meta.title) });
   }
@@ -146,8 +151,6 @@ const localeOptions = [
 function libraryIcon(collectionType?: string) {
   if (collectionType === 'movies') return 'i-lucide-clapperboard';
   if (collectionType === 'tvshows') return 'i-lucide-tv';
-  if (collectionType === 'music') return 'i-lucide-music';
-  if (collectionType === 'books') return 'i-lucide-book';
   return 'i-lucide-folder';
 }
 
@@ -221,12 +224,13 @@ async function handleLogout() {
   await router.replace('/server/login');
 }
 
-// 全局快捷键：⌘K / Ctrl+K 命令面板, ? 快捷键, G H 返回首页, G S 设置
 let gPressed = false;
 let gTimer = 0;
 function onKeyDown(e: KeyboardEvent) {
   const target = e.target as HTMLElement | null;
-  const inInput = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+  const inInput =
+    target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+
   if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
     e.preventDefault();
     paletteOpen.value = !paletteOpen.value;
@@ -275,7 +279,7 @@ function onKeyDown(e: KeyboardEvent) {
       <template #header="{ collapsed }">
         <RouterLink to="/" class="flex items-center gap-3">
           <div
-            class="bg-primary text-primary-contrast flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-sm font-bold"
+            class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-contrast"
           >
             MR
           </div>
@@ -347,7 +351,7 @@ function onKeyDown(e: KeyboardEvent) {
                   v-if="crumb.to"
                   type="button"
                   class="text-muted hover:text-primary text-base font-semibold"
-                  @click="router.push(crumb.to!)"
+                  @click="router.push(crumb.to)"
                 >
                   {{ crumb.label }}
                 </button>
@@ -380,11 +384,7 @@ function onKeyDown(e: KeyboardEvent) {
             </span>
           </UButton>
 
-          <form
-            v-if="!isAdminSection"
-            class="hidden md:block"
-            @submit.prevent="submitSearch"
-          >
+          <form v-if="!isAdminSection" class="hidden md:block" @submit.prevent="submitSearch">
             <UInput
               v-model="searchInput"
               icon="i-lucide-search"
@@ -421,12 +421,9 @@ function onKeyDown(e: KeyboardEvent) {
         </template>
       </UDashboardNavbar>
 
-      <template #body>
-        <!-- flex 子项默认 min-height:auto 可能导致面板 body 高度为 0，主内容（含 EmptyState）不可见 -->
-        <div class="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto p-4 sm:p-6">
-          <slot />
-        </div>
-      </template>
+      <div class="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto p-4 sm:p-6">
+        <slot />
+      </div>
     </UDashboardPanel>
 
     <CommandPalette v-model:open="paletteOpen" />
