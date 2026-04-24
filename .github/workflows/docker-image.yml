@@ -1,10 +1,25 @@
 name: Docker Image CI
 
+# ---------------------------------------------------------------------------
+# 单镜像策略（非前后端两个镜像）
+# ---------------------------------------------------------------------------
+# 根目录唯一 Dockerfile：多阶段构建 —— 阶段① Node 产出 Vue dist，阶段② Rust 产出
+# movie-rust-backend，最终运行时镜像内同时包含后端二进制与 /app/public 静态资源。
+#
+# 推送到注册表的只有「一个」仓库里的标签，例如：
+#   <DOCKERHUB_USERNAME>/movie-rust:latest
+#   <DOCKERHUB_USERNAME>/movie-rust:<git-sha>
+# :latest 与 :sha 指向同一构建产物，不是「前端镜像 + 后端镜像」两套镜像。
+#
+# 推送前无需在本地执行 npm run build；Vue 在镜像构建过程中完成。
+# ---------------------------------------------------------------------------
+
 on:
   push:
-    branches: ["oll"]
+    branches: [main, master, oll]
   pull_request:
-    branches: ["oll"]
+    branches: [main, master, oll]
+  workflow_dispatch:
 
 env:
   IMAGE_TAG: ${{ github.sha }}
@@ -23,13 +38,17 @@ jobs:
           driver: docker-container
 
       - name: Log in to Docker Hub
-        if: github.event_name == 'push' && github.ref == 'refs/heads/oll'
+        if: >
+          github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' ||
+           github.ref == 'refs/heads/master' ||
+           github.ref == 'refs/heads/oll')
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build image
+      - name: Build image (no push)
         if: github.event_name == 'pull_request'
         uses: docker/build-push-action@v6
         with:
@@ -41,7 +60,11 @@ jobs:
           cache-to: type=gha,mode=max,scope=movie-rust
 
       - name: Build and push image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/oll'
+        if: >
+          github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' ||
+           github.ref == 'refs/heads/master' ||
+           github.ref == 'refs/heads/oll')
         uses: docker/build-push-action@v6
         with:
           context: .

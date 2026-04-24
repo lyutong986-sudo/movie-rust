@@ -18,11 +18,13 @@ services:
       retries: 20
 
   movie-rust:
-    image: yuanhu66/movie-rust:7a452b5e7ca30765c9e09f0a92614a3e86934dbf
-    # 如果不需要本地构建，可以注释掉 build 部分
+    # 使用 GitHub Actions 构建并推送的镜像（Dockerfile 内已含 Vue 构建，无需本机 npm build）
+    image: yuanhu66/movie-rust:latest
+    # 本地从零构建（与 CI 相同多阶段：Node 编前端 + Rust 编后端）：
     # build:
-    #   context: ../..  # 如果 Dockerfile 在项目根目录
+    #   context: .
     #   dockerfile: Dockerfile
+    # image: movie-rust:local
     container_name: movie-rust
     environment:
       DATABASE_URL: postgres://movie:movie@postgres:5432/movie_rust

@@ -1,0 +1,50 @@
+name: Frontend CI
+
+# 仅做 Node 侧「前端能否通过 vue-tsc + vite build」的快速校验；
+# 不向 Docker Hub / GHCR 推送任何镜像，也不产生第二个镜像产物。
+#
+# 生产部署用的唯一镜像是 docker-image.yml 构建的 movie-rust（内含前端静态 + 后端）。
+
+on:
+  push:
+    branches: [main, master, oll]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
+  pull_request:
+    branches: [main, master, oll]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (vue-tsc + vite)
+        run: npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7

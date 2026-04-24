@@ -49,10 +49,11 @@ npm run dev
 
 ## Docker 构建与推送
 
-项目现在就是单镜像：
+项目采用 **单一镜像**（没有单独的「前端镜像」「后端镜像」）：
 
-- `Dockerfile`：先构建 Vue，再构建 Rust，最终镜像只运行 `movie-rust-backend`。
-- Rust 后端直接托管 Vue 静态资源，不再额外运行 Nginx。
+- `Dockerfile`：多阶段 —— 先构建 Vue，再构建 Rust，最终 **一个** 运行时镜像里同时包含 `movie-rust-backend` 与 `frontend/dist`（默认 `/app/public`）。
+- Rust 进程既提供 Emby 兼容 API，也托管静态资源与 SPA 回退；`docker-image.yml` 推送的也只有 **`movie-rust` 这一个仓库**（`:latest` 与 `:<git-sha>` 是同一镜像的两个标签）。
+- `frontend-ci.yml` 只做 GitHub 上的 `npm run build` 校验，**不推送任何 Docker 镜像**。
 
 1. 使用 compose 启动：
 
