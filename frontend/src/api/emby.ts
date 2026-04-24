@@ -36,14 +36,19 @@ export interface UserPolicy {
   IsHidden?: boolean;
   IsDisabled?: boolean;
   EnableRemoteAccess?: boolean;
+  EnableRemoteControlOfOtherUsers?: boolean;
+  EnableSharedDeviceControl?: boolean;
+  EnablePublicSharing?: boolean;
   EnableMediaPlayback?: boolean;
   EnableContentDeletion?: boolean;
   EnableContentDownloading?: boolean;
   EnableAudioPlaybackTranscoding?: boolean;
   EnableVideoPlaybackTranscoding?: boolean;
   EnablePlaybackRemuxing?: boolean;
+  ForceRemoteSourceTranscoding?: boolean;
   EnableUserPreferenceAccess?: boolean;
   MaxParentalRating?: number | null;
+  MaxParentalSubRating?: number | null;
   MaxActiveSessions?: number;
   LoginAttemptsBeforeLockout?: number;
   RemoteClientBitrateLimit?: number;
@@ -53,11 +58,16 @@ export interface UserPolicy {
   AccessSchedules?: AccessSchedule[];
   EnabledFolders?: string[];
   EnableAllFolders?: boolean;
+  BlockedMediaFolders?: string[];
+  EnabledChannels?: string[];
+  EnableAllChannels?: boolean;
+  BlockedChannels?: string[];
   EnabledDevices?: string[];
   EnableAllDevices?: boolean;
   EnableContentDeletionFromFolders?: string[];
   AuthenticationProviderId?: string;
   PasswordResetProviderId?: string;
+  SyncPlayAccess?: string;
 }
 
 export interface AuthResult {

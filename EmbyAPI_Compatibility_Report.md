@@ -567,3 +567,5 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 - 用户管理补齐 Emby 风格关键能力：MaxActiveSessions 现在只统计 Interactive 会话，不再把 API key 算进登录会话上限；settings/users 新增了认证提供器、密码重置提供器、本地密码登录开关、管理员重置密码和用户偏好配置入口，并接入 /Users/{id}/Password、/Users/{id}/Settings、/Auth/Providers 等现有后端能力。
 
 - 管理后台加载用户管理与服务器设置时，/Startup/Configuration 读取已改为登录后自动携带认证；初始化向导阶段仍可匿名访问，但管理员进入后台后不会再因匿名读取 startup 配置而产生 401 噪音。
+
+- 用户管理继续补齐 Emby 模板能力：管理员页新增 EnableRemoteControlOfOtherUsers、EnableSharedDeviceControl、EnablePublicSharing、ForceRemoteSourceTranscoding、SyncPlayAccess、BlockedMediaFolders、EnabledChannels、EnableAllChannels、BlockedChannels、MaxParentalSubRating 等策略编辑；账户页新增基于 /UserSettings/{id} 的个人偏好编辑，不再只有改密码。

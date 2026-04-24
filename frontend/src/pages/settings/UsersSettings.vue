@@ -19,24 +19,34 @@ const policyForm = reactive<UserPolicy>({
   IsHidden: false,
   IsDisabled: false,
   EnableRemoteAccess: true,
+  EnableRemoteControlOfOtherUsers: false,
+  EnableSharedDeviceControl: false,
+  EnablePublicSharing: true,
   EnableMediaPlayback: true,
   EnableContentDownloading: true,
   EnableContentDeletion: false,
   EnableAudioPlaybackTranscoding: true,
   EnableVideoPlaybackTranscoding: true,
   EnablePlaybackRemuxing: true,
+  ForceRemoteSourceTranscoding: false,
   EnableUserPreferenceAccess: true,
   EnableAllFolders: true,
   EnabledFolders: [],
+  BlockedMediaFolders: [],
+  EnableAllChannels: true,
+  EnabledChannels: [],
+  BlockedChannels: [],
   EnableAllDevices: true,
   EnabledDevices: [],
   MaxParentalRating: null,
+  MaxParentalSubRating: null,
   MaxActiveSessions: 0,
   LoginAttemptsBeforeLockout: -1,
   RemoteClientBitrateLimit: 0,
   BlockedTags: [],
   BlockUnratedItems: [],
-  AccessSchedules: []
+  AccessSchedules: [],
+  SyncPlayAccess: 'CreateAndJoinGroups'
 });
 
 const configurationForm = reactive<UserConfiguration>({
@@ -58,6 +68,8 @@ const configurationForm = reactive<UserConfiguration>({
 
 const tagText = ref('');
 const deviceText = ref('');
+const enabledChannelText = ref('');
+const blockedChannelText = ref('');
 const scheduleForm = reactive<AccessSchedule>({
   DayOfWeek: 'Monday',
   StartHour: 0,
@@ -73,6 +85,8 @@ watch(selectedUser, (user) => {
     Object.assign(configurationForm, normalizeConfiguration(user.Configuration));
     tagText.value = (policyForm.BlockedTags || []).join(', ');
     deviceText.value = (policyForm.EnabledDevices || []).join(', ');
+    enabledChannelText.value = (policyForm.EnabledChannels || []).join(', ');
+    blockedChannelText.value = (policyForm.BlockedChannels || []).join(', ');
     resetPassword.value = '';
     resetPasswordConfirm.value = '';
   }
@@ -100,27 +114,37 @@ function normalizePolicy(policy: UserDto['Policy']): UserPolicy {
     IsHidden: Boolean(policy?.IsHidden),
     IsDisabled: Boolean(policy?.IsDisabled),
     EnableRemoteAccess: policy?.EnableRemoteAccess ?? true,
+    EnableRemoteControlOfOtherUsers: policy?.EnableRemoteControlOfOtherUsers ?? false,
+    EnableSharedDeviceControl: policy?.EnableSharedDeviceControl ?? false,
+    EnablePublicSharing: policy?.EnablePublicSharing ?? true,
     EnableMediaPlayback: policy?.EnableMediaPlayback ?? true,
     EnableContentDownloading: policy?.EnableContentDownloading ?? true,
     EnableContentDeletion: policy?.EnableContentDeletion ?? false,
     EnableAudioPlaybackTranscoding: policy?.EnableAudioPlaybackTranscoding ?? true,
     EnableVideoPlaybackTranscoding: policy?.EnableVideoPlaybackTranscoding ?? true,
     EnablePlaybackRemuxing: policy?.EnablePlaybackRemuxing ?? true,
+    ForceRemoteSourceTranscoding: policy?.ForceRemoteSourceTranscoding ?? false,
     EnableUserPreferenceAccess: policy?.EnableUserPreferenceAccess ?? true,
     EnableAllFolders: policy?.EnableAllFolders ?? true,
     EnabledFolders: [...(policy?.EnabledFolders || [])],
+    BlockedMediaFolders: [...(policy?.BlockedMediaFolders || [])],
+    EnableAllChannels: policy?.EnableAllChannels ?? true,
+    EnabledChannels: [...(policy?.EnabledChannels || [])],
+    BlockedChannels: [...(policy?.BlockedChannels || [])],
     EnableAllDevices: policy?.EnableAllDevices ?? true,
     EnabledDevices: [...(policy?.EnabledDevices || [])],
     AuthenticationProviderId: policy?.AuthenticationProviderId || 'Default',
     PasswordResetProviderId: policy?.PasswordResetProviderId || 'Default',
     MaxParentalRating: policy?.MaxParentalRating ?? null,
+    MaxParentalSubRating: policy?.MaxParentalSubRating ?? null,
     MaxActiveSessions: policy?.MaxActiveSessions ?? 0,
     LoginAttemptsBeforeLockout: policy?.LoginAttemptsBeforeLockout ?? -1,
     RemoteClientBitrateLimit: policy?.RemoteClientBitrateLimit ?? 0,
     BlockedTags: [...(policy?.BlockedTags || [])],
     AllowedTags: [...(policy?.AllowedTags || [])],
     BlockUnratedItems: [...(policy?.BlockUnratedItems || [])],
-    AccessSchedules: [...(policy?.AccessSchedules || [])]
+    AccessSchedules: [...(policy?.AccessSchedules || [])],
+    SyncPlayAccess: policy?.SyncPlayAccess || 'CreateAndJoinGroups'
   };
 }
 
@@ -182,6 +206,8 @@ async function saveUser() {
       ...policyForm,
       BlockedTags: listFromText(tagText.value),
       EnabledDevices: listFromText(deviceText.value),
+      EnabledChannels: policyForm.EnableAllChannels ? [] : listFromText(enabledChannelText.value),
+      BlockedChannels: listFromText(blockedChannelText.value),
       EnabledFolders: policyForm.EnableAllFolders ? [] : [...(policyForm.EnabledFolders || [])],
       AccessSchedules: [...(policyForm.AccessSchedules || [])]
     };
@@ -238,6 +264,12 @@ function toggleFolder(id: string, checked: boolean) {
 
 function onFolderChange(id: string, event: Event) {
   toggleFolder(id, (event.target as HTMLInputElement).checked);
+}
+
+function toggleBlockedFolder(id: string, checked: boolean) {
+  const folders = new Set(policyForm.BlockedMediaFolders || []);
+  checked ? folders.add(id) : folders.delete(id);
+  policyForm.BlockedMediaFolders = [...folders];
 }
 
 function addSchedule() {
@@ -328,6 +360,7 @@ function removeSchedule(index: number) {
               <h3>密码与登录方式</h3>
               <div class="toggle-grid">
                 <label><input v-model="configurationForm.EnableLocalPassword" type="checkbox" /> 允许本地密码登录</label>
+                <label><input v-model="policyForm.EnablePublicSharing" type="checkbox" /> 允许公共分享</label>
               </div>
               <div class="form-grid">
                 <label>重置密码<input v-model="resetPassword" type="password" placeholder="留空表示不修改" /></label>
@@ -348,6 +381,16 @@ function removeSchedule(index: number) {
                   {{ library.Name }}
                 </label>
               </div>
+              <div class="toggle-grid">
+                <label v-for="library in mediaLibraries" :key="`blocked-${library.Id}`">
+                  <input
+                    type="checkbox"
+                    :checked="policyForm.BlockedMediaFolders?.includes(library.Id)"
+                    @change="toggleBlockedFolder(library.Id, ($event.target as HTMLInputElement).checked)"
+                  />
+                  屏蔽 {{ library.Name }}
+                </label>
+              </div>
             </section>
 
             <section class="settings-band">
@@ -359,10 +402,19 @@ function removeSchedule(index: number) {
                 <label><input v-model="policyForm.EnableAudioPlaybackTranscoding" type="checkbox" /> 允许音频转码</label>
                 <label><input v-model="policyForm.EnablePlaybackRemuxing" type="checkbox" /> 允许封装转换</label>
                 <label><input v-model="policyForm.EnableContentDeletion" type="checkbox" /> 允许删除媒体</label>
+                <label><input v-model="policyForm.ForceRemoteSourceTranscoding" type="checkbox" /> 强制远程源转码</label>
               </div>
               <div class="form-grid">
                 <label>远程码率上限 bps<input v-model.number="policyForm.RemoteClientBitrateLimit" type="number" min="0" /></label>
                 <label>最大活跃会话<input v-model.number="policyForm.MaxActiveSessions" type="number" min="0" /></label>
+                <label>
+                  SyncPlay 权限
+                  <select v-model="policyForm.SyncPlayAccess">
+                    <option value="CreateAndJoinGroups">CreateAndJoinGroups</option>
+                    <option value="JoinGroups">JoinGroups</option>
+                    <option value="None">None</option>
+                  </select>
+                </label>
               </div>
             </section>
 
@@ -370,14 +422,22 @@ function removeSchedule(index: number) {
               <h3>家长控制</h3>
               <div class="form-grid">
                 <label>最高分级值<input v-model.number="policyForm.MaxParentalRating" type="number" min="0" /></label>
+                <label>子分级上限<input v-model.number="policyForm.MaxParentalSubRating" type="number" min="0" /></label>
                 <label>屏蔽标签<input v-model="tagText" placeholder="多个标签用逗号分隔" /></label>
               </div>
             </section>
 
             <section class="settings-band">
               <h3>设备与时间</h3>
-              <label><input v-model="policyForm.EnableAllDevices" type="checkbox" /> 允许所有设备</label>
+              <div class="toggle-grid">
+                <label><input v-model="policyForm.EnableRemoteControlOfOtherUsers" type="checkbox" /> 允许控制其他用户</label>
+                <label><input v-model="policyForm.EnableSharedDeviceControl" type="checkbox" /> 允许共享设备控制</label>
+                <label><input v-model="policyForm.EnableAllDevices" type="checkbox" /> 允许所有设备</label>
+                <label><input v-model="policyForm.EnableAllChannels" type="checkbox" /> 允许所有频道</label>
+              </div>
               <input v-if="!policyForm.EnableAllDevices" v-model="deviceText" placeholder="允许的 DeviceId，逗号分隔" />
+              <input v-if="!policyForm.EnableAllChannels" v-model="enabledChannelText" placeholder="允许的 ChannelId，逗号分隔" />
+              <input v-model="blockedChannelText" placeholder="屏蔽的 ChannelId，逗号分隔" />
               <div class="form-grid">
                 <select v-model="scheduleForm.DayOfWeek">
                   <option>Monday</option>
