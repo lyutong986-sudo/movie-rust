@@ -309,6 +309,33 @@ export async function enterHome() {
   parentStack.value = [];
   await loadLibraries();
   await Promise.all([loadHome(), loadRecentlyAddedTitles(), loadLatestByLibrary()]);
+  // 刷新页面后恢复正在进行的扫描任务状态。
+  void hydrateScanOperation();
+}
+
+/**
+ * 页面刷新后从后端恢复最近的扫描任务状态。优先选未完成的，
+ * 否则保留最近一条的元数据让面板不显示 "Idle"。
+ */
+export async function hydrateScanOperation() {
+  if (!isAdmin.value) {
+    return;
+  }
+  try {
+    const operations = await api.scanOperations(10);
+    if (!operations.length) {
+      return;
+    }
+    const active =
+      operations.find((op) => op.Queued || op.Running || !op.Done) || operations[0];
+    scanOperation.value = active;
+    if (active && !active.Done) {
+      startScanPolling(active.Id);
+    }
+  } catch (error) {
+    // 未登录/接口不可用都保持静默，面板回退到 Idle。
+    console.warn('[scan] hydrate failed', error);
+  }
 }
 
 export async function addServer(url: string) {

@@ -59,7 +59,13 @@ const breadcrumb = computed(() => {
 
   if (route.name === 'item' || route.name === 'series') {
     if (selectedItem.value?.Type === 'Episode' && selectedItem.value.SeriesName) {
-      crumbs.push({ label: selectedItem.value.SeriesName });
+      // Series 名做成可点击链接，回到 Series 详情页。
+      crumbs.push({
+        label: selectedItem.value.SeriesName,
+        to: selectedItem.value.SeriesId
+          ? `/series/${selectedItem.value.SeriesId}`
+          : undefined
+      });
     }
     if (selectedItem.value) {
       crumbs.push({ label: selectedItem.value.Name });

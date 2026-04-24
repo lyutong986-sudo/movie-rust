@@ -103,6 +103,48 @@ const metaChips = computed(() => {
   ].filter(Boolean);
 });
 
+const episodeTag = computed(() => {
+  const it = item.value;
+  if (!it || it.Type !== 'Episode') return '';
+  const s = it.ParentIndexNumber;
+  const e = it.IndexNumber;
+  if (s != null && e != null) {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `S${pad(s)}E${pad(e)}`;
+  }
+  return '';
+});
+
+// 当前条目在同季列表里的前后集（Episode 详情页上下集导航使用）。
+const episodePrev = computed<BaseItemDto | null>(() => {
+  const it = item.value;
+  if (!it || it.Type !== 'Episode') return null;
+  const sorted = [it, ...relatedItems.value]
+    .filter((x) => x.Type === 'Episode')
+    .slice()
+    .sort((a, b) => (a.IndexNumber ?? 0) - (b.IndexNumber ?? 0));
+  const idx = sorted.findIndex((x) => x.Id === it.Id);
+  return idx > 0 ? sorted[idx - 1] : null;
+});
+
+const episodeNext = computed<BaseItemDto | null>(() => {
+  const it = item.value;
+  if (!it || it.Type !== 'Episode') return null;
+  const sorted = [it, ...relatedItems.value]
+    .filter((x) => x.Type === 'Episode')
+    .slice()
+    .sort((a, b) => (a.IndexNumber ?? 0) - (b.IndexNumber ?? 0));
+  const idx = sorted.findIndex((x) => x.Id === it.Id);
+  return idx >= 0 && idx < sorted.length - 1 ? sorted[idx + 1] : null;
+});
+
+function goToSeries() {
+  const it = item.value;
+  if (it?.SeriesId) {
+    router.push(`/series/${it.SeriesId}`);
+  }
+}
+
 const sourceTabs = computed(() =>
   (item.value?.MediaSources || []).map((source, index) => ({
     value: String(index),
@@ -339,7 +381,17 @@ watch(
 
         <div class="flex flex-col gap-4">
           <div>
-            <p class="text-muted text-xs uppercase tracking-wider">
+            <!-- Episode：Series 名做成可点击链接；其他类型只显示静态标签。 -->
+            <button
+              v-if="item.Type === 'Episode' && item.SeriesId"
+              type="button"
+              class="text-primary hover:text-primary/80 flex items-center gap-1 text-sm font-medium"
+              @click="goToSeries"
+            >
+              <UIcon name="i-lucide-arrow-left" class="size-3" />
+              {{ item.SeriesName || '返回剧集' }}
+            </button>
+            <p v-else class="text-muted text-xs uppercase tracking-wider">
               {{ item.SeriesName || item.SeasonName || item.Type }}
             </p>
             <img
@@ -352,6 +404,12 @@ watch(
               v-else
               class="text-highlighted display-font mt-1 text-2xl font-bold sm:text-3xl"
             >
+              <span
+                v-if="episodeTag"
+                class="text-primary mr-2 font-mono text-base font-semibold"
+              >
+                {{ episodeTag }}
+              </span>
               {{ item.Name }}
             </h1>
           </div>
@@ -433,6 +491,47 @@ watch(
                 更多
               </UButton>
             </UDropdownMenu>
+          </div>
+
+          <!-- Episode 专用：上一集 / 下一集 / 回到剧集 -->
+          <div v-if="item.Type === 'Episode'" class="flex flex-wrap gap-2">
+            <UButton
+              color="neutral"
+              variant="soft"
+              size="sm"
+              icon="i-lucide-skip-back"
+              :disabled="!episodePrev"
+              @click="() => episodePrev && openChild(episodePrev)"
+            >
+              上一集
+              <span v-if="episodePrev" class="text-muted text-xs">
+                · {{ episodePrev.Name }}
+              </span>
+            </UButton>
+            <UButton
+              color="neutral"
+              variant="soft"
+              size="sm"
+              icon="i-lucide-skip-forward"
+              :disabled="!episodeNext"
+              trailing-icon="i-lucide-chevron-right"
+              @click="() => episodeNext && openChild(episodeNext)"
+            >
+              下一集
+              <span v-if="episodeNext" class="text-muted text-xs">
+                · {{ episodeNext.Name }}
+              </span>
+            </UButton>
+            <UButton
+              v-if="item.SeriesId"
+              color="primary"
+              variant="subtle"
+              size="sm"
+              icon="i-lucide-tv"
+              @click="goToSeries"
+            >
+              查看剧集详情
+            </UButton>
           </div>
         </div>
       </div>

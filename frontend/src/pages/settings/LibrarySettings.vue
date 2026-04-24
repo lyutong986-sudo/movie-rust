@@ -6,6 +6,7 @@ import {
   api,
   cancelCurrentScan,
   deleteLibrary,
+  hydrateScanOperation,
   isAdmin,
   libraries,
   loadAdminData,
@@ -21,7 +22,12 @@ import type { VirtualFolderInfo } from '../../api/emby';
 
 onMounted(async () => {
   if (isAdmin.value) {
-    await Promise.all([loadAdminData(), loadLibraries(), loadVirtualFolders()]);
+    await Promise.all([
+      loadAdminData(),
+      loadLibraries(),
+      loadVirtualFolders(),
+      hydrateScanOperation()
+    ]);
   }
 });
 
