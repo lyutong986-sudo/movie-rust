@@ -951,3 +951,119 @@ npx vite build         # 构建成功
 
 - `backend> cargo build` —— ✅ 通过
 - `frontend> npm run build` —— ✅ 通过
+
+## 二十八、第二十八轮：按 Emby 模板批量补齐设置项（P0 + P1，2026-04-24）
+
+> 范围：对照 `模板项目/Emby.Web.Mobile-master/src/` 审计结果，把前端缺失的"整页"和"二级可选配置项"一次性补齐。
+
+### A. 后端新增配置 DTO / 仓储 / 路由
+
+| 模块 | 新增字段 / 接口 |
+| --- | --- |
+| `models::UserConfigurationDto` | 新增 `EnableBackdrops`、`EnableThemeSongs`、`DisplayUnairedEpisodes`、`EnableCinemaMode`、`EnableNextEpisodeAutoPlay`、`MaxStreamingBitrate`、`MaxChromecastBitrate`。 |
+| `models::BrandingConfiguration` | 补默认实现与 `camelCase` 别名，支持 POST 更新。 |
+| `models::PlaybackConfiguration`（新） | `MinResumePct/MaxResumePct/MinResumeDurationSeconds/MinAudiobookResume/MaxAudiobookResume`。 |
+| `models::NetworkConfiguration`（新） | `LocalAddress/HttpServerPortNumber/HttpsPortNumber/PublicHttpPort/PublicHttpsPort/CertificatePath/EnableHttps/ExternalDomain/EnableUPnP`。 |
+| `models::LibraryDisplayConfiguration`（新） | `DisplayFolderView/DisplaySpecialsWithinSeasons/GroupMoviesIntoCollections/DisplayCollectionsView/EnableExternalContentInSuggestions/DateAddedBehavior/MetadataPath/SaveMetadataHidden/SeasonZeroDisplayName/FanartApiKey`。 |
+| `models::SubtitleDownloadConfiguration`（新） | `DownloadSubtitlesForMovies/DownloadSubtitlesForEpisodes/DownloadLanguages/RequirePerfectMatch/SkipIfAudioTrackPresent/SkipIfGraphicalSubsPresent/OpenSubtitlesUsername/OpenSubtitlesPassword`。 |
+| `models::ApiKeyInfoDto`（新） | 对外暴露的 API Key 信息 DTO。 |
+| `repository` | 新增 `update_branding_configuration`、`playback_configuration`/`update_*`、`network_configuration`/`update_*`、`library_display_configuration`/`update_*`、`subtitle_download_configuration`/`update_*`、`create_api_key_session`、`delete_api_key_session`。 |
+| `routes::system` | 新增 `POST /Branding/Configuration`，新增 `GET/POST /System/Configuration/Playback`、`GET/POST /System/Configuration/Network`、`GET/POST /System/Configuration/LibraryDisplay`、`GET/POST /System/Configuration/SubtitleDownload`。原有 `/Auth/Keys`（sessions.rs）保持不变，用于 API Key CRUD。 |
+
+### B. 前端新增 / 重写页面
+
+| 路径 | 页面 | 说明 |
+| --- | --- | --- |
+| `/settings/scheduled-tasks` | `ScheduledTasksSettings.vue`（新） | 调用 `/ScheduledTasks` 全套接口，显示状态/进度/触发方式/最近结果，支持"立即运行"和"取消"，5 秒轮询。 |
+| `/settings/playback` | `PlaybackSettings.vue`（重写） | 从静态卡片换成真正的续播阈值表单（`MinResumePct/MaxResumePct/MinResumeDurationSeconds/MinAudiobookResume/MaxAudiobookResume`）。 |
+| `/settings/network` | `NetworkSettings.vue`（重写） | 合并远程访问、绑定 IP、HTTP/HTTPS 端口、对外端口、证书路径、DDNS。 |
+| `/settings/apikeys` | `ApiKeysSettings.vue`（重写） | 真正的 API Key 列表 + 颁发新 Key（App 名、有效期） + 撤销 + 显示/隐藏/复制。 |
+| `/settings/subtitle-download` | `SubtitleDownloadSettings.vue`（新） | Movies/Episodes 开关、下载语言勾选 + 自定义、匹配策略（Perfect Match/AudioTrack/GraphicalSubs）、OpenSubtitles 账号。 |
+| `/settings/library-display` | `LibraryDisplaySettings.vue`（新） | FolderView/DisplaySpecialsWithinSeasons/GroupMoviesIntoCollections/DisplayCollectionsView/ExternalContentInSuggestions、DateAddedBehavior、全局 MetadataPath、SeasonZeroDisplayName、FanartApiKey。 |
+| `/settings/branding` | `BrandingSettings.vue`（新） | LoginDisclaimer、SplashscreenEnabled、CustomCSS 文本域。 |
+| `/settings/account` | `AccountSettings.vue`（扩展） | 个人偏好补齐 `EnableBackdrops/EnableThemeSongs/DisplayUnairedEpisodes/EnableCinemaMode/EnableNextEpisodeAutoPlay/MaxStreamingBitrate/MaxChromecastBitrate`。 |
+
+### C. 导航入口
+
+- `frontend/src/router/index.ts` 增加 4 条路由：`scheduled-tasks` / `subtitle-download` / `library-display` / `branding`。
+- `frontend/src/pages/settings/SettingsIndex.vue` 与 `frontend/src/components/SettingsNav.vue` 都加入新的入口卡片/菜单项。
+
+### D. 未在本轮落地的项（原因）
+
+- **Playlists 管理**：需要后端新增播放列表表与 CRUD；`SupportsPlaylists` 当前标 `false`。
+- **Emby Connect 登录入口**：`/Connect/Exchange` 已就绪，但真实登录需要先经过 `emby.media/connect` 外部服务获取 ConnectUserId + AccessKey，本项目不作为云账号入口。
+- **元数据图片/NFO 策略独立页、Reports、Forgot Password**：影响面较小，后续可按需单独补。
+
+### E. 校验
+
+- `backend> cargo build` —— ✅ 通过
+- `frontend> npm run build` —— ✅ 通过
+
+## 二十九、第二十九轮：补齐 P2（播放列表 / 忘记密码 / 活动报表，2026-04-24）
+
+> 范围：把上一轮 P2 未落地的三项在前后端一次性补完（不含 Emby Connect 外部账号入口）。
+
+### A. 播放列表（Playlists，首次真实落地）
+
+**后端**
+
+| 模块 | 变更 |
+| --- | --- |
+| `migrations/0001_schema.sql` + `main.rs::ensure_schema_compatibility` | 新增 `playlists` 和 `playlist_items` 两张表（含 `playlist_item_id` 稳定标识、sort_index 排序）。 |
+| `models` | 新增 `DbPlaylist`、`DbPlaylistItem`；`BaseItemDto` 新增 `PlaylistItemId` 字段。 |
+| `repository` | 新增 `create_playlist`、`get_playlist`、`list_playlists_for_user`、`update_playlist`、`delete_playlist`、`list_playlist_items`、`add_playlist_items`、`remove_playlist_items`、`move_playlist_item`。 |
+| `routes/playlists.rs`（新） | 新增 `GET/POST /Playlists`、`GET/POST /Playlists/{id}`、`DELETE /Playlists/{id}`、`GET/POST /Playlists/{id}/Items`、`POST /Playlists/{id}/Items/Delete`、`POST /Playlists/{id}/Items/{entry_id}/Move/{new_index}`。 |
+| `routes/misc.rs` | `SupportsPlaylists` 从 `false` 改为 `true`。 |
+
+**前端**
+
+| 路径 | 页面 | 说明 |
+| --- | --- | --- |
+| `/playlists` | `PlaylistsPage.vue`（新） | 列表 + 新建 + 删除 + 进入详情。 |
+| `/playlist/:id` | `PlaylistDetailPage.vue`（新） | 基本信息编辑、条目移动（上下）、播放、移除、整表删除。 |
+| 侧栏主导航 | `AppLayout.vue` | 增加"播放列表"入口。 |
+| 条目详情 | `ItemPage.vue` | "更多"菜单新增"加入播放列表"；弹窗可选已有列表或新建列表。 |
+
+### B. 忘记密码（PIN 流程）
+
+**后端（`routes/users.rs`）**
+
+- 原 `forgot_password` / `forgot_password_pin` 占位升级为真实 PIN 流程：
+  - `POST /Users/ForgotPassword` 接受 `EnteredUsername`，为该用户生成 6 位数字 PIN（30 分钟有效），写入 `system_settings` 的 `password_reset_pin:{user_id}`；并打印到服务端日志。
+  - `POST /Users/ForgotPassword/Pin` 接受 `EnteredPin + NewPw`，遍历用户匹配 PIN 并校验过期，匹配成功则调用 `repository::change_user_password` 写入新密码、清除 PIN。
+- PIN 使用 `Uuid::new_v4()` 的低 64 位取模生成，避免引入新依赖。
+
+**前端**
+
+| 路径 | 页面 | 说明 |
+| --- | --- | --- |
+| `/server/forgot-password` | `ForgotPasswordPage.vue`（新） | 两步流程：输入用户名申请 PIN → 输入 PIN + 新密码完成重置。 |
+| `LoginPage.vue` | 登录表单底部加"忘记密码"按钮跳转。 |
+
+### C. 活动报表（Reports）
+
+**前端**（纯前端聚合，基于已有 `/System/ActivityLog/Entries`）
+
+| 路径 | 页面 | 说明 |
+| --- | --- | --- |
+| `/settings/reports` | `ReportsSettings.vue`（新） | 支持"近 1/7/30/90 天"范围切换；聚合总事件数、事件类型分布、用户 Top 10、按天柱状条。 |
+| `SettingsIndex.vue` / `SettingsNav.vue` | 加入"活动报表"入口。 |
+
+### D. 元数据图片 / NFO 策略
+
+- 经对比，Emby `metadataimages.html` / `metadatanfo.html` 字段与现有 `LibraryDisplayConfiguration` 已覆盖的 `MetadataPath/SaveMetadataHidden/FanartApiKey` 以及 `SubtitleDownloadConfiguration` 存在交集；本轮不再拆独立页。后续若需要再增加"下载图片策略"字段时，直接在 `LibraryDisplayConfiguration` 追加字段即可。
+
+### E. 结果
+
+- 前端新增 4 个可见页面：Playlists / Playlist Detail / Forgot Password / Reports。
+- 侧栏主导航多一个"播放列表"入口；登录页多一个"忘记密码"入口；设置首页和设置导航多一个"活动报表"入口。
+- 条目详情页"更多"菜单可以把视频加入任意播放列表（或新建一个）。
+
+### F. 校验
+
+- `backend> cargo build` —— ✅ 通过
+- `frontend> npm run build` —— ✅ 通过
+
+### G. 本批次显式未做
+
+- **Emby Connect 登录入口**：依赖 `emby.media/connect` 外部账号体系，按你的明确要求跳过。

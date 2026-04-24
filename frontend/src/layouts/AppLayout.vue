@@ -96,6 +96,12 @@ const mainNavItems = computed(() => [
     active: route.path.startsWith('/queue')
   },
   {
+    label: '播放列表',
+    icon: 'i-lucide-list-music',
+    to: '/playlists',
+    active: route.path.startsWith('/playlist')
+  },
+  {
     label: '设置',
     icon: 'i-lucide-settings',
     to: '/settings',

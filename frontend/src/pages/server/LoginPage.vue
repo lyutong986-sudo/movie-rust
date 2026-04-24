@@ -122,6 +122,14 @@ function pickUser(name: string) {
         <UButton color="neutral" variant="ghost" icon="i-lucide-server" @click="router.push('/server/select')">
           服务器
         </UButton>
+        <UButton
+          color="neutral"
+          variant="ghost"
+          icon="i-lucide-key-round"
+          @click="router.push('/server/forgot-password')"
+        >
+          忘记密码
+        </UButton>
         <UButton type="submit" :loading="state.busy" class="ms-auto" icon="i-lucide-log-in">
           登录
         </UButton>

@@ -710,3 +710,35 @@ CREATE TABLE IF NOT EXISTS display_preferences (
 
 CREATE INDEX IF NOT EXISTS idx_display_preferences_user
     ON display_preferences(user_id, updated_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- playlists / playlist_items：用户维度的自定义播放列表
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS playlists (
+    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name       text NOT NULL,
+    media_type text NOT NULL DEFAULT 'Video',
+    overview   text,
+    image_primary_path text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_playlists_user_id
+    ON playlists(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS playlist_items (
+    id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    playlist_id      uuid NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+    media_item_id    uuid NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+    playlist_item_id text NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text),
+    sort_index       integer NOT NULL DEFAULT 0,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (playlist_id, playlist_item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist
+    ON playlist_items(playlist_id, sort_index);
+CREATE INDEX IF NOT EXISTS idx_playlist_items_media_item
+    ON playlist_items(media_item_id);

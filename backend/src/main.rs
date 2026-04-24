@@ -503,6 +503,35 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             ON session_commands(session_id, created_at)
             WHERE consumed_at IS NULL
         "#,
+        // -------------------------------------------------------------------
+        // playlists / playlist_items：用户自定义播放列表。
+        // -------------------------------------------------------------------
+        r#"
+        CREATE TABLE IF NOT EXISTS playlists (
+            id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name       TEXT NOT NULL,
+            media_type TEXT NOT NULL DEFAULT 'Video',
+            overview   TEXT,
+            image_primary_path TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        "#,
+        r#"CREATE INDEX IF NOT EXISTS idx_playlists_user_id ON playlists(user_id, updated_at DESC)"#,
+        r#"
+        CREATE TABLE IF NOT EXISTS playlist_items (
+            id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            playlist_id      UUID NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+            media_item_id    UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            playlist_item_id TEXT NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text),
+            sort_index       INTEGER NOT NULL DEFAULT 0,
+            created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (playlist_id, playlist_item_id)
+        )
+        "#,
+        r#"CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist    ON playlist_items(playlist_id, sort_index)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_playlist_items_media_item  ON playlist_items(media_item_id)"#,
     ];
 
     for statement in compatibility_sql {

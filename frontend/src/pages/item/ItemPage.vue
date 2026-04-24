@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import MediaCard from '../../components/MediaCard.vue';
 import MediaRow from '../../components/MediaRow.vue';
 import MediaQualityBadges from '../../components/MediaQualityBadges.vue';
-import type { BaseItemDto, MediaStreamDto } from '../../api/emby';
+import type { BaseItemDto, MediaStreamDto, PlaylistInfo } from '../../api/emby';
 import {
   api,
   enqueue,
@@ -30,6 +30,56 @@ const similarItems = ref<BaseItemDto[]>([]);
 const currentSourceIndex = ref(0);
 const trailerOpen = ref(false);
 const trailerEmbed = ref('');
+const playlistPickerOpen = ref(false);
+const playlistOptions = ref<PlaylistInfo[]>([]);
+const playlistLoading = ref(false);
+const newPlaylistName = ref('');
+
+async function openPlaylistPicker() {
+  if (!item.value) return;
+  playlistPickerOpen.value = true;
+  playlistLoading.value = true;
+  try {
+    const result = await api.listPlaylists();
+    playlistOptions.value = result.Items;
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : String(error));
+  } finally {
+    playlistLoading.value = false;
+  }
+}
+
+async function addCurrentToPlaylist(playlistId: string) {
+  if (!item.value) return;
+  try {
+    await api.addPlaylistItems(playlistId, [item.value.Id]);
+    toast.success('已加入播放列表');
+    playlistPickerOpen.value = false;
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function createAndAddPlaylist() {
+  if (!item.value) return;
+  const name = newPlaylistName.value.trim();
+  if (!name) {
+    toast.error('请输入播放列表名称');
+    return;
+  }
+  try {
+    const created = await api.createPlaylist({
+      Name: name,
+      MediaType: 'Video',
+      Ids: [item.value.Id]
+    });
+    toast.success(`已创建「${created.Name}」并加入条目`);
+    newPlaylistName.value = '';
+    playlistPickerOpen.value = false;
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : String(error));
+  }
+}
 
 const currentSource = computed(() => item.value?.MediaSources?.[currentSourceIndex.value]);
 const currentStreams = computed(
@@ -371,7 +421,8 @@ watch(
                     label: isInWatchLater(item.Id) ? '从稍后观看移除' : '添加到稍后观看',
                     icon: 'i-lucide-clock',
                     onSelect: toggleLater
-                  }
+                  },
+                  { label: '加入播放列表', icon: 'i-lucide-list-music', onSelect: openPlaylistPicker }
                 ],
                 [
                   { label: '复制文件路径', icon: 'i-lucide-clipboard-copy', onSelect: copyPath, disabled: !item.Path }
@@ -575,6 +626,44 @@ watch(
             allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
             allowfullscreen
           />
+        </div>
+      </template>
+    </UModal>
+
+    <!-- 加入播放列表 modal -->
+    <UModal v-model:open="playlistPickerOpen" :ui="{ content: 'max-w-lg' }">
+      <template #header>
+        <h3 class="text-highlighted text-base font-semibold">加入播放列表</h3>
+      </template>
+      <template #body>
+        <div class="space-y-3">
+          <div v-if="playlistLoading" class="text-muted text-center text-sm">加载中...</div>
+          <div v-else-if="playlistOptions.length" class="max-h-72 space-y-2 overflow-y-auto">
+            <button
+              v-for="option in playlistOptions"
+              :key="option.Id"
+              type="button"
+              class="border-default hover:bg-elevated/60 flex w-full items-center justify-between rounded-lg border p-3 text-start transition"
+              @click="addCurrentToPlaylist(option.Id)"
+            >
+              <div class="min-w-0">
+                <p class="text-highlighted truncate text-sm font-medium">{{ option.Name }}</p>
+                <p class="text-muted text-xs">{{ option.ChildCount }} 个条目</p>
+              </div>
+              <UIcon name="i-lucide-plus" class="text-primary size-4" />
+            </button>
+          </div>
+          <p v-else class="text-muted rounded-lg border border-default bg-elevated/30 p-3 text-sm">
+            还没有播放列表，使用下方表单创建一个。
+          </p>
+
+          <div class="space-y-2">
+            <p class="text-muted text-xs">或新建一个播放列表</p>
+            <div class="flex gap-2">
+              <UInput v-model="newPlaylistName" placeholder="新播放列表名称" class="flex-1" />
+              <UButton icon="i-lucide-list-plus" @click="createAndAddPlaylist">创建并加入</UButton>
+            </div>
+          </div>
         </div>
       </template>
     </UModal>

@@ -13,6 +13,7 @@ pub mod live_streams;
 pub mod metadata_routes;
 pub mod misc;
 pub mod persons;
+pub mod playlists;
 pub mod scheduled_tasks;
 pub mod sessions;
 pub mod shows;
@@ -57,6 +58,7 @@ fn api_router() -> Router<AppState> {
         .merge(scheduled_tasks::router())
         .merge(collections::router())
         .merge(live_streams::router())
+        .merge(playlists::router())
 }
 
 #[cfg(test)]

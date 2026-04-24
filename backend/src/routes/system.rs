@@ -2,7 +2,9 @@ use crate::{
     auth::{require_admin, AuthSession},
     models::{
         uuid_to_emby_guid, ActivityLogQuery, BrandingConfiguration, EncodingOptionsDto,
-        EndpointInfo, LogFileDto, PublicSystemInfo, QueryResult, SystemInfo,
+        EndpointInfo, LibraryDisplayConfiguration, LogFileDto, NetworkConfiguration,
+        PlaybackConfiguration, PublicSystemInfo, QueryResult, SubtitleDownloadConfiguration,
+        SystemInfo,
     },
     repository,
     state::AppState,
@@ -29,12 +31,34 @@ pub fn router() -> Router<AppState> {
         .route("/system/ext/serverdomains", get(server_domains))
         .route("/System/Ping", get(ping).post(ping))
         .route("/system/ping", get(ping).post(ping))
-        .route("/Branding/Configuration", get(branding_configuration))
-        .route("/branding/configuration", get(branding_configuration))
+        .route(
+            "/Branding/Configuration",
+            get(branding_configuration).post(update_branding_configuration),
+        )
+        .route(
+            "/branding/configuration",
+            get(branding_configuration).post(update_branding_configuration),
+        )
         .route("/Branding/Css", get(branding_css))
         .route("/Branding/Css.css", get(branding_css))
         .route("/branding/css", get(branding_css))
         .route("/branding/css.css", get(branding_css))
+        .route(
+            "/System/Configuration/Playback",
+            get(playback_configuration).post(update_playback_configuration),
+        )
+        .route(
+            "/System/Configuration/Network",
+            get(network_configuration).post(update_network_configuration),
+        )
+        .route(
+            "/System/Configuration/LibraryDisplay",
+            get(library_display_configuration).post(update_library_display_configuration),
+        )
+        .route(
+            "/System/Configuration/SubtitleDownload",
+            get(subtitle_download_configuration).post(update_subtitle_download_configuration),
+        )
         .route("/System/Logs", get(server_logs))
         .route("/System/Configuration", get(system_configuration).post(update_system_configuration))
         .route("/System/Configuration/Partial", post(update_system_configuration_partial))
@@ -175,6 +199,102 @@ async fn branding_configuration(
 ) -> Result<Json<BrandingConfiguration>, crate::error::AppError> {
     Ok(Json(
         repository::branding_configuration(&state.pool, &state.config).await?,
+    ))
+}
+
+async fn update_branding_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<BrandingConfiguration>,
+) -> Result<Json<BrandingConfiguration>, crate::error::AppError> {
+    require_admin(&session)?;
+    repository::update_branding_configuration(&state.pool, &payload).await?;
+    Ok(Json(
+        repository::branding_configuration(&state.pool, &state.config).await?,
+    ))
+}
+
+async fn playback_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<PlaybackConfiguration>, crate::error::AppError> {
+    require_admin(&session)?;
+    Ok(Json(repository::playback_configuration(&state.pool).await?))
+}
+
+async fn update_playback_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<PlaybackConfiguration>,
+) -> Result<Json<PlaybackConfiguration>, crate::error::AppError> {
+    require_admin(&session)?;
+    repository::update_playback_configuration(&state.pool, &payload).await?;
+    Ok(Json(repository::playback_configuration(&state.pool).await?))
+}
+
+async fn network_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<NetworkConfiguration>, crate::error::AppError> {
+    require_admin(&session)?;
+    Ok(Json(
+        repository::network_configuration(&state.pool, &state.config).await?,
+    ))
+}
+
+async fn update_network_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<NetworkConfiguration>,
+) -> Result<Json<NetworkConfiguration>, crate::error::AppError> {
+    require_admin(&session)?;
+    repository::update_network_configuration(&state.pool, &payload).await?;
+    Ok(Json(
+        repository::network_configuration(&state.pool, &state.config).await?,
+    ))
+}
+
+async fn library_display_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<LibraryDisplayConfiguration>, crate::error::AppError> {
+    require_admin(&session)?;
+    Ok(Json(
+        repository::library_display_configuration(&state.pool).await?,
+    ))
+}
+
+async fn update_library_display_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<LibraryDisplayConfiguration>,
+) -> Result<Json<LibraryDisplayConfiguration>, crate::error::AppError> {
+    require_admin(&session)?;
+    repository::update_library_display_configuration(&state.pool, &payload).await?;
+    Ok(Json(
+        repository::library_display_configuration(&state.pool).await?,
+    ))
+}
+
+async fn subtitle_download_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<SubtitleDownloadConfiguration>, crate::error::AppError> {
+    require_admin(&session)?;
+    Ok(Json(
+        repository::subtitle_download_configuration(&state.pool).await?,
+    ))
+}
+
+async fn update_subtitle_download_configuration(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<SubtitleDownloadConfiguration>,
+) -> Result<Json<SubtitleDownloadConfiguration>, crate::error::AppError> {
+    require_admin(&session)?;
+    repository::update_subtitle_download_configuration(&state.pool, &payload).await?;
+    Ok(Json(
+        repository::subtitle_download_configuration(&state.pool).await?,
     ))
 }
 

@@ -99,7 +99,7 @@ async fn server_features(_session: OptionalAuthSession) -> Json<Value> {
         "SupportsRemoteAccess": true,
         "SupportsWebSocket": true,
         "SupportsCollections": true,
-        "SupportsPlaylists": false,
+        "SupportsPlaylists": true,
         "SupportsChannels": false,
         "SupportsNotifications": false,
         "SupportsCustomBranding": true,

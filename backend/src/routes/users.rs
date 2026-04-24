@@ -698,12 +698,122 @@ async fn update_user_configuration_partial(
     Ok(Json(next))
 }
 
-async fn forgot_password() -> Result<StatusCode, AppError> {
-    Ok(StatusCode::NO_CONTENT)
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ForgotPasswordRequest {
+    #[serde(alias = "EnteredUsername", alias = "enteredUsername", alias = "username")]
+    entered_username: Option<String>,
 }
 
-async fn forgot_password_pin() -> Result<StatusCode, AppError> {
-    Ok(StatusCode::NO_CONTENT)
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ForgotPasswordPinRequest {
+    #[serde(alias = "enteredPin", alias = "Pin", alias = "pin")]
+    entered_pin: Option<String>,
+    #[serde(alias = "newPw", alias = "newPassword", alias = "NewPw", alias = "NewPassword")]
+    new_password: Option<String>,
+}
+
+fn generate_pin() -> String {
+    let bytes = Uuid::new_v4().into_bytes();
+    let mut value: u64 = 0;
+    for (index, byte) in bytes.iter().take(8).enumerate() {
+        value ^= (*byte as u64) << (index * 8);
+    }
+    let number = (value % 1_000_000) as u32;
+    format!("{:06}", number)
+}
+
+async fn forgot_password(
+    State(state): State<AppState>,
+    Json(payload): Json<ForgotPasswordRequest>,
+) -> Result<Json<Value>, AppError> {
+    let username = payload
+        .entered_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("请输入用户名".to_string()))?;
+    let user = repository::get_user_by_name(&state.pool, username).await?;
+    let response_fields = |pin_file: &str, expires: chrono::DateTime<chrono::Utc>| {
+        serde_json::json!({
+            "Action": "PinCode",
+            "PinFile": pin_file,
+            "PinExpirationDate": expires.to_rfc3339(),
+        })
+    };
+    let Some(user) = user else {
+        return Ok(Json(response_fields("UnknownUser", chrono::Utc::now())));
+    };
+    let pin = generate_pin();
+    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(30);
+    let key = format!("password_reset_pin:{}", user.id);
+    let value = serde_json::json!({
+        "Pin": pin,
+        "ExpiresAt": expires_at.to_rfc3339(),
+    });
+    repository::set_setting_value(&state.pool, &key, value).await?;
+    tracing::info!(user = %user.name, pin = %pin, "已生成密码重置 PIN（调试日志）");
+    Ok(Json(response_fields(
+        &format!("passwordreset-{}.txt", user.id),
+        expires_at,
+    )))
+}
+
+async fn forgot_password_pin(
+    State(state): State<AppState>,
+    Json(payload): Json<ForgotPasswordPinRequest>,
+) -> Result<Json<Value>, AppError> {
+    let entered_pin = payload
+        .entered_pin
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("请输入 PIN".to_string()))?;
+    let new_password = payload
+        .new_password
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| value.len() >= 4)
+        .ok_or_else(|| AppError::BadRequest("新密码至少 4 个字符".to_string()))?;
+
+    let users = repository::list_users(&state.pool, false).await?;
+    for user in users {
+        let key = format!("password_reset_pin:{}", user.id);
+        let Some(value) = repository::get_setting_value(&state.pool, &key).await? else {
+            continue;
+        };
+        let stored_pin = value.get("Pin").and_then(Value::as_str).unwrap_or_default();
+        let expires_at = value
+            .get("ExpiresAt")
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc));
+        if stored_pin != entered_pin {
+            continue;
+        }
+        if expires_at.is_some_and(|value| value < chrono::Utc::now()) {
+            let _ = repository::set_setting_value(
+                &state.pool,
+                &key,
+                serde_json::Value::Null,
+            )
+            .await;
+            return Err(AppError::BadRequest("PIN 已过期，请重新申请".to_string()));
+        }
+        repository::change_user_password(&state.pool, user.id, new_password).await?;
+        let _ = repository::set_setting_value(
+            &state.pool,
+            &key,
+            serde_json::Value::Null,
+        )
+        .await;
+        return Ok(Json(serde_json::json!({
+            "Success": true,
+            "UsersReset": [uuid_to_emby_guid(&user.id)],
+        })));
+    }
+    Err(AppError::BadRequest("PIN 无效或已过期".to_string()))
 }
 
 async fn user_connect_link(

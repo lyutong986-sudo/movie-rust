@@ -70,6 +70,12 @@ const adminEntries = computed<SettingsEntry[]>(() => [
     to: '/settings/libraries'
   },
   {
+    icon: 'i-lucide-layout-grid',
+    title: '媒体库显示',
+    description: '合集视图、Specials、文件夹视图、DateAdded 策略。',
+    to: '/settings/library-display'
+  },
+  {
     icon: 'i-lucide-users',
     title: '用户',
     description: '管理账号、密码、权限、媒体库访问和偏好。',
@@ -88,6 +94,30 @@ const adminEntries = computed<SettingsEntry[]>(() => [
     to: '/settings/apikeys'
   },
   {
+    icon: 'i-lucide-timer',
+    title: '计划任务',
+    description: '媒体库扫描、元数据刷新、缓存清理等后台任务。',
+    to: '/settings/scheduled-tasks'
+  },
+  {
+    icon: 'i-lucide-subtitles',
+    title: '字幕下载',
+    description: 'OpenSubtitles 账号、下载语言、匹配策略。',
+    to: '/settings/subtitle-download'
+  },
+  {
+    icon: 'i-lucide-palette',
+    title: '品牌化',
+    description: '登录声明、自定义 CSS 与闪屏开关。',
+    to: '/settings/branding'
+  },
+  {
+    icon: 'i-lucide-bar-chart-3',
+    title: '活动报表',
+    description: '按时间范围聚合用户行为与事件类型。',
+    to: '/settings/reports'
+  },
+  {
     icon: 'i-lucide-activity',
     title: '日志与活动',
     description: '查看近期播放活动和服务状态。',
@@ -96,7 +126,7 @@ const adminEntries = computed<SettingsEntry[]>(() => [
   {
     icon: 'i-lucide-network',
     title: '网络',
-    description: '远程访问、端口和 Emby 兼容入口。',
+    description: '远程访问、端口、HTTPS、DDNS 与接入地址。',
     to: '/settings/network'
   }
 ]);

@@ -538,6 +538,20 @@ pub struct UserConfigurationDto {
     pub remember_audio_selections: bool,
     pub remember_subtitle_selections: bool,
     pub enable_local_password: bool,
+    #[serde(alias = "enableBackdrops")]
+    pub enable_backdrops: bool,
+    #[serde(alias = "enableThemeSongs")]
+    pub enable_theme_songs: bool,
+    #[serde(alias = "displayUnairedEpisodes")]
+    pub display_unaired_episodes: bool,
+    #[serde(alias = "enableCinemaMode")]
+    pub enable_cinema_mode: bool,
+    #[serde(alias = "enableNextEpisodeAutoPlay")]
+    pub enable_next_episode_auto_play: bool,
+    #[serde(alias = "maxStreamingBitrate")]
+    pub max_streaming_bitrate: i64,
+    #[serde(alias = "maxChromecastBitrate")]
+    pub max_chromecast_bitrate: i64,
 }
 
 impl Default for UserConfigurationDto {
@@ -557,6 +571,13 @@ impl Default for UserConfigurationDto {
             remember_audio_selections: true,
             remember_subtitle_selections: true,
             enable_local_password: true,
+            enable_backdrops: true,
+            enable_theme_songs: true,
+            display_unaired_episodes: false,
+            enable_cinema_mode: false,
+            enable_next_episode_auto_play: true,
+            max_streaming_bitrate: 140_000_000,
+            max_chromecast_bitrate: 0,
         }
     }
 }
@@ -690,12 +711,212 @@ pub struct EndpointInfo {
     pub is_in_network: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase", default)]
 pub struct BrandingConfiguration {
+    #[serde(alias = "loginDisclaimer")]
     pub login_disclaimer: String,
+    #[serde(alias = "customCss")]
     pub custom_css: String,
+    #[serde(alias = "splashscreenEnabled")]
     pub splashscreen_enabled: bool,
+}
+
+impl Default for BrandingConfiguration {
+    fn default() -> Self {
+        Self {
+            login_disclaimer: String::new(),
+            custom_css: String::new(),
+            splashscreen_enabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct PlaybackConfiguration {
+    #[serde(alias = "minResumePct")]
+    pub min_resume_pct: i32,
+    #[serde(alias = "maxResumePct")]
+    pub max_resume_pct: i32,
+    #[serde(alias = "minResumeDurationSeconds")]
+    pub min_resume_duration_seconds: i32,
+    #[serde(alias = "minAudiobookResume")]
+    pub min_audiobook_resume: i32,
+    #[serde(alias = "maxAudiobookResume")]
+    pub max_audiobook_resume: i32,
+}
+
+impl Default for PlaybackConfiguration {
+    fn default() -> Self {
+        Self {
+            min_resume_pct: 5,
+            max_resume_pct: 90,
+            min_resume_duration_seconds: 300,
+            min_audiobook_resume: 5,
+            max_audiobook_resume: 95,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct NetworkConfiguration {
+    #[serde(alias = "localAddress")]
+    pub local_address: String,
+    #[serde(alias = "httpServerPortNumber")]
+    pub http_server_port_number: u16,
+    #[serde(alias = "httpsPortNumber")]
+    pub https_port_number: u16,
+    #[serde(alias = "publicHttpPort")]
+    pub public_http_port: u16,
+    #[serde(alias = "publicHttpsPort")]
+    pub public_https_port: u16,
+    #[serde(alias = "certificatePath")]
+    pub certificate_path: String,
+    #[serde(alias = "enableHttps")]
+    pub enable_https: bool,
+    #[serde(alias = "externalDomain", alias = "externalDdns")]
+    pub external_domain: String,
+    #[serde(alias = "enableUPnP")]
+    pub enable_upnp: bool,
+}
+
+impl Default for NetworkConfiguration {
+    fn default() -> Self {
+        Self {
+            local_address: String::new(),
+            http_server_port_number: 8096,
+            https_port_number: 8920,
+            public_http_port: 8096,
+            public_https_port: 8920,
+            certificate_path: String::new(),
+            enable_https: false,
+            external_domain: String::new(),
+            enable_upnp: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct LibraryDisplayConfiguration {
+    #[serde(alias = "displayFolderView")]
+    pub display_folder_view: bool,
+    #[serde(alias = "displaySpecialsWithinSeasons")]
+    pub display_specials_within_seasons: bool,
+    #[serde(alias = "groupMoviesIntoCollections")]
+    pub group_movies_into_collections: bool,
+    #[serde(alias = "displayCollectionsView")]
+    pub display_collections_view: bool,
+    #[serde(alias = "enableExternalContentInSuggestions")]
+    pub enable_external_content_in_suggestions: bool,
+    #[serde(alias = "dateAddedBehavior")]
+    pub date_added_behavior: i32,
+    #[serde(alias = "metadataPath")]
+    pub metadata_path: String,
+    #[serde(alias = "saveMetadataHidden")]
+    pub save_metadata_hidden: bool,
+    #[serde(alias = "seasonZeroDisplayName")]
+    pub season_zero_display_name: String,
+    #[serde(alias = "fanartApiKey")]
+    pub fanart_api_key: String,
+}
+
+impl Default for LibraryDisplayConfiguration {
+    fn default() -> Self {
+        Self {
+            display_folder_view: false,
+            display_specials_within_seasons: true,
+            group_movies_into_collections: true,
+            display_collections_view: true,
+            enable_external_content_in_suggestions: false,
+            date_added_behavior: 0,
+            metadata_path: String::new(),
+            save_metadata_hidden: false,
+            season_zero_display_name: "Specials".to_string(),
+            fanart_api_key: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct SubtitleDownloadConfiguration {
+    #[serde(alias = "downloadSubtitlesForMovies")]
+    pub download_subtitles_for_movies: bool,
+    #[serde(alias = "downloadSubtitlesForEpisodes")]
+    pub download_subtitles_for_episodes: bool,
+    #[serde(alias = "downloadLanguages")]
+    pub download_languages: Vec<String>,
+    #[serde(alias = "requirePerfectMatch")]
+    pub require_perfect_match: bool,
+    #[serde(alias = "skipIfAudioTrackPresent")]
+    pub skip_if_audio_track_present: bool,
+    #[serde(alias = "skipIfGraphicalSubsPresent")]
+    pub skip_if_graphical_subs_present: bool,
+    #[serde(alias = "openSubtitlesUsername")]
+    pub open_subtitles_username: String,
+    #[serde(alias = "openSubtitlesPassword")]
+    pub open_subtitles_password: String,
+}
+
+impl Default for SubtitleDownloadConfiguration {
+    fn default() -> Self {
+        Self {
+            download_subtitles_for_movies: false,
+            download_subtitles_for_episodes: false,
+            download_languages: Vec::new(),
+            require_perfect_match: true,
+            skip_if_audio_track_present: false,
+            skip_if_graphical_subs_present: true,
+            open_subtitles_username: String::new(),
+            open_subtitles_password: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct DbPlaylist {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub name: String,
+    pub media_type: String,
+    pub overview: Option<String>,
+    pub image_primary_path: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct DbPlaylistItem {
+    pub id: Uuid,
+    pub playlist_id: Uuid,
+    pub media_item_id: Uuid,
+    pub playlist_item_id: String,
+    pub sort_index: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ApiKeyInfoDto {
+    #[serde(rename = "AccessToken")]
+    pub access_token: String,
+    #[serde(rename = "AppName")]
+    pub app_name: String,
+    #[serde(rename = "AppVersion")]
+    pub app_version: String,
+    #[serde(rename = "DeviceId")]
+    pub device_id: String,
+    #[serde(rename = "DeviceName")]
+    pub device_name: String,
+    #[serde(rename = "UserId", skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(rename = "UserName", skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    #[serde(rename = "DateCreated")]
+    pub date_created: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -883,6 +1104,8 @@ pub struct BaseItemDto {
     pub local_trailer_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_preferences_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub playlist_item_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recursive_item_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

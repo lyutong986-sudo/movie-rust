@@ -25,6 +25,130 @@ export interface UserConfiguration {
   RememberAudioSelections?: boolean;
   RememberSubtitleSelections?: boolean;
   EnableLocalPassword?: boolean;
+  EnableBackdrops?: boolean;
+  EnableThemeSongs?: boolean;
+  DisplayUnairedEpisodes?: boolean;
+  EnableCinemaMode?: boolean;
+  EnableNextEpisodeAutoPlay?: boolean;
+  MaxStreamingBitrate?: number;
+  MaxChromecastBitrate?: number;
+}
+
+export interface BrandingConfiguration {
+  LoginDisclaimer: string;
+  CustomCss: string;
+  SplashscreenEnabled: boolean;
+}
+
+export interface PlaybackConfiguration {
+  MinResumePct: number;
+  MaxResumePct: number;
+  MinResumeDurationSeconds: number;
+  MinAudiobookResume: number;
+  MaxAudiobookResume: number;
+}
+
+export interface NetworkConfiguration {
+  LocalAddress: string;
+  HttpServerPortNumber: number;
+  HttpsPortNumber: number;
+  PublicHttpPort: number;
+  PublicHttpsPort: number;
+  CertificatePath: string;
+  EnableHttps: boolean;
+  ExternalDomain: string;
+  EnableUPnP: boolean;
+}
+
+export interface LibraryDisplayConfiguration {
+  DisplayFolderView: boolean;
+  DisplaySpecialsWithinSeasons: boolean;
+  GroupMoviesIntoCollections: boolean;
+  DisplayCollectionsView: boolean;
+  EnableExternalContentInSuggestions: boolean;
+  DateAddedBehavior: number;
+  MetadataPath: string;
+  SaveMetadataHidden: boolean;
+  SeasonZeroDisplayName: string;
+  FanartApiKey: string;
+}
+
+export interface SubtitleDownloadConfiguration {
+  DownloadSubtitlesForMovies: boolean;
+  DownloadSubtitlesForEpisodes: boolean;
+  DownloadLanguages: string[];
+  RequirePerfectMatch: boolean;
+  SkipIfAudioTrackPresent: boolean;
+  SkipIfGraphicalSubsPresent: boolean;
+  OpenSubtitlesUsername: string;
+  OpenSubtitlesPassword: string;
+}
+
+export interface ScheduledTaskTrigger {
+  Type: string;
+  IntervalTicks?: number;
+  TimeOfDayTicks?: number;
+  DayOfWeek?: string;
+  MaxRuntimeTicks?: number;
+}
+
+export interface ScheduledTaskInfo {
+  Id: string;
+  Key?: string;
+  Name: string;
+  Description: string;
+  Category: string;
+  State: string;
+  CurrentProgressPercentage?: number | null;
+  Triggers: ScheduledTaskTrigger[];
+  LastExecutionResult?: {
+    StartTimeUtc?: string;
+    StartTime?: string;
+    EndTimeUtc?: string;
+    EndTime?: string;
+    Status?: string;
+    DurationTicks?: number;
+    ErrorMessage?: string | null;
+  } | null;
+  IsHidden?: boolean;
+}
+
+export interface ApiKeyInfo {
+  Id: string;
+  AccessToken: string;
+  UserId: string;
+  UserName: string;
+  AppName: string;
+  AppVersion: string;
+  DeviceId?: string | null;
+  DeviceName?: string | null;
+  DateLastActivity?: string;
+  ExpirationDate?: string | null;
+  IsActive?: boolean;
+}
+
+export interface PlaylistInfo {
+  Id: string;
+  Name: string;
+  ServerId: string;
+  MediaType: string;
+  UserId: string;
+  Overview?: string | null;
+  ChildCount: number;
+  DateCreated: string;
+  DateModified: string;
+  PrimaryImageTag?: string | null;
+}
+
+export interface ForgotPasswordResult {
+  Action: string;
+  PinFile?: string;
+  PinExpirationDate?: string;
+}
+
+export interface ForgotPasswordPinResult {
+  Success: boolean;
+  UsersReset?: string[];
 }
 
 export interface AccessSchedule {
@@ -112,6 +236,8 @@ export interface ActivityLogEntry {
   ShortOverview?: string;
   Severity: string;
   Date: string;
+  UserId?: string;
+  ItemId?: string;
 }
 
 export interface LogFileDto {
@@ -129,6 +255,7 @@ export interface BaseItemDto {
   Name: string;
   Type: string;
   IsFolder: boolean;
+  PlaylistItemId?: string;
   SortName?: string;
   CollectionType?: string;
   MediaType?: string;
@@ -456,6 +583,191 @@ export class EmbyApi {
     return this.request<EncodingOptions>('/System/MediaEncoder/Path', {
       method: 'POST',
       body: payload
+    });
+  }
+
+  async brandingConfiguration() {
+    return this.request<BrandingConfiguration>('/Branding/Configuration');
+  }
+
+  async updateBrandingConfiguration(payload: BrandingConfiguration) {
+    return this.request<BrandingConfiguration>('/Branding/Configuration', {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async playbackConfiguration() {
+    return this.request<PlaybackConfiguration>('/System/Configuration/Playback');
+  }
+
+  async updatePlaybackConfiguration(payload: PlaybackConfiguration) {
+    return this.request<PlaybackConfiguration>('/System/Configuration/Playback', {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async networkConfiguration() {
+    return this.request<NetworkConfiguration>('/System/Configuration/Network');
+  }
+
+  async updateNetworkConfiguration(payload: NetworkConfiguration) {
+    return this.request<NetworkConfiguration>('/System/Configuration/Network', {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async libraryDisplayConfiguration() {
+    return this.request<LibraryDisplayConfiguration>('/System/Configuration/LibraryDisplay');
+  }
+
+  async updateLibraryDisplayConfiguration(payload: LibraryDisplayConfiguration) {
+    return this.request<LibraryDisplayConfiguration>('/System/Configuration/LibraryDisplay', {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async subtitleDownloadConfiguration() {
+    return this.request<SubtitleDownloadConfiguration>('/System/Configuration/SubtitleDownload');
+  }
+
+  async updateSubtitleDownloadConfiguration(payload: SubtitleDownloadConfiguration) {
+    return this.request<SubtitleDownloadConfiguration>('/System/Configuration/SubtitleDownload', {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async scheduledTasks() {
+    return this.request<ScheduledTaskInfo[]>('/ScheduledTasks');
+  }
+
+  async scheduledTask(taskId: string) {
+    return this.request<ScheduledTaskInfo>(`/ScheduledTasks/${encodeURIComponent(taskId)}`);
+  }
+
+  async startScheduledTask(taskId: string) {
+    return this.request<void>(`/ScheduledTasks/Running/${encodeURIComponent(taskId)}`, {
+      method: 'POST'
+    });
+  }
+
+  async cancelScheduledTask(taskId: string) {
+    return this.request<void>(`/ScheduledTasks/Running/${encodeURIComponent(taskId)}/Cancel`, {
+      method: 'POST'
+    });
+  }
+
+  async updateScheduledTaskTriggers(taskId: string, triggers: ScheduledTaskTrigger[]) {
+    return this.request<void>(`/ScheduledTasks/${encodeURIComponent(taskId)}/Triggers`, {
+      method: 'POST',
+      body: triggers
+    });
+  }
+
+  async listAuthKeys() {
+    return this.request<QueryResult<ApiKeyInfo>>('/Auth/Keys');
+  }
+
+  async createAuthKey(options: { app?: string; expiresInDays?: number } = {}) {
+    const params = new URLSearchParams();
+    if (options.app) params.set('App', options.app);
+    if (options.expiresInDays) params.set('ExpiresInDays', String(options.expiresInDays));
+    const query = params.toString();
+    return this.request<ApiKeyInfo>(`/Auth/Keys${query ? `?${query}` : ''}`, {
+      method: 'POST'
+    });
+  }
+
+  async deleteAuthKey(key: string) {
+    return this.request<void>(`/Auth/Keys/${encodeURIComponent(key)}`, {
+      method: 'DELETE'
+    });
+  }
+
+  async listPlaylists() {
+    return this.request<QueryResult<PlaylistInfo>>('/Playlists');
+  }
+
+  async createPlaylist(payload: {
+    Name: string;
+    MediaType?: string;
+    Overview?: string;
+    Ids?: string[];
+  }) {
+    return this.request<PlaylistInfo>('/Playlists', {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async getPlaylist(id: string) {
+    return this.request<PlaylistInfo>(`/Playlists/${encodeURIComponent(id)}`);
+  }
+
+  async updatePlaylist(id: string, payload: { Name?: string; Overview?: string | null }) {
+    return this.request<PlaylistInfo>(`/Playlists/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async deletePlaylist(id: string) {
+    return this.request<void>(`/Playlists/${encodeURIComponent(id)}/Delete`, {
+      method: 'POST'
+    });
+  }
+
+  async listPlaylistItems(id: string, options: { StartIndex?: number; Limit?: number } = {}) {
+    const params = new URLSearchParams();
+    if (options.StartIndex !== undefined) params.set('StartIndex', String(options.StartIndex));
+    if (options.Limit !== undefined) params.set('Limit', String(options.Limit));
+    const query = params.toString();
+    return this.request<QueryResult<BaseItemDto>>(
+      `/Playlists/${encodeURIComponent(id)}/Items${query ? `?${query}` : ''}`
+    );
+  }
+
+  async addPlaylistItems(id: string, itemIds: string[]) {
+    const params = new URLSearchParams({ Ids: itemIds.join(',') });
+    return this.request<void>(
+      `/Playlists/${encodeURIComponent(id)}/Items?${params.toString()}`,
+      {
+        method: 'POST'
+      }
+    );
+  }
+
+  async removePlaylistItems(id: string, entryIds: string[]) {
+    return this.request<void>(`/Playlists/${encodeURIComponent(id)}/Items/Delete`, {
+      method: 'POST',
+      body: { EntryIds: entryIds }
+    });
+  }
+
+  async movePlaylistItem(id: string, entryId: string, newIndex: number) {
+    return this.request<void>(
+      `/Playlists/${encodeURIComponent(id)}/Items/${encodeURIComponent(entryId)}/Move/${newIndex}`,
+      { method: 'POST' }
+    );
+  }
+
+  async forgotPassword(username: string) {
+    return this.request<ForgotPasswordResult>('/Users/ForgotPassword', {
+      method: 'POST',
+      auth: false,
+      body: { EnteredUsername: username }
+    });
+  }
+
+  async forgotPasswordPin(pin: string, newPassword: string) {
+    return this.request<ForgotPasswordPinResult>('/Users/ForgotPassword/Pin', {
+      method: 'POST',
+      auth: false,
+      body: { EnteredPin: pin, NewPw: newPassword }
     });
   }
 

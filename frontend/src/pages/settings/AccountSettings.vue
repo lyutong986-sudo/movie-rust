@@ -23,8 +23,26 @@ const preferences = reactive<UserConfiguration>({
   OrderedViews: [],
   HidePlayedInLatest: false,
   RememberAudioSelections: true,
-  RememberSubtitleSelections: true
+  RememberSubtitleSelections: true,
+  EnableBackdrops: true,
+  EnableThemeSongs: true,
+  DisplayUnairedEpisodes: false,
+  EnableCinemaMode: false,
+  EnableNextEpisodeAutoPlay: true,
+  MaxStreamingBitrate: 140_000_000,
+  MaxChromecastBitrate: 0
 });
+
+const bitrateOptions = [
+  { label: '自动（不限制）', value: 0 },
+  { label: '480p · 1 Mbps', value: 1_000_000 },
+  { label: '720p · 3 Mbps', value: 3_000_000 },
+  { label: '1080p · 8 Mbps', value: 8_000_000 },
+  { label: '1080p · 20 Mbps', value: 20_000_000 },
+  { label: '4K · 40 Mbps', value: 40_000_000 },
+  { label: '4K · 80 Mbps', value: 80_000_000 },
+  { label: '不限制 · 140 Mbps', value: 140_000_000 }
+];
 
 const subtitleModeOptions = [
   { label: 'Default', value: 'Default' },
@@ -172,9 +190,33 @@ async function savePreferences() {
           <USwitch v-model="preferences.PlayDefaultAudioTrack" label="默认选择音轨" />
           <USwitch v-model="preferences.PlayDefaultSubtitleTrack" label="默认选择字幕" />
           <USwitch v-model="preferences.DisplayMissingEpisodes" label="显示缺失剧集" />
+          <USwitch v-model="preferences.DisplayUnairedEpisodes" label="显示未播出剧集" />
           <USwitch v-model="preferences.HidePlayedInLatest" label="最新内容中隐藏已播放" />
           <USwitch v-model="preferences.RememberAudioSelections" label="记住音轨选择" />
           <USwitch v-model="preferences.RememberSubtitleSelections" label="记住字幕选择" />
+          <USwitch v-model="preferences.EnableNextEpisodeAutoPlay" label="自动连播下一集" />
+          <USwitch v-model="preferences.EnableBackdrops" label="启用背景图" />
+          <USwitch v-model="preferences.EnableThemeSongs" label="启用主题曲" />
+          <USwitch v-model="preferences.EnableCinemaMode" label="启用放映模式（片头/Trailer）" />
+        </div>
+
+        <div class="mt-6 grid gap-4 sm:grid-cols-2">
+          <UFormField label="最大串流码率" hint="控制客户端选择的最大视频码率">
+            <USelect
+              v-model.number="preferences.MaxStreamingBitrate"
+              :items="bitrateOptions"
+              value-key="value"
+              class="w-full"
+            />
+          </UFormField>
+          <UFormField label="Chromecast 最大码率" hint="0 表示自动">
+            <USelect
+              v-model.number="preferences.MaxChromecastBitrate"
+              :items="bitrateOptions"
+              value-key="value"
+              class="w-full"
+            />
+          </UFormField>
         </div>
 
         <template #footer>

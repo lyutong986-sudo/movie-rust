@@ -124,6 +124,54 @@ export const router = createRouter({
       meta: { title: '网络', section: 'admin', admin: true }
     },
     {
+      path: '/settings/scheduled-tasks',
+      name: 'settings-scheduled-tasks',
+      component: () => import('../pages/settings/ScheduledTasksSettings.vue'),
+      meta: { title: '计划任务', section: 'admin', admin: true }
+    },
+    {
+      path: '/settings/subtitle-download',
+      name: 'settings-subtitle-download',
+      component: () => import('../pages/settings/SubtitleDownloadSettings.vue'),
+      meta: { title: '字幕下载', section: 'admin', admin: true }
+    },
+    {
+      path: '/settings/library-display',
+      name: 'settings-library-display',
+      component: () => import('../pages/settings/LibraryDisplaySettings.vue'),
+      meta: { title: '媒体库显示', section: 'admin', admin: true }
+    },
+    {
+      path: '/settings/branding',
+      name: 'settings-branding',
+      component: () => import('../pages/settings/BrandingSettings.vue'),
+      meta: { title: '品牌化', section: 'admin', admin: true }
+    },
+    {
+      path: '/settings/reports',
+      name: 'settings-reports',
+      component: () => import('../pages/settings/ReportsSettings.vue'),
+      meta: { title: '活动报表', section: 'admin', admin: true }
+    },
+    {
+      path: '/playlists',
+      name: 'playlists',
+      component: () => import('../pages/PlaylistsPage.vue'),
+      meta: { title: '播放列表', section: 'home' }
+    },
+    {
+      path: '/playlist/:id',
+      name: 'playlist-detail',
+      component: () => import('../pages/PlaylistDetailPage.vue'),
+      meta: { title: '播放列表详情', section: 'home' }
+    },
+    {
+      path: '/server/forgot-password',
+      name: 'server-forgot-password',
+      component: () => import('../pages/server/ForgotPasswordPage.vue'),
+      meta: { title: '找回密码', layout: 'server' }
+    },
+    {
       path: '/server/login',
       name: 'server-login',
       component: () => import('../pages/server/LoginPage.vue'),

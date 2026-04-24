@@ -254,9 +254,108 @@ pub async fn branding_configuration(
     })
 }
 
+pub async fn update_branding_configuration(
+    pool: &sqlx::PgPool,
+    configuration: &BrandingConfiguration,
+) -> Result<(), AppError> {
+    set_system_setting(pool, "branding_configuration", json!(configuration)).await
+}
+
 pub async fn branding_css(pool: &sqlx::PgPool, config: &Config) -> Result<String, AppError> {
     let configuration = branding_configuration(pool, config).await?;
     Ok(configuration.custom_css)
+}
+
+pub async fn playback_configuration(
+    pool: &sqlx::PgPool,
+) -> Result<crate::models::PlaybackConfiguration, AppError> {
+    if let Some(value) = get_system_setting(pool, "playback_configuration").await? {
+        if let Ok(configuration) =
+            serde_json::from_value::<crate::models::PlaybackConfiguration>(value)
+        {
+            return Ok(configuration);
+        }
+    }
+    Ok(crate::models::PlaybackConfiguration::default())
+}
+
+pub async fn update_playback_configuration(
+    pool: &sqlx::PgPool,
+    configuration: &crate::models::PlaybackConfiguration,
+) -> Result<(), AppError> {
+    set_system_setting(pool, "playback_configuration", json!(configuration)).await
+}
+
+pub async fn network_configuration(
+    pool: &sqlx::PgPool,
+    config: &Config,
+) -> Result<crate::models::NetworkConfiguration, AppError> {
+    if let Some(value) = get_system_setting(pool, "network_configuration").await? {
+        if let Ok(configuration) =
+            serde_json::from_value::<crate::models::NetworkConfiguration>(value)
+        {
+            return Ok(configuration);
+        }
+    }
+    let remote_access = startup_remote_access(pool, config).await?;
+    Ok(crate::models::NetworkConfiguration {
+        local_address: config.host.clone(),
+        http_server_port_number: config.port,
+        https_port_number: 8920,
+        public_http_port: config.port,
+        public_https_port: 8920,
+        certificate_path: String::new(),
+        enable_https: false,
+        external_domain: config.public_url.clone().unwrap_or_default(),
+        enable_upnp: remote_access.enable_automatic_port_mapping.unwrap_or(false),
+    })
+}
+
+pub async fn update_network_configuration(
+    pool: &sqlx::PgPool,
+    configuration: &crate::models::NetworkConfiguration,
+) -> Result<(), AppError> {
+    set_system_setting(pool, "network_configuration", json!(configuration)).await
+}
+
+pub async fn library_display_configuration(
+    pool: &sqlx::PgPool,
+) -> Result<crate::models::LibraryDisplayConfiguration, AppError> {
+    if let Some(value) = get_system_setting(pool, "library_display_configuration").await? {
+        if let Ok(configuration) =
+            serde_json::from_value::<crate::models::LibraryDisplayConfiguration>(value)
+        {
+            return Ok(configuration);
+        }
+    }
+    Ok(crate::models::LibraryDisplayConfiguration::default())
+}
+
+pub async fn update_library_display_configuration(
+    pool: &sqlx::PgPool,
+    configuration: &crate::models::LibraryDisplayConfiguration,
+) -> Result<(), AppError> {
+    set_system_setting(pool, "library_display_configuration", json!(configuration)).await
+}
+
+pub async fn subtitle_download_configuration(
+    pool: &sqlx::PgPool,
+) -> Result<crate::models::SubtitleDownloadConfiguration, AppError> {
+    if let Some(value) = get_system_setting(pool, "subtitle_download_configuration").await? {
+        if let Ok(configuration) =
+            serde_json::from_value::<crate::models::SubtitleDownloadConfiguration>(value)
+        {
+            return Ok(configuration);
+        }
+    }
+    Ok(crate::models::SubtitleDownloadConfiguration::default())
+}
+
+pub async fn update_subtitle_download_configuration(
+    pool: &sqlx::PgPool,
+    configuration: &crate::models::SubtitleDownloadConfiguration,
+) -> Result<(), AppError> {
+    set_system_setting(pool, "subtitle_download_configuration", json!(configuration)).await
 }
 
 pub async fn encoding_options(
@@ -2098,6 +2197,47 @@ pub async fn list_all_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow
     )
     .fetch_all(pool)
     .await?)
+}
+
+pub async fn create_api_key_session(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    device_id: Option<String>,
+    device_name: Option<String>,
+    client: Option<String>,
+    application_version: Option<String>,
+) -> Result<AuthSessionRow, AppError> {
+    create_session_with_type(
+        pool,
+        user_id,
+        device_id,
+        device_name,
+        client,
+        application_version,
+        None,
+        "ApiKey",
+    )
+    .await
+}
+
+pub async fn delete_api_key_session(
+    pool: &sqlx::PgPool,
+    access_token: &str,
+) -> Result<(), AppError> {
+    let affected = sqlx::query(
+        r#"
+        DELETE FROM sessions
+        WHERE access_token = $1 AND session_type = 'ApiKey'
+        "#,
+    )
+    .bind(access_token)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if affected == 0 {
+        return Err(AppError::NotFound("API Key 不存在".to_string()));
+    }
+    Ok(())
 }
 
 pub async fn list_api_key_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, AppError> {
@@ -4389,6 +4529,7 @@ pub async fn get_boxsets_for_item_ids(
             tag_items: name_long_id_items_from_names(&item.tags),
             local_trailer_count: 0,
             display_preferences_id: Some(boxset_id.clone()),
+            playlist_item_id: None,
             recursive_item_count: Some(grouped_items.len() as i64),
             season_count: None,
             series_count: None,
@@ -4465,6 +4606,206 @@ pub async fn get_boxsets_for_item_ids(
         total_record_count,
         start_index: Some(start_index.max(0)),
     })
+}
+
+pub async fn create_playlist(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    name: &str,
+    media_type: &str,
+    overview: Option<&str>,
+) -> Result<crate::models::DbPlaylist, AppError> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO playlists (id, user_id, name, media_type, overview)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(id)
+    .bind(user_id)
+    .bind(name)
+    .bind(media_type)
+    .bind(overview)
+    .execute(pool)
+    .await?;
+    get_playlist(pool, id)
+        .await?
+        .ok_or_else(|| AppError::Internal("创建播放列表后无法读取".to_string()))
+}
+
+pub async fn get_playlist(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<Option<crate::models::DbPlaylist>, AppError> {
+    Ok(sqlx::query_as::<_, crate::models::DbPlaylist>(
+        r#"
+        SELECT id, user_id, name, media_type, overview, image_primary_path, created_at, updated_at
+        FROM playlists
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn list_playlists_for_user(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<Vec<crate::models::DbPlaylist>, AppError> {
+    Ok(sqlx::query_as::<_, crate::models::DbPlaylist>(
+        r#"
+        SELECT id, user_id, name, media_type, overview, image_primary_path, created_at, updated_at
+        FROM playlists
+        WHERE user_id = $1
+        ORDER BY updated_at DESC, name ASC
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn update_playlist(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    name: Option<&str>,
+    overview: Option<Option<&str>>,
+) -> Result<(), AppError> {
+    if let Some(name) = name {
+        sqlx::query("UPDATE playlists SET name = $2, updated_at = now() WHERE id = $1")
+            .bind(id)
+            .bind(name)
+            .execute(pool)
+            .await?;
+    }
+    if let Some(overview) = overview {
+        sqlx::query("UPDATE playlists SET overview = $2, updated_at = now() WHERE id = $1")
+            .bind(id)
+            .bind(overview)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn delete_playlist(pool: &sqlx::PgPool, id: Uuid) -> Result<(), AppError> {
+    sqlx::query("DELETE FROM playlists WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn list_playlist_items(
+    pool: &sqlx::PgPool,
+    playlist_id: Uuid,
+) -> Result<Vec<crate::models::DbPlaylistItem>, AppError> {
+    Ok(sqlx::query_as::<_, crate::models::DbPlaylistItem>(
+        r#"
+        SELECT id, playlist_id, media_item_id, playlist_item_id, sort_index, created_at
+        FROM playlist_items
+        WHERE playlist_id = $1
+        ORDER BY sort_index ASC, created_at ASC
+        "#,
+    )
+    .bind(playlist_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn add_playlist_items(
+    pool: &sqlx::PgPool,
+    playlist_id: Uuid,
+    media_item_ids: &[Uuid],
+) -> Result<(), AppError> {
+    if media_item_ids.is_empty() {
+        return Ok(());
+    }
+    let current_max: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(sort_index)::bigint FROM playlist_items WHERE playlist_id = $1")
+            .bind(playlist_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    let mut next_index = current_max.map(|value| value + 1).unwrap_or(0);
+    for media_item_id in media_item_ids {
+        sqlx::query(
+            r#"
+            INSERT INTO playlist_items (playlist_id, media_item_id, sort_index)
+            VALUES ($1, $2, $3)
+            "#,
+        )
+        .bind(playlist_id)
+        .bind(media_item_id)
+        .bind(next_index as i32)
+        .execute(pool)
+        .await?;
+        next_index += 1;
+    }
+    sqlx::query("UPDATE playlists SET updated_at = now() WHERE id = $1")
+        .bind(playlist_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn remove_playlist_items(
+    pool: &sqlx::PgPool,
+    playlist_id: Uuid,
+    entry_ids: &[String],
+) -> Result<(), AppError> {
+    if entry_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        DELETE FROM playlist_items
+        WHERE playlist_id = $1 AND playlist_item_id = ANY($2)
+        "#,
+    )
+    .bind(playlist_id)
+    .bind(entry_ids)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE playlists SET updated_at = now() WHERE id = $1")
+        .bind(playlist_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn move_playlist_item(
+    pool: &sqlx::PgPool,
+    playlist_id: Uuid,
+    entry_id: &str,
+    new_index: i32,
+) -> Result<(), AppError> {
+    let items = list_playlist_items(pool, playlist_id).await?;
+    let mut remaining: Vec<_> = items
+        .iter()
+        .filter(|item| item.playlist_item_id != entry_id)
+        .collect();
+    let Some(target) = items
+        .iter()
+        .find(|item| item.playlist_item_id == entry_id)
+        .cloned()
+    else {
+        return Err(AppError::NotFound("播放列表条目不存在".to_string()));
+    };
+    let insert_index = new_index.clamp(0, remaining.len() as i32);
+    remaining.insert(insert_index as usize, &target);
+    for (index, item) in remaining.iter().enumerate() {
+        sqlx::query(
+            "UPDATE playlist_items SET sort_index = $2 WHERE id = $1",
+        )
+        .bind(item.id)
+        .bind(index as i32)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
 
 pub async fn get_media_item(
@@ -5740,6 +6081,7 @@ pub async fn library_to_item_dto(
         tag_items: Vec::new(),
         local_trailer_count: 0,
         display_preferences_id: Some(uuid_to_emby_guid(&library.id)),
+        playlist_item_id: None,
         recursive_item_count: Some(child_count),
         season_count: None,
         series_count: Some(series_count),
@@ -5851,6 +6193,7 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         tag_items: Vec::new(),
         local_trailer_count: 0,
         display_preferences_id: Some("root".to_string()),
+        playlist_item_id: None,
         recursive_item_count: None,
         season_count: None,
         series_count: None,
@@ -6164,6 +6507,7 @@ pub async fn media_item_to_dto(
         tag_items: name_long_id_items_from_names(&item.tags),
         local_trailer_count: 0,
         display_preferences_id: Some(display_preferences_id(item, &provider_ids)),
+        playlist_item_id: None,
         recursive_item_count,
         season_count,
         series_count: None,
@@ -6542,6 +6886,7 @@ where
         tag_items: Vec::new(),
         local_trailer_count: 0,
         display_preferences_id: Some(uuid_to_emby_guid(&virtual_id)),
+        playlist_item_id: None,
         recursive_item_count: None,
         season_count: None,
         series_count: None,
