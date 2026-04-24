@@ -17,6 +17,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path as StdPath, PathBuf};
+use std::time::Duration;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -86,18 +87,42 @@ fn enqueue_library_scan(state: &AppState, trigger: &str) {
     let trigger = trigger.to_string();
 
     tokio::spawn(async move {
-        match scanner::scan_all_libraries(&pool, metadata_manager, &config, work_limiters).await {
-            Ok(summary) => {
-                tracing::info!(
-                    trigger = %trigger,
-                    libraries = summary.libraries,
-                    scanned_files = summary.scanned_files,
-                    imported_items = summary.imported_items,
-                    "后台媒体库扫描完成"
-                );
-            }
-            Err(error) => {
-                tracing::error!(trigger = %trigger, error = %error, "后台媒体库扫描失败");
+        const MAX_ATTEMPTS: usize = 3;
+        let mut attempt = 1usize;
+        loop {
+            match scanner::scan_all_libraries(&pool, metadata_manager.clone(), &config, work_limiters.clone()).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        trigger = %trigger,
+                        attempt,
+                        libraries = summary.libraries,
+                        scanned_files = summary.scanned_files,
+                        imported_items = summary.imported_items,
+                        "后台媒体库扫描完成"
+                    );
+                    break;
+                }
+                Err(AppError::Sqlx(error)) if attempt < MAX_ATTEMPTS => {
+                    tracing::warn!(
+                        trigger = %trigger,
+                        attempt,
+                        max_attempts = MAX_ATTEMPTS,
+                        error = %error,
+                        "后台媒体库扫描遇到数据库错误，将延迟重试"
+                    );
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        trigger = %trigger,
+                        attempt,
+                        max_attempts = MAX_ATTEMPTS,
+                        error = %error,
+                        "后台媒体库扫描失败"
+                    );
+                    break;
+                }
             }
         }
     });

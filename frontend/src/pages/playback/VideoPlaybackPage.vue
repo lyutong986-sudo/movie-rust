@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import Hls from 'hls.js';
+import videojs from 'video.js';
+import type Player from 'video.js/dist/types/player';
+import 'video.js/dist/video-js.css';
 import type { BaseItemDto, MediaStreamDto } from '../../api/emby';
 import {
   api,
@@ -17,6 +21,8 @@ const route = useRoute();
 const router = useRouter();
 
 const videoRef = ref<HTMLVideoElement | null>(null);
+const playerRef = ref<Player | null>(null);
+const hlsRef = ref<Hls | null>(null);
 const loading = ref(false);
 const error = ref('');
 const item = ref<BaseItemDto | null>(null);
@@ -35,6 +41,7 @@ const fullscreen = ref(false);
 const pip = ref(false);
 const selectedAudioIndex = ref<number | null>(null);
 const selectedSubtitleIndex = ref<number | null>(null);
+const activeSourceCandidate = ref(0);
 const nextUpEpisode = ref<BaseItemDto | null>(null);
 const seekPreview = ref<{ x: number; time: number } | null>(null);
 
@@ -45,13 +52,27 @@ let lastProgressSecond = -10;
 
 const itemId = computed(() => String(route.query.itemId || ''));
 const currentSource = computed(() => item.value?.MediaSources?.[currentSourceIndex.value]);
-const sourceUrl = computed(() =>
+const directSourceUrl = computed(() =>
   currentSource.value
     ? api.streamUrlForSource(currentSource.value)
     : item.value
     ? api.streamUrl(item.value)
     : ''
 );
+const hlsSourceUrl = computed(() => {
+  if (!item.value) return '';
+  return api.hlsUrlForSource(item.value.Id, currentSource.value, playSessionId.value);
+});
+const sourceCandidates = computed(() => {
+  const candidates: Array<{ src: string; type: string }> = [];
+  if (hlsSourceUrl.value) {
+    candidates.push({ src: hlsSourceUrl.value, type: 'application/x-mpegURL' });
+  }
+  if (directSourceUrl.value) {
+    candidates.push({ src: directSourceUrl.value, type: 'video/mp4' });
+  }
+  return candidates;
+});
 const posterImage = computed(() =>
   item.value ? api.backdropUrl(item.value) || api.itemImageUrl(item.value) : ''
 );
@@ -124,19 +145,17 @@ watch(
 watch(
   () => currentSourceIndex.value,
   async () => {
-    if (!videoRef.value || !sourceUrl.value) return;
-    const keepTime = videoRef.value.currentTime;
-    videoRef.value.load();
-    try {
-      await videoRef.value.play();
-      videoRef.value.currentTime = keepTime;
-    } catch {
-      // ignore
-    }
+    if (!videoRef.value) return;
+    activeSourceCandidate.value = 0;
+    await applyPlaybackSource(videoRef.value.currentTime);
   }
 );
 
 onMounted(() => {
+  initVideoJsPlayer();
+  if (sourceCandidates.value.length) {
+    void applyPlaybackSource(0);
+  }
   document.addEventListener('fullscreenchange', onFullscreenChange);
   window.addEventListener('keydown', onKeyDown);
 });
@@ -145,8 +164,85 @@ onBeforeUnmount(async () => {
   window.clearTimeout(overlayTimer);
   document.removeEventListener('fullscreenchange', onFullscreenChange);
   window.removeEventListener('keydown', onKeyDown);
+  destroyHls();
+  playerRef.value?.dispose();
+  playerRef.value = null;
   await stopPlayback();
 });
+
+function initVideoJsPlayer() {
+  if (playerRef.value || !videoRef.value) return;
+  playerRef.value = videojs(videoRef.value, {
+    autoplay: true,
+    controls: false,
+    preload: 'auto',
+    muted: false,
+    html5: {
+      vhs: {
+        overrideNative: true
+      }
+    }
+  });
+}
+
+function destroyHls() {
+  if (hlsRef.value) {
+    hlsRef.value.destroy();
+    hlsRef.value = null;
+  }
+}
+
+async function applyPlaybackSource(keepTime = 0) {
+  const player = playerRef.value;
+  const media = videoRef.value;
+  const candidate = sourceCandidates.value[activeSourceCandidate.value];
+  if (!player || !media || !candidate) return;
+
+  destroyHls();
+  media.pause();
+  media.currentTime = Math.max(0, keepTime);
+
+  if (candidate.type === 'application/x-mpegURL' && Hls.isSupported()) {
+    const hls = new Hls({
+      enableWorker: true
+    });
+    hlsRef.value = hls;
+    hls.loadSource(candidate.src);
+    hls.attachMedia(media);
+    hls.on(Hls.Events.ERROR, (_event, data) => {
+      if (data.fatal) {
+        void tryNextSource(data.details || 'hls_fatal_error');
+      }
+    });
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      void media.play().catch(() => {
+        // 自动播放被策略拦截时保持静默，等待用户交互
+      });
+    });
+    return;
+  }
+
+  player.src({
+    src: candidate.src,
+    type: candidate.type
+  });
+  try {
+    await media.play();
+  } catch {
+    // 自动播放被策略拦截时保持静默，等待用户交互
+  }
+}
+
+async function tryNextSource(reason = '') {
+  if (activeSourceCandidate.value + 1 >= sourceCandidates.value.length) {
+    if (reason) {
+      error.value = `播放失败：${reason}`;
+    }
+    return;
+  }
+  activeSourceCandidate.value += 1;
+  await applyPlaybackSource(currentTime.value);
+}
 
 async function loadPlayback(nextItemId: string) {
   loading.value = true;
@@ -168,6 +264,7 @@ async function loadPlayback(nextItemId: string) {
       MediaStreams: playback.MediaSources[0]?.MediaStreams || loadedItem.MediaStreams
     };
     currentSourceIndex.value = 0;
+    activeSourceCandidate.value = 0;
     playSessionId.value = playback.PlaySessionId;
 
     // 默认字幕 / 音频
@@ -191,6 +288,10 @@ async function loadPlayback(nextItemId: string) {
     }
 
     touchOverlay();
+    if (videoRef.value) {
+      initVideoJsPlayer();
+      await applyPlaybackSource(0);
+    }
   } catch (loadError) {
     error.value = loadError instanceof Error ? loadError.message : String(loadError);
     item.value = null;
@@ -616,8 +717,7 @@ const rateMenu = computed(() =>
   >
     <video
       ref="videoRef"
-      class="absolute inset-0 h-full w-full bg-black object-contain"
-      :src="sourceUrl"
+      class="video-js absolute inset-0 h-full w-full bg-black object-contain"
       :poster="posterImage"
       autoplay
       playsinline
@@ -629,6 +729,7 @@ const rateMenu = computed(() =>
       @ratechange="onRateChange"
       @enterpictureinpicture="onEnterPip"
       @leavepictureinpicture="onLeavePip"
+      @error="tryNextSource('media_error')"
       @click="togglePlayback"
     >
       <track

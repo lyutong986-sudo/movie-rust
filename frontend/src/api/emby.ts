@@ -185,6 +185,11 @@ export interface BaseItemDto {
     Path: string;
     Container: string;
     DirectStreamUrl: string;
+    TranscodingUrl?: string;
+    SupportsDirectPlay?: boolean;
+    SupportsDirectStream?: boolean;
+    SupportsTranscoding?: boolean;
+    AddApiKeyToDirectStreamUrl?: boolean;
     Size?: number;
     ETag?: string;
     DefaultAudioStreamIndex?: number;
@@ -860,14 +865,57 @@ export class EmbyApi {
     return `${this.baseUrl}/Videos/${item.Id}/stream?static=true&api_key=${encodeURIComponent(this.token)}`;
   }
 
+  hlsUrlForSource(
+    itemId: string,
+    source?: NonNullable<BaseItemDto['MediaSources']>[number],
+    playSessionId?: string
+  ) {
+    const transcodingUrl = source?.TranscodingUrl;
+    if (transcodingUrl) {
+      return this.absoluteUrlWithOptionalApiKey(transcodingUrl);
+    }
+
+    const params = new URLSearchParams();
+    if (source?.Id) {
+      params.set('MediaSourceId', source.Id);
+    }
+    if (playSessionId) {
+      params.set('PlaySessionId', playSessionId);
+    }
+    params.set('DeviceId', getDeviceId());
+    if (this.token) {
+      params.set('api_key', this.token);
+    }
+    return `${this.baseUrl}/Videos/${itemId}/master.m3u8?${params}`;
+  }
+
   streamUrlForSource(source: NonNullable<BaseItemDto['MediaSources']>[number]) {
     const directUrl = source.DirectStreamUrl;
     if (!directUrl) {
       return '';
     }
 
-    const joiner = directUrl.includes('?') ? '&' : '?';
-    return `${this.baseUrl}${directUrl}${joiner}api_key=${encodeURIComponent(this.token)}`;
+    const absoluteUrl = this.absoluteUrlWithOptionalApiKey(directUrl, source.AddApiKeyToDirectStreamUrl !== false);
+    if (!absoluteUrl) {
+      return '';
+    }
+
+    return absoluteUrl;
+  }
+
+  private absoluteUrlWithOptionalApiKey(pathOrUrl: string, appendApiKey = true) {
+    const absoluteUrl = /^https?:\/\//i.test(pathOrUrl) ? pathOrUrl : `${this.baseUrl}${pathOrUrl}`;
+    if (!appendApiKey || !this.token) {
+      return absoluteUrl;
+    }
+
+    // PlaybackInfo 可能已经内嵌 api_key，避免重复拼接导致后端按非法查询参数拒绝。
+    if (/[?&]api_key=/i.test(absoluteUrl)) {
+      return absoluteUrl;
+    }
+
+    const joiner = absoluteUrl.includes('?') ? '&' : '?';
+    return `${absoluteUrl}${joiner}api_key=${encodeURIComponent(this.token)}`;
   }
 
   subtitleUrl(deliveryUrl?: string) {

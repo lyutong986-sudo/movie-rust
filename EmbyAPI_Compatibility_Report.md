@@ -729,3 +729,63 @@ npx vite build         # 构建成功
 **说明**：手动扫描接口 `/api/admin/scan` 仍保留同步返回 `ScanSummary`，用于需要即时统计结果的管理场景。
 
 **校验**：`backend> cargo build`、`frontend> npx vue-tsc -b` —— ✅ 通过。
+
+## 二十、第二十轮：播放失败定位与 `hls.js + video.js` 播放链路（2026-04-24）
+
+> 目标：修复条目页点击“播放”后无法播放的问题，并将 Web 端播放链路切到 `hls.js + video.js`，提升对容器/音轨组合（含部分浏览器不友好的源格式）的兼容能力。
+
+### A. MCP 线上实测结论（`/item/82A10E09-1CD1-5A8C-A45D-882C72499751`）
+
+| 证据 | 结论 |
+| --- | --- |
+| `POST /Items/{id}/PlaybackInfo` 返回 200，随后播放器请求 `GET /videos/{id}/original.mkv?...&api_key=...&api_key=...` 返回 400 | 前端把 `DirectStreamUrl` 里已存在的 `api_key` 又追加了一次，导致直链请求参数异常。 |
+| 控制台出现 `NotSupportedError: The element has no supported sources.` | 浏览器拿到 400 的媒体 URL 后，`<video>` 判定当前 source 不可播放并抛错。 |
+
+### B. 前端 API 层修复（`frontend/src/api/emby.ts`）
+
+| 问题 | 修复 |
+| --- | --- |
+| `streamUrlForSource` 对 `DirectStreamUrl` 无条件追加 `api_key`。 | 改为“检测已含 `api_key` 则不重复追加”，并尊重 `AddApiKeyToDirectStreamUrl=false`。 |
+| 仅有“直链文件”构造逻辑。 | 新增 `hlsUrlForSource(itemId, source, playSessionId)`，优先使用 `TranscodingUrl`，否则回退到 `/Videos/{id}/master.m3u8`。 |
+| `MediaSources` 类型缺少 HLS/能力字段。 | 补充 `TranscodingUrl`、`SupportsTranscoding`、`SupportsDirectPlay`、`SupportsDirectStream`、`AddApiKeyToDirectStreamUrl`。 |
+
+### C. 播放页切换到 `hls.js + video.js`（`frontend/src/pages/playback/VideoPlaybackPage.vue`）
+
+| 改造点 | 说明 |
+| --- | --- |
+| 引入播放器内核 | 增加 `video.js` 与 `hls.js` 依赖，页面初始化 `video.js` 实例（保留现有自研 UI 控件层）。 |
+| 播放源策略 | 播放源按候选顺序切换：优先 HLS（`master.m3u8`），再回退直链（`DirectStreamUrl`）。 |
+| HLS 驱动方式 | 当浏览器支持 `hls.js` 时，使用 `hls.js` 绑定 `<video>` 并加载 m3u8；其余情况由 `video.js` 设置 source。 |
+| 容错 | 监听 `hls.js` fatal error 与 `<video>` `error` 事件，自动尝试下一个候选源，避免单一路径失败即黑屏。 |
+
+### D. 构建校验
+
+- `frontend> npx vue-tsc -b` —— ✅ 通过
+- `frontend> npm run build` —— ✅ 通过
+
+> 备注：引入 `video.js` 后 `VideoPlaybackPage` 路由分包体积上升；当前为播放页按需 chunk，不影响非播放页面首屏。
+
+## 二十一、第二十一轮：类似内容多版本合并 + 扫库中断容错（2026-04-24）
+
+> 范围：修复详情页“类似内容”重复展示多版本；增强后台扫描在数据库短时不可用场景下的鲁棒性。
+
+### A. 类似内容多版本未合并
+
+| 问题 | 原因 | 修复 |
+| --- | --- | --- |
+| 详情页“类似内容”会把同一影片的多个版本（同内容不同文件）分别展示；进入条目详情时又能看到版本合并后的视图。 | `GET /Items/{id}/Similar` 走 `repository::find_similar_items`，此前只做“排除目标项”，未对候选结果做“同内容身份键”去重。 | 在 `backend/src/repository.rs::find_similar_items` 三段结果装配（主查询、无标签分支、补足分支）统一按 `item_identity_key` 去重；无 identity 时回退 `item:{id}`，保证 Similar 列表层同内容仅出现一次。 |
+
+### B. 扫库“突然中断”的容错改进
+
+| 现象 | 处理 |
+| --- | --- |
+| 后台扫描期间若数据库连接瞬断（例如容器重启/数据库重启窗口），任务可能在首次 SQL 错误时立即结束。 | `backend/src/routes/admin.rs::enqueue_library_scan` 增加 SQLx 失败重试：最多 3 次、每次间隔 5 秒；重试次数与错误会写入日志。非数据库错误仍立即失败并记录。 |
+
+### C. 你提供日志的定位结论
+
+- 日志中的 `received fast shutdown request` + 随后完整 `initdb`，说明 **PostgreSQL 进程被快速关闭并重新初始化了数据目录**，这是基础设施级中断（容器/数据目录生命周期），不是单条 SQL 或单个 API 查询本身导致。
+- 本轮代码层已做“数据库短暂不可用”的重试兜底；但若容器被重建且数据目录被清空，仍需要先修复部署侧持久化（volume）与重启策略。
+
+### D. 校验
+
+- `backend> cargo build` —— ✅ 通过

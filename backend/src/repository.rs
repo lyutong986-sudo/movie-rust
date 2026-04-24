@@ -8906,8 +8906,14 @@ pub async fn find_similar_items(
         .await?;
 
         let mut result = Vec::new();
+        let mut seen_identity_keys = BTreeSet::new();
         for item in similar_items {
             if same_item_identity(target_identity.as_deref(), &item) {
+                continue;
+            }
+            let identity_key = item_identity_key(&item, &provider_ids_for_item(&item))
+                .unwrap_or_else(|| format!("item:{}", item.id));
+            if !seen_identity_keys.insert(identity_key) {
                 continue;
             }
             result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
@@ -8950,8 +8956,16 @@ pub async fn find_similar_items(
     .await?;
 
     let mut result = Vec::new();
+    let mut seen_identity_keys = BTreeSet::new();
     for item in similar_items {
         if same_item_identity(target_identity.as_deref(), &item) {
+            continue;
+        }
+        let identity_key =
+            item_identity_key(&item, &provider_ids_for_item(&item)).unwrap_or_else(|| {
+                format!("item:{}", item.id)
+            });
+        if !seen_identity_keys.insert(identity_key) {
             continue;
         }
         result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
@@ -8991,6 +9005,11 @@ pub async fn find_similar_items(
 
         for item in additional_items {
             if same_item_identity(target_identity.as_deref(), &item) {
+                continue;
+            }
+            let identity_key = item_identity_key(&item, &provider_ids_for_item(&item))
+                .unwrap_or_else(|| format!("item:{}", item.id));
+            if !seen_identity_keys.insert(identity_key) {
                 continue;
             }
             result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
