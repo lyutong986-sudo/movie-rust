@@ -101,8 +101,9 @@ async fn main() -> Result<()> {
     // - `ServeDir` 负责实际存在于 `frontend/dist` 下的静态资源（`/index.html`、`/assets/*`、
     //   `/favicon.svg`、`/manifest.webmanifest` 等）。
     // - 对于 **Vue Router 客户端路由**（例如 `/settings`、`/library/<id>`、`/queue`、`/wizard`）
-    //   或路径不存在、方法不支持（HEAD/OPTIONS）等，统一交给 `spa_fallback` 返回 `index.html`，
-    //   让前端路由器接管，避免用户直接访问 / 刷新 Vue 路由时拿到 404。
+    //   等无对应静态文件的路径，使用 `ServeDir::fallback` 返回 `index.html`。
+    //   注意：必须用 `fallback`，不能用 `not_found_service`——后者会把回退响应**强制改成 404**，
+    //   导致浏览器地址栏、SEO、PWA 安装等仍显示 Not Found，尽管 body 已是 SPA HTML。
     let index_path: Arc<PathBuf> = Arc::new(static_dir.join("index.html"));
     let spa_index_service = {
         let index_path = index_path.clone();
@@ -111,7 +112,7 @@ async fn main() -> Result<()> {
             async move { Ok::<_, std::convert::Infallible>(serve_spa_index(&index_path).await) }
         })
     };
-    let spa = ServeDir::new(&static_dir).not_found_service(spa_index_service);
+    let spa = ServeDir::new(&static_dir).fallback(spa_index_service);
 
     let http_trace = TraceLayer::new_for_http()
         .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
