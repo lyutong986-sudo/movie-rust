@@ -1076,9 +1076,9 @@ pub async fn upsert_person_from_nfo(
     let result = sqlx::query(
         r#"
         INSERT INTO persons (
-            id, name, sort_name, provider_ids, primary_image_path, created_at, updated_at
+            name, sort_name, provider_ids, primary_image_path, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, now(), now())
+        VALUES ($1, $2, $3, $4, now(), now())
         ON CONFLICT (name, sort_name)
         DO UPDATE SET
             provider_ids = CASE
@@ -1090,10 +1090,6 @@ pub async fn upsert_person_from_nfo(
         RETURNING id
         "#,
     )
-    .bind(Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        format!("person:{sort_name}").as_bytes(),
-    ))
     .bind(name)
     .bind(sort_name)
     .bind(provider_ids)
@@ -1120,9 +1116,9 @@ pub async fn upsert_person_reference(
     let result = sqlx::query(
         r#"
         INSERT INTO persons (
-            id, name, sort_name, provider_ids, primary_image_path, external_url, created_at, updated_at
+            name, sort_name, provider_ids, primary_image_path, external_url, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, now(), now())
+        VALUES ($1, $2, $3, $4, $5, now(), now())
         ON CONFLICT (name, sort_name)
         DO UPDATE SET
             provider_ids = CASE
@@ -1135,7 +1131,6 @@ pub async fn upsert_person_reference(
         RETURNING id
         "#,
     )
-    .bind(Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("person:{sort_name}").as_bytes()))
     .bind(name)
     .bind(sort_name)
     .bind(provider_ids)
