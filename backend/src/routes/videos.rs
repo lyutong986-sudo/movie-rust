@@ -943,11 +943,23 @@ async fn transcoded_hls_playlist_response(
     if !path.exists() {
         return Err(AppError::NotFound("媒体文件不存在".to_string()));
     }
-    if naming::is_strm(&path) {
-        return Err(AppError::BadRequest(
-            "STRM 远程流不支持服务端 HLS 分片转码".to_string(),
-        ));
-    }
+    // STRM 文件：读取里面的远程 URL，直接作为 ffmpeg 的 -i 输入，
+    // 浏览器侧得到可解码的 HLS（fMP4/TS）片段，避免 MKV 直链无法原生解码。
+    let effective_input = if naming::is_strm(&path) {
+        let content = tokio::fs::read_to_string(&path).await?;
+        let target = naming::strm_target_from_text(&content).ok_or_else(|| {
+            AppError::BadRequest("STRM 文件没有有效的远程播放地址".to_string())
+        })?;
+        tracing::info!(
+            item_id = %item.id,
+            item_name = %item.name,
+            target = %target,
+            "为 STRM 远程流启动服务端 HLS 转码"
+        );
+        PathBuf::from(target)
+    } else {
+        path.clone()
+    };
 
     query.transcoding_protocol = Some("hls".to_string());
     let session = state
@@ -958,7 +970,7 @@ async fn transcoded_hls_playlist_response(
             &device_id.unwrap_or_else(|| "unknown-device".to_string()),
             query,
             encoding_options,
-            &path,
+            &effective_input,
         )
         .await?;
 

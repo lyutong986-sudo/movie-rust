@@ -1116,3 +1116,72 @@ npx vite build         # 构建成功
 
 - `backend> cargo build` —— ✅ 通过
 - `frontend> npm run build` —— ✅ 通过
+
+## 三十一、第三十一轮：STRM 远程流 HLS 转码支持（MCP 线上实测定位，2026-04-24）
+
+> 背景：MCP Chrome DevTools 抓到 `https://test.emby.yun:4443/library/.../item/...` 点击播放后：
+> - `GET /Videos/{id}/master.m3u8` → **400** `请求参数错误: STRM 远程流不支持服务端 HLS 分片转码`
+> - `GET /videos/{id}/original.mkv` → 206 成功，但浏览器无法原生解码 `MKV + AVC + DTS-HD MA + TrueHD 5.1`
+>
+> 定位：条目 `Path = .../xxx.strm`，`MediaSource.Path = http://172.32.0.1:18080/stream/...`（STRM 指向的远程 URL），但 `MediaSource.SupportsTranscoding=true` 与 `master.m3u8` 入口对 STRM **强行拒绝** 之间自相矛盾。
+
+### A. 根因
+
+| 位置 | 问题 |
+| --- | --- |
+| `backend/src/routes/videos.rs::transcoded_hls_playlist_response` | 对 `is_strm(path)` 直接 `return Err(AppError::BadRequest("STRM 远程流不支持..."))`。 |
+| MediaSource 填充（`routes/items.rs`, `repository.rs`） | `SupportsTranscoding` 对 STRM 依然返回 `true`，与 HLS 入口实际行为不一致。 |
+| 结果 | 前端按 `SupportsTranscoding=true` 优先请求 HLS，被 400 拒绝后回退直链 MKV，浏览器没有原生解码能力 → 黑屏 + NotSupportedError。 |
+
+### B. 修复
+
+**后端（`backend/src/routes/videos.rs::transcoded_hls_playlist_response`）**
+
+原来：
+
+```rust
+if naming::is_strm(&path) {
+    return Err(AppError::BadRequest(
+        "STRM 远程流不支持服务端 HLS 分片转码".to_string(),
+    ));
+}
+// ... start_transcoding(..., &path)
+```
+
+改为：
+
+```rust
+// STRM 文件：读取里面的远程 URL，直接作为 ffmpeg 的 -i 输入
+let effective_input = if naming::is_strm(&path) {
+    let content = tokio::fs::read_to_string(&path).await?;
+    let target = naming::strm_target_from_text(&content).ok_or_else(|| {
+        AppError::BadRequest("STRM 文件没有有效的远程播放地址".to_string())
+    })?;
+    PathBuf::from(target)
+} else {
+    path.clone()
+};
+// ... start_transcoding(..., &effective_input)
+```
+
+这和 `transcoder::build_ffmpeg_args` 的 `-i <URL>` 调用方式完全兼容：ffmpeg 直接以 HTTP URL 作为输入 probe + 解复用 + 转码，无需先把远程流缓存到本地。
+
+**前端（`frontend/src/pages/playback/VideoPlaybackPage.vue`）**
+
+HLS 致命错误处理增强：把 `data.response.code` / `data.response.text` 拼进 reason，配合 `console.warn('[playback] HLS fatal error', data)`，出现未来类似问题时可以直接在 DevTools 看到 HTTP 响应。
+
+### C. 线上自检清单（部署后）
+
+1. 点击播放 STRM 远程流视频，`GET /Videos/{id}/master.m3u8` 现在应返回 **200**，响应体是 HLS 播放列表。
+2. HLS 分片 `/Videos/{id}/hls1/{session_id}/0.ts` 陆续返回 200，ffmpeg 以 `-i http://172.32.0.1:18080/stream/...` 拉流转码。
+3. 浏览器视频面板正常播放；不再回退到 `original.mkv` 的 206 直链。
+
+### D. 依赖 / 前置条件
+
+- 后端容器内的 `ffmpeg` 需要能访问 `http://172.32.0.1:18080`（STRM 指向的内网地址）。
+- `EncodingOptions.EnableTranscoding=true` 和 `TranscodingTempPath` 可写，否则仍会回到 `HLS 播放需要启用真实转码输出` 的报错。
+
+### E. 校验
+
+- `backend> cargo build` —— ✅ 通过
+- `frontend> npm run build` —— ✅ 通过

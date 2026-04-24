@@ -232,7 +232,13 @@ async function applyPlaybackSource(keepTime = 0) {
     hls.attachMedia(media);
     hls.on(HlsCtor.Events.ERROR, (_event, data) => {
       if (data.fatal) {
-        void tryNextSource(data.details || 'hls_fatal_error');
+        const httpCode = data.response?.code;
+        const httpText = data.response?.text;
+        const reason = [data.details || 'hls_fatal_error', httpCode ? `HTTP ${httpCode}` : '', httpText]
+          .filter(Boolean)
+          .join(' · ');
+        console.warn('[playback] HLS fatal error', data);
+        void tryNextSource(reason);
       }
     });
     hls.on(HlsCtor.Events.MANIFEST_PARSED, () => {
