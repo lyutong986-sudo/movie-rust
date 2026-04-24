@@ -669,7 +669,6 @@ async fn sync_source_inner(
     if let Some(handle) = &progress {
         handle.set_phase("PreparingTargetLibrary", 5.0);
     }
-    reset_source_directory(&source_root).await?;
     cleanup_remote_source_items(
         &state.pool,
         source.target_library_id,
@@ -916,16 +915,6 @@ fn source_root_path(library: &DbLibrary, source: &DbRemoteEmbySource) -> PathBuf
     PathBuf::from(&library.path)
         .join("_remote_emby")
         .join(sanitize_segment(&source.name))
-}
-
-async fn reset_source_directory(source_root: &PathBuf) -> Result<(), AppError> {
-    match tokio::fs::remove_dir_all(source_root).await {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(AppError::Io(error)),
-    }
-    tokio::fs::create_dir_all(source_root).await?;
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
