@@ -22,6 +22,7 @@ export interface ServerEntry {
 }
 
 export const api = new EmbyApi(import.meta.env.VITE_API_BASE || '');
+api.onUnauthorized = handleUnauthorized;
 
 /** 后端若缺字段或解析异常时避免 `undefined` 写入 ref，防止首页模板访问 `.length` 直接崩溃 */
 function itemsFromQuery<T>(result: { Items?: T[] | null }): T[] {
@@ -128,23 +129,31 @@ export async function initialize(force = false) {
   }
 
   state.initialized = false;
-  ensureDefaultServer();
-  api.setBaseUrl(currentServerUrl.value);
-  await loadPublicInfo();
+  try {
+    ensureDefaultServer();
+    api.setBaseUrl(currentServerUrl.value);
+    await loadPublicInfo();
 
-  if (!state.startupWizardCompleted) {
-    await loadStartupWizard();
+    if (!state.startupWizardCompleted) {
+      await loadStartupWizard();
+      return;
+    }
+
+    publicUsers.value = await safePublicUsers();
+    if (api.isAuthenticated) {
+      user.value = api.user;
+      try {
+        await enterHome();
+      } catch (error) {
+        if (!api.isAuthenticated) {
+          handleUnauthorized();
+        }
+        state.error = error instanceof Error ? error.message : String(error);
+      }
+    }
+  } finally {
     state.initialized = true;
-    return;
   }
-
-  publicUsers.value = await safePublicUsers();
-  if (api.isAuthenticated) {
-    user.value = api.user;
-    await enterHome();
-  }
-
-  state.initialized = true;
 }
 
 export async function loadPublicInfo() {
@@ -652,6 +661,11 @@ export async function search() {
 
 export function logout() {
   api.logout();
+  clearClientState(true);
+  void refreshPublicUsersAfterLogout();
+}
+
+function handleUnauthorized() {
   clearClientState(true);
   void refreshPublicUsersAfterLogout();
 }

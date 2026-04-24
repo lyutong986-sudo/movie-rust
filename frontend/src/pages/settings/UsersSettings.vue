@@ -225,6 +225,16 @@ async function createUser() {
 async function saveUser() {
   const u = selectedUser.value;
   if (!u) return;
+  if (resetPassword.value || resetPasswordConfirm.value) {
+    if (resetPassword.value.length < 4) {
+      error.value = '新密码至少需要 4 个字符';
+      return;
+    }
+    if (resetPassword.value !== resetPasswordConfirm.value) {
+      error.value = '两次输入的新密码不一致';
+      return;
+    }
+  }
   saving.value = true;
   error.value = '';
   try {

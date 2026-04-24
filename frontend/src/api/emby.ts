@@ -378,6 +378,7 @@ export class EmbyApi {
   baseUrl: string;
   token = localStorage.getItem(TOKEN_KEY) || '';
   user: UserDto | null = readJson<UserDto>(USER_KEY);
+  onUnauthorized: (() => void) | null = null;
 
   constructor(baseUrl = '') {
     this.baseUrl = normalizeBaseUrl(baseUrl);
@@ -618,7 +619,17 @@ export class EmbyApi {
   }
 
   async playbackInfo(itemId: string) {
-    return this.request<PlaybackInfoResponse>(`/Items/${itemId}/PlaybackInfo`);
+    const userId = this.requireUserId();
+    const params = new URLSearchParams({
+      UserId: userId,
+      IsPlayback: 'true'
+    });
+    return this.request<PlaybackInfoResponse>(`/Items/${itemId}/PlaybackInfo?${params}`, {
+      method: 'POST',
+      body: {
+        DeviceProfile: webPlaybackDeviceProfile()
+      }
+    });
   }
 
   async playbackStarted(payload: PlaybackReportPayload) {
@@ -904,6 +915,7 @@ export class EmbyApi {
       const text = await response.text();
       if (options.auth !== false && (response.status === 401 || response.status === 403)) {
         this.logout();
+        this.onUnauthorized?.();
       }
       throw new Error(text || `HTTP ${response.status}`);
     }
@@ -945,6 +957,44 @@ function getDeviceId() {
   const value = crypto.randomUUID();
   localStorage.setItem(key, value);
   return value;
+}
+
+function webPlaybackDeviceProfile() {
+  return {
+    MaxStaticBitrate: 200_000_000,
+    MaxStreamingBitrate: 200_000_000,
+    DirectPlayProfiles: [
+      { Type: 'Video' },
+      { Type: 'Audio' }
+    ],
+    TranscodingProfiles: [
+      {
+        Container: 'ts',
+        Type: 'Video',
+        AudioCodec: 'aac,mp3,ac3,eac3,opus',
+        VideoCodec: 'h264',
+        Context: 'Streaming',
+        Protocol: 'hls',
+        MaxAudioChannels: '6',
+        MinSegments: '1',
+        BreakOnNonKeyFrames: true,
+        ManifestSubtitles: 'vtt'
+      }
+    ],
+    ContainerProfiles: [],
+    SubtitleProfiles: [
+      { Format: 'vtt', Method: 'External' },
+      { Format: 'webvtt', Method: 'External' },
+      { Format: 'srt', Method: 'External' },
+      { Format: 'ass', Method: 'External' },
+      { Format: 'ssa', Method: 'External' },
+      { Format: 'subrip', Method: 'Embed' },
+      { Format: 'srt', Method: 'Embed' },
+      { Format: 'ass', Method: 'Embed' },
+      { Format: 'ssa', Method: 'Embed' },
+      { Format: 'vtt', Method: 'Hls' }
+    ]
+  };
 }
 
 function normalizeBaseUrl(baseUrl: string) {

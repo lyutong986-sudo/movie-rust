@@ -682,6 +682,17 @@ npx vite build         # 构建成功
 
 **校验**：`frontend> npm run build` —— ✅ 通过。
 
+## 十八、第十八轮：前端会话失效、用户保存顺序与 Web PlaybackInfo（2026-04-24）
+
+> 范围：前端审计中发现的初始化卡死、401/403 后响应式登录态未清理、用户管理半提交，以及 Web 播放器未按 EmbySDK 提交播放上下文。
+
+| 问题 | 修复 |
+| --- | --- |
+| 本地 token 已失效时，`initialize()` 会在 `enterHome()` 的 401 异常处中断，`state.initialized` 无法恢复，页面停在加载壳或半初始化状态。 | `frontend/src/store/app.ts` 用 `try/finally` 保证初始化结束；`enterHome()` 失败时调用统一未授权处理并刷新公开用户列表。 |
+| API 层 401/403 只清 `api.token/api.user/localStorage`，没有同步清 store 的 `user` ref，路由守卫仍可能认为已登录。 | `frontend/src/api/emby.ts` 增加 `onUnauthorized` 回调；store 注册后统一执行 `clearClientState(true)` 与公开用户刷新。 |
+| 用户管理保存时先写 Policy/UserSettings，再校验重置密码，失败会留下半保存状态。 | `frontend/src/pages/settings/UsersSettings.vue` 在任何网络写入前先校验新密码长度与确认值。 |
+| Web 播放器 `PlaybackInfo` 仍是无上下文 GET，无法按设备能力返回播放源。 | `frontend/src/api/emby.ts` 改为 `POST /Items/{id}/PlaybackInfo?UserId=...&IsPlayback=true`，并提交 Web 端 `DeviceProfile`（DirectPlay、HLS 转码、字幕能力）。 |
+
 **I. GitHub Actions `buildx` 摘要异常（2026-04-24）**
 
 | 现象 | 原因（定位） | 修复 |
