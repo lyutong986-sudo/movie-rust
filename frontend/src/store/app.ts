@@ -438,10 +438,11 @@ export async function loadRecentlyAddedTitles() {
 
 async function loadLibraryHomeItems(library: BaseItemDto) {
   if (library.CollectionType === 'tvshows') {
+    // 与"最新剧集"语义一致：按加入时间倒序。
     const result = await api.items(library.Id, '', false, {
       includeTypes: ['Series'],
-      sortBy: 'SortName',
-      sortOrder: 'Ascending',
+      sortBy: 'DateCreated',
+      sortOrder: 'Descending',
       limit: 36
     });
     return itemsFromQuery(result);
@@ -490,7 +491,9 @@ export async function loadItems() {
       sortBy: state.librarySortBy || 'SortName',
       sortOrder: state.librarySortAscending ? 'Ascending' : 'Descending',
       limit: 180,
-      fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'Overview']
+      // 列表卡只用到：图片、名字/年份、质量徽章（需 MediaStreams.Video）、ChildCount。
+      // Overview / 其余不会渲染，去掉以减小响应体积。
+      fields: ['MediaStreams', 'MediaSources', 'ChildCount']
     });
     let list = itemsFromQuery(result);
     if (state.libraryOnlyHDR) {
@@ -505,12 +508,6 @@ export async function loadItems() {
   });
 }
 
-export async function selectLibrary(libraryId: string) {
-  state.selectedLibraryId = libraryId;
-  state.search = '';
-  parentStack.value = [];
-  await loadItems();
-}
 
 export const libraryGenresCache = ref<Record<string, string[]>>({});
 
@@ -793,21 +790,6 @@ async function refreshPublicUsersAfterLogout() {
   }
 
   publicUsers.value = await safePublicUsers();
-}
-
-export function openItem(item: BaseItemDto) {
-  if (item.Type === 'CollectionFolder') {
-    selectLibrary(item.Id);
-    return;
-  }
-
-  if (item.IsFolder) {
-    parentStack.value.push(item);
-    void loadItems();
-    return;
-  }
-
-  selectedItem.value = item;
 }
 
 export async function toggleFavorite(item: BaseItemDto) {

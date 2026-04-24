@@ -15,7 +15,6 @@ import {
   parentStack,
   resetLibraryFilters,
   selectedLibrary,
-  selectLibrary,
   serializeParentStack,
   state
 } from '../../store/app';
@@ -73,8 +72,12 @@ watch(
   () => route.params.id,
   async (value) => {
     if (typeof value !== 'string' || !value) return;
-    if (state.selectedLibraryId !== value) {
-      await selectLibrary(value);
+    const switched = state.selectedLibraryId !== value;
+    if (switched) {
+      // 只更新 store 状态，不在这里 loadItems —— 后面统一拉一次。
+      state.selectedLibraryId = value;
+      state.search = '';
+      parentStack.value = [];
     }
     const pathParam = typeof route.query.path === 'string' ? route.query.path : '';
     await hydrateParentStack(pathParam);

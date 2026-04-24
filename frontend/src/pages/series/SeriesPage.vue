@@ -88,6 +88,7 @@ async function loadSeries(itemId: string) {
 
     series.value = currentSeries;
 
+    // 季列表必须先拿到，后续并行
     const seasonItems = (
       await api.items(currentSeries.Id, '', false, {
         includeTypes: ['Season'],
@@ -97,46 +98,42 @@ async function loadSeries(itemId: string) {
       })
     ).Items;
 
-    seasons.value = await Promise.all(
-      seasonItems.map(async (season) => ({
-        season,
-        episodes: (
-          await api.items(season.Id, '', false, {
-            includeTypes: ['Episode'],
-            sortBy: 'IndexNumber',
-            sortOrder: 'Ascending',
-            limit: 200
-          })
-        ).Items
-      }))
-    );
+    // 并行：各季分集 + nextUp + 最新剧集 + 相似剧集
+    const [seasonEntries, nextUpResult, relatedResult, similarResult] = await Promise.all([
+      Promise.all(
+        seasonItems.map(async (season) => ({
+          season,
+          episodes: (
+            await api.items(season.Id, '', false, {
+              includeTypes: ['Episode'],
+              sortBy: 'IndexNumber',
+              sortOrder: 'Ascending',
+              limit: 200
+            })
+          ).Items
+        }))
+      ),
+      api.nextUp(currentSeries.Id, 1).catch(() => null),
+      api
+        .items(undefined, '', true, {
+          includeTypes: ['Series'],
+          sortBy: 'DateCreated',
+          sortOrder: 'Descending',
+          limit: 36
+        })
+        .catch(() => null),
+      api.similar(currentSeries.Id, 20).catch(() => null)
+    ]);
 
-    // 取得下一集
-    try {
-      const nu = await api.nextUp(currentSeries.Id, 1);
-      nextUpEpisode.value = nu.Items?.[0] || null;
-    } catch {
-      nextUpEpisode.value = null;
-    }
+    seasons.value = seasonEntries;
+    nextUpEpisode.value = nextUpResult?.Items?.[0] || null;
+    relatedItems.value =
+      relatedResult?.Items?.filter((candidate) => candidate.Id !== currentSeries.Id) || [];
+    similarItems.value = similarResult?.Items || [];
 
-    // 默认选中含 nextUp / 最近播放 集对应的季
+    // 默认选中 nextUp / 最近播放 对应的季（此时 seasons 已填好，lastPlayedEpisode 计算可用）
     const targetEp = nextUpEpisode.value || lastPlayedEpisode.value;
     activeSeasonId.value = targetEp?.SeasonId || seasons.value[0]?.season.Id || '';
-
-    relatedItems.value = (
-      await api.items(undefined, '', true, {
-        includeTypes: ['Series'],
-        sortBy: 'DateCreated',
-        sortOrder: 'Descending',
-        limit: 36
-      })
-    ).Items.filter((candidate) => candidate.Id !== currentSeries.Id);
-
-    try {
-      similarItems.value = (await api.similar(currentSeries.Id, 20)).Items || [];
-    } catch {
-      similarItems.value = [];
-    }
   } catch (loadError) {
     error.value = loadError instanceof Error ? loadError.message : String(loadError);
     series.value = null;

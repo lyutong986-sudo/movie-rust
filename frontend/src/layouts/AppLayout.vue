@@ -185,15 +185,19 @@ watch(
   { immediate: true }
 );
 
+// 监听是否进入/离开 admin 区块。只有"从非 admin 进入 admin"这一跳转时才加载一次，
+// 避免在 /settings/a → /settings/b 之间反复拉 systemInfo / users / cultures / startup。
 watch(
-  () => route.fullPath,
-  async () => {
-    if (!isAdminSection.value) return;
+  () => isAdminSection.value,
+  async (inAdmin, wasInAdmin) => {
+    if (!inAdmin) return;
     if (!isAdmin.value) {
       await router.replace('/');
       return;
     }
-    await loadAdminData();
+    if (!wasInAdmin) {
+      await loadAdminData();
+    }
   }
 );
 

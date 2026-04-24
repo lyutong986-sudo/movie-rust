@@ -201,37 +201,39 @@ async function loadItem(itemId: string) {
     item.value = currentItem;
     currentSourceIndex.value = 0;
 
-    childItems.value = currentItem.IsFolder
-      ? (
-          await api.items(currentItem.Id, '', false, {
-            sortBy: currentItem.Type === 'Season' ? 'IndexNumber' : 'SortName',
-            sortOrder: 'Ascending',
-            limit: 120
-          })
-        ).Items
-      : [];
-
-    if (currentItem.ParentId) {
-      relatedItems.value = (
-        await api.items(currentItem.ParentId, '', false, {
-          sortBy: currentItem.Type === 'Episode' ? 'IndexNumber' : 'SortName',
+    // 并行：子项、同级相关、Similar
+    const childPromise = currentItem.IsFolder
+      ? api.items(currentItem.Id, '', false, {
+          sortBy: currentItem.Type === 'Season' ? 'IndexNumber' : 'SortName',
           sortOrder: 'Ascending',
-          limit: 60
-        })
-      ).Items.filter((c) => c.Id !== currentItem.Id);
-    } else {
-      relatedItems.value = [];
-    }
+          limit: 120
+        }).then((r) => r.Items).catch(() => [] as BaseItemDto[])
+      : Promise.resolve([] as BaseItemDto[]);
 
-    // Similar：Emby 的 /Items/{id}/Similar
-    if (currentItem.Type === 'Movie' || currentItem.Type === 'Series') {
-      try {
-        const sim = await api.similar(currentItem.Id, 20);
-        similarItems.value = sim.Items || [];
-      } catch {
-        similarItems.value = [];
-      }
-    }
+    const relatedPromise = currentItem.ParentId
+      ? api
+          .items(currentItem.ParentId, '', false, {
+            sortBy: currentItem.Type === 'Episode' ? 'IndexNumber' : 'SortName',
+            sortOrder: 'Ascending',
+            limit: 60
+          })
+          .then((r) => r.Items.filter((c) => c.Id !== currentItem.Id))
+          .catch(() => [] as BaseItemDto[])
+      : Promise.resolve([] as BaseItemDto[]);
+
+    const similarPromise =
+      currentItem.Type === 'Movie' || currentItem.Type === 'Series'
+        ? api.similar(currentItem.Id, 20).then((r) => r.Items || []).catch(() => [] as BaseItemDto[])
+        : Promise.resolve([] as BaseItemDto[]);
+
+    const [children, related, similar] = await Promise.all([
+      childPromise,
+      relatedPromise,
+      similarPromise
+    ]);
+    childItems.value = children;
+    relatedItems.value = related;
+    similarItems.value = similar;
   } catch (loadError) {
     error.value = loadError instanceof Error ? loadError.message : String(loadError);
     item.value = null;
