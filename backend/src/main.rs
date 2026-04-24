@@ -112,13 +112,17 @@ async fn main() -> Result<()> {
 }
 
 async fn run_startup_schema_tasks(pool: &sqlx::PgPool) -> Result<()> {
+    // 项目只保留一个 migration：`0001_schema.sql`，它描述完整 schema 并对所有
+    // 对象使用 `IF NOT EXISTS`。之后任何新字段都通过
+    // `0001_schema.sql` + `ensure_schema_compatibility` 原地补齐，**不再新增**
+    // migration 文件。
     match sqlx::migrate!("./migrations").run(pool).await {
         Ok(_) => {}
         Err(error) => {
             let error_text = error.to_string();
             if error_text.contains("previously applied but has been modified") {
                 tracing::warn!(
-                    "检测到 sqlx 迁移校验失败（已应用迁移文件被修改），继续执行兼容性补齐 SQL：{}",
+                    "检测到 sqlx 迁移校验失败（0001_schema.sql 被修改），继续执行运行时 schema 守护：{}",
                     error_text
                 );
             } else {
@@ -131,137 +135,318 @@ async fn run_startup_schema_tasks(pool: &sqlx::PgPool) -> Result<()> {
     Ok(())
 }
 
+/// 运行时 schema 守护者。
+///
+/// 作用：
+/// * 老库（还没跑最新 `0001_schema.sql`）在这里被自动补上缺列、缺索引；
+/// * 新库跑完 `0001_schema.sql` 后这里的语句全部是 no-op。
+///
+/// 使用约定：
+/// **不要在这里做业务逻辑**，只做 `ADD COLUMN IF NOT EXISTS` / `CREATE INDEX
+/// IF NOT EXISTS` / `CREATE TABLE IF NOT EXISTS` 这类幂等 DDL，和
+/// `0001_schema.sql` 一一对齐。加新字段时：
+///   1. 先在 `0001_schema.sql` 里加一行；
+///   2. 再在这里加同样的 `ADD COLUMN IF NOT EXISTS`。
 async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
     let compatibility_sql = [
-        r#"
-        ALTER TABLE media_streams
-            ADD COLUMN IF NOT EXISTS attachment_size INTEGER,
-            ADD COLUMN IF NOT EXISTS extended_video_sub_type TEXT,
-            ADD COLUMN IF NOT EXISTS extended_video_sub_type_description TEXT,
-            ADD COLUMN IF NOT EXISTS extended_video_type TEXT,
-            ADD COLUMN IF NOT EXISTS is_anamorphic BOOLEAN,
-            ADD COLUMN IF NOT EXISTS is_avc BOOLEAN,
-            ADD COLUMN IF NOT EXISTS is_external_url TEXT,
-            ADD COLUMN IF NOT EXISTS is_text_subtitle_stream BOOLEAN,
-            ADD COLUMN IF NOT EXISTS level INTEGER,
-            ADD COLUMN IF NOT EXISTS pixel_format TEXT,
-            ADD COLUMN IF NOT EXISTS ref_frames INTEGER,
-            ADD COLUMN IF NOT EXISTS stream_start_time_ticks BIGINT
-        "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS media_chapters (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            media_item_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
-            chapter_index INTEGER NOT NULL,
-            start_position_ticks BIGINT NOT NULL,
-            name TEXT,
-            marker_type TEXT,
-            image_path TEXT,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            UNIQUE (media_item_id, chapter_index)
-        )
-        "#,
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_media_chapters_media_item_id
-            ON media_chapters(media_item_id)
-        "#,
+        // -------------------------------------------------------------------
+        // users：核心账号 + Emby 用户策略 + EasyPassword。
+        // -------------------------------------------------------------------
         r#"
         ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN NOT NULL DEFAULT false,
-            ADD COLUMN IF NOT EXISTS is_disabled BOOLEAN NOT NULL DEFAULT false,
-            ADD COLUMN IF NOT EXISTS policy JSONB NOT NULL DEFAULT '{}'::jsonb,
-            ADD COLUMN IF NOT EXISTS configuration JSONB NOT NULL DEFAULT '{}'::jsonb,
-            ADD COLUMN IF NOT EXISTS primary_image_path TEXT,
+            ADD COLUMN IF NOT EXISTS easy_password_hash  TEXT,
+            ADD COLUMN IF NOT EXISTS is_hidden           BOOLEAN NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS is_disabled         BOOLEAN NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS policy              JSONB   NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS configuration       JSONB   NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS primary_image_path  TEXT,
             ADD COLUMN IF NOT EXISTS backdrop_image_path TEXT,
-            ADD COLUMN IF NOT EXISTS logo_image_path TEXT,
-            ADD COLUMN IF NOT EXISTS date_modified TIMESTAMPTZ NOT NULL DEFAULT now(),
-            ADD COLUMN IF NOT EXISTS easy_password_hash TEXT
+            ADD COLUMN IF NOT EXISTS logo_image_path     TEXT,
+            ADD COLUMN IF NOT EXISTS date_modified       TIMESTAMPTZ NOT NULL DEFAULT now()
         "#,
-        // sessions.session_type 原本由 0015 迁移补齐；老库（迁移未跑到）在这里兜底。
+        // -------------------------------------------------------------------
+        // sessions：会话令牌 + session_type + expires_at。
+        // -------------------------------------------------------------------
         r#"
         ALTER TABLE sessions
-            ADD COLUMN IF NOT EXISTS session_type TEXT NOT NULL DEFAULT 'Interactive'
+            ADD COLUMN IF NOT EXISTS session_type TEXT NOT NULL DEFAULT 'Interactive',
+            ADD COLUMN IF NOT EXISTS expires_at   TIMESTAMPTZ
         "#,
+        r#"CREATE INDEX IF NOT EXISTS idx_sessions_user         ON sessions(user_id)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_sessions_expires_at   ON sessions(expires_at)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_sessions_session_type ON sessions(session_type)"#,
+        // -------------------------------------------------------------------
+        // libraries：库选项 JSON + 修改时间。
+        // -------------------------------------------------------------------
         r#"
-        CREATE INDEX IF NOT EXISTS idx_sessions_session_type ON sessions(session_type)
-        "#,
-        r#"
-        ALTER TABLE media_items
-            ADD COLUMN IF NOT EXISTS original_title TEXT,
-            ADD COLUMN IF NOT EXISTS official_rating TEXT,
-            ADD COLUMN IF NOT EXISTS community_rating DOUBLE PRECISION,
-            ADD COLUMN IF NOT EXISTS critic_rating DOUBLE PRECISION,
-            ADD COLUMN IF NOT EXISTS series_name TEXT,
-            ADD COLUMN IF NOT EXISTS season_name TEXT,
-            ADD COLUMN IF NOT EXISTS index_number INTEGER,
-            ADD COLUMN IF NOT EXISTS index_number_end INTEGER,
-            ADD COLUMN IF NOT EXISTS parent_index_number INTEGER,
-            ADD COLUMN IF NOT EXISTS provider_ids JSONB NOT NULL DEFAULT '{}'::jsonb,
-            ADD COLUMN IF NOT EXISTS genres TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-            ADD COLUMN IF NOT EXISTS studios TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-            ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-            ADD COLUMN IF NOT EXISTS production_locations TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-            ADD COLUMN IF NOT EXISTS width INTEGER,
-            ADD COLUMN IF NOT EXISTS height INTEGER,
-            ADD COLUMN IF NOT EXISTS bit_rate BIGINT,
-            ADD COLUMN IF NOT EXISTS video_codec TEXT,
-            ADD COLUMN IF NOT EXISTS audio_codec TEXT,
-            ADD COLUMN IF NOT EXISTS logo_path TEXT,
-            ADD COLUMN IF NOT EXISTS thumb_path TEXT,
-            ADD COLUMN IF NOT EXISTS remote_trailers TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-            ADD COLUMN IF NOT EXISTS status TEXT,
-            ADD COLUMN IF NOT EXISTS end_date DATE,
-            ADD COLUMN IF NOT EXISTS air_days TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-            ADD COLUMN IF NOT EXISTS air_time TEXT
+        ALTER TABLE libraries
+            ADD COLUMN IF NOT EXISTS library_options JSONB       NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS date_modified   TIMESTAMPTZ NOT NULL DEFAULT now()
         "#,
         r#"
         DO $$
         BEGIN
             IF NOT EXISTS (
-                SELECT 1
-                FROM pg_indexes
+                SELECT 1 FROM pg_indexes
                 WHERE schemaname = current_schema()
-                  AND indexname = 'idx_libraries_name_unique'
+                  AND indexname  = 'idx_libraries_name_unique'
             ) AND NOT EXISTS (
-                SELECT 1
-                FROM libraries
-                GROUP BY lower(name)
-                HAVING COUNT(*) > 1
+                SELECT 1 FROM libraries GROUP BY lower(name) HAVING COUNT(*) > 1
             ) THEN
-                CREATE UNIQUE INDEX idx_libraries_name_unique
-                    ON libraries (lower(name));
+                CREATE UNIQUE INDEX idx_libraries_name_unique ON libraries (lower(name));
             END IF;
         END
-        $$;
+        $$
         "#,
+        // -------------------------------------------------------------------
+        // media_items：核心媒体表（对齐 BaseItemDto 全量预留列）。
+        // -------------------------------------------------------------------
         r#"
-        CREATE TABLE IF NOT EXISTS series_episode_catalog (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            series_id UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
-            provider TEXT NOT NULL,
-            external_series_id TEXT NOT NULL,
-            external_season_id TEXT,
-            external_episode_id TEXT,
-            season_number INTEGER NOT NULL,
-            episode_number INTEGER NOT NULL,
-            episode_number_end INTEGER,
-            name TEXT NOT NULL,
-            overview TEXT,
-            premiere_date DATE,
-            image_path TEXT,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            UNIQUE (series_id, provider, season_number, episode_number)
+        ALTER TABLE media_items
+            ADD COLUMN IF NOT EXISTS original_title             TEXT,
+            ADD COLUMN IF NOT EXISTS forced_sort_name           TEXT,
+            ADD COLUMN IF NOT EXISTS taglines                   TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS locked_fields              TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS lock_data                  BOOLEAN NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS official_rating            TEXT,
+            ADD COLUMN IF NOT EXISTS custom_rating              TEXT,
+            ADD COLUMN IF NOT EXISTS community_rating           DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS critic_rating              DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS start_date                 DATE,
+            ADD COLUMN IF NOT EXISTS end_date                   DATE,
+            ADD COLUMN IF NOT EXISTS date_last_saved            TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS date_last_media_added      TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS status                     TEXT,
+            ADD COLUMN IF NOT EXISTS air_days                   TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS air_time                   TEXT,
+            ADD COLUMN IF NOT EXISTS series_name                TEXT,
+            ADD COLUMN IF NOT EXISTS series_id                  UUID,
+            ADD COLUMN IF NOT EXISTS season_name                TEXT,
+            ADD COLUMN IF NOT EXISTS season_id                  UUID,
+            ADD COLUMN IF NOT EXISTS index_number               INTEGER,
+            ADD COLUMN IF NOT EXISTS index_number_end           INTEGER,
+            ADD COLUMN IF NOT EXISTS parent_index_number        INTEGER,
+            ADD COLUMN IF NOT EXISTS sort_index_number          INTEGER,
+            ADD COLUMN IF NOT EXISTS sort_parent_index_number   INTEGER,
+            ADD COLUMN IF NOT EXISTS display_order              TEXT,
+            ADD COLUMN IF NOT EXISTS provider_ids               JSONB NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS external_urls              JSONB NOT NULL DEFAULT '[]'::jsonb,
+            ADD COLUMN IF NOT EXISTS genres                     TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS studios                    TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS tags                       TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS production_locations       TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS remote_trailers            TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS width                      INTEGER,
+            ADD COLUMN IF NOT EXISTS height                     INTEGER,
+            ADD COLUMN IF NOT EXISTS bit_rate                   BIGINT,
+            ADD COLUMN IF NOT EXISTS size                       BIGINT,
+            ADD COLUMN IF NOT EXISTS file_name                  TEXT,
+            ADD COLUMN IF NOT EXISTS video_codec                TEXT,
+            ADD COLUMN IF NOT EXISTS audio_codec                TEXT,
+            ADD COLUMN IF NOT EXISTS logo_path                  TEXT,
+            ADD COLUMN IF NOT EXISTS thumb_path                 TEXT,
+            ADD COLUMN IF NOT EXISTS art_path                   TEXT,
+            ADD COLUMN IF NOT EXISTS banner_path                TEXT,
+            ADD COLUMN IF NOT EXISTS disc_path                  TEXT,
+            ADD COLUMN IF NOT EXISTS box_path                   TEXT,
+            ADD COLUMN IF NOT EXISTS menu_path                  TEXT,
+            ADD COLUMN IF NOT EXISTS image_tags                 JSONB NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS backdrop_image_tags        TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS primary_image_tag          TEXT,
+            ADD COLUMN IF NOT EXISTS primary_image_item_id      UUID,
+            ADD COLUMN IF NOT EXISTS primary_image_aspect_ratio DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS parent_logo_item_id        UUID,
+            ADD COLUMN IF NOT EXISTS parent_logo_image_tag      TEXT,
+            ADD COLUMN IF NOT EXISTS parent_backdrop_item_id    UUID,
+            ADD COLUMN IF NOT EXISTS parent_backdrop_image_tags TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            ADD COLUMN IF NOT EXISTS parent_thumb_item_id       UUID,
+            ADD COLUMN IF NOT EXISTS parent_thumb_image_tag     TEXT,
+            ADD COLUMN IF NOT EXISTS series_primary_image_tag   TEXT,
+            ADD COLUMN IF NOT EXISTS series_studio              TEXT,
+            ADD COLUMN IF NOT EXISTS child_count                INTEGER,
+            ADD COLUMN IF NOT EXISTS recursive_item_count       BIGINT,
+            ADD COLUMN IF NOT EXISTS season_count               INTEGER,
+            ADD COLUMN IF NOT EXISTS series_count               INTEGER,
+            ADD COLUMN IF NOT EXISTS movie_count                INTEGER,
+            ADD COLUMN IF NOT EXISTS special_feature_count      INTEGER,
+            ADD COLUMN IF NOT EXISTS local_trailer_count        INTEGER NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS part_count                 INTEGER NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS is_movie                   BOOLEAN,
+            ADD COLUMN IF NOT EXISTS is_series                  BOOLEAN,
+            ADD COLUMN IF NOT EXISTS is_folder                  BOOLEAN,
+            ADD COLUMN IF NOT EXISTS is_hd                      BOOLEAN,
+            ADD COLUMN IF NOT EXISTS is_3d                      BOOLEAN,
+            ADD COLUMN IF NOT EXISTS disabled                   BOOLEAN NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS can_delete                 BOOLEAN NOT NULL DEFAULT true,
+            ADD COLUMN IF NOT EXISTS can_download               BOOLEAN NOT NULL DEFAULT true,
+            ADD COLUMN IF NOT EXISTS supports_sync              BOOLEAN NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS supports_resume            BOOLEAN NOT NULL DEFAULT true,
+            ADD COLUMN IF NOT EXISTS etag                       TEXT,
+            ADD COLUMN IF NOT EXISTS presentation_unique_key    TEXT,
+            ADD COLUMN IF NOT EXISTS collection_type            TEXT,
+            ADD COLUMN IF NOT EXISTS location_type              TEXT,
+            ADD COLUMN IF NOT EXISTS extra_type                 TEXT
+        "#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_library  ON media_items(library_id)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_parent   ON media_items(parent_id)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_type     ON media_items(item_type)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_sort     ON media_items(sort_name)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_series   ON media_items(series_id)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_premiere ON media_items(premiere_date)"#,
+        // -------------------------------------------------------------------
+        // user_item_data：Emby UserItemDataDto 预留列。
+        // -------------------------------------------------------------------
+        r#"
+        ALTER TABLE user_item_data
+            ADD COLUMN IF NOT EXISTS rating              DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS played_percentage   DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS unplayed_item_count INTEGER,
+            ADD COLUMN IF NOT EXISTS likes               BOOLEAN
+        "#,
+        // -------------------------------------------------------------------
+        // media_streams：Emby MediaStream 扩展字段 + UNIQUE 兜底。
+        // -------------------------------------------------------------------
+        r#"
+        ALTER TABLE media_streams
+            ADD COLUMN IF NOT EXISTS attachment_size                     INTEGER,
+            ADD COLUMN IF NOT EXISTS extended_video_sub_type             TEXT,
+            ADD COLUMN IF NOT EXISTS extended_video_sub_type_description TEXT,
+            ADD COLUMN IF NOT EXISTS extended_video_type                 TEXT,
+            ADD COLUMN IF NOT EXISTS is_anamorphic                       BOOLEAN,
+            ADD COLUMN IF NOT EXISTS is_avc                              BOOLEAN,
+            ADD COLUMN IF NOT EXISTS is_external_url                     TEXT,
+            ADD COLUMN IF NOT EXISTS is_text_subtitle_stream             BOOLEAN,
+            ADD COLUMN IF NOT EXISTS level                               INTEGER,
+            ADD COLUMN IF NOT EXISTS pixel_format                        TEXT,
+            ADD COLUMN IF NOT EXISTS ref_frames                          INTEGER,
+            ADD COLUMN IF NOT EXISTS stream_start_time_ticks             BIGINT,
+            ADD COLUMN IF NOT EXISTS mime_type                           TEXT,
+            ADD COLUMN IF NOT EXISTS subtitle_location_type              TEXT,
+            ADD COLUMN IF NOT EXISTS is_closed_captions                  BOOLEAN,
+            ADD COLUMN IF NOT EXISTS nal_length_size                     TEXT,
+            ADD COLUMN IF NOT EXISTS video_range                         TEXT,
+            ADD COLUMN IF NOT EXISTS delivery_method                     TEXT,
+            ADD COLUMN IF NOT EXISTS delivery_url                        TEXT,
+            ADD COLUMN IF NOT EXISTS extradata                           TEXT
+        "#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_streams_media_item_id ON media_streams(media_item_id)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_streams_stream_type   ON media_streams(stream_type)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_streams_language      ON media_streams(language)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_streams_codec         ON media_streams(codec)"#,
+        r#"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename  = 'media_streams'
+                  AND indexname  = 'media_streams_media_item_id_index_stream_type_key'
+            ) THEN
+                DELETE FROM media_streams ms
+                USING (
+                    SELECT ctid, row_number() OVER (
+                        PARTITION BY media_item_id, index, stream_type
+                        ORDER BY created_at ASC, ctid
+                    ) AS rn
+                    FROM media_streams
+                ) dups
+                WHERE ms.ctid = dups.ctid AND dups.rn > 1;
+
+                BEGIN
+                    ALTER TABLE media_streams
+                        ADD CONSTRAINT media_streams_media_item_id_index_stream_type_key
+                        UNIQUE (media_item_id, index, stream_type);
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END;
+            END IF;
+        END
+        $$
+        "#,
+        // -------------------------------------------------------------------
+        // media_chapters：表本身 + 章节图片字段 + UNIQUE 兜底。
+        // -------------------------------------------------------------------
+        r#"
+        CREATE TABLE IF NOT EXISTS media_chapters (
+            id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            media_item_id        UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            chapter_index        INTEGER NOT NULL,
+            start_position_ticks BIGINT NOT NULL,
+            name                 TEXT,
+            marker_type          TEXT,
+            image_path           TEXT,
+            created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (media_item_id, chapter_index)
         )
         "#,
         r#"
-        CREATE INDEX IF NOT EXISTS idx_series_episode_catalog_series_id
-            ON series_episode_catalog(series_id)
+        ALTER TABLE media_chapters
+            ADD COLUMN IF NOT EXISTS image_tag           TEXT,
+            ADD COLUMN IF NOT EXISTS image_date_modified TIMESTAMPTZ
         "#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_chapters_media_item_id ON media_chapters(media_item_id)"#,
         r#"
-        CREATE INDEX IF NOT EXISTS idx_series_episode_catalog_series_date
-            ON series_episode_catalog(series_id, premiere_date)
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename  = 'media_chapters'
+                  AND indexname  = 'media_chapters_media_item_id_chapter_index_key'
+            ) THEN
+                DELETE FROM media_chapters mc
+                USING (
+                    SELECT ctid, row_number() OVER (
+                        PARTITION BY media_item_id, chapter_index
+                        ORDER BY created_at ASC, ctid
+                    ) AS rn
+                    FROM media_chapters
+                ) dups
+                WHERE mc.ctid = dups.ctid AND dups.rn > 1;
+
+                BEGIN
+                    ALTER TABLE media_chapters
+                        ADD CONSTRAINT media_chapters_media_item_id_chapter_index_key
+                        UNIQUE (media_item_id, chapter_index);
+                EXCEPTION WHEN duplicate_object THEN NULL;
+                END;
+            END IF;
+        END
+        $$
+        "#,
+        // -------------------------------------------------------------------
+        // series_episode_catalog：TMDB / TVDB 补齐的分集"应当存在"目录。
+        // -------------------------------------------------------------------
+        r#"
+        CREATE TABLE IF NOT EXISTS series_episode_catalog (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            series_id           UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            provider            TEXT NOT NULL,
+            external_series_id  TEXT NOT NULL,
+            external_season_id  TEXT,
+            external_episode_id TEXT,
+            season_number       INTEGER NOT NULL,
+            episode_number      INTEGER NOT NULL,
+            episode_number_end  INTEGER,
+            name                TEXT NOT NULL,
+            overview            TEXT,
+            premiere_date       DATE,
+            image_path          TEXT,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (series_id, provider, season_number, episode_number)
+        )
+        "#,
+        r#"CREATE INDEX IF NOT EXISTS idx_series_episode_catalog_series_id   ON series_episode_catalog(series_id)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_series_episode_catalog_series_date ON series_episode_catalog(series_id, premiere_date)"#,
+        // -------------------------------------------------------------------
+        // session_commands：老库只有 0018 建表但没 consumed_at。
+        // -------------------------------------------------------------------
+        r#"ALTER TABLE session_commands ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMPTZ"#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_session_commands_unconsumed
+            ON session_commands(session_id, created_at)
+            WHERE consumed_at IS NULL
         "#,
     ];
 

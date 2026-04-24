@@ -1,2 +1,0 @@
-ALTER TABLE media_items
-    ADD COLUMN IF NOT EXISTS critic_rating DOUBLE PRECISION;

@@ -223,3 +223,49 @@ test result: ok. 58 passed; 0 failed
 
 - BackupRestore 真实 `pg_dump` / `pg_restore` 落盘（id 15）。
 - OpenAPI / Swagger 自动化文档（id 16）。
+
+## 十、第八轮：数据库 schema 单文件化（2026-04-24）
+
+### 背景
+
+项目此前共累积 21 个迁移文件（`0001_init.sql` ~ `0022_scanner_idempotency.sql`），并且：
+
+- 多次"每加一个 Emby 字段 → 新建一个迁移文件"，schema 真相分散；
+- 两个 `0009_*.sql` 版本号撞车，直接导致 `sqlx::migrate!` 断链、`easy_password_hash` 等后续列没落盘；
+- 运行时 `ensure_schema_compatibility` 已经在做"全 schema 快照"的事，但和迁移文件双写维护，容易漏项；
+- 还出现了 `backend/src/bin/fix_migration.rs` 这种手动清 `_sqlx_migrations` 的工具，说明模式本身已经不稳。
+
+方案重定：**不再用递增迁移堆字段，改成"一个全量 schema 文件 + 运行时幂等守护"双层结构，后续加 Emby 字段在原文件里就地改，不再新增迁移**。
+
+### 改造内容
+
+- **合并迁移**：删除全部 21 个旧 `0001_init.sql`/`0002_*`/…/`0022_scanner_idempotency.sql`，替换为单一 `backend/migrations/0001_schema.sql`。
+- **0001_schema.sql**：
+  - 所有 `CREATE TABLE` / `CREATE INDEX` / 触发器都带 `IF NOT EXISTS`，可重复执行；
+  - 每张表在 `CREATE` 之后紧跟一段 `ALTER TABLE ADD COLUMN IF NOT EXISTS ...`，把老库缺的列补齐；
+  - 一次性把 Emby SDK `BaseItemDto` / `MediaStream` / `UserItemDataDto` / `ChapterInfo` 里暂时还没写入的字段**作为预留列**加进 schema（`forced_sort_name / taglines / locked_fields / lock_data / custom_rating / start_date / date_last_saved / date_last_media_added / sort_index_number / sort_parent_index_number / display_order / external_urls / image_tags / backdrop_image_tags / primary_image_* / parent_logo_* / parent_backdrop_* / parent_thumb_* / series_primary_image_tag / series_studio / child_count / recursive_item_count / season_count / series_count / movie_count / special_feature_count / local_trailer_count / part_count / is_movie / is_series / is_folder / is_hd / is_3d / disabled / can_delete / can_download / supports_sync / supports_resume / etag / presentation_unique_key / collection_type / location_type / extra_type / art_path / banner_path / disc_path / box_path / menu_path`；`media_streams` 上则补齐 `mime_type / subtitle_location_type / is_closed_captions / nal_length_size / video_range / delivery_method / delivery_url / extradata`；`user_item_data` 补齐 `rating / played_percentage / unplayed_item_count / likes`；`media_chapters` 补齐 `image_tag / image_date_modified`）；
+  - 保留第七轮的"重复数据清理 + UNIQUE 建立"兜底块，继续让扫库完全幂等。
+
+- **`backend/src/main.rs::ensure_schema_compatibility`**：整体重写为 `0001_schema.sql` 的运行时镜像。`ensure_schema_compatibility` 现在覆盖 users / sessions / libraries / media_items / user_item_data / media_streams / media_chapters / series_episode_catalog / session_commands 全部预留列 + 索引 + UNIQUE 兜底。并在函数头明确写了"加新 Emby 字段的流程：在这里和 0001_schema.sql 各加一行"。
+- **删除 `backend/src/bin/fix_migration.rs`**：单迁移方案不再会出现"失败迁移记录残留"，这个小工具失去意义。
+
+### 为何这样做更好
+
+1. **新库**：`sqlx::migrate!` 只跑一个文件建出完整 schema，顺序不再重要，也没有版本号冲突风险。
+2. **老库**：启动时 `ensure_schema_compatibility` 会用 `ADD COLUMN IF NOT EXISTS` 把一切缺列/缺索引/缺唯一约束原地补齐，不丢历史数据。
+3. **以后加 Emby 功能**：只需在 `0001_schema.sql` + `ensure_schema_compatibility` 两处各加一行 `ADD COLUMN IF NOT EXISTS`，**不再新建 0023/0024/... 迁移文件**。因此"迁移文件越堆越多"的问题从根本上被解决了。
+4. **可读性**：整个数据库 schema 只看 `0001_schema.sql` 一个文件就能看全。
+
+### 测试
+
+``````
+cargo check --bin movie-rust-backend
+Finished `dev` profile ... 0 error
+``````
+
+（`sqlx::migrate!` 是编译期宏，能 check 通过说明合并后的 `0001_schema.sql` 语法对 sqlx 可解析。）
+
+### 升级动作
+
+- 本地既有开发库：执行一次 `DROP DATABASE movie_rust; CREATE DATABASE movie_rust;`（或等价的 docker volume 清理）后重启后端；`0001_schema.sql` 会一次性建出全量 schema。
+- 生产 / 保留老数据的实例：无需手动干预，启动时 `ensure_schema_compatibility` 会按需 `ADD COLUMN IF NOT EXISTS`，既有数据不动；历史 `_sqlx_migrations` 里残留的旧版本记录可留可删。
