@@ -4479,6 +4479,9 @@ async fn get_similar_items(
         group_items_into_collections,
     )
     .await?;
+    // fetch_limit 已经包含 start_index，所以这里的 total 只是"当前窗口内可见的相似项数量"。
+    // 语义与 Emby 的 /Items/{id}/Similar 一致（前端通常不做真正的分页），
+    // start_index 之前的项目已在上一页看过，合并计入总数。
     let total_record_count = similar_items.len() as i64;
     let items = similar_items
         .into_iter()

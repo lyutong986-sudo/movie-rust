@@ -92,6 +92,8 @@ struct PagingQuery {
 struct CreateAuthKeyQuery {
     #[serde(default, alias = "app")]
     app: Option<String>,
+    #[serde(default, alias = "appVersion")]
+    app_version: Option<String>,
     #[serde(default, alias = "expiresInDays")]
     expires_in_days: Option<i64>,
 }
@@ -210,6 +212,7 @@ async fn create_auth_key(
         return Err(AppError::Unauthorized);
     }
     let app = query.app.unwrap_or_else(|| "Api Key".to_string());
+    let app_version = query.app_version.unwrap_or_else(|| "0.1.0".to_string());
     let expires_at = query
         .expires_in_days
         .filter(|days| *days > 0)
@@ -220,7 +223,7 @@ async fn create_auth_key(
         None,
         Some(app.clone()),
         Some(app),
-        None,
+        Some(app_version),
         expires_at,
         "ApiKey",
     )

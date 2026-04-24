@@ -1376,3 +1376,128 @@ watch(() => route.fullPath, async () => {
 
 - `frontend> npm run build` —— ✅ 通过
 - `ReadLints` —— ✅ 无错误
+
+## 三十六、第三十六轮：基于 `frontend/src/router/index.ts` 的后端功能链路审计（2026-04-24）
+
+> 审计方法：把 34 条前端路由逐页追查其实际发起的 `api.XXX(...)`，再追到 `backend/src/routes` 的 handler、`repository` 的 SQL，交叉检查是否符合 Emby 合约并排查性能/正确性缺陷。
+
+### A. 路由 → 后端链路总览
+
+| 路由 | 前端页面 | 关键 API 调用 | 后端 handler（文件 → 函数） |
+| --- | --- | --- | --- |
+| `/` | HomePage + store.enterHome | `items(undef,'',true,DateCreated desc)` / `libraries` / `latest` | `items.rs::user_items` → `list_items_for_user` / `library.rs::media_folders` / `items.rs::get_user_latest_items` |
+| `/library/:id` | LibraryPage + store.loadItems | `items(parent,...)` / `genres(parent)` | `items.rs::user_items` / `metadata_routes.rs::list_genres` |
+| `/search` | SearchPage | `items(undef, query, recursive)` | `items.rs::user_items` (走 `list_media_items` 的 `search_term`) |
+| `/item/:id` | ItemPage | `item(id)` / `items(parent)` / `similar(id)` / `markFavorite` / `markPlayed` / 播放列表族 | `items.rs::user_item` / `get_similar_items` / `users.rs::mark_favorite` / playlists.rs |
+| `/series/:id` | SeriesPage | `item(id)` / `items(series,Season)` / `items(season,Episode)` / `nextUp(series)` / `similar(series)` | 同上 + `shows.rs::get_next_up` |
+| `/genre/:id` | GenrePage | `items(undef,'',true,Genres=[name])` | `items.rs::user_items`（带 `genres`） |
+| `/playlists` | PlaylistsPage | `listPlaylists` / `createPlaylist` / `deletePlaylist` | `playlists.rs::list_playlists / create / delete` |
+| `/playlist/:id` | PlaylistDetailPage | `getPlaylist` / `listPlaylistItems` / `updatePlaylist` / `add/remove/movePlaylistItem` | `playlists.rs::*` |
+| `/queue` | QueuePage | — （纯 store） | 无 |
+| `/playback/video` | VideoPlaybackPage | `item` / `playbackInfo` / `playbackStarted/Progress/Stopped` / `nextUp` / `streamUrl*` / `hlsUrlForSource` | `items.rs::playback_info` / `sessions.rs::playback_*` / `videos.rs::stream / hls_playlist` |
+| `/playback/music` | MusicPlaybackPage | 同上（音频路径用 `/Audio/{id}/stream`） | 同上 |
+| `/settings` | SettingsIndex | 走 store 的 loadAdminData / loadLibraries | — |
+| `/settings/account` | AccountSettings | `me` / `userSettings` / `changePassword` / `updateUserSettings` | `users.rs::me / user_settings / change_password / update_user_settings` |
+| `/settings/server` | ServerSettings | `systemInfo` / `startupConfiguration` / `updateRemoteAccess` | `system.rs` / `startup.rs` |
+| `/settings/libraries` | LibrarySettings | `scan` / `virtualFolders` / `createLibrary` / `deleteLibrary` / `scanOperation(s)` / `cancelScanOperation` | `admin.rs::enqueue_library_scan / scan_operations*` + `library.rs::*` |
+| `/settings/users` | UsersSettings | `authProviders` / `createUser` / `updateUserPolicy` / `changePassword` / `deleteUser` | `users.rs::*` |
+| `/settings/playback` | PlaybackSettings | `playbackConfiguration` / `update*` | `system.rs::playback_configuration*` |
+| `/settings/transcoding` | TranscodingSettings | `encodingConfiguration` / `updateMediaEncoderPath` / `environmentDrives` / `directoryContents` / `parentPath` | `system.rs::encoding_*` / `environment.rs::*` |
+| `/settings/subtitles` | SubtitlesSettings | — （纯 localStorage） | 无 |
+| `/settings/devices` | DevicesSettings | `sessions` | `sessions.rs::list_sessions` |
+| `/settings/apikeys` | ApiKeysSettings | `listAuthKeys` / `createAuthKey` / `deleteAuthKey` | `sessions.rs::list_auth_keys / create_auth_key / delete_auth_key` |
+| `/settings/logs-and-activity` | LogsActivitySettings | `serverLogs` / `activity(50)` | `system.rs::server_logs / activity_log_entries` |
+| `/settings/network` | NetworkSettings | `networkConfiguration` / `update*` | `system.rs::network_configuration*` |
+| `/settings/scheduled-tasks` | ScheduledTasksSettings | `scheduledTasks` / `startScheduledTask` / `cancelScheduledTask` | `scheduled_tasks.rs::*` |
+| `/settings/subtitle-download` | SubtitleDownloadSettings | `subtitleDownloadConfiguration` / `update*` | `system.rs::subtitle_download_configuration*` |
+| `/settings/library-display` | LibraryDisplaySettings | `libraryDisplayConfiguration` / `update*` | `system.rs::library_display_configuration*` |
+| `/settings/branding` | BrandingSettings | `brandingConfiguration` / `update*` | `system.rs::branding_configuration*` |
+| `/settings/reports` | ReportsSettings | `activity(500)` | `system.rs::activity_log_entries` |
+| `/server/*`（select/add/login/forgot/wizard） | 服务器选择/登录/向导 | `publicInfo` / `login` / `forgotPassword[/Pin]` / `startupConfiguration` 等 | `system.rs::public_info` / `users.rs::authenticate_by_name / forgot_password*` / `startup.rs::*` |
+
+结论：每条前端 API 调用都有对应后端 handler，**无悬空调用**。
+
+### B. 发现的问题与本轮修复
+
+#### B1. `record_playback_event` 的 `last_played_date` 更新不全 —— 已修 ✅
+
+原实现只有 `played_to_completion=true` 时才写 `last_played_date`，导致：
+- 看到一半暂停的条目 `last_played_date` 为 `NULL`，
+- "继续观看"按 `last_played_date DESC` 排序时这些条目排到最末，
+- `Jellyfin` 参考实现则是每次 `ReportPlaybackProgress` 都刷新。
+
+修复：在 `Started / Progress / Stopped` 三类事件里，`user_item_data` UPSERT 都把 `last_played_date = now()` 无条件刷新；`is_played` / `play_count` 仍然只在 `played_to_completion=true` 时变更。
+
+影响：首页"继续观看"会按真实最近播放时间排序；`Started` 事件也会即时建立 `user_item_data` 行（之前要到第一个 `Progress` 才建立，极端情况下短时间内停止会丢进度）。
+
+```4990:5060:backend/src/repository.rs
+        // Started / Progress / Stopped 都应更新 user_item_data：
+        // - Started: 初始化/刷新 last_played_date，便于 "继续观看" 按最近播放排序；
+        // - Progress: 持续刷新 position_ticks + last_played_date；
+        // - Stopped: 同上，并在 played_to_completion=true 时标记 is_played + 累加 play_count。
+        if matches!(event_type, "Started" | "Progress" | "Stopped") {
+            ...
+            VALUES ($1, $2, COALESCE($3, 0), $4, CASE WHEN $4 THEN 1 ELSE 0 END, now(), now())
+            ON CONFLICT ...
+                last_played_date = now(),
+```
+
+#### B2. `Shows/NextUp|Upcoming|MissingEpisodes` 硬编码 `limit=10_000` —— 已修 ✅
+
+原实现：后端一次从 SQL 拉最多 **1 万** 条 Episode，再在内存里交给 `apply_items_query_to_show_result` 做 `media_types / video_types / genres / years / tags` 等筛选和 `limit` 切片。对 1000+ 集库每次 NextUp 都是全表扫描 + 大排序。
+
+修复：把前端 `StartIndex` / `Limit` 透传到 SQL（留 2× 冗余给内存侧残余筛选）。对默认 `Limit=50` 的 NextUp 调用，SQL 只扫 100 条即返回，减少约 100 倍的数据量。
+
+```26:62:backend/src/routes/shows.rs
+    let sql_start = query.start_index.unwrap_or(0).max(0);
+    let sql_limit = query.limit.unwrap_or(50).clamp(1, 2000).saturating_mul(2);
+    let result = repository::get_next_up_episodes(
+        &state.pool,
+        user_id,
+        scope_id,
+        state.config.server_id,
+        sql_start,
+        sql_limit,
+    )
+    .await?;
+```
+
+#### B3. `POST /Auth/Keys` 把 `AppName` 同时塞进 `client / application_version` —— 已修 ✅
+
+后端 `create_auth_key` 把 `app` 参数分别写入 session 的 `client` 和 `application_version` 字段。Emby 合约里：
+- `Client` = 客户端应用名（如 "Emby Web"）
+- `ApplicationVersion` = 客户端版本号（如 "4.7.14"）
+
+二者混淆导致 `/Auth/Keys` 列表里 `AppVersion` 被污染成 AppName。
+
+修复：新增可选 query 参数 `AppVersion`（默认 `0.1.0`），前端 `createAuthKey(options)` 也暴露 `appVersion`；老的 `App` 仍然兼容，version 字段不再与 name 绑定。
+
+#### B4. `get_similar_items` 分页语义注释 —— 已修 ✅
+
+`total_record_count` 用的是 `fetch_limit = limit + start_index` 内的命中数量，不是全库相似项总数。前端目前恒定 `start_index=0 / limit=20`，不做真正分页，语义可接受。已补充注释说明，避免未来误用。
+
+#### B5. `playback_info` STRM / 本地文件元数据同步分析 —— 记录，未修
+
+当 `video_codec / audio_codec / runtime_ticks` 缺失时，`playback_info` 同步调用 `media_analyzer::analyze_remote_media`（STRM）或 `analyze_media_file`（本地 ffprobe），首次播放时前端会黑屏等 1~5 秒。
+
+合理的优化是：
+1. 命中 `needs_metadata=true` 时，把"缺字段"的 MediaSource 立即返回（设 `SupportsDirectStream=true` + 占位 codec），
+2. 后台 `tokio::spawn` 跑 `analyze_*`，成功后 UPDATE `media_items` 表，
+3. 客户端下次 PlaybackInfo 就能拿到准确数据。
+
+风险：占位 codec / container 影响 `DirectPlay` 匹配，要么客户端播不了要么反转码。当前实现保证"**首次等但一定对**"，先不动。
+
+### C. 校验
+
+- `backend> cargo build` —— ✅ 通过（27 warnings，全为合约字段 dead code）
+- `frontend> npm run build` —— ✅ 通过
+- `ReadLints` —— ✅ 无错误
+
+### D. 未修但记录
+
+| 项 | 说明 |
+| --- | --- |
+| `playback_info` 首次分析 1~5s 阻塞 | 见 B5，异步化方案需要 MediaSource 占位策略。 |
+| `loadItems` 无 AbortController | 快速切库/筛选时存在请求竞态，要加请求版本号。 |
+| `TopLoader` 只 hook `state.busy` | ItemPage / SeriesPage / PlaylistsPage 用本地 `loading`，顶部进度条不转。可统一走 `store::run`。 |
+| `loadRecentlyAddedTitles` vs `loadLatestByLibrary` 对 movies 库发两次相同请求 | N 库场景下可省 N 次 API；两者可合并。 |

@@ -677,9 +677,10 @@ export class EmbyApi {
     return this.request<QueryResult<ApiKeyInfo>>('/Auth/Keys');
   }
 
-  async createAuthKey(options: { app?: string; expiresInDays?: number } = {}) {
+  async createAuthKey(options: { app?: string; appVersion?: string; expiresInDays?: number } = {}) {
     const params = new URLSearchParams();
     if (options.app) params.set('App', options.app);
+    if (options.appVersion) params.set('AppVersion', options.appVersion);
     if (options.expiresInDays) params.set('ExpiresInDays', String(options.expiresInDays));
     const query = params.toString();
     return this.request<ApiKeyInfo>(`/Auth/Keys${query ? `?${query}` : ''}`, {

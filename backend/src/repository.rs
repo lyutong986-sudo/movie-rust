@@ -5034,19 +5034,23 @@ pub async fn record_playback_event(
             }
         }
 
-        if matches!(event_type, "Progress" | "Stopped") {
+        // Started / Progress / Stopped 都应更新 user_item_data：
+        // - Started: 初始化/刷新 last_played_date，便于 "继续观看" 按最近播放排序；
+        // - Progress: 持续刷新 position_ticks + last_played_date；
+        // - Stopped: 同上，并在 played_to_completion=true 时标记 is_played + 累加 play_count。
+        if matches!(event_type, "Started" | "Progress" | "Stopped") {
             let is_played = played_to_completion.unwrap_or(false);
             sqlx::query(
                 r#"
                 INSERT INTO user_item_data
                     (user_id, item_id, playback_position_ticks, is_played, play_count, last_played_date, updated_at)
-                VALUES ($1, $2, COALESCE($3, 0), $4, CASE WHEN $4 THEN 1 ELSE 0 END, CASE WHEN $4 THEN now() ELSE NULL END, now())
+                VALUES ($1, $2, COALESCE($3, 0), $4, CASE WHEN $4 THEN 1 ELSE 0 END, now(), now())
                 ON CONFLICT (user_id, item_id)
                 DO UPDATE SET
                     playback_position_ticks = COALESCE(EXCLUDED.playback_position_ticks, user_item_data.playback_position_ticks),
                     is_played = CASE WHEN EXCLUDED.is_played THEN true ELSE user_item_data.is_played END,
                     play_count = CASE WHEN EXCLUDED.is_played THEN user_item_data.play_count + 1 ELSE user_item_data.play_count END,
-                    last_played_date = CASE WHEN EXCLUDED.is_played THEN now() ELSE user_item_data.last_played_date END,
+                    last_played_date = now(),
                     updated_at = now()
                 "#,
             )
