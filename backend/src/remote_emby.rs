@@ -348,6 +348,8 @@ struct RemoteMediaSource {
 struct RemotePlaybackInfo {
     #[serde(default)]
     media_sources: Vec<RemotePlaybackMediaSource>,
+    #[serde(default)]
+    play_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1626,6 +1628,7 @@ async fn send_remote_stream_request(
             false,
         )
         .await?;
+        let mut playback_session_id = playback_info.play_session_id.clone();
         let mut media_source = select_remote_playback_media_source(
             playback_info.media_sources.as_slice(),
             media_source_id,
@@ -1656,6 +1659,13 @@ async fn send_remote_stream_request(
                 true,
             )
             .await?;
+            if fallback_playback_info
+                .play_session_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                playback_session_id = fallback_playback_info.play_session_id.clone();
+            }
             media_source = select_remote_playback_media_source(
                 fallback_playback_info.media_sources.as_slice(),
                 media_source_id,
@@ -1675,6 +1685,18 @@ async fn send_remote_stream_request(
                         .filter(|value| !value.trim().is_empty())
                 })
                 .map(str::to_string);
+        }
+        if stream_path.is_none() {
+            let device_id = source.source_secret.to_string();
+            stream_path = build_fallback_playback_stream_url(
+                server_url.as_str(),
+                remote_item_id,
+                media_source_id,
+                &media_source,
+                device_id.as_str(),
+                token.as_str(),
+                playback_session_id.as_deref(),
+            );
         }
         let stream_path = stream_path
             .ok_or_else(|| AppError::BadRequest("远端 PlaybackInfo 未提供可播放流".to_string()))?;
@@ -1810,6 +1832,48 @@ fn resolve_redirect_url(current_endpoint: &str, location: &str, server_url: &str
     absolutize_remote_url(server_url, target)
 }
 
+fn build_fallback_playback_stream_url(
+    server_url: &str,
+    remote_item_id: &str,
+    requested_media_source_id: Option<&str>,
+    media_source: &RemotePlaybackMediaSource,
+    device_id: &str,
+    token: &str,
+    play_session_id: Option<&str>,
+) -> Option<String> {
+    let media_source_id = media_source
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            requested_media_source_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })?;
+    let remote_item_id = remote_item_id.trim();
+    if remote_item_id.is_empty() {
+        return None;
+    }
+    let container = media_source
+        .container
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("mp4");
+    let mut endpoint = format!("{server_url}/videos/{remote_item_id}/original.{container}");
+    endpoint = append_query_pair(endpoint.as_str(), "DeviceId", device_id);
+    endpoint = append_query_pair(endpoint.as_str(), "MediaSourceId", media_source_id);
+    let play_session_id = play_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    endpoint = append_query_pair(endpoint.as_str(), "PlaySessionId", play_session_id.as_str());
+    endpoint = append_query_pair(endpoint.as_str(), "api_key", token);
+    Some(endpoint)
+}
+
 async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
@@ -1919,7 +1983,10 @@ async fn fetch_remote_playback_info(
             "IsPlayback".to_string(),
             if is_playback { "true" } else { "false" }.to_string(),
         ),
-        ("AutoOpenLiveStream".to_string(), "false".to_string()),
+        (
+            "AutoOpenLiveStream".to_string(),
+            if is_playback { "true" } else { "false" }.to_string(),
+        ),
         ("MaxStreamingBitrate".to_string(), "6790000".to_string()),
         ("reqformat".to_string(), "json".to_string()),
     ];
