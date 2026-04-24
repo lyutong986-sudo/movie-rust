@@ -715,3 +715,17 @@ npx vite build         # 构建成功
 | `enterHome()` 链路中 `loadHome()` 失败无法向上感知（被 `run` 吞掉）。 | `loadHome()` 改为 `run(..., '', { rethrow: true })`，允许关键初始化路径捕获真实失败。 |
 
 **校验**：`frontend> npx vue-tsc -b`、`frontend> npm run build` —— ✅ 通过。
+
+## 十九、第十九轮：创建媒体库自动扫描改为后台异步（2026-04-24）
+
+> 目标：保留“创建后自动扫描”，但避免创建弹窗等待全量入库完成。
+
+| 问题 | 修复 |
+| --- | --- |
+| `createLibrary(..., refreshLibrary=true)` 会在后端同步执行 `scan_all_libraries`，请求直到扫描结束才返回，前端弹窗因此长时间不关闭。 | `backend/src/routes/admin.rs` 新增 `enqueue_library_scan()`：当 `refreshLibrary=true` 时改为 `tokio::spawn` 后台扫描并立即返回 API 响应（200/204）。 |
+| 同类接口（删除库、增删改路径、`/Library/Refresh`）也会被同步扫描阻塞。 | 统一把 `refreshLibrary=true` 分支改为后台派发，避免管理操作被长扫描阻塞。 |
+| 前端创建成功提示未体现“后台扫描已启动”。 | `frontend/src/store/app.ts` 将创建成功消息改为 **`媒体库已创建，已开始扫描`**（Toast 提示）。 |
+
+**说明**：手动扫描接口 `/api/admin/scan` 仍保留同步返回 `ScanSummary`，用于需要即时统计结果的管理场景。
+
+**校验**：`backend> cargo build`、`frontend> npx vue-tsc -b` —— ✅ 通过。

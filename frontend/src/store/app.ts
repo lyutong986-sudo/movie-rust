@@ -608,7 +608,7 @@ export async function createLibrary(payload = libraryPayloadFromState()) {
     await Promise.all([loadHome(), loadRecentlyAddedTitles(), loadLatestByLibrary()]);
     state.selectedLibraryId = library.Id;
     await loadItems();
-  }, '媒体库已创建');
+  }, '媒体库已创建，已开始扫描');
 }
 
 export async function deleteLibrary(library: BaseItemDto | VirtualFolderInfo) {
