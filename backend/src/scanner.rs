@@ -3,7 +3,7 @@ use crate::{
     error::AppError,
     media_analyzer,
     metadata::{
-        provider::{MetadataProvider, MetadataProviderManager},
+        provider::{ExternalRemoteImage, MetadataProvider, MetadataProviderManager},
         tmdb::TmdbProvider,
     },
     models::{DbLibrary, LibraryOptionsDto, ScanSummary},
@@ -1573,29 +1573,20 @@ async fn cache_remote_images_for_item(
     else {
         return;
     };
-    let mut images = Vec::new();
+    let mut images: Vec<ExternalRemoteImage> = Vec::new();
     for (image_type, path) in [
         ("Primary", item.image_primary_path.as_deref()),
         ("Backdrop", item.backdrop_path.as_deref()),
         ("Logo", item.logo_path.as_deref()),
         ("Thumb", item.thumb_path.as_deref()),
+        ("Banner", item.banner_path.as_deref()),
+        ("Disc", item.disc_path.as_deref()),
+        ("Art", item.art_path.as_deref()),
     ] {
-        let Some(path) =
-            path.filter(|path| path.starts_with("http://") || path.starts_with("https://"))
-        else {
-            continue;
-        };
-        images.push(crate::metadata::provider::ExternalRemoteImage {
-            provider_name: "CurrentPath".to_string(),
-            url: path.to_string(),
-            thumbnail_url: Some(path.to_string()),
-            image_type: image_type.to_string(),
-            language: None,
-            width: None,
-            height: None,
-            community_rating: None,
-            vote_count: None,
-        });
+        push_current_remote_image(&mut images, image_type, path);
+    }
+    for extra_backdrop in &item.backdrop_paths {
+        push_current_remote_image(&mut images, "Backdrop", Some(extra_backdrop.as_str()));
     }
 
     if let Some((tmdb_id, season_number, episode_number, remote_media_type)) =
@@ -1627,11 +1618,19 @@ async fn cache_remote_images_for_item(
         return;
     }
 
-    for image_type in ["Primary", "Backdrop", "Logo", "Thumb"] {
-        let Some(image) = images
-            .iter()
-            .find(|image| image.image_type.eq_ignore_ascii_case(image_type))
-        else {
+    let image_download_plan: [(&str, &[&str]); 7] = [
+        ("Primary", &["Primary"]),
+        ("Backdrop", &["Backdrop"]),
+        ("Logo", &["Logo"]),
+        ("Thumb", &["Thumb", "Backdrop", "Primary"]),
+        // Fanart.tv 常见有 Banner / Art / Disc；缺失时回退 TMDB 的通用图。
+        ("Banner", &["Banner", "Backdrop"]),
+        ("Art", &["Art", "Logo", "Backdrop"]),
+        ("Disc", &["Disc", "Primary"]),
+    ];
+
+    for (image_type, fallback_types) in image_download_plan {
+        let Some(image) = pick_remote_image_with_fallback(&images, fallback_types) else {
             continue;
         };
         let local_path = if library_options.save_local_metadata {
@@ -1664,6 +1663,78 @@ async fn cache_remote_images_for_item(
         )
         .await;
     }
+}
+
+fn push_current_remote_image(images: &mut Vec<ExternalRemoteImage>, image_type: &str, path: Option<&str>) {
+    let Some(path) = path.filter(|value| {
+        let value = value.trim();
+        value.starts_with("http://") || value.starts_with("https://")
+    }) else {
+        return;
+    };
+    images.push(ExternalRemoteImage {
+        provider_name: "CurrentPath".to_string(),
+        url: path.to_string(),
+        thumbnail_url: Some(path.to_string()),
+        image_type: image_type.to_string(),
+        language: None,
+        width: None,
+        height: None,
+        community_rating: None,
+        vote_count: None,
+    });
+}
+
+fn remote_image_provider_priority(image: &ExternalRemoteImage) -> i32 {
+    let provider = image.provider_name.to_ascii_lowercase();
+    let url = image.url.to_ascii_lowercase();
+    if provider.contains("currentpath") {
+        return -10;
+    }
+    if provider.contains("fanart") || url.contains("fanart.tv") {
+        return 0;
+    }
+    if provider.contains("localmetadata") {
+        return 5;
+    }
+    if provider.contains("tmdb")
+        || provider.contains("themoviedb")
+        || url.contains("image.tmdb.org")
+    {
+        return 10;
+    }
+    20
+}
+
+fn pick_remote_image_with_fallback<'a>(
+    images: &'a [ExternalRemoteImage],
+    fallback_types: &[&str],
+) -> Option<&'a ExternalRemoteImage> {
+    let mut best: Option<(usize, i32, f64, &ExternalRemoteImage)> = None;
+    for image in images {
+        let Some(type_rank) = fallback_types
+            .iter()
+            .position(|kind| image.image_type.eq_ignore_ascii_case(kind))
+        else {
+            continue;
+        };
+        let provider_rank = remote_image_provider_priority(image);
+        let rating = image.community_rating.unwrap_or(-1.0);
+        let should_replace = if let Some((best_type_rank, best_provider_rank, best_rating, _)) = best
+        {
+            type_rank < best_type_rank
+                || (type_rank == best_type_rank && provider_rank < best_provider_rank)
+                || (type_rank == best_type_rank
+                    && provider_rank == best_provider_rank
+                    && rating > best_rating)
+        } else {
+            true
+        };
+        if should_replace {
+            best = Some((type_rank, provider_rank, rating, image));
+        }
+    }
+    best.map(|(_, _, _, image)| image)
 }
 
 async fn cache_person_image(
@@ -1768,7 +1839,12 @@ fn image_target_path(
 
     if item.item_type.eq_ignore_ascii_case("Episode") {
         return match image_type.as_str() {
-            "primary" => Some(folder.join(format!("{stem}-thumb.{extension}"))),
+            "primary" | "thumb" => Some(folder.join(format!("{stem}-thumb.{extension}"))),
+            "backdrop" => Some(folder.join(format!("{stem}-fanart.{extension}"))),
+            "logo" => Some(folder.join(format!("{stem}-logo.{extension}"))),
+            "banner" => Some(folder.join(format!("{stem}-banner.{extension}"))),
+            "disc" => Some(folder.join(format!("{stem}-disc.{extension}"))),
+            "art" => Some(folder.join(format!("{stem}-clearart.{extension}"))),
             _ => None,
         };
     }
@@ -1786,6 +1862,9 @@ fn image_target_path(
             "backdrop" => Some(folder.join(format!("{prefix}-fanart.{extension}"))),
             "logo" => Some(folder.join(format!("{prefix}-logo.{extension}"))),
             "thumb" => Some(folder.join(format!("{prefix}-landscape.{extension}"))),
+            "banner" => Some(folder.join(format!("{prefix}-banner.{extension}"))),
+            "disc" => Some(folder.join(format!("{prefix}-disc.{extension}"))),
+            "art" => Some(folder.join(format!("{prefix}-clearart.{extension}"))),
             _ => None,
         };
     }
@@ -1795,6 +1874,9 @@ fn image_target_path(
         "backdrop" => "fanart",
         "logo" => "logo",
         "thumb" => "landscape",
+        "banner" => "banner",
+        "disc" => "disc",
+        "art" => "clearart",
         _ => return None,
     };
 
