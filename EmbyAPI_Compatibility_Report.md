@@ -815,3 +815,27 @@ npx vite build         # 构建成功
 
 - `frontend> npm run build` —— ✅ 通过
 - 播放页主 chunk 从先前约 **1.2MB** 降到约 **17KB**（播放器核心拆分为独立异步 chunk：`hls` / `video.es` / `video-js.css`）。
+
+## 二十三、第二十三轮：手动扫描改为异步返回，规避 504 超时（2026-04-24）
+
+> 背景：通过反向代理（openresty）点击“扫描媒体库”时，长时同步请求命中网关超时，页面收到 `504 Gateway Time-out`。
+
+### A. 后端改造（`backend/src/routes/admin.rs`）
+
+| 项 | 变更 |
+| --- | --- |
+| `POST /api/admin/scan` 默认行为 | 改为**异步入队立即返回**，HTTP `202 Accepted`，响应 `{ Queued: true, Message: "..." }`。 |
+| 同步兼容开关 | 支持查询参数 `WaitForCompletion=true`（兼容 `waitForCompletion` / `wait_for_completion`），仅在显式指定时同步执行并返回 `ScanSummary`。 |
+| 扫描执行 | 复用既有 `enqueue_library_scan()` 后台任务路径（含数据库错误重试逻辑）。 |
+
+### B. 前端适配（`frontend/src/api/emby.ts` + `frontend/src/store/app.ts`）
+
+| 项 | 变更 |
+| --- | --- |
+| API 调用 | `api.scan(waitForCompletion = false)` 默认请求 `WaitForCompletion=false`。 |
+| UI 反馈 | `store.scan()` 对异步返回显示“媒体库已开始后台扫描”（或后端返回消息）；保留同步返回时“扫描完成，新增 N 个条目”的文案分支。 |
+
+### C. 校验
+
+- `backend> cargo build` —— ✅ 通过
+- `frontend> npm run build` —— ✅ 通过

@@ -3,7 +3,7 @@ use crate::{
     error::AppError,
     models::{
         AddVirtualFolderDto, BaseItemDto, CreateLibraryRequest, LibraryMediaFolderDto,
-        LibrarySubFolderDto, MediaPathDto, ScanSummary, UpdateLibraryOptionsDto,
+        LibrarySubFolderDto, MediaPathDto, UpdateLibraryOptionsDto,
         UpdateMediaPathRequestDto, VirtualFolderInfoDto, VirtualFolderQuery,
     },
     repository, scanner,
@@ -12,6 +12,7 @@ use crate::{
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -348,17 +349,29 @@ async fn remove_media_path(
 async fn scan_libraries(
     session: AuthSession,
     State(state): State<AppState>,
-) -> Result<Json<ScanSummary>, AppError> {
+    Query(query): Query<ScanLibrariesQuery>,
+) -> Result<Response, AppError> {
     auth::require_admin(&session)?;
-    Ok(Json(
-        scanner::scan_all_libraries(
+    if query.wait_for_completion.unwrap_or(false) {
+        let summary = scanner::scan_all_libraries(
             &state.pool,
             state.metadata_manager.clone(),
             &state.config,
             state.work_limiters.clone(),
         )
-        .await?,
-    ))
+        .await?;
+        return Ok((StatusCode::OK, Json(summary)).into_response());
+    }
+
+    enqueue_library_scan(&state, "manual_scan");
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ScanQueuedResponse {
+            queued: true,
+            message: "媒体库扫描任务已加入队列".to_string(),
+        }),
+    )
+        .into_response())
 }
 
 async fn refresh_libraries(
@@ -449,6 +462,24 @@ struct ParentPathQuery {
 struct ValidatePathQuery {
     #[serde(default, rename = "Path", alias = "path")]
     path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScanLibrariesQuery {
+    #[serde(
+        default,
+        rename = "WaitForCompletion",
+        alias = "waitForCompletion",
+        alias = "wait_for_completion"
+    )]
+    wait_for_completion: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct ScanQueuedResponse {
+    queued: bool,
+    message: String,
 }
 
 #[derive(Debug, Serialize)]

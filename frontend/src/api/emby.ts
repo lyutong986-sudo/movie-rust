@@ -247,6 +247,11 @@ export interface ScanSummary {
   ImportedItems: number;
 }
 
+export interface ScanQueuedResponse {
+  Queued: boolean;
+  Message?: string;
+}
+
 export interface StartupConfiguration {
   ServerName: string;
   UiCulture: string;
@@ -758,8 +763,11 @@ export class EmbyApi {
     });
   }
 
-  async scan() {
-    return this.request<ScanSummary>('/api/admin/scan', {
+  async scan(waitForCompletion = false) {
+    const params = new URLSearchParams({
+      WaitForCompletion: waitForCompletion ? 'true' : 'false'
+    });
+    return this.request<ScanSummary | ScanQueuedResponse>(`/api/admin/scan?${params}`, {
       method: 'POST'
     });
   }

@@ -645,13 +645,17 @@ export async function saveServerSettings() {
 
 export async function scan() {
   await run(async () => {
-    const summary = await api.scan();
+    const result = await api.scan(false);
     await loadLibraries();
     await loadVirtualFolders();
-    await loadRecentlyAddedTitles();
-    await loadLatestByLibrary();
-    await loadItems();
-    state.message = `扫描完成，新增 ${summary.ImportedItems} 个条目`;
+    if ('ImportedItems' in result) {
+      await loadRecentlyAddedTitles();
+      await loadLatestByLibrary();
+      await loadItems();
+      state.message = `扫描完成，新增 ${result.ImportedItems} 个条目`;
+      return;
+    }
+    state.message = result.Message || '媒体库已开始后台扫描';
   });
 }
 
