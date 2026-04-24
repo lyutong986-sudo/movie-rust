@@ -58,10 +58,19 @@ pub fn router() -> Router<AppState> {
         .route("/Users/{user_id}/easypassword", post(update_easy_password))
         .route("/users/{user_id}/easypassword", post(update_easy_password))
         .route("/Users/{user_id}/Policy", post(update_user_policy))
-        .route("/Users/{user_id}/Configuration", get(user_configuration).post(update_user_configuration))
-        .route("/Users/{user_id}/Configuration/Partial", post(update_user_configuration_partial))
+        .route(
+            "/Users/{user_id}/Configuration",
+            get(user_configuration).post(update_user_configuration),
+        )
+        .route(
+            "/Users/{user_id}/Configuration/Partial",
+            post(update_user_configuration_partial),
+        )
         .route("/Users/{user_id}/Connect/Link", post(user_connect_link))
-        .route("/Users/{user_id}/Connect/Link/Delete", post(user_connect_link_delete))
+        .route(
+            "/Users/{user_id}/Connect/Link/Delete",
+            post(user_connect_link_delete),
+        )
         .route(
             "/Users/{user_id}/TrackSelections/{track_type}",
             post(user_track_selection),
@@ -205,7 +214,8 @@ async fn user_item_access(
     };
     let item_uuid = crate::models::emby_id_to_uuid(item_id)
         .map_err(|_| AppError::BadRequest("无效的 itemId".to_string()))?;
-    let has_access = repository::user_can_access_item(&state.pool, target_user_id, item_uuid).await?;
+    let has_access =
+        repository::user_can_access_item(&state.pool, target_user_id, item_uuid).await?;
     Ok(Json(serde_json::json!({
         "UserId": target_user_id.to_string().to_uppercase(),
         "ItemId": item_id,
@@ -311,7 +321,8 @@ async fn update_user(
 
     if let Some(configuration_value) = payload_obj
         .and_then(|map| {
-            map.get("Configuration").or_else(|| map.get("configuration"))
+            map.get("Configuration")
+                .or_else(|| map.get("configuration"))
         })
         .cloned()
     {
@@ -340,7 +351,10 @@ async fn update_user(
     let refreshed = repository::get_user_by_id(&state.pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
-    Ok(Json(repository::user_to_dto(&refreshed, state.config.server_id)))
+    Ok(Json(repository::user_to_dto(
+        &refreshed,
+        state.config.server_id,
+    )))
 }
 
 /// `POST /Users/{Id}/EasyPassword`：Emby 用于设置 PIN 的快速密码。
@@ -701,7 +715,11 @@ async fn update_user_configuration_partial(
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct ForgotPasswordRequest {
-    #[serde(alias = "EnteredUsername", alias = "enteredUsername", alias = "username")]
+    #[serde(
+        alias = "EnteredUsername",
+        alias = "enteredUsername",
+        alias = "username"
+    )]
     entered_username: Option<String>,
 }
 
@@ -710,7 +728,12 @@ struct ForgotPasswordRequest {
 struct ForgotPasswordPinRequest {
     #[serde(alias = "enteredPin", alias = "Pin", alias = "pin")]
     entered_pin: Option<String>,
-    #[serde(alias = "newPw", alias = "newPassword", alias = "NewPw", alias = "NewPassword")]
+    #[serde(
+        alias = "newPw",
+        alias = "newPassword",
+        alias = "NewPw",
+        alias = "NewPassword"
+    )]
     new_password: Option<String>,
 }
 
@@ -793,21 +816,11 @@ async fn forgot_password_pin(
             continue;
         }
         if expires_at.is_some_and(|value| value < chrono::Utc::now()) {
-            let _ = repository::set_setting_value(
-                &state.pool,
-                &key,
-                serde_json::Value::Null,
-            )
-            .await;
+            let _ = repository::set_setting_value(&state.pool, &key, serde_json::Value::Null).await;
             return Err(AppError::BadRequest("PIN 已过期，请重新申请".to_string()));
         }
         repository::change_user_password(&state.pool, user.id, new_password).await?;
-        let _ = repository::set_setting_value(
-            &state.pool,
-            &key,
-            serde_json::Value::Null,
-        )
-        .await;
+        let _ = repository::set_setting_value(&state.pool, &key, serde_json::Value::Null).await;
         return Ok(Json(serde_json::json!({
             "Success": true,
             "UsersReset": [uuid_to_emby_guid(&user.id)],
@@ -851,7 +864,10 @@ async fn user_track_selection(
     auth::ensure_user_access(&session, user_id)?;
     repository::set_setting_value(
         &state.pool,
-        &format!("user_track_selection:{user_id}:{}", _track_type.to_ascii_lowercase()),
+        &format!(
+            "user_track_selection:{user_id}:{}",
+            _track_type.to_ascii_lowercase()
+        ),
         payload,
     )
     .await?;
@@ -866,7 +882,10 @@ async fn user_track_selection_delete(
     auth::ensure_user_access(&session, user_id)?;
     repository::delete_setting_value(
         &state.pool,
-        &format!("user_track_selection:{user_id}:{}", _track_type.to_ascii_lowercase()),
+        &format!(
+            "user_track_selection:{user_id}:{}",
+            _track_type.to_ascii_lowercase()
+        ),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -911,8 +930,11 @@ async fn user_item_rating_delete(
     auth::ensure_user_access(&session, user_id)?;
     let item_id = crate::models::emby_id_to_uuid(&_item_id)
         .map_err(|_| AppError::BadRequest("无效的 itemId".to_string()))?;
-    repository::delete_setting_value(&state.pool, &format!("user_item_rating:{user_id}:{item_id}"))
-        .await?;
+    repository::delete_setting_value(
+        &state.pool,
+        &format!("user_item_rating:{user_id}:{item_id}"),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -938,7 +960,10 @@ async fn update_user_typed_settings(
     auth::ensure_user_access(&session, user_id)?;
     repository::set_setting_value(
         &state.pool,
-        &format!("user_typed_settings:{user_id}:{}", _key.to_ascii_lowercase()),
+        &format!(
+            "user_typed_settings:{user_id}:{}",
+            _key.to_ascii_lowercase()
+        ),
         payload,
     )
     .await?;
@@ -1031,10 +1056,7 @@ mod tests {
         assert!(map.get("Policy").unwrap().is_object());
         // HasPassword / Id 不在写入白名单内 —— 静态断言。
         let payload_clone = payload.clone();
-        let policy_part = payload_clone
-            .get("Policy")
-            .cloned()
-            .unwrap_or(Value::Null);
+        let policy_part = payload_clone.get("Policy").cloned().unwrap_or(Value::Null);
         assert!(policy_part.is_object());
     }
 

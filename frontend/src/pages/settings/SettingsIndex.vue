@@ -70,6 +70,12 @@ const adminEntries = computed<SettingsEntry[]>(() => [
     to: '/settings/libraries'
   },
   {
+    icon: 'i-lucide-waypoints',
+    title: '远端 Emby 中转',
+    description: '接入外部 Emby 账号，生成本地 STRM 并进行中转播放。',
+    to: '/settings/remote-emby'
+  },
+  {
     icon: 'i-lucide-layout-grid',
     title: '媒体库显示',
     description: '合集视图、Specials、文件夹视图、DateAdded 策略。',

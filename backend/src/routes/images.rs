@@ -246,10 +246,7 @@ async fn item_image_url_response(
     let has_image = if let Some(item) = repository::get_media_item(&state.pool, item_id).await? {
         match normalized.as_str() {
             "Backdrop" if idx == 0 => item.backdrop_path.is_some(),
-            "Backdrop" if idx > 0 => item
-                .backdrop_paths
-                .get((idx - 1) as usize)
-                .is_some(),
+            "Backdrop" if idx > 0 => item.backdrop_paths.get((idx - 1) as usize).is_some(),
             "Logo" => item.logo_path.is_some(),
             "Thumb" => item.thumb_path.is_some(),
             "Banner" => item.banner_path.is_some(),
@@ -970,14 +967,8 @@ async fn upload_item_image_with_tail(
     match last_tail_segment(&image_tail).to_ascii_lowercase().as_str() {
         "delete" => {
             let backdrop_index = tail_leading_backdrop_index(&image_type, &image_tail);
-            return delete_item_image_impl(
-                session,
-                state,
-                item_id_str,
-                image_type,
-                backdrop_index,
-            )
-            .await;
+            return delete_item_image_impl(session, state, item_id_str, image_type, backdrop_index)
+                .await;
         }
         "index" => {
             if !session.is_admin {
@@ -1163,10 +1154,7 @@ async fn delete_item_image_impl(
     let image_type = normalized_item_image_type(&image_type);
     let idx = backdrop_index.unwrap_or(0);
     let current_path = match image_type.as_str() {
-        "Backdrop" if idx > 0 => item
-            .backdrop_paths
-            .get((idx - 1) as usize)
-            .cloned(),
+        "Backdrop" if idx > 0 => item.backdrop_paths.get((idx - 1) as usize).cloned(),
         "Backdrop" => item.backdrop_path,
         "Logo" => item.logo_path,
         "Thumb" => item.thumb_path,
@@ -1248,10 +1236,7 @@ async fn serve_item_image(
     let idx = image_index.unwrap_or(0);
     let path = match normalized.as_str() {
         "Backdrop" if idx == 0 => item.backdrop_path,
-        "Backdrop" if idx > 0 => item
-            .backdrop_paths
-            .get((idx - 1) as usize)
-            .cloned(),
+        "Backdrop" if idx > 0 => item.backdrop_paths.get((idx - 1) as usize).cloned(),
         "Logo" => item.logo_path,
         "Thumb" => item.thumb_path.or(item.backdrop_path.clone()),
         "Banner" => item.banner_path,

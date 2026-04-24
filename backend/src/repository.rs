@@ -6,11 +6,11 @@ use crate::{
     models::{
         emby_id_to_uuid, uuid_to_emby_guid, ActivityLogEntryDto, AuthSessionRow, BaseItemDto,
         BrandingConfiguration, DbLibrary, DbMediaChapter, DbMediaItem, DbMediaStream, DbPerson,
-        DbUser, DbUserItemData, EncodingOptionsDto, ExternalUrlDto,
-        GenreDto, ItemCountsDto, LibraryOptionsDto, LogFileDto, MediaItemRow, MediaPathInfoDto,
-        MediaSourceDto, MediaStreamDto, NameLongIdDto, PersonDto, PublicUserDto,
-        QueryResult, SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest,
-        UserConfigurationDto, UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
+        DbRemoteEmbySource, DbUser, DbUserItemData, EncodingOptionsDto, ExternalUrlDto, GenreDto,
+        ItemCountsDto, LibraryOptionsDto, LogFileDto, MediaItemRow, MediaPathInfoDto,
+        MediaSourceDto, MediaStreamDto, NameLongIdDto, PersonDto, PublicUserDto, QueryResult,
+        SessionInfoDto, StartupConfiguration, StartupRemoteAccessRequest, UserConfigurationDto,
+        UserDto, UserItemDataDto, UserPolicyDto, VirtualFolderInfoDto,
     },
     naming, security,
 };
@@ -355,7 +355,12 @@ pub async fn update_subtitle_download_configuration(
     pool: &sqlx::PgPool,
     configuration: &crate::models::SubtitleDownloadConfiguration,
 ) -> Result<(), AppError> {
-    set_system_setting(pool, "subtitle_download_configuration", json!(configuration)).await
+    set_system_setting(
+        pool,
+        "subtitle_download_configuration",
+        json!(configuration),
+    )
+    .await
 }
 
 pub async fn encoding_options(
@@ -1720,23 +1725,26 @@ pub async fn set_user_easy_password(
     user_id: Uuid,
     new_password: Option<&str>,
 ) -> Result<(), AppError> {
-    let hash = match new_password.map(str::trim).filter(|value| !value.is_empty()) {
+    let hash = match new_password
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(value) => {
             if value.len() < 4 {
-                return Err(AppError::BadRequest("快速密码至少需要 4 个字符".to_string()));
+                return Err(AppError::BadRequest(
+                    "快速密码至少需要 4 个字符".to_string(),
+                ));
             }
             Some(security::hash_password(value)?)
         }
         None => None,
     };
 
-    sqlx::query(
-        "UPDATE users SET easy_password_hash = $1, date_modified = now() WHERE id = $2",
-    )
-    .bind(hash)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE users SET easy_password_hash = $1, date_modified = now() WHERE id = $2")
+        .bind(hash)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
 
     Ok(())
 }
@@ -2537,6 +2545,175 @@ pub async fn get_library(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbLibra
     .bind(id)
     .fetch_optional(pool)
     .await?)
+}
+
+pub async fn list_remote_emby_sources(
+    pool: &sqlx::PgPool,
+) -> Result<Vec<DbRemoteEmbySource>, AppError> {
+    Ok(sqlx::query_as::<_, DbRemoteEmbySource>(
+        r#"
+        SELECT
+            id, name, server_url, username, password, spoofed_user_agent, target_library_id,
+            enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
+            created_at, updated_at
+        FROM remote_emby_sources
+        ORDER BY name
+        "#,
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn get_remote_emby_source(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<Option<DbRemoteEmbySource>, AppError> {
+    Ok(sqlx::query_as::<_, DbRemoteEmbySource>(
+        r#"
+        SELECT
+            id, name, server_url, username, password, spoofed_user_agent, target_library_id,
+            enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
+            created_at, updated_at
+        FROM remote_emby_sources
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn create_remote_emby_source(
+    pool: &sqlx::PgPool,
+    name: &str,
+    server_url: &str,
+    username: &str,
+    password: &str,
+    spoofed_user_agent: &str,
+    target_library_id: Uuid,
+    enabled: bool,
+) -> Result<DbRemoteEmbySource, AppError> {
+    let name = name.trim();
+    let server_url = server_url.trim().trim_end_matches('/');
+    let username = username.trim();
+    let spoofed_user_agent = spoofed_user_agent.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("远端源名称不能为空".to_string()));
+    }
+    if server_url.is_empty() {
+        return Err(AppError::BadRequest("远端 Emby 地址不能为空".to_string()));
+    }
+    if username.is_empty() {
+        return Err(AppError::BadRequest("远端 Emby 用户名不能为空".to_string()));
+    }
+    if password.trim().is_empty() {
+        return Err(AppError::BadRequest("远端 Emby 密码不能为空".to_string()));
+    }
+    if spoofed_user_agent.is_empty() {
+        return Err(AppError::BadRequest("伪装 User-Agent 不能为空".to_string()));
+    }
+
+    if get_library(pool, target_library_id).await?.is_none() {
+        return Err(AppError::BadRequest("目标媒体库不存在".to_string()));
+    }
+
+    let id = Uuid::new_v4();
+    let source_secret = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO remote_emby_sources (
+            id, name, server_url, username, password, spoofed_user_agent, target_library_id,
+            enabled, source_secret
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(server_url)
+    .bind(username)
+    .bind(password)
+    .bind(spoofed_user_agent)
+    .bind(target_library_id)
+    .bind(enabled)
+    .bind(source_secret)
+    .execute(pool)
+    .await?;
+
+    get_remote_emby_source(pool, id)
+        .await?
+        .ok_or_else(|| AppError::Internal("创建远端 Emby 源后无法读取记录".to_string()))
+}
+
+pub async fn delete_remote_emby_source(pool: &sqlx::PgPool, id: Uuid) -> Result<(), AppError> {
+    let result = sqlx::query("DELETE FROM remote_emby_sources WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("远端 Emby 源不存在".to_string()));
+    }
+    Ok(())
+}
+
+pub async fn update_remote_emby_source_auth_state(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    remote_user_id: &str,
+    access_token: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE remote_emby_sources
+        SET remote_user_id = $2, access_token = $3, updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(remote_user_id.trim())
+    .bind(access_token.trim())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn clear_remote_emby_source_auth_state(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE remote_emby_sources
+        SET remote_user_id = NULL, access_token = NULL, updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn update_remote_emby_source_sync_state(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    error_message: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE remote_emby_sources
+        SET
+            last_sync_at = now(),
+            last_sync_error = $2,
+            updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(error_message.map(str::trim))
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn get_library_for_media_item(
@@ -4833,12 +5010,13 @@ pub async fn add_playlist_items(
     if media_item_ids.is_empty() {
         return Ok(());
     }
-    let current_max: Option<i64> =
-        sqlx::query_scalar("SELECT MAX(sort_index)::bigint FROM playlist_items WHERE playlist_id = $1")
-            .bind(playlist_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
+    let current_max: Option<i64> = sqlx::query_scalar(
+        "SELECT MAX(sort_index)::bigint FROM playlist_items WHERE playlist_id = $1",
+    )
+    .bind(playlist_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
     let mut next_index = current_max.map(|value| value + 1).unwrap_or(0);
     for media_item_id in media_item_ids {
         sqlx::query(
@@ -4907,13 +5085,11 @@ pub async fn move_playlist_item(
     let insert_index = new_index.clamp(0, remaining.len() as i32);
     remaining.insert(insert_index as usize, &target);
     for (index, item) in remaining.iter().enumerate() {
-        sqlx::query(
-            "UPDATE playlist_items SET sort_index = $2 WHERE id = $1",
-        )
-        .bind(item.id)
-        .bind(index as i32)
-        .execute(pool)
-        .await?;
+        sqlx::query("UPDATE playlist_items SET sort_index = $2 WHERE id = $1")
+            .bind(item.id)
+            .bind(index as i32)
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
@@ -7265,11 +7441,15 @@ impl From<MissingEpisodeDetailRow> for MissingEpisodeDtoSource {
 
 pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
     let local_path = Path::new(&item.path);
+    let normalized_path = item.path.replace('\\', "/");
+    let is_virtual_remote = normalized_path
+        .to_ascii_uppercase()
+        .starts_with("REMOTE_EMBY/");
     let strm_target = naming::is_strm(local_path)
         .then(|| naming::read_strm_target(local_path))
         .flatten();
     let container = effective_container_from_target(item, strm_target.as_deref());
-    let is_remote = strm_target.is_some();
+    let is_remote = strm_target.is_some() || is_virtual_remote;
     let size = media_source_size(item, is_remote);
     let item_emby_id = uuid_to_emby_guid(&item.id);
     let media_source_id = format!("mediasource_{item_emby_id}");
@@ -8792,11 +8972,15 @@ pub async fn get_media_source_with_streams(
     }
 
     let local_path = Path::new(&item.path);
+    let normalized_path = item.path.replace('\\', "/");
+    let is_virtual_remote = normalized_path
+        .to_ascii_uppercase()
+        .starts_with("REMOTE_EMBY/");
     let strm_target = naming::is_strm(local_path)
         .then(|| naming::read_strm_target(local_path))
         .flatten();
     let container = effective_container_from_target(item, strm_target.as_deref());
-    let is_remote = strm_target.is_some();
+    let is_remote = strm_target.is_some() || is_virtual_remote;
     let size = media_source_size(item, is_remote);
 
     let item_emby_id = uuid_to_emby_guid(&item.id);
@@ -9336,10 +9520,8 @@ pub async fn find_similar_items(
         if same_item_identity(target_identity.as_deref(), &item) {
             continue;
         }
-        let identity_key =
-            item_identity_key(&item, &provider_ids_for_item(&item)).unwrap_or_else(|| {
-                format!("item:{}", item.id)
-            });
+        let identity_key = item_identity_key(&item, &provider_ids_for_item(&item))
+            .unwrap_or_else(|| format!("item:{}", item.id));
         if group_items_into_collections && !seen_identity_keys.insert(identity_key) {
             continue;
         }

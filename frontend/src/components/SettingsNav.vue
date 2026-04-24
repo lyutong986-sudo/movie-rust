@@ -14,6 +14,7 @@ const NAV = [
   { label: '服务器', icon: 'i-lucide-server', to: '/settings/server', admin: true },
   { label: '转码', icon: 'i-lucide-cpu', to: '/settings/transcoding', admin: true },
   { label: '媒体库', icon: 'i-lucide-library', to: '/settings/libraries', admin: true },
+  { label: '远端 Emby 中转', icon: 'i-lucide-waypoints', to: '/settings/remote-emby', admin: true },
   { label: '媒体库显示', icon: 'i-lucide-layout-grid', to: '/settings/library-display', admin: true },
   { label: '计划任务', icon: 'i-lucide-timer', to: '/settings/scheduled-tasks', admin: true },
   { label: '字幕下载', icon: 'i-lucide-download-cloud', to: '/settings/subtitle-download', admin: true },

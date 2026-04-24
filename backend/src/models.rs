@@ -34,6 +34,25 @@ pub struct DbLibrary {
 }
 
 #[derive(Debug, Clone, FromRow)]
+pub struct DbRemoteEmbySource {
+    pub id: Uuid,
+    pub name: String,
+    pub server_url: String,
+    pub username: String,
+    pub password: String,
+    pub spoofed_user_agent: String,
+    pub target_library_id: Uuid,
+    pub enabled: bool,
+    pub remote_user_id: Option<String>,
+    pub access_token: Option<String>,
+    pub source_secret: Uuid,
+    pub last_sync_at: Option<DateTime<Utc>>,
+    pub last_sync_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct DbMediaItem {
     pub id: Uuid,
     pub parent_id: Option<Uuid>,

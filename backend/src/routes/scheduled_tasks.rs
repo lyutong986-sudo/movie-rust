@@ -21,14 +21,8 @@ pub fn router() -> Router<AppState> {
         .route("/scheduledtasks", get(list_tasks))
         .route("/ScheduledTasks/{task_id}", get(get_task))
         .route("/scheduledtasks/{task_id}", get(get_task))
-        .route(
-            "/ScheduledTasks/{task_id}/Triggers",
-            post(update_triggers),
-        )
-        .route(
-            "/scheduledtasks/{task_id}/triggers",
-            post(update_triggers),
-        )
+        .route("/ScheduledTasks/{task_id}/Triggers", post(update_triggers))
+        .route("/scheduledtasks/{task_id}/triggers", post(update_triggers))
         .route("/ScheduledTasks/Running/{task_id}", post(start_task))
         .route("/scheduledtasks/running/{task_id}", post(start_task))
         .route(
@@ -140,10 +134,16 @@ async fn read_state(pool: &sqlx::PgPool, task_id: &str) -> Result<TaskRuntimeSta
 
     let last_end = repository::get_setting_value(pool, &format!("task:{task_id}:last_end"))
         .await?
-        .and_then(|v| v.as_str().and_then(|s| DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))));
+        .and_then(|v| {
+            v.as_str().and_then(|s| {
+                DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            })
+        });
 
-    let last_exec = repository::get_setting_value(pool, &format!("task:{task_id}:last_exec"))
-        .await?;
+    let last_exec =
+        repository::get_setting_value(pool, &format!("task:{task_id}:last_exec")).await?;
 
     let triggers = repository::get_setting_value(pool, &format!("task:{task_id}:triggers")).await?;
 
@@ -206,7 +206,10 @@ async fn get_task(
 ) -> Result<Json<Value>, AppError> {
     require_admin(&session)?;
     let descriptors = builtin_tasks();
-    let Some(desc) = descriptors.iter().find(|d| d.id.eq_ignore_ascii_case(&task_id)) else {
+    let Some(desc) = descriptors
+        .iter()
+        .find(|d| d.id.eq_ignore_ascii_case(&task_id))
+    else {
         return Err(AppError::NotFound(format!("任务不存在: {task_id}")));
     };
     let runtime = read_state(&state.pool, desc.id).await?;
@@ -221,7 +224,10 @@ async fn update_triggers(
 ) -> Result<StatusCode, AppError> {
     require_admin(&session)?;
     let descriptors = builtin_tasks();
-    if !descriptors.iter().any(|d| d.id.eq_ignore_ascii_case(&task_id)) {
+    if !descriptors
+        .iter()
+        .any(|d| d.id.eq_ignore_ascii_case(&task_id))
+    {
         return Err(AppError::NotFound(format!("任务不存在: {task_id}")));
     }
     repository::set_setting_value(
@@ -245,10 +251,18 @@ async fn start_task(
         return Err(AppError::NotFound(format!("任务不存在: {task_id}")));
     };
 
-    repository::set_setting_value(&state.pool, &format!("task:{}:state", desc.id), json!("Running"))
-        .await?;
-    repository::set_setting_value(&state.pool, &format!("task:{}:progress", desc.id), json!(0.0))
-        .await?;
+    repository::set_setting_value(
+        &state.pool,
+        &format!("task:{}:state", desc.id),
+        json!("Running"),
+    )
+    .await?;
+    repository::set_setting_value(
+        &state.pool,
+        &format!("task:{}:progress", desc.id),
+        json!(0.0),
+    )
+    .await?;
 
     // 按任务类型触发真实后台任务。不阻塞响应。
     let pool = state.pool.clone();
@@ -265,12 +279,9 @@ async fn start_task(
         };
         let key_state = format!("task:{task_id}:state");
         let _ = repository::set_setting_value(&pool, &key_state, json!("Idle")).await;
-        let _ = repository::set_setting_value(
-            &pool,
-            &format!("task:{task_id}:progress"),
-            json!(100.0),
-        )
-        .await;
+        let _ =
+            repository::set_setting_value(&pool, &format!("task:{task_id}:progress"), json!(100.0))
+                .await;
         let _ = repository::set_setting_value(
             &pool,
             &format!("task:{task_id}:last_end"),
@@ -301,8 +312,12 @@ async fn cancel_task(
 ) -> Result<StatusCode, AppError> {
     require_admin(&session)?;
     let key = task_id.to_ascii_lowercase();
-    repository::set_setting_value(&state.pool, &format!("task:{key}:state"), json!("Cancelled"))
-        .await?;
+    repository::set_setting_value(
+        &state.pool,
+        &format!("task:{key}:state"),
+        json!("Cancelled"),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -351,9 +366,11 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
             Ok(())
         }
         "cleanup-activity-log" => {
-            sqlx::query("DELETE FROM playback_events WHERE created_at < (now() - interval '30 days')")
-                .execute(&state.pool)
-                .await?;
+            sqlx::query(
+                "DELETE FROM playback_events WHERE created_at < (now() - interval '30 days')",
+            )
+            .execute(&state.pool)
+            .await?;
             Ok(())
         }
         _ => Err(AppError::NotFound(format!("未知任务: {task_id}"))),

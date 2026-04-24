@@ -210,7 +210,15 @@ pub async fn scan_all_libraries_with_progress(
     progress: Option<ScanProgress>,
 ) -> Result<ScanSummary, AppError> {
     let libraries = repository::list_libraries(pool).await?;
-    scan_libraries(pool, metadata_manager, config, work_limiters, libraries, progress).await
+    scan_libraries(
+        pool,
+        metadata_manager,
+        config,
+        work_limiters,
+        libraries,
+        progress,
+    )
+    .await
 }
 
 pub async fn scan_single_library(
@@ -1401,6 +1409,13 @@ async fn analyze_imported_media(
                     );
                     return Ok(());
                 };
+                if target_url.contains("/api/remote-emby/proxy/") {
+                    tracing::debug!(
+                        "扫描阶段跳过远端 Emby 代理 .strm URL 分析，由 PlaybackInfo 负责元数据补全: {}",
+                        file.display()
+                    );
+                    return Ok(());
+                }
 
                 match media_analyzer::analyze_remote_media(&target_url).await {
                     Ok(analysis) => analysis,
@@ -1665,7 +1680,11 @@ async fn cache_remote_images_for_item(
     }
 }
 
-fn push_current_remote_image(images: &mut Vec<ExternalRemoteImage>, image_type: &str, path: Option<&str>) {
+fn push_current_remote_image(
+    images: &mut Vec<ExternalRemoteImage>,
+    image_type: &str,
+    path: Option<&str>,
+) {
     let Some(path) = path.filter(|value| {
         let value = value.trim();
         value.starts_with("http://") || value.starts_with("https://")
@@ -1720,16 +1739,16 @@ fn pick_remote_image_with_fallback<'a>(
         };
         let provider_rank = remote_image_provider_priority(image);
         let rating = image.community_rating.unwrap_or(-1.0);
-        let should_replace = if let Some((best_type_rank, best_provider_rank, best_rating, _)) = best
-        {
-            type_rank < best_type_rank
-                || (type_rank == best_type_rank && provider_rank < best_provider_rank)
-                || (type_rank == best_type_rank
-                    && provider_rank == best_provider_rank
-                    && rating > best_rating)
-        } else {
-            true
-        };
+        let should_replace =
+            if let Some((best_type_rank, best_provider_rank, best_rating, _)) = best {
+                type_rank < best_type_rank
+                    || (type_rank == best_type_rank && provider_rank < best_provider_rank)
+                    || (type_rank == best_type_rank
+                        && provider_rank == best_provider_rank
+                        && rating > best_rating)
+            } else {
+                true
+            };
         if should_replace {
             best = Some((type_rank, provider_rank, rating, image));
         }
@@ -2081,10 +2100,7 @@ fn read_nfo_file(path: &Path) -> Option<NfoMetadata> {
             Some("discart") | Some("cdart") | Some("disc") => {
                 metadata.disc_image.get_or_insert(image.path);
             }
-            Some("clearart")
-            | Some("characterart")
-            | Some("hdclearart")
-            | Some("character")
+            Some("clearart") | Some("characterart") | Some("hdclearart") | Some("character")
             | Some("art") => {
                 metadata.art_image.get_or_insert(image.path);
             }

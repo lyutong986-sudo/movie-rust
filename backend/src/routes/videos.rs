@@ -2,7 +2,7 @@ use crate::{
     auth::{self, AuthSession, MediaAccessKind},
     error::AppError,
     models::{emby_id_to_uuid, VideoStreamQuery},
-    naming, repository,
+    naming, remote_emby, repository,
     state::AppState,
 };
 use axum::{
@@ -468,6 +468,29 @@ async fn serve_media_item(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
+    if let Some(virtual_ref) = remote_emby::parse_virtual_media_path(&item.path) {
+        let local_media_source_id =
+            format!("mediasource_{}", crate::models::uuid_to_emby_guid(&item.id));
+        let requested_media_source_id = query
+            .as_ref()
+            .and_then(|value| value.media_source_id.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|value| !value.eq_ignore_ascii_case(local_media_source_id.as_str()));
+        let media_source_id = requested_media_source_id
+            .map(ToOwned::to_owned)
+            .or_else(|| remote_emby::remote_default_media_source_id(&item.provider_ids));
+        return remote_emby::proxy_item_stream_internal(
+            state,
+            virtual_ref.source_id,
+            virtual_ref.remote_item_id.as_str(),
+            media_source_id.as_deref(),
+            request.method().clone(),
+            request.headers(),
+        )
+        .await;
+    }
+
     let path = PathBuf::from(&item.path);
     if !path.exists() {
         return Err(AppError::NotFound("媒体文件不存在".to_string()));
@@ -751,7 +774,9 @@ async fn video_index_bif(
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
     let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
-    Err(AppError::NotFound("当前版本未生成 BIF 预览索引".to_string()))
+    Err(AppError::NotFound(
+        "当前版本未生成 BIF 预览索引".to_string(),
+    ))
 }
 
 async fn video_alternate_sources(
@@ -940,16 +965,35 @@ async fn transcoded_hls_playlist_response(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
     let path = PathBuf::from(&item.path);
-    if !path.exists() {
-        return Err(AppError::NotFound("媒体文件不存在".to_string()));
-    }
     // STRM 文件：读取里面的远程 URL，直接作为 ffmpeg 的 -i 输入，
     // 浏览器侧得到可解码的 HLS（fMP4/TS）片段，避免 MKV 直链无法原生解码。
-    let effective_input = if naming::is_strm(&path) {
+    let effective_input = if let Some(virtual_ref) =
+        remote_emby::parse_virtual_media_path(&item.path)
+    {
+        let local_media_source_id =
+            format!("mediasource_{}", crate::models::uuid_to_emby_guid(&item.id));
+        let requested_media_source_id = query
+            .media_source_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|value| !value.eq_ignore_ascii_case(local_media_source_id.as_str()));
+        let media_source_id = requested_media_source_id
+            .map(ToOwned::to_owned)
+            .or_else(|| remote_emby::remote_default_media_source_id(&item.provider_ids));
+        let proxy_url = remote_emby::build_signed_proxy_url(
+            &state.pool,
+            &state.config,
+            virtual_ref.source_id,
+            virtual_ref.remote_item_id.as_str(),
+            media_source_id.as_deref(),
+        )
+        .await?;
+        PathBuf::from(proxy_url)
+    } else if naming::is_strm(&path) {
         let content = tokio::fs::read_to_string(&path).await?;
-        let target = naming::strm_target_from_text(&content).ok_or_else(|| {
-            AppError::BadRequest("STRM 文件没有有效的远程播放地址".to_string())
-        })?;
+        let target = naming::strm_target_from_text(&content)
+            .ok_or_else(|| AppError::BadRequest("STRM 文件没有有效的远程播放地址".to_string()))?;
         tracing::info!(
             item_id = %item.id,
             item_name = %item.name,
@@ -958,6 +1002,9 @@ async fn transcoded_hls_playlist_response(
         );
         PathBuf::from(target)
     } else {
+        if !path.exists() {
+            return Err(AppError::NotFound("媒体文件不存在".to_string()));
+        }
         path.clone()
     };
 

@@ -18,16 +18,19 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/Playlists", post(create_playlist).get(list_playlists_me))
         .route("/playlists", post(create_playlist).get(list_playlists_me))
-        .route("/Playlists/{playlist_id}", get(get_playlist).post(update_playlist))
-        .route("/playlists/{playlist_id}", get(get_playlist).post(update_playlist))
+        .route(
+            "/Playlists/{playlist_id}",
+            get(get_playlist).post(update_playlist),
+        )
+        .route(
+            "/playlists/{playlist_id}",
+            get(get_playlist).post(update_playlist),
+        )
         .route(
             "/Playlists/{playlist_id}/Delete",
             post(delete_playlist_route),
         )
-        .route(
-            "/Playlists/{playlist_id}",
-            delete(delete_playlist_route),
-        )
+        .route("/Playlists/{playlist_id}", delete(delete_playlist_route))
         .route(
             "/Playlists/{playlist_id}/Items",
             get(list_playlist_items).post(add_playlist_items_route),
@@ -235,10 +238,7 @@ async fn update_playlist(
         return Err(AppError::Forbidden);
     }
     let name_ref = payload.name.as_deref();
-    let overview_ref = payload
-        .overview
-        .as_ref()
-        .map(|value| value.as_deref());
+    let overview_ref = payload.overview.as_ref().map(|value| value.as_deref());
     repository::update_playlist(&state.pool, id, name_ref, overview_ref).await?;
     let playlist = repository::get_playlist(&state.pool, id)
         .await?
@@ -291,7 +291,8 @@ async fn list_playlist_items(
     let selected: Vec<_> = entries.into_iter().skip(start_index).take(limit).collect();
     let mut items = Vec::with_capacity(selected.len());
     for entry in selected {
-        let Some(media) = repository::get_media_item(&state.pool, entry.media_item_id).await? else {
+        let Some(media) = repository::get_media_item(&state.pool, entry.media_item_id).await?
+        else {
             continue;
         };
         let mut dto = repository::media_item_to_dto(

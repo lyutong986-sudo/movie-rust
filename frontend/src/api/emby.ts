@@ -407,6 +407,58 @@ export interface ScanQueuedResponse {
   Operation: ScanOperation;
 }
 
+export interface RemoteEmbySource {
+  Id: string;
+  Name: string;
+  ServerUrl: string;
+  Username: string;
+  TargetLibraryId: string;
+  Enabled: boolean;
+  SpoofedUserAgent: string;
+  RemoteUserId?: string;
+  HasAccessToken: boolean;
+  LastSyncAt?: string;
+  LastSyncError?: string;
+  CreatedAt: string;
+  UpdatedAt: string;
+}
+
+export interface RemoteEmbySyncResponse {
+  SourceId: string;
+  SourceName: string;
+  WrittenFiles: number;
+  SourceRoot: string;
+  ScanSummary: ScanSummary;
+}
+
+export interface RemoteEmbySyncOperation {
+  Id: string;
+  SourceId: string;
+  SourceName: string;
+  Status: string;
+  Progress: number;
+  Phase: string;
+  TotalItems: number;
+  FetchedItems: number;
+  WrittenFiles: number;
+  Queued: boolean;
+  Running: boolean;
+  Done: boolean;
+  CancelRequested: boolean;
+  CreatedAt: string;
+  StartedAt?: string;
+  CompletedAt?: string;
+  Result?: RemoteEmbySyncResponse;
+  Error?: string;
+  MonitorUrl: string;
+}
+
+export interface RemoteEmbySyncQueuedResponse {
+  Queued: boolean;
+  Message?: string;
+  Operation: RemoteEmbySyncOperation;
+}
+
 export interface StartupConfiguration {
   ServerName: string;
   UiCulture: string;
@@ -1241,6 +1293,51 @@ export class EmbyApi {
         method: 'POST'
       }
     );
+  }
+
+  async remoteEmbySources() {
+    return this.request<RemoteEmbySource[]>('/api/admin/remote-emby/sources');
+  }
+
+  async createRemoteEmbySource(payload: {
+    Name: string;
+    ServerUrl: string;
+    Username: string;
+    Password: string;
+    TargetLibraryId: string;
+    SpoofedUserAgent?: string;
+    Enabled?: boolean;
+  }) {
+    return this.request<RemoteEmbySource>('/api/admin/remote-emby/sources', {
+      method: 'POST',
+      body: payload
+    });
+  }
+
+  async deleteRemoteEmbySource(sourceId: string) {
+    return this.request<void>(`/api/admin/remote-emby/sources/${encodeURIComponent(sourceId)}`, {
+      method: 'DELETE'
+    });
+  }
+
+  async startRemoteEmbySync(sourceId: string) {
+    return this.request<RemoteEmbySyncQueuedResponse>(
+      `/api/admin/remote-emby/sources/${encodeURIComponent(sourceId)}/sync`,
+      {
+        method: 'POST'
+      }
+    );
+  }
+
+  async remoteEmbySyncOperation(operationId: string) {
+    return this.request<RemoteEmbySyncOperation>(
+      `/api/admin/remote-emby/sync/operations/${encodeURIComponent(operationId)}`
+    );
+  }
+
+  async remoteEmbySyncOperations(limit = 20) {
+    const params = new URLSearchParams({ Limit: String(limit) });
+    return this.request<RemoteEmbySyncOperation[]>(`/api/admin/remote-emby/sync/operations?${params}`);
   }
 
   async markFavorite(itemId: string, isFavorite: boolean) {

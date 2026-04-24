@@ -662,6 +662,34 @@ CREATE INDEX IF NOT EXISTS idx_series_episode_catalog_series_date
     ON series_episode_catalog(series_id, premiere_date);
 
 -- ---------------------------------------------------------------------------
+-- remote_emby_sources：外部 Emby 中转源（账号密码登录 + UA 伪装）
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS remote_emby_sources (
+    id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name               text NOT NULL,
+    server_url         text NOT NULL,
+    username           text NOT NULL,
+    password           text NOT NULL,
+    spoofed_user_agent text NOT NULL,
+    target_library_id  uuid NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+    enabled            boolean NOT NULL DEFAULT true,
+    remote_user_id     text,
+    access_token       text,
+    source_secret      uuid NOT NULL DEFAULT gen_random_uuid(),
+    last_sync_at       timestamptz,
+    last_sync_error    text,
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    updated_at         timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique
+    ON remote_emby_sources(lower(name));
+CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_library
+    ON remote_emby_sources(target_library_id);
+CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_enabled
+    ON remote_emby_sources(enabled);
+
+-- ---------------------------------------------------------------------------
 -- session_play_queue / session_commands：远程控制 & 当前播放队列
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS session_play_queue (

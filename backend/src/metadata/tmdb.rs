@@ -1402,7 +1402,10 @@ mod tests {
             hit.image_url.as_deref(),
             Some("https://image.tmdb.org/t/p/original/p.jpg")
         );
-        assert_eq!(hit.provider_ids.get("Tmdb").map(String::as_str), Some("603"));
+        assert_eq!(
+            hit.provider_ids.get("Tmdb").map(String::as_str),
+            Some("603")
+        );
     }
 
     #[test]

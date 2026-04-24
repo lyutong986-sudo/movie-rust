@@ -26,8 +26,14 @@ pub fn router() -> Router<AppState> {
         .route("/streamlanguages", get(stream_languages))
         .route("/ExtendedVideoTypes", get(extended_video_types))
         .route("/extendedvideotypes", get(extended_video_types))
-        .route("/Libraries/AvailableOptions", get(library_available_options))
-        .route("/libraries/availableoptions", get(library_available_options))
+        .route(
+            "/Libraries/AvailableOptions",
+            get(library_available_options),
+        )
+        .route(
+            "/libraries/availableoptions",
+            get(library_available_options),
+        )
         .route("/Playback/BitrateTest", get(playback_bitrate_test))
         .route("/playback/bitratetest", get(playback_bitrate_test))
         .route(
@@ -423,11 +429,7 @@ async fn backup_restore_trigger(
     Json(payload): Json<BackupRestoreRequest>,
 ) -> Result<Json<Value>, AppError> {
     require_admin(&session)?;
-    let mode = payload
-        .mode
-        .as_deref()
-        .unwrap_or("Database")
-        .to_string();
+    let mode = payload.mode.as_deref().unwrap_or("Database").to_string();
     // 目前没有真正的 pg_dump 封装，记录请求并返回 Accepted，
     // 便于前端感知"已提交"。后续接入 PG 工具链后填充真实逻辑。
     let now = chrono::Utc::now().to_rfc3339();

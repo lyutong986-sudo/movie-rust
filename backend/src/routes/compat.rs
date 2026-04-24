@@ -24,7 +24,10 @@ pub fn router() -> Router<AppState> {
         .route("/Localization/Options", get(localization_options))
         .route("/Localization/Cultures", get(localization_cultures))
         .route("/Localization/Countries", get(localization_countries))
-        .route("/Localization/ParentalRatings", get(localization_parental_ratings))
+        .route(
+            "/Localization/ParentalRatings",
+            get(localization_parental_ratings),
+        )
         .route(
             "/UserSettings/{user_id}",
             get(user_settings).post(update_user_settings),

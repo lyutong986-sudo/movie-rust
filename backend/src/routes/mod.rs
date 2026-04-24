@@ -14,6 +14,7 @@ pub mod metadata_routes;
 pub mod misc;
 pub mod persons;
 pub mod playlists;
+pub mod remote_emby;
 pub mod scheduled_tasks;
 pub mod sessions;
 pub mod shows;
@@ -59,6 +60,7 @@ fn api_router() -> Router<AppState> {
         .merge(collections::router())
         .merge(live_streams::router())
         .merge(playlists::router())
+        .merge(remote_emby::router())
 }
 
 #[cfg(test)]

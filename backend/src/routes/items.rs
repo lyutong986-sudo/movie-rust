@@ -13,7 +13,7 @@ use crate::{
         QueryResult, TranscodingInfoDto, UpdateUserItemDataRequest, UserItemDataDto,
         UserItemDataQuery,
     },
-    naming,
+    naming, remote_emby,
     repository::{self, ItemListOptions, UpdateUserDataInput},
     state::AppState,
     work_limiter::{WorkLimiterConfig, WorkLimiterKind},
@@ -102,13 +102,19 @@ pub fn router() -> Router<AppState> {
         .route("/Items/{item_id}", get(item_by_id).post(update_item))
         .route("/Items/{item_id}/Ancestors", get(item_ancestors))
         .route("/Items/{item_id}/CriticReviews", get(item_critic_reviews))
-        .route("/Items/{item_id}/ExternalIdInfos", get(item_external_id_infos))
+        .route(
+            "/Items/{item_id}/ExternalIdInfos",
+            get(item_external_id_infos),
+        )
         .route("/Items/{item_id}/InstantMix", get(item_instant_mix))
         .route("/Items/{item_id}/ThemeMedia", get(item_theme_media))
         .route("/Items/{item_id}/ThemeSongs", get(item_theme_songs))
         .route("/Items/{item_id}/ThemeVideos", get(item_theme_videos))
         .route("/Items/{item_id}/MetadataEditor", get(item_metadata_editor))
-        .route("/Items/{item_id}/Delete", post(delete_item).delete(delete_item))
+        .route(
+            "/Items/{item_id}/Delete",
+            post(delete_item).delete(delete_item),
+        )
         .route("/Items/{item_id}/DeleteInfo", get(delete_item_info))
         .route("/Items/{item_id}/MakePrivate", post(make_item_private))
         .route("/Items/{item_id}/MakePublic", post(make_item_public))
@@ -150,7 +156,10 @@ pub fn router() -> Router<AppState> {
             "/Items/Metadata/Reset",
             get(query_items_metadata_reset_status).post(reset_items_metadata),
         )
-        .route("/Items/RemoteSearch/Apply/{item_id}", post(remote_search_apply))
+        .route(
+            "/Items/RemoteSearch/Apply/{item_id}",
+            post(remote_search_apply),
+        )
         .route("/Items/RemoteSearch/Book", post(remote_search_empty))
         .route("/Items/RemoteSearch/BoxSet", post(remote_search_empty))
         .route("/Items/RemoteSearch/Game", post(remote_search_empty))
@@ -1128,8 +1137,7 @@ async fn media_items_to_dto_result(
         .filter(|item| repository::is_folder_item_public(item))
         .map(|item| item.id)
         .collect();
-    let child_counts =
-        repository::count_item_children_batch(&state.pool, &folder_ids).await?;
+    let child_counts = repository::count_item_children_batch(&state.pool, &folder_ids).await?;
     let recursive_counts =
         repository::count_recursive_children_batch(&state.pool, &folder_ids).await?;
     let series_ids: Vec<uuid::Uuid> = result
@@ -1138,8 +1146,7 @@ async fn media_items_to_dto_result(
         .filter(|item| item.item_type.eq_ignore_ascii_case("Series"))
         .map(|item| item.id)
         .collect();
-    let season_counts =
-        repository::count_series_seasons_batch(&state.pool, &series_ids).await?;
+    let season_counts = repository::count_series_seasons_batch(&state.pool, &series_ids).await?;
 
     let mut items = Vec::with_capacity(result.items.len());
     for item in result.items {
@@ -1750,7 +1757,10 @@ struct UpdateItemBody {
     _locked_fields: Option<Vec<String>>,
 }
 
-fn coerce_name_list(primary: &Option<Vec<Value>>, fallback: &Option<Vec<Value>>) -> Option<Vec<String>> {
+fn coerce_name_list(
+    primary: &Option<Vec<Value>>,
+    fallback: &Option<Vec<Value>>,
+) -> Option<Vec<String>> {
     let source = primary.as_ref().or(fallback.as_ref())?;
     let mut out: Vec<String> = Vec::new();
     for value in source {
@@ -1765,7 +1775,11 @@ fn coerce_name_list(primary: &Option<Vec<Value>>, fallback: &Option<Vec<Value>>)
         };
         if let Some(name) = name {
             let trimmed = name.trim().to_string();
-            if !trimmed.is_empty() && !out.iter().any(|existing| existing.eq_ignore_ascii_case(&trimmed)) {
+            if !trimmed.is_empty()
+                && !out
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(&trimmed))
+            {
                 out.push(trimmed);
             }
         }
@@ -1839,7 +1853,10 @@ async fn update_item(
     });
 
     let updates = repository::MediaItemEditableFields {
-        name: body.name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        name: body
+            .name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
         original_title: body.original_title,
         sort_name: body.sort_name,
         overview: body.overview,
@@ -2012,9 +2029,7 @@ async fn remote_search_subtitles_apply(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn items_intros(
-    _session: AuthSession,
-) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+async fn items_intros(_session: AuthSession) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     Ok(Json(QueryResult {
         total_record_count: 0,
         items: Vec::new(),
@@ -2359,9 +2374,10 @@ async fn run_remote_search(
         .iter()
         .find_map(|(key, value)| {
             if key.eq_ignore_ascii_case("tmdb") {
-                value.as_str().map(ToOwned::to_owned).or_else(|| {
-                    value.as_i64().map(|id| id.to_string())
-                })
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .or_else(|| value.as_i64().map(|id| id.to_string()))
             } else {
                 None
             }
@@ -2382,21 +2398,17 @@ async fn run_remote_search(
             }
             let search_hits = provider.search_movie(&query_name, year).await?;
             for hit in search_hits {
-                if results
-                    .iter()
-                    .any(|existing| existing.get("ProviderIds").is_some_and(|ids| {
+                if results.iter().any(|existing| {
+                    existing.get("ProviderIds").is_some_and(|ids| {
                         ids.get("Tmdb")
                             .and_then(|value| value.as_str())
                             .map(|value| value == hit.external_id)
                             .unwrap_or(false)
-                    }))
-                {
+                    })
+                }) {
                     continue;
                 }
-                results.push(search_result_to_emby_value(
-                    &hit,
-                    &search_provider_name,
-                ));
+                results.push(search_result_to_emby_value(&hit, &search_provider_name));
             }
         }
         RemoteSearchKind::Series => {
@@ -2410,21 +2422,17 @@ async fn run_remote_search(
             }
             let search_hits = provider.search_series(&query_name, year).await?;
             for hit in search_hits {
-                if results
-                    .iter()
-                    .any(|existing| existing.get("ProviderIds").is_some_and(|ids| {
+                if results.iter().any(|existing| {
+                    existing.get("ProviderIds").is_some_and(|ids| {
                         ids.get("Tmdb")
                             .and_then(|value| value.as_str())
                             .map(|value| value == hit.external_id)
                             .unwrap_or(false)
-                    }))
-                {
+                    })
+                }) {
                     continue;
                 }
-                results.push(search_result_to_emby_value(
-                    &hit,
-                    &search_provider_name,
-                ));
+                results.push(search_result_to_emby_value(&hit, &search_provider_name));
             }
         }
         RemoteSearchKind::Person => {
@@ -2532,7 +2540,9 @@ async fn remote_search_apply(
 
     // 若客户端带来新的 provider ids，先写回媒体项，使重抓时能以新的 TMDb id 为准。
     if let Some(Json(payload)) = body {
-        if let Some(provider_ids) = payload.get("ProviderIds").and_then(|value| value.as_object())
+        if let Some(provider_ids) = payload
+            .get("ProviderIds")
+            .and_then(|value| value.as_object())
         {
             let cleaned: serde_json::Map<String, Value> = provider_ids
                 .iter()
@@ -2653,7 +2663,10 @@ async fn remote_search_image(
         if !include_all_langs && img.language.is_some() {
             // 当客户端要求仅当前语种时，TMDB 返回语言为 null 的（中性）图先跳过会造成过度过滤，
             // 因此只有在 language 与首选语言显式不同时才过滤。
-            let preferred = library_options.preferred_metadata_language.as_deref().unwrap_or("");
+            let preferred = library_options
+                .preferred_metadata_language
+                .as_deref()
+                .unwrap_or("");
             let lang = img.language.as_deref().unwrap_or("");
             if !preferred.is_empty() && !lang.is_empty() && !preferred.starts_with(lang) {
                 continue;
@@ -2715,7 +2728,9 @@ async fn remote_search_trailer(
                 .map(ToOwned::to_owned)
                 .or_else(|| value.as_i64().map(|id| id.to_string()))
         });
-    let search_provider_name = body.search_provider_name.unwrap_or_else(|| "TheMovieDb".into());
+    let search_provider_name = body
+        .search_provider_name
+        .unwrap_or_else(|| "TheMovieDb".into());
     let Some(tmdb_id) = tmdb_id else {
         return Ok(Json(json!([])));
     };
@@ -2749,9 +2764,7 @@ async fn remote_search_trailer(
     Ok(Json(Value::Array(results)))
 }
 
-async fn items_shared_leave(
-    _session: AuthSession,
-) -> Result<StatusCode, AppError> {
+async fn items_shared_leave(_session: AuthSession) -> Result<StatusCode, AppError> {
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3321,71 +3334,86 @@ async fn playback_info(
     let needs_metadata =
         item.video_codec.is_none() || item.audio_codec.is_none() || item.runtime_ticks.is_none();
     if needs_metadata {
-        work_limiter_config(&state).await?;
-        let item_path = item.path.clone();
-        let path = std::path::Path::new(&item_path);
-        if path.exists() {
-            if naming::is_strm(path) {
-                // 对于.strm文件，尝试分析远程URL
-                match std::fs::read_to_string(path) {
-                    Ok(content) => {
-                        if let Some(target_url) = naming::strm_target_from_text(&content) {
-                            tracing::debug!("分析.strm文件远程URL: {}", target_url);
-                            let _analysis_permit = state
-                                .work_limiters
-                                .acquire(WorkLimiterKind::MediaAnalysis)
-                                .await;
-                            match media_analyzer::analyze_remote_media(&target_url).await {
-                                Ok(analysis) => {
-                                    repository::update_media_item_metadata(
-                                        &state.pool,
-                                        item_id,
-                                        &analysis,
-                                    )
-                                    .await?;
-                                    item = repository::get_media_item(&state.pool, item_id)
-                                        .await?
-                                        .ok_or_else(|| {
-                                            AppError::NotFound("媒体条目不存在".to_string())
-                                        })?;
-                                    tracing::info!(
-                                        "已更新.strm文件远程媒体元数据: {}",
-                                        path.display()
-                                    );
+        if remote_emby::parse_virtual_media_path(&item.path).is_some() {
+            tracing::debug!("PlaybackInfo 跳过远端虚拟条目本地探测: {}", item.path);
+        } else {
+            work_limiter_config(&state).await?;
+            let item_path = item.path.clone();
+            let path = std::path::Path::new(&item_path);
+            if path.exists() {
+                if naming::is_strm(path) {
+                    // 对于.strm文件，尝试分析远程URL
+                    match std::fs::read_to_string(path) {
+                        Ok(content) => {
+                            if let Some(target_url) = naming::strm_target_from_text(&content) {
+                                if target_url.contains("/api/remote-emby/proxy/") {
+                                    tracing::debug!(
+                                    "PlaybackInfo 跳过远端 Emby 代理 .strm URL 直连分析，改由远端 PlaybackInfo 元数据补全: {}",
+                                    path.display()
+                                );
+                                } else {
+                                    tracing::debug!("分析.strm文件远程URL: {}", target_url);
+                                    let _analysis_permit = state
+                                        .work_limiters
+                                        .acquire(WorkLimiterKind::MediaAnalysis)
+                                        .await;
+                                    match media_analyzer::analyze_remote_media(&target_url).await {
+                                        Ok(analysis) => {
+                                            repository::update_media_item_metadata(
+                                                &state.pool,
+                                                item_id,
+                                                &analysis,
+                                            )
+                                            .await?;
+                                            item = repository::get_media_item(&state.pool, item_id)
+                                                .await?
+                                                .ok_or_else(|| {
+                                                    AppError::NotFound("媒体条目不存在".to_string())
+                                                })?;
+                                            tracing::info!(
+                                                "已更新.strm文件远程媒体元数据: {}",
+                                                path.display()
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "无法分析.strm远程媒体 {}: {}",
+                                                target_url,
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
-                                Err(e) => {
-                                    tracing::warn!("无法分析.strm远程媒体 {}: {}", target_url, e);
-                                }
+                            } else {
+                                tracing::debug!(".strm文件中未找到有效URL: {}", path.display());
                             }
-                        } else {
-                            tracing::debug!(".strm文件中未找到有效URL: {}", path.display());
+                        }
+                        Err(e) => {
+                            tracing::warn!("无法读取.strm文件 {}: {}", path.display(), e);
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("无法读取.strm文件 {}: {}", path.display(), e);
+                } else {
+                    // 对于普通文件，进行本地分析
+                    let _analysis_permit = state
+                        .work_limiters
+                        .acquire(WorkLimiterKind::MediaAnalysis)
+                        .await;
+                    match media_analyzer::analyze_media_file(path).await {
+                        Ok(analysis) => {
+                            repository::update_media_item_metadata(&state.pool, item_id, &analysis)
+                                .await?;
+                            item = repository::get_media_item(&state.pool, item_id)
+                                .await?
+                                .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+                        }
+                        Err(e) => {
+                            tracing::warn!("无法分析媒体文件 {}: {}", path.display(), e);
+                        }
                     }
                 }
             } else {
-                // 对于普通文件，进行本地分析
-                let _analysis_permit = state
-                    .work_limiters
-                    .acquire(WorkLimiterKind::MediaAnalysis)
-                    .await;
-                match media_analyzer::analyze_media_file(path).await {
-                    Ok(analysis) => {
-                        repository::update_media_item_metadata(&state.pool, item_id, &analysis)
-                            .await?;
-                        item = repository::get_media_item(&state.pool, item_id)
-                            .await?
-                            .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-                    }
-                    Err(e) => {
-                        tracing::warn!("无法分析媒体文件 {}: {}", path.display(), e);
-                    }
-                }
+                tracing::debug!("跳过媒体文件分析（文件不存在）: {}", path.display());
             }
-        } else {
-            tracing::debug!("跳过媒体文件分析（文件不存在）: {}", path.display());
         }
     }
 
@@ -4750,15 +4778,17 @@ async fn movies_recommendations(
     )
     .await?;
     if !latest.items.is_empty() {
-        categories.push(build_recommendation_category(
-            &state,
-            user_id,
-            "SimilarToRecentlyPlayed",
-            None,
-            "最近添加",
-            latest.items,
-        )
-        .await?);
+        categories.push(
+            build_recommendation_category(
+                &state,
+                user_id,
+                "SimilarToRecentlyPlayed",
+                None,
+                "最近添加",
+                latest.items,
+            )
+            .await?,
+        );
     }
 
     // 2) 基于用户最近播放的相似推荐（genre 交集）
@@ -5372,8 +5402,14 @@ mod tests {
         };
 
         let value = search_result_to_emby_value(&hit, "TheMovieDb");
-        assert_eq!(value.get("Name").and_then(Value::as_str), Some("The Matrix"));
-        assert_eq!(value.get("ProductionYear").and_then(Value::as_i64), Some(1999));
+        assert_eq!(
+            value.get("Name").and_then(Value::as_str),
+            Some("The Matrix")
+        );
+        assert_eq!(
+            value.get("ProductionYear").and_then(Value::as_i64),
+            Some(1999)
+        );
         assert_eq!(
             value.get("PremiereDate").and_then(Value::as_str),
             Some("1999-03-31")
@@ -5487,7 +5523,12 @@ mod tests {
             "Countries",
             "Cultures",
         ] {
-            assert!(body.get(key).and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()), "{key} should be non-empty");
+            assert!(
+                body.get(key)
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| !a.is_empty()),
+                "{key} should be non-empty"
+            );
         }
         // TheMovieDb/IMDb 一定出现在条目 id 列表里，否则客户端无法手填 TMDb/IMDb id。
         let keys: Vec<&str> = body["ExternalIdInfos"]

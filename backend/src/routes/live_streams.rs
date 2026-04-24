@@ -8,11 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
-    auth::AuthSession,
-    error::AppError,
-    models::emby_id_to_uuid,
-    repository,
-    state::AppState,
+    auth::AuthSession, error::AppError, models::emby_id_to_uuid, repository, state::AppState,
 };
 
 pub fn router() -> Router<AppState> {

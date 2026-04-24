@@ -40,14 +40,20 @@ pub fn router() -> Router<AppState> {
                 .post(add_virtual_folder)
                 .delete(remove_virtual_folder),
         )
-        .route("/Library/VirtualFolders/Delete", post(remove_virtual_folder))
+        .route(
+            "/Library/VirtualFolders/Delete",
+            post(remove_virtual_folder),
+        )
         .route("/Library/VirtualFolders/Query", get(virtual_folders))
         .route("/Library/VirtualFolders/Name", post(rename_virtual_folder))
         .route(
             "/Library/VirtualFolders/Paths",
             post(add_media_path).delete(remove_media_path),
         )
-        .route("/Library/VirtualFolders/Paths/Delete", post(remove_media_path))
+        .route(
+            "/Library/VirtualFolders/Paths/Delete",
+            post(remove_media_path),
+        )
         .route(
             "/Library/VirtualFolders/Paths/Update",
             post(update_media_path),
@@ -72,8 +78,14 @@ pub fn router() -> Router<AppState> {
             "/Environment/DefaultDirectoryBrowser",
             get(environment_default_directory_browser),
         )
-        .route("/Environment/NetworkDevices", get(environment_network_devices))
-        .route("/Environment/NetworkShares", get(environment_network_shares))
+        .route(
+            "/Environment/NetworkDevices",
+            get(environment_network_devices),
+        )
+        .route(
+            "/Environment/NetworkShares",
+            get(environment_network_shares),
+        )
         .route(
             "/Environment/DirectoryContents",
             get(environment_directory_contents).post(environment_directory_contents),
@@ -85,7 +97,10 @@ pub fn router() -> Router<AppState> {
         .route("/Environment/ParentPath", get(environment_parent_path))
         .route("/api/admin/scan", post(scan_libraries))
         .route("/api/admin/scan/operations", get(list_scan_operations))
-        .route("/api/admin/scan/operations/{operation_id}", get(get_scan_operation))
+        .route(
+            "/api/admin/scan/operations/{operation_id}",
+            get(get_scan_operation),
+        )
         .route(
             "/api/admin/scan/operations/{operation_id}/cancel",
             post(cancel_scan_operation),
@@ -250,7 +265,11 @@ async fn enqueue_library_scan(
         const KEEP_LATEST: usize = 100;
         while registry.operations.len() > KEEP_LATEST {
             if let Some(oldest_id) = registry.operations.keys().next().copied() {
-                if registry.active_operation_ids.values().any(|active| *active == oldest_id) {
+                if registry
+                    .active_operation_ids
+                    .values()
+                    .any(|active| *active == oldest_id)
+                {
                     break;
                 }
                 registry.operations.remove(&oldest_id);
@@ -806,9 +825,7 @@ async fn cancel_scan_operation(
     Ok(Json(dto))
 }
 
-async fn library_notify(
-    session: AuthSession,
-) -> Result<StatusCode, AppError> {
+async fn library_notify(session: AuthSession) -> Result<StatusCode, AppError> {
     auth::require_admin(&session)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -896,7 +913,12 @@ struct ScanLibrariesQuery {
         alias = "wait_for_completion"
     )]
     wait_for_completion: Option<bool>,
-    #[serde(default, rename = "LibraryId", alias = "libraryId", alias = "library_id")]
+    #[serde(
+        default,
+        rename = "LibraryId",
+        alias = "libraryId",
+        alias = "library_id"
+    )]
     library_id: Option<Uuid>,
 }
 

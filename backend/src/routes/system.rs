@@ -60,8 +60,14 @@ pub fn router() -> Router<AppState> {
             get(subtitle_download_configuration).post(update_subtitle_download_configuration),
         )
         .route("/System/Logs", get(server_logs))
-        .route("/System/Configuration", get(system_configuration).post(update_system_configuration))
-        .route("/System/Configuration/Partial", post(update_system_configuration_partial))
+        .route(
+            "/System/Configuration",
+            get(system_configuration).post(update_system_configuration),
+        )
+        .route(
+            "/System/Configuration/Partial",
+            post(update_system_configuration_partial),
+        )
         .route(
             "/System/Configuration/{name}",
             get(named_configuration).post(update_named_configuration),
@@ -395,9 +401,8 @@ async fn apply_system_configuration_update(
     payload: Value,
 ) -> Result<(), crate::error::AppError> {
     if let Some(startup_value) = payload.get("StartupConfiguration") {
-        let startup = serde_json::from_value::<crate::models::StartupConfiguration>(
-            startup_value.clone(),
-        )?;
+        let startup =
+            serde_json::from_value::<crate::models::StartupConfiguration>(startup_value.clone())?;
         repository::update_startup_configuration(&state.pool, &startup).await?;
     } else if payload.get("ServerName").is_some()
         || payload.get("UICulture").is_some()

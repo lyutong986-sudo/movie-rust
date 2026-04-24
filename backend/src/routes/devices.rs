@@ -57,7 +57,11 @@ async fn list_devices(
     let sessions = repository::list_sessions(&state.pool).await?;
 
     // 非管理员仅能看到自己设备
-    let visible_user = if session.is_admin { None } else { Some(session.user_id) };
+    let visible_user = if session.is_admin {
+        None
+    } else {
+        Some(session.user_id)
+    };
 
     let mut by_device: std::collections::BTreeMap<String, DeviceAccumulator> =
         std::collections::BTreeMap::new();
@@ -76,8 +80,9 @@ async fn list_devices(
                 continue;
             }
         }
-        let entry = by_device.entry(device_id.clone()).or_insert_with(|| {
-            DeviceAccumulator {
+        let entry = by_device
+            .entry(device_id.clone())
+            .or_insert_with(|| DeviceAccumulator {
                 id: device_id.clone(),
                 name: s
                     .device_name
@@ -88,8 +93,7 @@ async fn list_devices(
                 last_user_id: s.user_id,
                 last_user_name: s.user_name.clone(),
                 date_last_activity: s.last_activity_at,
-            }
-        });
+            });
         if s.last_activity_at > entry.date_last_activity {
             entry.date_last_activity = s.last_activity_at;
             entry.last_user_id = s.user_id;

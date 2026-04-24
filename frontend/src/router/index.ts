@@ -76,6 +76,12 @@ export const router = createRouter({
       meta: { title: '媒体库', section: 'admin', admin: true }
     },
     {
+      path: '/settings/remote-emby',
+      name: 'settings-remote-emby',
+      component: () => import('../pages/settings/RemoteEmbySettings.vue'),
+      meta: { title: '远端 Emby 中转', section: 'admin', admin: true }
+    },
+    {
       path: '/settings/users',
       name: 'settings-users',
       component: () => import('../pages/settings/UsersSettings.vue'),

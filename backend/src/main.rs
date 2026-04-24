@@ -5,6 +5,7 @@ mod media_analyzer;
 mod metadata;
 mod models;
 mod naming;
+mod remote_emby;
 mod repository;
 mod routes;
 mod scanner;
@@ -253,6 +254,31 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         END
         $$
         "#,
+        // -------------------------------------------------------------------
+        // remote_emby_sources：外部 Emby 中转源（账号密码登录 + 伪装 UA）。
+        // -------------------------------------------------------------------
+        r#"
+        CREATE TABLE IF NOT EXISTS remote_emby_sources (
+            id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name               TEXT NOT NULL,
+            server_url         TEXT NOT NULL,
+            username           TEXT NOT NULL,
+            password           TEXT NOT NULL,
+            spoofed_user_agent TEXT NOT NULL,
+            target_library_id  UUID NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+            enabled            BOOLEAN NOT NULL DEFAULT true,
+            remote_user_id     TEXT,
+            access_token       TEXT,
+            source_secret      UUID NOT NULL DEFAULT gen_random_uuid(),
+            last_sync_at       TIMESTAMPTZ,
+            last_sync_error    TEXT,
+            created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        "#,
+        r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique ON remote_emby_sources (lower(name))"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_library ON remote_emby_sources(target_library_id)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_enabled ON remote_emby_sources(enabled)"#,
         // -------------------------------------------------------------------
         // media_items：核心媒体表（对齐 BaseItemDto 全量预留列）。
         // -------------------------------------------------------------------
@@ -537,9 +563,7 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
 
     for statement in compatibility_sql {
         if let Err(error) = sqlx::query(statement).execute(pool).await {
-            tracing::warn!(
-                "Schema 兼容性补齐跳过（不影响启动）: {error}"
-            );
+            tracing::warn!("Schema 兼容性补齐跳过（不影响启动）: {error}");
         }
     }
 
