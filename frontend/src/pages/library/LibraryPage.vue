@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import MediaCard from '../../components/MediaCard.vue';
 import MediaCardSkeleton from '../../components/MediaCardSkeleton.vue';
@@ -9,6 +9,11 @@ import {
   currentParentName,
   hydrateParentStack,
   items,
+  libraryHasMore,
+  libraryLoadedCount,
+  libraryLoadingMore,
+  libraryTotalCount,
+  loadMoreItems,
   loadItems,
   loadLibraryGenres,
   libraryGenresCache,
@@ -23,6 +28,8 @@ import { itemRoute, playbackRoute } from '../../utils/navigation';
 
 const route = useRoute();
 const router = useRouter();
+const loadMoreTrigger = ref<HTMLElement | null>(null);
+let loadMoreObserver: IntersectionObserver | null = null;
 
 const VIEW_TYPES = [
   { value: '', label: '全部' },
@@ -142,6 +149,43 @@ async function playItem(item: BaseItemDto) {
 function toggleSortOrder() {
   state.librarySortAscending = !state.librarySortAscending;
 }
+
+function resetLoadMoreObserver() {
+  loadMoreObserver?.disconnect();
+  loadMoreObserver = null;
+  if (!loadMoreTrigger.value || !libraryHasMore.value) {
+    return;
+  }
+  loadMoreObserver = new IntersectionObserver(
+    (entries) => {
+      const shouldLoad = entries.some((entry) => entry.isIntersecting);
+      if (shouldLoad) {
+        void loadMoreItems();
+      }
+    },
+    { rootMargin: '480px 0px' }
+  );
+  loadMoreObserver.observe(loadMoreTrigger.value);
+}
+
+watch(
+  () => [items.value.length, libraryHasMore.value, libraryLoadingMore.value],
+  () => {
+    void nextTick(resetLoadMoreObserver);
+  }
+);
+
+watch(loadMoreTrigger, () => {
+  void nextTick(resetLoadMoreObserver);
+});
+
+onMounted(() => {
+  void nextTick(resetLoadMoreObserver);
+});
+
+onBeforeUnmount(() => {
+  loadMoreObserver?.disconnect();
+});
 </script>
 
 <template>
@@ -174,7 +218,9 @@ function toggleSortOrder() {
     >
       <div class="min-w-0">
         <h2 class="text-highlighted truncate text-base font-semibold">{{ currentParentName }}</h2>
-        <p class="text-muted text-xs">{{ items.length }} 个条目</p>
+        <p class="text-muted text-xs">
+          {{ libraryLoadedCount }} / {{ libraryTotalCount }} 个条目
+        </p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <USelect v-model="state.libraryViewType" :items="VIEW_TYPES" size="sm" class="w-32" />
@@ -289,6 +335,20 @@ function toggleSortOrder() {
         @play="playItem"
         @select="openMedia"
       />
+    </div>
+    <div v-if="items.length" class="flex flex-col items-center gap-2 py-2">
+      <div ref="loadMoreTrigger" class="h-0.5 w-full" />
+      <UButton
+        v-if="libraryHasMore"
+        :loading="libraryLoadingMore"
+        color="neutral"
+        variant="soft"
+        size="sm"
+        @click="loadMoreItems"
+      >
+        加载更多
+      </UButton>
+      <span v-else class="text-muted text-xs">已加载全部条目</span>
     </div>
     <EmptyState
       v-else

@@ -32,6 +32,7 @@ function itemsFromQuery<T>(result: { Items?: T[] | null }): T[] {
 
 const SERVERS_KEY = 'movie-rust-servers';
 const CURRENT_SERVER_KEY = 'movie-rust-current-server';
+const LIBRARY_PAGE_SIZE = 72;
 
 export const state = reactive({
   serverName: 'Movie Rust',
@@ -85,6 +86,10 @@ export const metadataCultures = ref<LocalizationCulture[]>([]);
 export const libraries = ref<BaseItemDto[]>([]);
 export const virtualFolders = ref<VirtualFolderInfo[]>([]);
 export const items = ref<BaseItemDto[]>([]);
+export const libraryTotalCount = ref(0);
+export const libraryLoadedCount = ref(0);
+export const libraryHasMore = ref(false);
+export const libraryLoadingMore = ref(false);
 export const homeItems = ref<BaseItemDto[]>([]);
 export const recentlyAddedTitles = ref<BaseItemDto[]>([]);
 export const latestByLibrary = ref<Record<string, BaseItemDto[]>>({});
@@ -94,6 +99,8 @@ export const parentStack = ref<BaseItemDto[]>([]);
 export const scanOperation = ref<ScanOperation | null>(null);
 
 let scanPollTimer = 0;
+let libraryRawFetchedCount = 0;
+let libraryQueryToken = 0;
 
 export const isAdmin = computed(() => Boolean(user.value?.Policy?.IsAdministrator));
 export const currentServer = computed(
@@ -474,41 +481,105 @@ function buildRecentlyAddedTitles(latestMap: Record<string, BaseItemDto[]>) {
     .slice(0, 36);
 }
 
+function filterHdrItems(list: BaseItemDto[]) {
+  if (!state.libraryOnlyHDR) {
+    return list;
+  }
+  return list.filter((item) => {
+    const vs = item.MediaStreams?.find((s) => s.Type === 'Video') ||
+      item.MediaSources?.[0]?.MediaStreams?.find((s) => s.Type === 'Video');
+    const vr = (vs as unknown as { VideoRange?: string } | undefined)?.VideoRange || '';
+    return /HDR|DOVI|DOLBY/i.test(vr);
+  });
+}
+
+function buildLibraryItemsOptions(startIndex: number, limit: number) {
+  const videoTypes: string[] = [];
+  if (state.libraryOnly4K) videoTypes.push('Video4K');
+  return {
+    includeTypes: state.libraryViewType ? [state.libraryViewType] : undefined,
+    genres: state.libraryGenres.length ? state.libraryGenres : undefined,
+    years: state.libraryYears.length ? state.libraryYears : undefined,
+    isFavorite: state.libraryFavoritesOnly || undefined,
+    videoTypes: videoTypes.length ? videoTypes : undefined,
+    hasSubtitles: state.librarySubtitlesOnly ? true : undefined,
+    sortBy: state.librarySortBy || 'SortName',
+    sortOrder: state.librarySortAscending ? 'Ascending' as const : 'Descending' as const,
+    limit,
+    startIndex,
+    // 列表卡只用到：图片、名字/年份、质量徽章（需 MediaStreams.Video）、ChildCount。
+    fields: ['MediaStreams', 'MediaSources', 'ChildCount']
+  };
+}
+
+async function fetchLibraryItemsPage(startIndex: number, limit: number) {
+  const parentId = parentStack.value.at(-1)?.Id || state.selectedLibraryId;
+  const result = await api.items(
+    parentId,
+    state.search,
+    Boolean(state.search.trim()),
+    buildLibraryItemsOptions(startIndex, limit)
+  );
+  const rawItems = itemsFromQuery(result);
+  return {
+    rawItems,
+    filteredItems: filterHdrItems(rawItems),
+    total: result.TotalRecordCount || 0
+  };
+}
+
 export async function loadItems() {
   if (!state.selectedLibraryId) {
     await loadHome();
     return;
   }
 
+  const token = ++libraryQueryToken;
   await run(async () => {
-    const parentId = parentStack.value.at(-1)?.Id || state.selectedLibraryId;
-    const videoTypes: string[] = [];
-    if (state.libraryOnly4K) videoTypes.push('Video4K');
-    const result = await api.items(parentId, state.search, Boolean(state.search.trim()), {
-      includeTypes: state.libraryViewType ? [state.libraryViewType] : undefined,
-      genres: state.libraryGenres.length ? state.libraryGenres : undefined,
-      years: state.libraryYears.length ? state.libraryYears : undefined,
-      isFavorite: state.libraryFavoritesOnly || undefined,
-      videoTypes: videoTypes.length ? videoTypes : undefined,
-      hasSubtitles: state.librarySubtitlesOnly ? true : undefined,
-      sortBy: state.librarySortBy || 'SortName',
-      sortOrder: state.librarySortAscending ? 'Ascending' : 'Descending',
-      limit: 180,
-      // 列表卡只用到：图片、名字/年份、质量徽章（需 MediaStreams.Video）、ChildCount。
-      // Overview / 其余不会渲染，去掉以减小响应体积。
-      fields: ['MediaStreams', 'MediaSources', 'ChildCount']
-    });
-    let list = itemsFromQuery(result);
-    if (state.libraryOnlyHDR) {
-      list = list.filter((item) => {
-        const vs = item.MediaStreams?.find((s) => s.Type === 'Video') ||
-          item.MediaSources?.[0]?.MediaStreams?.find((s) => s.Type === 'Video');
-        const vr = (vs as unknown as { VideoRange?: string } | undefined)?.VideoRange || '';
-        return /HDR|DOVI|DOLBY/i.test(vr);
-      });
+    libraryLoadingMore.value = false;
+    libraryRawFetchedCount = 0;
+    items.value = [];
+    libraryTotalCount.value = 0;
+    libraryLoadedCount.value = 0;
+    libraryHasMore.value = false;
+
+    const firstPage = await fetchLibraryItemsPage(0, LIBRARY_PAGE_SIZE);
+    if (token !== libraryQueryToken) {
+      return;
     }
-    items.value = list;
+
+    items.value = firstPage.filteredItems;
+    libraryRawFetchedCount = firstPage.rawItems.length;
+    libraryTotalCount.value = firstPage.total;
+    libraryLoadedCount.value = items.value.length;
+    libraryHasMore.value = libraryRawFetchedCount < libraryTotalCount.value && firstPage.rawItems.length > 0;
   });
+}
+
+export async function loadMoreItems() {
+  if (!state.selectedLibraryId || libraryLoadingMore.value || !libraryHasMore.value) {
+    return;
+  }
+  const token = libraryQueryToken;
+  libraryLoadingMore.value = true;
+  state.error = '';
+  try {
+    const page = await fetchLibraryItemsPage(libraryRawFetchedCount, LIBRARY_PAGE_SIZE);
+    if (token !== libraryQueryToken) {
+      return;
+    }
+    const seen = new Set(items.value.map((item) => item.Id));
+    const merged = page.filteredItems.filter((item) => !seen.has(item.Id));
+    items.value = [...items.value, ...merged];
+    libraryRawFetchedCount += page.rawItems.length;
+    libraryTotalCount.value = page.total;
+    libraryLoadedCount.value = items.value.length;
+    libraryHasMore.value = libraryRawFetchedCount < libraryTotalCount.value && page.rawItems.length > 0;
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    libraryLoadingMore.value = false;
+  }
 }
 
 
@@ -765,6 +836,12 @@ function clearClientState(keepInitialized: boolean) {
   publicUsers.value = [];
   libraries.value = [];
   items.value = [];
+  libraryTotalCount.value = 0;
+  libraryLoadedCount.value = 0;
+  libraryHasMore.value = false;
+  libraryLoadingMore.value = false;
+  libraryRawFetchedCount = 0;
+  libraryQueryToken = 0;
   homeItems.value = [];
   recentlyAddedTitles.value = [];
   latestByLibrary.value = {};
