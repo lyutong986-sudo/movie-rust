@@ -1623,13 +1623,14 @@ async fn send_remote_stream_request(
             false,
         )
         .await?;
-        let media_source = select_remote_playback_media_source(
+        let mut media_source = select_remote_playback_media_source(
             playback_info.media_sources.as_slice(),
             media_source_id,
         )
+        .cloned()
         .ok_or_else(|| AppError::BadRequest("远端 PlaybackInfo 未返回可用媒体源".to_string()))?;
 
-        let stream_path = media_source
+        let mut stream_path = media_source
             .direct_stream_url
             .as_deref()
             .filter(|value| !value.trim().is_empty())
@@ -1639,8 +1640,42 @@ async fn send_remote_stream_request(
                     .as_deref()
                     .filter(|value| !value.trim().is_empty())
             })
+            .map(str::to_string);
+
+        // 某些远端 Emby 仅在 IsPlayback=true 时返回可用流地址，先走 false，再兜底 true。
+        if stream_path.is_none() {
+            let fallback_playback_info = fetch_remote_playback_info(
+                pool,
+                source,
+                user_id.as_str(),
+                remote_item_id,
+                media_source_id,
+                true,
+            )
+            .await?;
+            media_source = select_remote_playback_media_source(
+                fallback_playback_info.media_sources.as_slice(),
+                media_source_id,
+            )
+            .cloned()
+            .ok_or_else(|| {
+                AppError::BadRequest("远端 PlaybackInfo 未返回可用媒体源".to_string())
+            })?;
+            stream_path = media_source
+                .direct_stream_url
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    media_source
+                        .transcoding_url
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                })
+                .map(str::to_string);
+        }
+        let stream_path = stream_path
             .ok_or_else(|| AppError::BadRequest("远端 PlaybackInfo 未提供可播放流".to_string()))?;
-        let mut endpoint = absolutize_remote_url(server_url.as_str(), stream_path);
+        let mut endpoint = absolutize_remote_url(server_url.as_str(), stream_path.as_str());
         if media_source
             .add_api_key_to_direct_stream_url
             .unwrap_or(false)
