@@ -202,6 +202,9 @@ async fn get_episodes(
 
     let mut parent_id = Some(series_id);
     let mut recursive = true;
+    let requested_start = query.start_index.unwrap_or(0).max(0);
+    let requested_limit = query.limit.unwrap_or(100).clamp(1, 200);
+    let needs_local_windowing = should_apply_local_episode_windowing(&query);
     // 如果提供了 SeasonId，则只获取该季；否则递归获取整部剧下的分集。
     if let Some(season_id) = query.season_id {
         let season = repository::get_media_item(&state.pool, season_id)
@@ -270,6 +273,16 @@ async fn get_episodes(
         }
         items
     } else {
+        let sql_start = if needs_local_windowing {
+            0
+        } else {
+            requested_start
+        };
+        let sql_limit = if needs_local_windowing {
+            requested_limit.saturating_mul(4)
+        } else {
+            requested_limit
+        };
         let episodes = repository::list_media_items(
             &state.pool,
             ItemListOptions {
@@ -312,12 +325,25 @@ async fn get_episodes(
                     .or_else(|| Some("Ascending".to_string())),
                 filters: None,
                 fields: query.fields.clone(),
-                start_index: 0,
-                limit: 10_000,
+                start_index: sql_start,
+                limit: sql_limit,
                 ..ItemListOptions::default()
             },
         )
         .await?;
+
+        if !needs_local_windowing {
+            let mut items = Vec::with_capacity(episodes.items.len());
+            for episode in episodes.items {
+                let dto = episode_to_dto(&state, user_id, &episode).await?;
+                items.push(apply_episode_response_shape(dto, &query));
+            }
+            return Ok(Json(QueryResult {
+                items,
+                total_record_count: episodes.total_record_count,
+                start_index: Some(sql_start),
+            }));
+        }
 
         let mut items = Vec::with_capacity(episodes.items.len());
         for episode in episodes.items {
@@ -335,12 +361,13 @@ async fn get_episodes(
     episode_dtos = apply_adjacent_items(episode_dtos, query.adjacent_to.as_deref());
 
     let total_record_count = episode_dtos.len() as i64;
-    let start_index = query.start_index.unwrap_or(0).max(0) as usize;
-    let limit = query.limit.unwrap_or(100).clamp(1, 200) as usize;
+    let start_index = requested_start as usize;
+    let limit = requested_limit as usize;
     let items = episode_dtos
         .into_iter()
         .skip(start_index)
         .take(limit)
+        .map(|item| apply_episode_response_shape(item, &query))
         .collect::<Vec<_>>();
 
     Ok(Json(QueryResult {
@@ -578,6 +605,91 @@ fn apply_show_response_shape(mut item: BaseItemDto, query: &ItemsQuery) -> BaseI
     item
 }
 
+fn apply_episode_response_shape(mut item: BaseItemDto, query: &EpisodesQuery) -> BaseItemDto {
+    let enable_image_types = parse_list(query.enable_image_types.as_deref());
+    let images_disabled = query.enable_images == Some(false)
+        || query.image_type_limit == Some(0)
+        || (query.image_type_limit.is_some_and(|limit| limit <= 0));
+
+    if images_disabled {
+        clear_item_images(&mut item);
+    } else if !enable_image_types.is_empty() {
+        retain_item_images(&mut item, &enable_image_types);
+    }
+
+    if query.enable_user_data == Some(false) {
+        item.user_data = repository::empty_user_data_for_item(
+            emby_id_to_uuid(&item.id).unwrap_or_else(|_| Uuid::nil()),
+        );
+    }
+
+    let requested_fields = parse_list(query.fields.as_deref());
+    if !requested_fields.is_empty() {
+        trim_episode_heavy_fields(&mut item, &requested_fields);
+    }
+
+    item
+}
+
+fn trim_episode_heavy_fields(item: &mut BaseItemDto, requested_fields: &[String]) {
+    if !contains_ignore_case(requested_fields, "Overview") {
+        item.overview = None;
+    }
+    if !contains_ignore_case(requested_fields, "Path") {
+        item.path = None;
+    }
+    if !contains_ignore_case(requested_fields, "People") {
+        item.people.clear();
+    }
+    if !contains_ignore_case(requested_fields, "MediaSources") {
+        item.media_sources.clear();
+    }
+    if !contains_ignore_case(requested_fields, "MediaStreams") {
+        item.media_streams.clear();
+    }
+    if !contains_ignore_case(requested_fields, "Chapters") {
+        item.chapters.clear();
+    }
+    if !contains_ignore_case(requested_fields, "RemoteTrailers") {
+        item.remote_trailers.clear();
+        item.local_trailer_count = 0;
+    }
+    if !contains_ignore_case(requested_fields, "Genres") {
+        item.genres.clear();
+        item.genre_items.clear();
+    }
+    if !contains_ignore_case(requested_fields, "Studios") {
+        item.studios.clear();
+        item.series_studio = None;
+    }
+    if !contains_ignore_case(requested_fields, "Tags") {
+        item.tags.clear();
+        item.tag_items.clear();
+        item.taglines.clear();
+    }
+    if !contains_ignore_case(requested_fields, "ProviderIds") {
+        item.provider_ids.clear();
+    }
+    if !contains_ignore_case(requested_fields, "ExternalUrls") {
+        item.external_urls.clear();
+    }
+    if !contains_ignore_case(requested_fields, "ProductionLocations") {
+        item.production_locations.clear();
+    }
+    if !contains_ignore_case(requested_fields, "RecursiveItemCount") {
+        item.recursive_item_count = None;
+    }
+    if !contains_ignore_case(requested_fields, "SeasonCount") {
+        item.season_count = None;
+    }
+    if !contains_ignore_case(requested_fields, "ChildCount") {
+        item.child_count = None;
+    }
+    if !contains_ignore_case(requested_fields, "ExtraFields") {
+        item.extra_fields.clear();
+    }
+}
+
 fn clear_item_images(item: &mut BaseItemDto) {
     item.primary_image_tag = None;
     item.image_tags.clear();
@@ -689,6 +801,22 @@ fn apply_episode_sort(items: &mut [BaseItemDto], sort_by: Option<&str>, sort_ord
     }
 }
 
+fn should_apply_local_episode_windowing(query: &EpisodesQuery) -> bool {
+    query.is_missing == Some(true)
+        || query
+            .start_item_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || query
+            .adjacent_to
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || query
+            .sort_by
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("Random"))
+}
+
 async fn get_episodes_by_season(
     session: AuthSession,
     State(state): State<AppState>,
@@ -708,6 +836,8 @@ async fn get_episodes_by_season(
     if season.item_type != "Season" {
         return Err(AppError::BadRequest("Item is not a season".to_string()));
     }
+    let requested_start = query.start_index.unwrap_or(0).max(0);
+    let requested_limit = query.limit.unwrap_or(100).clamp(1, 200);
 
     // 获取该季下的所有剧集
     let episodes = repository::list_media_items(
@@ -752,8 +882,8 @@ async fn get_episodes_by_season(
                 .or_else(|| Some("Ascending".to_string())),
             filters: None,
             fields: query.fields.clone(),
-            start_index: query.start_index.unwrap_or(0),
-            limit: query.limit.unwrap_or(100),
+            start_index: requested_start,
+            limit: requested_limit,
             ..ItemListOptions::default()
         },
     )
@@ -761,13 +891,14 @@ async fn get_episodes_by_season(
 
     let mut episode_dtos = Vec::with_capacity(episodes.items.len());
     for episode in episodes.items {
-        episode_dtos.push(episode_to_dto(&state, user_id, &episode).await?);
+        let dto = episode_to_dto(&state, user_id, &episode).await?;
+        episode_dtos.push(apply_episode_response_shape(dto, &query));
     }
 
     Ok(Json(QueryResult {
         items: episode_dtos,
         total_record_count: episodes.total_record_count,
-        start_index: query.start_index,
+        start_index: Some(requested_start),
     }))
 }
 
