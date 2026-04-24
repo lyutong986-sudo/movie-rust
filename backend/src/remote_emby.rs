@@ -1976,26 +1976,111 @@ async fn fetch_remote_playback_info(
 ) -> Result<RemotePlaybackInfo, AppError> {
     let server_url = normalize_server_url(&source.server_url);
     let endpoint = format!("{server_url}/Items/{remote_item_id}/PlaybackInfo");
-    let mut query = vec![
-        ("UserId".to_string(), user_id.to_string()),
-        ("StartTimeTicks".to_string(), "0".to_string()),
-        (
-            "IsPlayback".to_string(),
-            if is_playback { "true" } else { "false" }.to_string(),
-        ),
-        (
-            "AutoOpenLiveStream".to_string(),
-            if is_playback { "true" } else { "false" }.to_string(),
-        ),
-        ("MaxStreamingBitrate".to_string(), "6790000".to_string()),
-        ("reqformat".to_string(), "json".to_string()),
-    ];
-    if let Some(value) = media_source_id {
-        if !value.trim().is_empty() {
-            query.push(("MediaSourceId".to_string(), value.trim().to_string()));
+    let client = Client::new();
+    for attempt in 0..2 {
+        let _ = ensure_authenticated(pool, source, attempt > 0).await?;
+        let token = source
+            .access_token
+            .clone()
+            .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
+
+        let mut query = vec![
+            ("UserId".to_string(), user_id.to_string()),
+            ("StartTimeTicks".to_string(), "0".to_string()),
+            (
+                "IsPlayback".to_string(),
+                if is_playback { "true" } else { "false" }.to_string(),
+            ),
+            (
+                "AutoOpenLiveStream".to_string(),
+                if is_playback { "true" } else { "false" }.to_string(),
+            ),
+            ("MaxStreamingBitrate".to_string(), "6790000".to_string()),
+            ("reqformat".to_string(), "json".to_string()),
+        ];
+        if let Some(value) = media_source_id {
+            if !value.trim().is_empty() {
+                query.push(("MediaSourceId".to_string(), value.trim().to_string()));
+            }
         }
+
+        let response = client
+            .post(&endpoint)
+            .query(&query)
+            .query(&[("api_key", token.as_str())])
+            .header(
+                header::USER_AGENT.as_str(),
+                source.spoofed_user_agent.as_str(),
+            )
+            .header(header::ACCEPT.as_str(), "application/json")
+            .header(header::ACCEPT_ENCODING.as_str(), "identity")
+            .header("X-Emby-Token", token.as_str())
+            .header(
+                "X-Emby-Authorization",
+                emby_auth_header(source, Some(token.as_str())),
+            )
+            .json(&serde_json::json!({
+                "DeviceProfile": {
+                    "MaxStaticBitrate": 200000000,
+                    "MaxStreamingBitrate": 200000000,
+                    "DirectPlayProfiles": [
+                        { "Type": "Video" },
+                        { "Type": "Audio" }
+                    ],
+                    "TranscodingProfiles": [
+                        {
+                            "Container": "ts",
+                            "Type": "Video",
+                            "AudioCodec": "aac,mp3,ac3,eac3,opus",
+                            "VideoCodec": "h264",
+                            "Context": "Streaming",
+                            "Protocol": "hls",
+                            "MaxAudioChannels": "6",
+                            "MinSegments": "1",
+                            "BreakOnNonKeyFrames": true,
+                            "ManifestSubtitles": "vtt"
+                        }
+                    ],
+                    "ContainerProfiles": [],
+                    "SubtitleProfiles": [
+                        { "Format": "vtt", "Method": "External" },
+                        { "Format": "webvtt", "Method": "External" },
+                        { "Format": "srt", "Method": "External" },
+                        { "Format": "ass", "Method": "External" },
+                        { "Format": "ssa", "Method": "External" },
+                        { "Format": "subrip", "Method": "Embed" },
+                        { "Format": "srt", "Method": "Embed" },
+                        { "Format": "ass", "Method": "Embed" },
+                        { "Format": "ssa", "Method": "Embed" },
+                        { "Format": "vtt", "Method": "Hls" }
+                    ]
+                }
+            }))
+            .send()
+            .await?;
+
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) && attempt == 0
+        {
+            repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
+            source.access_token = None;
+            source.remote_user_id = None;
+            continue;
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::Internal(format!(
+                "远端 PlaybackInfo 请求失败: {} {}",
+                status.as_u16(),
+                body
+            )));
+        }
+        return parse_remote_json_response(response, &endpoint).await;
     }
-    get_json_with_retry(pool, source, &endpoint, &query).await
+    Err(AppError::Unauthorized)
 }
 
 fn select_remote_playback_media_source<'a>(
