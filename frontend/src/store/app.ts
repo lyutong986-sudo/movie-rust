@@ -23,6 +23,11 @@ export interface ServerEntry {
 
 export const api = new EmbyApi(import.meta.env.VITE_API_BASE || '');
 
+/** 后端若缺字段或解析异常时避免 `undefined` 写入 ref，防止首页模板访问 `.length` 直接崩溃 */
+function itemsFromQuery<T>(result: { Items?: T[] | null }): T[] {
+  return result.Items ?? [];
+}
+
 const SERVERS_KEY = 'movie-rust-servers';
 const CURRENT_SERVER_KEY = 'movie-rust-current-server';
 
@@ -261,11 +266,16 @@ export async function completeWizard() {
       const result = await api.login(state.adminName.trim(), state.adminPassword);
       user.value = result.User;
     }
-
-    if (user.value) {
-      await enterHome();
-    }
   }, state.adminPassword ? '设置完成' : '设置完成，请登录');
+
+  // enterHome 不包在 run 内：避免与「设置完成」同一次 catch 混在一起，且确保导航到首页前数据已拉取
+  if (user.value) {
+    try {
+      await enterHome();
+    } catch (error) {
+      state.error = error instanceof Error ? error.message : String(error);
+    }
+  }
 }
 
 export async function login(name = state.username, password = state.password) {
@@ -321,7 +331,7 @@ export function removeServer(url: string) {
 
 export async function loadLibraries() {
   const result = await api.libraries();
-  libraries.value = result.Items;
+  libraries.value = itemsFromQuery(result);
 }
 
 export async function loadVirtualFolders() {
@@ -341,7 +351,7 @@ export async function loadHome() {
       sortOrder: searching ? 'Ascending' : 'Descending',
       limit: 180
     });
-    homeItems.value = result.Items;
+    homeItems.value = itemsFromQuery(result);
   });
 }
 
@@ -362,7 +372,7 @@ export async function loadRecentlyAddedTitles() {
           sortOrder: 'Descending',
           limit: 36
         });
-        return result.Items;
+        return itemsFromQuery(result);
       }
 
       if (library.CollectionType === 'movies') {
@@ -372,7 +382,7 @@ export async function loadRecentlyAddedTitles() {
           sortOrder: 'Descending',
           limit: 36
         });
-        return result.Items;
+        return itemsFromQuery(result);
       }
 
       return [] as BaseItemDto[];
@@ -392,7 +402,7 @@ async function loadLibraryHomeItems(library: BaseItemDto) {
       sortOrder: 'Ascending',
       limit: 36
     });
-    return result.Items;
+    return itemsFromQuery(result);
   }
 
   if (library.CollectionType === 'movies') {
@@ -402,7 +412,7 @@ async function loadLibraryHomeItems(library: BaseItemDto) {
       sortOrder: 'Descending',
       limit: 36
     });
-    return result.Items;
+    return itemsFromQuery(result);
   }
 
   if (library.CollectionType === 'music') {
@@ -412,7 +422,7 @@ async function loadLibraryHomeItems(library: BaseItemDto) {
       sortOrder: 'Descending',
       limit: 36
     });
-    return result.Items;
+    return itemsFromQuery(result);
   }
 
   return api.latest(library.Id, 18);
@@ -440,7 +450,7 @@ export async function loadItems() {
       limit: 180,
       fields: ['MediaStreams', 'MediaSources', 'ChildCount', 'Overview']
     });
-    let list = result.Items;
+    let list = itemsFromQuery(result);
     if (state.libraryOnlyHDR) {
       list = list.filter((item) => {
         const vs = item.MediaStreams?.find((s) => s.Type === 'Video') ||
@@ -466,7 +476,9 @@ export async function loadLibraryGenres(libraryId: string) {
   if (libraryGenresCache.value[libraryId]) return libraryGenresCache.value[libraryId];
   try {
     const res = await api.genres(libraryId);
-    const names = res.Items.map((g) => g.Name).filter(Boolean);
+    const names = itemsFromQuery(res)
+      .map((g) => g.Name)
+      .filter(Boolean);
     libraryGenresCache.value[libraryId] = names;
     return names;
   } catch {

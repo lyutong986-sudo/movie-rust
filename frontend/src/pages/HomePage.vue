@@ -23,6 +23,9 @@ import { itemRoute, playbackRoute } from '../utils/navigation';
 
 const router = useRouter();
 
+// 显式 computed，避免模板里依赖「跨文件导入的 ref」在个别构建/版本下的自动解包差异
+const libraryList = computed(() => libraries.value ?? []);
+
 // Hero 轮播：优先继续观看 + 最近添加，最多 5 张，形成 Netflix 式首屏。
 const heroItems = computed(() => {
   const pool: BaseItemDto[] = [];
@@ -39,7 +42,7 @@ const heroItems = computed(() => {
 });
 
 const latestSections = computed(() =>
-  libraries.value
+  libraryList.value
     .map((library) => ({
       library,
       label: librarySectionLabel(library.CollectionType),
@@ -84,7 +87,8 @@ async function playItem(item: BaseItemDto) {
 </script>
 
 <template>
-  <div v-if="libraries.length" class="flex flex-col gap-8">
+  <div class="min-h-0 w-full min-w-0 flex-1">
+  <div v-if="libraryList.length" class="flex flex-col gap-8">
     <HeroCarousel
       v-if="heroItems.length"
       :items="heroItems"
@@ -95,11 +99,11 @@ async function playItem(item: BaseItemDto) {
     <section class="space-y-3">
       <div class="flex items-baseline justify-between">
         <h2 class="text-highlighted text-lg font-semibold">媒体库</h2>
-        <span class="text-muted text-sm">{{ libraries.length }} 个</span>
+        <span class="text-muted text-sm">{{ libraryList.length }} 个</span>
       </div>
       <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
         <button
-          v-for="library in libraries"
+          v-for="library in libraryList"
           :key="library.Id"
           type="button"
           class="group border-default bg-elevated/30 hover:bg-elevated/70 hover:ring-primary/40 flex flex-col items-start gap-2 rounded-xl border p-4 text-start transition hover:ring-1"
@@ -186,4 +190,5 @@ async function playItem(item: BaseItemDto) {
     :action-icon="isAdmin ? 'i-lucide-plus' : 'i-lucide-refresh-cw'"
     @action="() => (isAdmin ? router.push('/settings/libraries') : enterHome())"
   />
+  </div>
 </template>

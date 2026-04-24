@@ -664,3 +664,11 @@ npx vite build         # 构建成功
 | 顶栏/侧栏正常，`/Users/.../Views` 与 `/Items` 均为 200，但 **主内容区仅底色、无「媒体库」或空状态文案** | Dashboard 布局下 **flex 子项未设 `min-h-0`** 时，滚动区高度可塌成 0，子页面仍在 DOM 但不可见。 | `frontend/src/layouts/AppLayout.vue` 中 `#body` 包裹层增加 `min-h-0 flex-1 overflow-y-auto`（保留原有 `gap` / `padding`）。 |
 
 **附**：首屏「正在连接服务器……」来自 `App.vue` 在 `state.initialized` 为 false 时的加载壳；控制台偶发 **`Error: 未登录`** 来自 `frontend/src/api/emby.ts` 的 `requireUserId()`，多为初始化与恢复会话的竞态，与上述布局问题独立。
+
+**G. 首页仍无内容（第二轮修复，2026-04-24）**
+
+| 问题 | 修复 |
+| --- | --- |
+| `libraries.value = result.Items` 在 **`Items` 缺失** 时变成 `undefined`，模板访问 `.length` **渲染抛错**，整页空白 | `store/app.ts` 增加 `itemsFromQuery()`，凡从 `QueryResult` 取列表处统一 `Items ?? []`。 |
+| 向导 **`completeWizard` 内** `enterHome()` 与 `run()` 同层 try/catch，失败时与「设置完成」混在一起 | `enterHome` 移到 `run` **之后**，单独 try/catch 写入 `state.error`。 |
+| 模板依赖跨文件 `libraries` ref 的解包 + 面板未占满高度 | `HomePage.vue` 使用 **`libraryList` computed**；`UDashboardGroup` 增加 **`min-h-svh`**，`UDashboardPanel` 增加 **`flex min-h-0 flex-1 flex-col`**；首页根节点 **`min-w-0 flex-1`**。 |

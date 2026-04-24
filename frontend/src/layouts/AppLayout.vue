@@ -264,7 +264,7 @@ function onKeyDown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <UDashboardGroup unit="rem" storage="local">
+  <UDashboardGroup unit="rem" storage="local" class="min-h-svh min-w-0">
     <UDashboardSidebar
       class="bg-elevated/25"
       resizable
@@ -332,7 +332,7 @@ function onKeyDown(e: KeyboardEvent) {
       </template>
     </UDashboardSidebar>
 
-    <UDashboardPanel id="main">
+    <UDashboardPanel id="main" class="flex min-h-0 min-w-0 flex-1 flex-col">
       <UDashboardNavbar :title="currentTitle" :toggle="{ color: 'neutral', variant: 'ghost' }">
         <template #leading>
           <UDashboardSidebarCollapse />
