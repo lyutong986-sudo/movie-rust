@@ -101,9 +101,10 @@ function targetLibraryName(libraryId?: string) {
 }
 
 function sourceRemoteViewsText(source: RemoteEmbySource) {
-  if (!source.RemoteViewIds?.length) {
-    return '全部远端媒体库';
+  if (source.RemoteViews?.length) {
+    return source.RemoteViews.map((view) => view.Name || view.Id).join(' · ');
   }
+  if (!source.RemoteViewIds?.length) return '全部远端媒体库';
   return source.RemoteViewIds.map((viewId) => remoteViewNameMap.value.get(viewId.toLowerCase()) || viewId).join(' · ');
 }
 
@@ -323,6 +324,9 @@ async function createSource() {
   error.value = '';
   saved.value = '';
   try {
+    const selectedRemoteViews = remoteViews.value.filter((view) =>
+      payload.remoteViewIds.some((selectedId) => selectedId.toLowerCase() === view.Id.toLowerCase())
+    );
     await api.createRemoteEmbySource({
       Name: payload.name.trim(),
       ServerUrl: payload.serverUrl.trim(),
@@ -331,6 +335,7 @@ async function createSource() {
       TargetLibraryId: selectedLocalLibraryId,
       DisplayMode: payload.displayMode,
       RemoteViewIds: payload.remoteViewIds,
+      RemoteViews: selectedRemoteViews,
       SpoofedUserAgent: payload.spoofedUserAgent.trim(),
       Enabled: payload.enabled
     });

@@ -37,7 +37,7 @@ pub struct RemoteEmbySyncResult {
     pub scan_summary: ScanSummary,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemoteViewPreview {
     pub id: String,

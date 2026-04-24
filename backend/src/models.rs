@@ -45,6 +45,8 @@ pub struct DbRemoteEmbySource {
     pub display_mode: String,
     #[sqlx(default)]
     pub remote_view_ids: Vec<String>,
+    #[sqlx(default)]
+    pub remote_views: Value,
     pub enabled: bool,
     pub remote_user_id: Option<String>,
     pub access_token: Option<String>,

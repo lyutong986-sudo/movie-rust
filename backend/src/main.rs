@@ -268,6 +268,7 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             target_library_id  UUID NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
             display_mode       TEXT NOT NULL DEFAULT 'separate',
             remote_view_ids    TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+            remote_views       JSONB NOT NULL DEFAULT '[]'::jsonb,
             enabled            BOOLEAN NOT NULL DEFAULT true,
             remote_user_id     TEXT,
             access_token       TEXT,
@@ -285,6 +286,10 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         r#"
         ALTER TABLE remote_emby_sources
             ADD COLUMN IF NOT EXISTS remote_view_ids TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]
+        "#,
+        r#"
+        ALTER TABLE remote_emby_sources
+            ADD COLUMN IF NOT EXISTS remote_views JSONB NOT NULL DEFAULT '[]'::jsonb
         "#,
         r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique ON remote_emby_sources (lower(name))"#,
         r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_library ON remote_emby_sources(target_library_id)"#,

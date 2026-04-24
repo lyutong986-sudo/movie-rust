@@ -421,6 +421,7 @@ export interface RemoteEmbySource {
   TargetLibraryId: string;
   DisplayMode: 'merge' | 'separate' | string;
   RemoteViewIds: string[];
+  RemoteViews: RemoteEmbyView[];
   Enabled: boolean;
   SpoofedUserAgent: string;
   RemoteUserId?: string;
@@ -1330,6 +1331,7 @@ export class EmbyApi {
     TargetLibraryId: string;
     DisplayMode?: 'merge' | 'separate';
     RemoteViewIds?: string[];
+    RemoteViews?: RemoteEmbyView[];
     SpoofedUserAgent?: string;
     Enabled?: boolean;
   }) {

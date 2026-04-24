@@ -19,7 +19,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 use sqlx::{FromRow, Postgres, QueryBuilder, Row};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -2553,7 +2553,7 @@ pub async fn list_remote_emby_sources(
     Ok(sqlx::query_as::<_, DbRemoteEmbySource>(
         r#"
         SELECT
-            id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids,
+            id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             created_at, updated_at
         FROM remote_emby_sources
@@ -2571,7 +2571,7 @@ pub async fn get_remote_emby_source(
     Ok(sqlx::query_as::<_, DbRemoteEmbySource>(
         r#"
         SELECT
-            id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids,
+            id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             created_at, updated_at
         FROM remote_emby_sources
@@ -2593,6 +2593,7 @@ pub async fn create_remote_emby_source(
     target_library_id: Uuid,
     display_mode: &str,
     remote_view_ids: &[String],
+    remote_views: &Value,
     enabled: bool,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
@@ -2623,18 +2624,73 @@ pub async fn create_remote_emby_source(
         _ => "separate",
     };
     let mut sanitized_remote_view_ids = Vec::new();
+    let mut selected_remote_view_id_set = HashSet::new();
     for raw in remote_view_ids {
         let value = raw.trim();
         if value.is_empty() {
             continue;
         }
-        if !sanitized_remote_view_ids
-            .iter()
-            .any(|existing: &String| existing.eq_ignore_ascii_case(value))
-        {
+        let lowercase = value.to_ascii_lowercase();
+        if selected_remote_view_id_set.insert(lowercase) {
             sanitized_remote_view_ids.push(value.to_string());
         }
     }
+    let mut sanitized_remote_views = Vec::new();
+    let mut included_view_id_set = HashSet::new();
+    if let Some(items) = remote_views.as_array() {
+        for item in items {
+            let Some(map) = item.as_object() else {
+                continue;
+            };
+            let id = map
+                .get("Id")
+                .or_else(|| map.get("id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            if id.is_empty() {
+                continue;
+            }
+            if !selected_remote_view_id_set.is_empty()
+                && !selected_remote_view_id_set.contains(&id.to_ascii_lowercase())
+            {
+                continue;
+            }
+            let id_lower = id.to_ascii_lowercase();
+            if !included_view_id_set.insert(id_lower) {
+                continue;
+            }
+            let name = map
+                .get("Name")
+                .or_else(|| map.get("name"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(id);
+            let collection_type = map
+                .get("CollectionType")
+                .or_else(|| map.get("collectionType"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            sanitized_remote_views.push(json!({
+                "Id": id,
+                "Name": name,
+                "CollectionType": collection_type,
+            }));
+        }
+    }
+    for id in &sanitized_remote_view_ids {
+        if included_view_id_set.insert(id.to_ascii_lowercase()) {
+            sanitized_remote_views.push(json!({
+                "Id": id,
+                "Name": id,
+                "CollectionType": Value::Null,
+            }));
+        }
+    }
+    let sanitized_remote_views = Value::Array(sanitized_remote_views);
 
     let id = Uuid::new_v4();
     let source_secret = Uuid::new_v4();
@@ -2642,9 +2698,9 @@ pub async fn create_remote_emby_source(
         r#"
         INSERT INTO remote_emby_sources (
             id, name, server_url, username, password, spoofed_user_agent, target_library_id,
-            display_mode, remote_view_ids, enabled, source_secret
+            display_mode, remote_view_ids, remote_views, enabled, source_secret
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(id)
@@ -2656,6 +2712,7 @@ pub async fn create_remote_emby_source(
     .bind(target_library_id)
     .bind(display_mode)
     .bind(sanitized_remote_view_ids)
+    .bind(sanitized_remote_views)
     .bind(enabled)
     .bind(source_secret)
     .execute(pool)

@@ -67,10 +67,21 @@ struct CreateRemoteEmbySourceRequest {
     display_mode: Option<String>,
     #[serde(default, alias = "remoteViewIds")]
     remote_view_ids: Vec<String>,
+    #[serde(default, alias = "remoteViews")]
+    remote_views: Vec<CreateRemoteEmbySourceRemoteView>,
     #[serde(default, alias = "spoofedUserAgent", alias = "UserAgent")]
     spoofed_user_agent: Option<String>,
     #[serde(default, alias = "isEnabled")]
     enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+struct CreateRemoteEmbySourceRemoteView {
+    id: String,
+    name: String,
+    #[serde(default)]
+    collection_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +107,7 @@ struct RemoteEmbySourceDto {
     target_library_id: String,
     display_mode: String,
     remote_view_ids: Vec<String>,
+    remote_views: Vec<remote_emby::RemoteViewPreview>,
     enabled: bool,
     spoofed_user_agent: String,
     remote_user_id: Option<String>,
@@ -257,6 +269,8 @@ async fn create_remote_emby_source(
     Json(payload): Json<CreateRemoteEmbySourceRequest>,
 ) -> Result<Json<RemoteEmbySourceDto>, AppError> {
     auth::require_admin(&session)?;
+    let remote_views =
+        serde_json::to_value(&payload.remote_views).unwrap_or_else(|_| serde_json::json!([]));
     let source = repository::create_remote_emby_source(
         &state.pool,
         &payload.name,
@@ -271,6 +285,7 @@ async fn create_remote_emby_source(
         payload.target_library_id,
         payload.display_mode.as_deref().unwrap_or("separate"),
         payload.remote_view_ids.as_slice(),
+        &remote_views,
         payload.enabled.unwrap_or(true),
     )
     .await?;
@@ -569,6 +584,19 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
 }
 
 fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> RemoteEmbySourceDto {
+    let remote_views =
+        serde_json::from_value::<Vec<remote_emby::RemoteViewPreview>>(source.remote_views.clone())
+            .unwrap_or_else(|_| {
+                source
+                    .remote_view_ids
+                    .iter()
+                    .map(|id| remote_emby::RemoteViewPreview {
+                        id: id.clone(),
+                        name: id.clone(),
+                        collection_type: None,
+                    })
+                    .collect()
+            });
     RemoteEmbySourceDto {
         id: source.id.to_string(),
         name: source.name,
@@ -577,6 +605,7 @@ fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> Remot
         target_library_id: source.target_library_id.to_string(),
         display_mode: source.display_mode,
         remote_view_ids: source.remote_view_ids,
+        remote_views,
         enabled: source.enabled,
         spoofed_user_agent: source.spoofed_user_agent,
         remote_user_id: source.remote_user_id,
