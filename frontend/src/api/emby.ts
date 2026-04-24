@@ -5,7 +5,24 @@ export interface UserDto {
   HasPassword?: boolean;
   HasConfiguredPassword?: boolean;
   Policy: UserPolicy;
-  Configuration?: Record<string, unknown>;
+  Configuration?: UserConfiguration;
+}
+
+export interface UserConfiguration {
+  PlayDefaultAudioTrack?: boolean;
+  PlayDefaultSubtitleTrack?: boolean;
+  SubtitleMode?: string;
+  AudioLanguagePreference?: string;
+  SubtitleLanguagePreference?: string;
+  DisplayMissingEpisodes?: boolean;
+  GroupedFolders?: string[];
+  LatestItemsExcludes?: string[];
+  MyMediaExcludes?: string[];
+  OrderedViews?: string[];
+  HidePlayedInLatest?: boolean;
+  RememberAudioSelections?: boolean;
+  RememberSubtitleSelections?: boolean;
+  EnableLocalPassword?: boolean;
 }
 
 export interface AccessSchedule {
@@ -39,6 +56,8 @@ export interface UserPolicy {
   EnabledDevices?: string[];
   EnableAllDevices?: boolean;
   EnableContentDeletionFromFolders?: string[];
+  AuthenticationProviderId?: string;
+  PasswordResetProviderId?: string;
 }
 
 export interface AuthResult {
@@ -187,6 +206,14 @@ export interface StartupConfiguration {
   LibraryScanThreadCount: number;
   StrmAnalysisThreadCount: number;
   TmdbMetadataThreadCount: number;
+}
+
+export interface UserSettingsResponse {
+  UserId: string;
+  Configuration: UserConfiguration;
+  Policy: UserPolicy;
+  PreferredMetadataLanguage?: string;
+  PreferredMetadataCountryCode?: string;
 }
 
 export interface StartupRemoteAccess {
@@ -376,6 +403,21 @@ export class EmbyApi {
     });
   }
 
+  async authProviders() {
+    return this.request<Array<{ Id: string; Name: string; Type?: string; IsEnabled?: boolean }>>('/Auth/Providers');
+  }
+
+  async userSettings(userId: string) {
+    return this.request<UserSettingsResponse>(`/Users/${userId}/Settings`);
+  }
+
+  async updateUserSettings(userId: string, configuration: UserConfiguration) {
+    return this.request<UserConfiguration>(`/Users/${userId}/Settings`, {
+      method: 'POST',
+      body: configuration
+    });
+  }
+
   async me() {
     return this.request<UserDto>('/Users/Me');
   }
@@ -405,7 +447,7 @@ export class EmbyApi {
   }
 
   async startupConfiguration() {
-    return this.request<StartupConfiguration>('/Startup/Configuration', { auth: false });
+    return this.request<StartupConfiguration>('/Startup/Configuration');
   }
 
   async updateStartupConfiguration(payload: StartupConfiguration) {

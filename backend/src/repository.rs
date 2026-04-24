@@ -1813,6 +1813,7 @@ pub async fn active_session_count_for_user(
         SELECT COUNT(*)::bigint
         FROM sessions
         WHERE user_id = $1
+          AND session_type = 'Interactive'
           AND (expires_at IS NULL OR expires_at > now())
         "#,
     )

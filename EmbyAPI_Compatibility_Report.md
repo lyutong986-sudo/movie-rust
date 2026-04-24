@@ -563,3 +563,7 @@ cargo test --manifest-path backend/Cargo.toml transcoding_info_reports_real_reas
 - 启动向导现在会在创建首个管理员后立即登录该管理员；随后 /Startup/Configuration、/Startup/RemoteAccess、/Startup/Complete 会使用已建立的管理员会话继续完成初始化，从而兼顾首个用户创建后的安全收口与向导可用性。
 
 - 数据库初始化改为通过启动期 schema compatibility 预留字段兜底 media_items 结构：即使历史迁移缺失、迁移脚本被调整或旧库直接复用，服务启动时也会自动补齐 original_title 等当前后端真实依赖的列，避免初始化后进入界面即因缺列报错。
+
+- 用户管理补齐 Emby 风格关键能力：MaxActiveSessions 现在只统计 Interactive 会话，不再把 API key 算进登录会话上限；settings/users 新增了认证提供器、密码重置提供器、本地密码登录开关、管理员重置密码和用户偏好配置入口，并接入 /Users/{id}/Password、/Users/{id}/Settings、/Auth/Providers 等现有后端能力。
+
+- 管理后台加载用户管理与服务器设置时，/Startup/Configuration 读取已改为登录后自动携带认证；初始化向导阶段仍可匿名访问，但管理员进入后台后不会再因匿名读取 startup 配置而产生 401 噪音。

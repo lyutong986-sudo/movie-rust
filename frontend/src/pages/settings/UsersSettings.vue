@@ -2,14 +2,17 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import SettingsNav from '../../components/SettingsNav.vue';
 import { api, adminUsers, isAdmin, libraries, loadAdminData } from '../../store/app';
-import type { AccessSchedule, UserDto, UserPolicy } from '../../api/emby';
+import type { AccessSchedule, UserConfiguration, UserDto, UserPolicy } from '../../api/emby';
 
 const selectedUserId = ref('');
 const newUserName = ref('');
 const newPassword = ref('');
 const copyFromUserId = ref('');
+const resetPassword = ref('');
+const resetPasswordConfirm = ref('');
 const error = ref('');
 const saving = ref(false);
+const authProviderOptions = ref<string[]>(['Default']);
 
 const policyForm = reactive<UserPolicy>({
   IsAdministrator: false,
@@ -36,6 +39,23 @@ const policyForm = reactive<UserPolicy>({
   AccessSchedules: []
 });
 
+const configurationForm = reactive<UserConfiguration>({
+  PlayDefaultAudioTrack: true,
+  PlayDefaultSubtitleTrack: false,
+  SubtitleMode: 'Default',
+  AudioLanguagePreference: '',
+  SubtitleLanguagePreference: '',
+  DisplayMissingEpisodes: false,
+  GroupedFolders: [],
+  LatestItemsExcludes: [],
+  MyMediaExcludes: [],
+  OrderedViews: [],
+  HidePlayedInLatest: false,
+  RememberAudioSelections: true,
+  RememberSubtitleSelections: true,
+  EnableLocalPassword: true
+});
+
 const tagText = ref('');
 const deviceText = ref('');
 const scheduleForm = reactive<AccessSchedule>({
@@ -50,14 +70,26 @@ const mediaLibraries = computed(() => libraries.value.filter((library) => ['movi
 watch(selectedUser, (user) => {
   if (user) {
     Object.assign(policyForm, normalizePolicy(user.Policy));
+    Object.assign(configurationForm, normalizeConfiguration(user.Configuration));
     tagText.value = (policyForm.BlockedTags || []).join(', ');
     deviceText.value = (policyForm.EnabledDevices || []).join(', ');
+    resetPassword.value = '';
+    resetPasswordConfirm.value = '';
   }
 }, { immediate: true });
 
 onMounted(async () => {
   if (isAdmin.value) {
     await loadAdminData();
+    try {
+      const providers = await api.authProviders();
+      const values = providers
+        .map((provider) => provider.Id || provider.Name)
+        .filter(Boolean);
+      authProviderOptions.value = values.length ? Array.from(new Set(values)) : ['Default'];
+    } catch {
+      authProviderOptions.value = ['Default'];
+    }
     selectedUserId.value = adminUsers.value[0]?.Id || '';
   }
 });
@@ -79,6 +111,8 @@ function normalizePolicy(policy: UserDto['Policy']): UserPolicy {
     EnabledFolders: [...(policy?.EnabledFolders || [])],
     EnableAllDevices: policy?.EnableAllDevices ?? true,
     EnabledDevices: [...(policy?.EnabledDevices || [])],
+    AuthenticationProviderId: policy?.AuthenticationProviderId || 'Default',
+    PasswordResetProviderId: policy?.PasswordResetProviderId || 'Default',
     MaxParentalRating: policy?.MaxParentalRating ?? null,
     MaxActiveSessions: policy?.MaxActiveSessions ?? 0,
     LoginAttemptsBeforeLockout: policy?.LoginAttemptsBeforeLockout ?? -1,
@@ -87,6 +121,25 @@ function normalizePolicy(policy: UserDto['Policy']): UserPolicy {
     AllowedTags: [...(policy?.AllowedTags || [])],
     BlockUnratedItems: [...(policy?.BlockUnratedItems || [])],
     AccessSchedules: [...(policy?.AccessSchedules || [])]
+  };
+}
+
+function normalizeConfiguration(configuration: UserDto['Configuration']): UserConfiguration {
+  return {
+    PlayDefaultAudioTrack: configuration?.PlayDefaultAudioTrack ?? true,
+    PlayDefaultSubtitleTrack: configuration?.PlayDefaultSubtitleTrack ?? false,
+    SubtitleMode: configuration?.SubtitleMode || 'Default',
+    AudioLanguagePreference: configuration?.AudioLanguagePreference || '',
+    SubtitleLanguagePreference: configuration?.SubtitleLanguagePreference || '',
+    DisplayMissingEpisodes: configuration?.DisplayMissingEpisodes ?? false,
+    GroupedFolders: [...(configuration?.GroupedFolders || [])],
+    LatestItemsExcludes: [...(configuration?.LatestItemsExcludes || [])],
+    MyMediaExcludes: [...(configuration?.MyMediaExcludes || [])],
+    OrderedViews: [...(configuration?.OrderedViews || [])],
+    HidePlayedInLatest: configuration?.HidePlayedInLatest ?? false,
+    RememberAudioSelections: configuration?.RememberAudioSelections ?? true,
+    RememberSubtitleSelections: configuration?.RememberSubtitleSelections ?? true,
+    EnableLocalPassword: configuration?.EnableLocalPassword ?? true
   };
 }
 
@@ -119,7 +172,7 @@ async function createUser() {
   }
 }
 
-async function savePolicy() {
+async function saveUser() {
   const user = selectedUser.value;
   if (!user) return;
   saving.value = true;
@@ -133,6 +186,26 @@ async function savePolicy() {
       AccessSchedules: [...(policyForm.AccessSchedules || [])]
     };
     await api.updateUserPolicy(user.Id, next);
+    await api.updateUserSettings(user.Id, {
+      ...configurationForm,
+      GroupedFolders: [...(configurationForm.GroupedFolders || [])],
+      LatestItemsExcludes: [...(configurationForm.LatestItemsExcludes || [])],
+      MyMediaExcludes: [...(configurationForm.MyMediaExcludes || [])],
+      OrderedViews: [...(configurationForm.OrderedViews || [])]
+    });
+    if (resetPassword.value || resetPasswordConfirm.value) {
+      if (resetPassword.value.length < 4) {
+        throw new Error('新密码至少需要 4 个字符');
+      }
+      if (resetPassword.value !== resetPasswordConfirm.value) {
+        throw new Error('两次输入的新密码不一致');
+      }
+      await api.changePassword(user.Id, {
+        NewPw: resetPassword.value
+      });
+      resetPassword.value = '';
+      resetPasswordConfirm.value = '';
+    }
     await loadAdminData();
   } catch (err) {
     error.value = err instanceof Error ? err.message : '保存用户策略失败';
@@ -193,7 +266,7 @@ function removeSchedule(index: number) {
             <p>用户</p>
             <h2>用户管理</h2>
           </div>
-          <button type="button" :disabled="saving" @click="savePolicy">保存策略</button>
+          <button type="button" :disabled="saving" @click="saveUser">保存更改</button>
         </header>
 
         <p v-if="error" class="form-error">{{ error }}</p>
@@ -234,6 +307,31 @@ function removeSchedule(index: number) {
                 <label><input v-model="policyForm.IsDisabled" type="checkbox" /> 禁用用户</label>
                 <label><input v-model="policyForm.EnableRemoteAccess" type="checkbox" /> 允许远程访问</label>
                 <label><input v-model="policyForm.EnableUserPreferenceAccess" type="checkbox" /> 允许修改个人偏好</label>
+              </div>
+              <div class="form-grid">
+                <label>
+                  认证提供器
+                  <select v-model="policyForm.AuthenticationProviderId">
+                    <option v-for="provider in authProviderOptions" :key="provider" :value="provider">{{ provider }}</option>
+                  </select>
+                </label>
+                <label>
+                  密码重置提供器
+                  <select v-model="policyForm.PasswordResetProviderId">
+                    <option v-for="provider in authProviderOptions" :key="`reset-${provider}`" :value="provider">{{ provider }}</option>
+                  </select>
+                </label>
+              </div>
+            </section>
+
+            <section class="settings-band">
+              <h3>密码与登录方式</h3>
+              <div class="toggle-grid">
+                <label><input v-model="configurationForm.EnableLocalPassword" type="checkbox" /> 允许本地密码登录</label>
+              </div>
+              <div class="form-grid">
+                <label>重置密码<input v-model="resetPassword" type="password" placeholder="留空表示不修改" /></label>
+                <label>确认新密码<input v-model="resetPasswordConfirm" type="password" placeholder="再次输入新密码" /></label>
               </div>
             </section>
 
@@ -298,6 +396,32 @@ function removeSchedule(index: number) {
                 <button v-for="(schedule, index) in policyForm.AccessSchedules" :key="`${schedule.DayOfWeek}-${index}`" type="button" @click="removeSchedule(index)">
                   {{ schedule.DayOfWeek }} {{ schedule.StartHour }}-{{ schedule.EndHour }}
                 </button>
+              </div>
+            </section>
+
+            <section class="settings-band">
+              <h3>用户偏好</h3>
+              <div class="toggle-grid">
+                <label><input v-model="configurationForm.PlayDefaultAudioTrack" type="checkbox" /> 默认选择音轨</label>
+                <label><input v-model="configurationForm.PlayDefaultSubtitleTrack" type="checkbox" /> 默认选择字幕</label>
+                <label><input v-model="configurationForm.DisplayMissingEpisodes" type="checkbox" /> 显示缺失剧集</label>
+                <label><input v-model="configurationForm.HidePlayedInLatest" type="checkbox" /> 最新内容中隐藏已播放</label>
+                <label><input v-model="configurationForm.RememberAudioSelections" type="checkbox" /> 记住音轨选择</label>
+                <label><input v-model="configurationForm.RememberSubtitleSelections" type="checkbox" /> 记住字幕选择</label>
+              </div>
+              <div class="form-grid">
+                <label>
+                  字幕模式
+                  <select v-model="configurationForm.SubtitleMode">
+                    <option value="Default">Default</option>
+                    <option value="Always">Always</option>
+                    <option value="OnlyForced">OnlyForced</option>
+                    <option value="None">None</option>
+                    <option value="Smart">Smart</option>
+                  </select>
+                </label>
+                <label>音频语言偏好<input v-model="configurationForm.AudioLanguagePreference" placeholder="如 zh, en, ja" /></label>
+                <label>字幕语言偏好<input v-model="configurationForm.SubtitleLanguagePreference" placeholder="如 zh, en" /></label>
               </div>
             </section>
 
