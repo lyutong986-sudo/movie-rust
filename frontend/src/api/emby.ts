@@ -247,9 +247,29 @@ export interface ScanSummary {
   ImportedItems: number;
 }
 
+export interface ScanOperation {
+  Id: string;
+  Trigger: string;
+  Status: string;
+  Progress: number;
+  Queued: boolean;
+  Running: boolean;
+  Done: boolean;
+  CancelRequested: boolean;
+  CreatedAt: string;
+  StartedAt?: string;
+  CompletedAt?: string;
+  Attempts: number;
+  MaxAttempts: number;
+  Result?: ScanSummary;
+  Error?: string;
+  MonitorUrl: string;
+}
+
 export interface ScanQueuedResponse {
   Queued: boolean;
   Message?: string;
+  Operation: ScanOperation;
 }
 
 export interface StartupConfiguration {
@@ -770,6 +790,24 @@ export class EmbyApi {
     return this.request<ScanSummary | ScanQueuedResponse>(`/api/admin/scan?${params}`, {
       method: 'POST'
     });
+  }
+
+  async scanOperation(operationId: string) {
+    return this.request<ScanOperation>(`/api/admin/scan/operations/${encodeURIComponent(operationId)}`);
+  }
+
+  async scanOperations(limit = 20) {
+    const params = new URLSearchParams({ Limit: String(limit) });
+    return this.request<ScanOperation[]>(`/api/admin/scan/operations?${params}`);
+  }
+
+  async cancelScanOperation(operationId: string) {
+    return this.request<ScanOperation>(
+      `/api/admin/scan/operations/${encodeURIComponent(operationId)}/cancel`,
+      {
+        method: 'POST'
+      }
+    );
   }
 
   async markFavorite(itemId: string, isFavorite: boolean) {

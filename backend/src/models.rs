@@ -1839,7 +1839,7 @@ fn default_min_collection_items() -> i32 {
     2
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ScanSummary {
     pub libraries: i64,

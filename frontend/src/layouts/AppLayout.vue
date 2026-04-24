@@ -9,8 +9,10 @@ import {
   loadLibraries,
   logout,
   parentStack,
+  scanOperation,
   selectedItem,
   state,
+  totalLibraryItems,
   user
 } from '../store/app';
 import CommandPalette from '../components/CommandPalette.vue';
@@ -110,6 +112,15 @@ const libraryNavItems = computed(() =>
     badge: library.ChildCount ? String(library.ChildCount) : undefined
   }))
 );
+const librarySummaryText = computed(() => {
+  const count = totalLibraryItems.value;
+  const operation = scanOperation.value;
+  if (operation && !operation.Done) {
+    const progress = Number.isFinite(operation.Progress) ? Math.round(operation.Progress) : 0;
+    return `媒体库 · ${count} · ${operation.Status} ${progress}%`;
+  }
+  return `媒体库 · ${count}`;
+});
 
 const userAvatarSrc = computed(() => api.userImageUrl(user.value) || undefined);
 
@@ -304,7 +315,9 @@ function onKeyDown(e: KeyboardEvent) {
         <USeparator v-if="libraryNavItems.length" type="dashed" />
 
         <div v-if="!collapsed && libraryNavItems.length" class="px-2 py-1">
-          <p class="text-muted text-[10px] font-medium uppercase tracking-wider">媒体库</p>
+          <p class="text-muted text-[10px] font-medium uppercase tracking-wider">
+            {{ librarySummaryText }}
+          </p>
         </div>
         <UNavigationMenu
           v-if="libraryNavItems.length"

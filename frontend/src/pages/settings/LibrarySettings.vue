@@ -1,15 +1,20 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import AddLibraryDialog from '../../components/AddLibraryDialog.vue';
 import SettingsLayout from '../../layouts/SettingsLayout.vue';
 import {
+  api,
+  cancelCurrentScan,
   deleteLibrary,
   isAdmin,
+  libraries,
   loadAdminData,
   loadLibraries,
+  scanOperation,
   loadVirtualFolders,
   scan,
   state,
+  totalLibraryItems,
   virtualFolders
 } from '../../store/app';
 import type { VirtualFolderInfo } from '../../api/emby';
@@ -19,6 +24,61 @@ onMounted(async () => {
     await Promise.all([loadAdminData(), loadLibraries(), loadVirtualFolders()]);
   }
 });
+
+const scanStatusColor = computed(() => {
+  const status = scanOperation.value?.Status;
+  if (!status) return 'neutral';
+  if (status === 'Succeeded') return 'success';
+  if (status === 'Failed') return 'error';
+  if (status === 'Cancelled') return 'neutral';
+  return 'warning';
+});
+
+const canCancelScan = computed(() => {
+  const status = scanOperation.value?.Status;
+  return status === 'Queued' || status === 'Running' || status === 'Cancelling';
+});
+const scanRunning = computed(() => canCancelScan.value);
+const requestedLibraryId = ref<string | null>(null);
+watch(scanRunning, (running) => {
+  if (!running) requestedLibraryId.value = null;
+});
+
+const libraryCountById = computed(() => {
+  const map = new Map<string, number>();
+  for (const library of libraries.value) {
+    if (library?.Id) {
+      map.set(library.Id, library.ChildCount || 0);
+    }
+  }
+  return map;
+});
+
+const scanProgressText = computed(() => {
+  const progress = scanOperation.value?.Progress;
+  if (typeof progress !== 'number' || !Number.isFinite(progress)) return '0%';
+  return `${Math.round(progress)}%`;
+});
+
+function formatTime(value?: string | null) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleString();
+}
+
+function monitorUrl() {
+  const id = scanOperation.value?.Id;
+  if (!id) return '-';
+  return `/api/admin/scan/operations/${id}`;
+}
+
+async function openMonitor() {
+  const id = scanOperation.value?.Id;
+  if (!id) return;
+  const operation = await api.scanOperation(id);
+  scanOperation.value = operation;
+}
 
 function collectionLabel(type: string) {
   if (type === 'tvshows') return '电视剧';
@@ -42,6 +102,34 @@ function collectionIcon(type: string) {
 
 function edit(folder: VirtualFolderInfo) {
   state.editingLibrary = folder;
+}
+
+function folderCount(folder: VirtualFolderInfo) {
+  return libraryCountById.value.get(folder.ItemId) || 0;
+}
+
+function folderScanStatus(folder: VirtualFolderInfo) {
+  if (!scanRunning.value) return 'Idle';
+  if (!requestedLibraryId.value) return 'Running (All)';
+  if (requestedLibraryId.value === folder.ItemId) return scanOperation.value?.Status || 'Running';
+  return 'Queued';
+}
+
+function isFolderScanButtonDisabled(folder: VirtualFolderInfo) {
+  if (state.busy) return true;
+  if (!scanRunning.value) return false;
+  if (!requestedLibraryId.value) return true;
+  return requestedLibraryId.value === folder.ItemId;
+}
+
+async function scanFolder(folder: VirtualFolderInfo) {
+  requestedLibraryId.value = folder.ItemId;
+  await scan();
+}
+
+async function scanAllLibraries() {
+  requestedLibraryId.value = null;
+  await scan();
 }
 
 async function remove(folder: VirtualFolderInfo) {
@@ -77,7 +165,7 @@ async function remove(folder: VirtualFolderInfo) {
             variant="subtle"
             icon="i-lucide-refresh-ccw"
             :loading="state.busy"
-            @click="scan"
+            @click="scanAllLibraries"
           >
             扫描所有媒体库
           </UButton>
@@ -86,6 +174,78 @@ async function remove(folder: VirtualFolderInfo) {
 
       <UAlert v-if="state.error" color="error" icon="i-lucide-triangle-alert" :description="state.error" />
       <UAlert v-else-if="state.message" color="success" icon="i-lucide-check" :description="state.message" />
+
+      <UCard variant="soft">
+        <template #header>
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <p class="text-muted text-xs uppercase tracking-wider">Tasks</p>
+              <h3 class="text-highlighted text-base font-semibold">媒体库扫描任务</h3>
+            </div>
+            <div class="flex items-center gap-2">
+              <UBadge :color="scanStatusColor" variant="soft" size="sm">
+                {{ scanOperation?.Status || 'Idle' }}
+              </UBadge>
+              <UButton
+                color="error"
+                variant="soft"
+                size="sm"
+                icon="i-lucide-square"
+                :disabled="!canCancelScan || state.busy"
+                @click="cancelCurrentScan"
+              >
+                取消
+              </UButton>
+            </div>
+          </div>
+        </template>
+        <div class="grid gap-3 md:grid-cols-2">
+          <div class="rounded-lg border border-default p-3">
+            <p class="text-muted text-xs">当前媒体库总片源</p>
+            <p class="text-highlighted mt-1 text-2xl font-semibold">{{ totalLibraryItems }}</p>
+          </div>
+          <div class="rounded-lg border border-default p-3">
+            <p class="text-muted text-xs">扫描进度</p>
+            <p class="text-highlighted mt-1 text-2xl font-semibold">{{ scanProgressText }}</p>
+            <UProgress
+              class="mt-2"
+              :model-value="scanOperation?.Progress || 0"
+              :max="100"
+              :color="scanStatusColor"
+            />
+          </div>
+          <div class="rounded-lg border border-default p-3">
+            <p class="text-muted text-xs">开始时间</p>
+            <p class="text-highlighted mt-1 text-sm font-medium">{{ formatTime(scanOperation?.StartedAt) }}</p>
+          </div>
+          <div class="rounded-lg border border-default p-3">
+            <p class="text-muted text-xs">结束时间</p>
+            <p class="text-highlighted mt-1 text-sm font-medium">{{ formatTime(scanOperation?.CompletedAt) }}</p>
+          </div>
+        </div>
+
+        <div class="mt-3 space-y-2">
+          <p class="text-muted text-xs">错误详情</p>
+          <UAlert
+            v-if="scanOperation?.Error"
+            color="error"
+            icon="i-lucide-badge-alert"
+            :description="scanOperation.Error"
+          />
+          <p v-else class="text-muted rounded-lg border border-default bg-elevated/40 p-3 text-xs">
+            当前无错误
+          </p>
+        </div>
+
+        <template #footer>
+          <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <span class="text-muted font-mono">Monitor: {{ monitorUrl() }}</span>
+            <UButton color="neutral" variant="subtle" size="sm" icon="i-lucide-refresh-cw" @click="openMonitor">
+              刷新状态
+            </UButton>
+          </div>
+        </template>
+      </UCard>
 
       <div v-if="virtualFolders.length" class="grid gap-3 md:grid-cols-2">
         <UCard v-for="folder in virtualFolders" :key="folder.ItemId">
@@ -98,6 +258,17 @@ async function remove(folder: VirtualFolderInfo) {
                 <h3 class="text-highlighted truncate text-base font-semibold">{{ folder.Name }}</h3>
                 <UBadge variant="soft" color="primary" size="xs">
                   {{ collectionLabel(folder.CollectionType) }}
+                </UBadge>
+                <UBadge variant="subtle" color="neutral" size="xs">
+                  片源 {{ folderCount(folder) }}
+                </UBadge>
+                <UBadge
+                  v-if="scanRunning"
+                  variant="soft"
+                  :color="requestedLibraryId === folder.ItemId ? scanStatusColor : 'neutral'"
+                  size="xs"
+                >
+                  {{ folderScanStatus(folder) }}
                 </UBadge>
               </div>
               <p class="text-muted mt-1 break-all font-mono text-xs">
@@ -127,8 +298,14 @@ async function remove(folder: VirtualFolderInfo) {
               <UButton color="neutral" variant="subtle" icon="i-lucide-pencil" :disabled="state.busy" @click="edit(folder)">
                 编辑
               </UButton>
-              <UButton color="neutral" variant="subtle" icon="i-lucide-refresh-ccw" :disabled="state.busy" @click="scan">
-                扫描
+              <UButton
+                color="neutral"
+                variant="subtle"
+                icon="i-lucide-refresh-ccw"
+                :disabled="isFolderScanButtonDisabled(folder)"
+                @click="scanFolder(folder)"
+              >
+                {{ requestedLibraryId === folder.ItemId && scanRunning ? '扫描中' : '扫描' }}
               </UButton>
               <UButton color="error" variant="soft" icon="i-lucide-trash-2" :disabled="state.busy" @click="remove(folder)">
                 删除

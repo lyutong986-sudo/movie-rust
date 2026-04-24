@@ -839,3 +839,81 @@ npx vite build         # 构建成功
 
 - `backend> cargo build` —— ✅ 通过
 - `frontend> npm run build` —— ✅ 通过
+
+## 二十四、第二十四轮：扫描任务 Operation 化（operationId + monitor + cancel + 单飞，2026-04-24）
+
+> 目标：将媒体库扫描链路升级为业界常见 LRO（Long Running Operation）模型，支持“可追踪、可轮询、可取消、可去重”。
+
+### A. 后端（`backend/src/routes/admin.rs`）
+
+| 能力 | 实现 |
+| --- | --- |
+| 任务单飞（Single-flight） | 新增内存注册表 `ScanOperationRegistry`；当已有运行中的扫描任务时，新的触发请求复用现有 `operationId`，避免并发全库扫描。 |
+| 任务状态模型 | 新增 `ScanOperationState/Dto`：`Queued/Running/Cancelling/Succeeded/Failed/Cancelled`、`Progress`、`Attempts`、`Error`、`Result`、`CreatedAt/StartedAt/CompletedAt`。 |
+| 触发接口升级 | `POST /api/admin/scan` 返回 `202 Accepted`，Body 含 `Operation` 与 `MonitorUrl`；响应头增加 `Location`（状态地址）和 `Retry-After: 3`。 |
+| 状态接口 | 新增 `GET /api/admin/scan/operations`（列表）与 `GET /api/admin/scan/operations/{operation_id}`（详情）；未完成返回 `202` 并带 `Retry-After`。 |
+| 取消接口 | 新增 `POST /api/admin/scan/operations/{operation_id}/cancel`；队列中任务立即取消，运行中任务转 `Cancelling`（软取消标记）。 |
+| 兼容保留 | `WaitForCompletion=true` 仍可走同步路径返回 `ScanSummary`。 |
+
+### B. 前端（`frontend/src/api/emby.ts` + `frontend/src/store/app.ts`）
+
+| 能力 | 实现 |
+| --- | --- |
+| LRO 类型 | 新增 `ScanOperation` 类型与 `ScanQueuedResponse.Operation`。 |
+| 轮询 API | 新增 `scanOperation(id)` / `scanOperations(limit)` / `cancelScanOperation(id)`。 |
+| 触发后轮询 | `store.scan()` 触发后保存 `scanOperation`，每 3 秒轮询状态；完成后按状态更新提示并刷新首页/库数据。 |
+
+### C. 结果
+
+- 扫描链路从“fire-and-forget 提示”升级为“可观测任务流”；
+- 避免多入口重复触发造成并发全库扫描；
+- 为后续 UI 进度条与任务列表提供统一数据基础。
+
+## 二十五、第二十五轮：扫描中断按钮 + 设置页任务面板 + 片源计数实时刷新（2026-04-24）
+
+> 目标：避免重复点击扫描；在设置页直接可见任务状态；侧边栏媒体库摘要实时显示当前片源数与扫描进度。
+
+### A. 参考对照
+
+- 对照项目内 `docs/JELLYFIN_FRONTEND_PARITY.md` 的“后台设置分区”思路，把扫描任务信息前置到设置视图，而不是只依赖 Toast。
+
+### B. 前端改造
+
+| 文件 | 变更 |
+| --- | --- |
+| `frontend/src/store/app.ts` | 新增 `cancelCurrentScan()`，调用 `POST /api/admin/scan/operations/{id}/cancel`；轮询期间新增 `loadLibraries()`，让媒体库 `ChildCount` 在扫描进行中持续刷新。 |
+| `frontend/src/layouts/AppLayout.vue` | 侧边栏 `text-muted text-[10px] font-medium uppercase tracking-wider` 文本改为动态摘要：空闲时显示 `媒体库 · 总数`，扫描中显示 `媒体库 · 总数 · 状态 进度%`。 |
+| `frontend/src/pages/settings/LibrarySettings.vue` | 新增“媒体库扫描任务”面板：显示 `Queued/Running/Cancelling/Succeeded/Failed/Cancelled`、进度条、开始/结束时间、错误详情、Monitor 地址；新增“取消”按钮与“刷新状态”按钮。 |
+| `frontend/src/pages/settings/SettingsIndex.vue` | 设置首页新增“扫描任务面板”卡片，显示状态/进度，并提供“取消”按钮与“进入媒体库任务详情”快捷入口。 |
+
+### C. 结果
+
+- 你在设置页即可看到扫描任务状态与进度，不需要反复点击“扫描”；
+- “取消扫描”支持从设置首页和媒体库设置页双入口触发；
+- 侧边栏媒体库摘要会随扫描轮询实时更新片源总数（`ChildCount` 聚合）。
+
+### D. 校验
+
+- `frontend> npm run build` —— ✅ 通过
+
+## 二十六、第二十六轮：库级扫描状态视图（防重复点击，2026-04-24）
+
+> 目标：你确认“需要”后，继续把扫描状态下沉到每个媒体库卡片，减少“点了某个库但看不出是否在扫”的重复操作。
+
+### A. 现状约束
+
+- 当前后端扫描任务是全库单飞（一个 `operationId`），尚无“每个库独立任务ID”的接口；
+- 在这个约束下，前端先实现“库级状态展示层 + 触发来源记忆”，保证交互可感知。
+
+### B. 前端改造（`frontend/src/pages/settings/LibrarySettings.vue`）
+
+| 改造点 | 说明 |
+| --- | --- |
+| 卡片片源数实时显示 | 每个媒体库卡片新增 `片源 N`，数据来自 `libraries.ChildCount`，会随扫描轮询刷新。 |
+| 库级扫描状态标签 | 扫描中时每个库显示状态：触发库显示当前任务状态；其余库显示排队态，避免“看起来没反应”。 |
+| 扫描按钮防重复 | 每个库“扫描”按钮在对应任务进行中会禁用并切换文案为“扫描中”；全库扫描进行中时其它库按钮也会受控禁点。 |
+| 全库扫描入口统一 | 顶部“扫描所有媒体库”改走 `scanAllLibraries()`，与库级触发共享状态记忆逻辑。 |
+
+### C. 校验
+
+- `frontend> npm run build` —— ✅ 通过

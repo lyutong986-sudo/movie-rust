@@ -5,6 +5,7 @@ import type {
   CreateLibraryPayload,
   LocalizationCulture,
   LibraryOptions,
+  ScanOperation,
   SystemInfo,
   UserDto,
   VirtualFolderInfo
@@ -90,6 +91,9 @@ export const latestByLibrary = ref<Record<string, BaseItemDto[]>>({});
 export const systemInfo = ref<SystemInfo | null>(null);
 export const selectedItem = ref<BaseItemDto | null>(null);
 export const parentStack = ref<BaseItemDto[]>([]);
+export const scanOperation = ref<ScanOperation | null>(null);
+
+let scanPollTimer = 0;
 
 export const isAdmin = computed(() => Boolean(user.value?.Policy?.IsAdministrator));
 export const currentServer = computed(
@@ -655,8 +659,56 @@ export async function scan() {
       state.message = `扫描完成，新增 ${result.ImportedItems} 个条目`;
       return;
     }
+    scanOperation.value = result.Operation;
     state.message = result.Message || '媒体库已开始后台扫描';
+    startScanPolling(result.Operation.Id);
   });
+}
+
+export async function cancelCurrentScan() {
+  const operationId = scanOperation.value?.Id;
+  if (!operationId) return;
+  await run(async () => {
+    const operation = await api.cancelScanOperation(operationId);
+    scanOperation.value = operation;
+    state.message = operation.Status === 'Cancelled' ? '媒体库扫描已取消' : '已请求取消扫描';
+  });
+}
+
+function startScanPolling(operationId: string) {
+  if (scanPollTimer) {
+    window.clearTimeout(scanPollTimer);
+  }
+
+  const poll = async () => {
+    try {
+      const operation = await api.scanOperation(operationId);
+      scanOperation.value = operation;
+      if (operation.Done) {
+        if (operation.Status === 'Succeeded') {
+          const imported = operation.Result?.ImportedItems ?? 0;
+          state.message = `扫描完成，新增 ${imported} 个条目`;
+          await loadRecentlyAddedTitles();
+          await loadLatestByLibrary();
+          await loadItems();
+        } else if (operation.Status === 'Cancelled') {
+          state.error = '媒体库扫描已取消';
+        } else {
+          state.error = operation.Error || '媒体库扫描失败';
+        }
+        return;
+      }
+      // 扫描进行中时定期刷新媒体库计数，侧边栏与设置页统计会实时变化。
+      await loadLibraries();
+      scanPollTimer = window.setTimeout(() => {
+        void poll();
+      }, 3000);
+    } catch (error) {
+      state.error = error instanceof Error ? error.message : String(error);
+    }
+  };
+
+  void poll();
 }
 
 export async function search() {

@@ -4,12 +4,14 @@ import { useRouter } from 'vue-router';
 import SettingsLayout from '../../layouts/SettingsLayout.vue';
 import {
   adminUsers,
+  cancelCurrentScan,
   currentServer,
   homeItems,
   isAdmin,
   libraries,
   loadAdminData,
   playQueue,
+  scanOperation,
   state,
   systemInfo,
   totalLibraryItems,
@@ -138,6 +140,20 @@ const collectionStats = computed(() => {
     count,
     percent: Math.round((count / total) * 100)
   }));
+});
+
+const scanStatusColor = computed(() => {
+  const status = scanOperation.value?.Status;
+  if (!status) return 'neutral';
+  if (status === 'Succeeded') return 'success';
+  if (status === 'Failed') return 'error';
+  if (status === 'Cancelled') return 'neutral';
+  return 'warning';
+});
+
+const canCancelScan = computed(() => {
+  const status = scanOperation.value?.Status;
+  return status === 'Queued' || status === 'Running' || status === 'Cancelling';
 });
 </script>
 
@@ -273,6 +289,35 @@ const collectionStats = computed(() => {
           <span>队列 {{ playQueue.length }}</span>
           <span>稍后观看 {{ watchLater.length }}</span>
           <span>版本 {{ systemInfo?.Version || '0.1.0' }}</span>
+        </div>
+      </UCard>
+
+      <UCard v-if="isAdmin" variant="soft">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <h3 class="text-highlighted text-sm font-semibold">扫描任务面板</h3>
+            <p class="text-muted mt-1 text-xs">
+              状态 {{ scanOperation?.Status || 'Idle' }} / 进度 {{ Math.round(scanOperation?.Progress || 0) }}%
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <UBadge :color="scanStatusColor" variant="soft" size="sm">
+              {{ scanOperation?.Status || 'Idle' }}
+            </UBadge>
+            <UButton
+              color="error"
+              variant="soft"
+              size="sm"
+              icon="i-lucide-square"
+              :disabled="!canCancelScan || state.busy"
+              @click="cancelCurrentScan"
+            >
+              取消
+            </UButton>
+            <UButton color="neutral" variant="subtle" size="sm" @click="router.push('/settings/libraries')">
+              进入媒体库任务详情
+            </UButton>
+          </div>
         </div>
       </UCard>
     </div>
