@@ -1,4 +1,4 @@
-﻿# Emby API 兼容性审计报告
+# Emby API 兼容性审计报告
 
 - 审计日期：2026-04-24（第十六轮：部署 / SPA 状态码 / Docker·CI 补充后）
 - 项目：movie-rust（Rust + Axum 0.8 + PostgreSQL 后端）
