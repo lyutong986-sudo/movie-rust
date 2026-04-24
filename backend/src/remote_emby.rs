@@ -131,6 +131,36 @@ impl RemoteSyncProgress {
         });
     }
 
+    pub fn set_streaming_progress(&self, fetched_items: u64, written_files: u64, total_items: u64) {
+        let snapshot = self.snapshot.clone();
+        if let Ok(mut guard) = snapshot.try_write() {
+            guard.phase = "SyncingRemoteItems".to_string();
+            guard.total_items = total_items;
+            guard.fetched_items = fetched_items.min(total_items);
+            guard.written_files = written_files.min(total_items);
+            let ratio = if total_items == 0 {
+                1.0
+            } else {
+                guard.fetched_items as f64 / total_items as f64
+            };
+            guard.progress = (10.0 + ratio * 89.0).clamp(10.0, 99.0);
+            return;
+        }
+        tokio::spawn(async move {
+            let mut guard = snapshot.write().await;
+            guard.phase = "SyncingRemoteItems".to_string();
+            guard.total_items = total_items;
+            guard.fetched_items = fetched_items.min(total_items);
+            guard.written_files = written_files.min(total_items);
+            let ratio = if total_items == 0 {
+                1.0
+            } else {
+                guard.fetched_items as f64 / total_items as f64
+            };
+            guard.progress = (10.0 + ratio * 89.0).clamp(10.0, 99.0);
+        });
+    }
+
     pub fn apply_scan_snapshot(&self, scan: &scanner::ScanProgressSnapshot) {
         let snapshot = self.snapshot.clone();
         let scan_percent = scan.percent.clamp(0.0, 96.0);
@@ -486,10 +516,26 @@ async fn sync_source_inner(
         .ok_or_else(|| AppError::BadRequest("目标媒体库不存在".to_string()))?;
 
     if let Some(handle) = &progress {
-        handle.set_phase("FetchingRemoteItems", 5.0);
+        handle.set_phase("CountingRemoteItems", 3.0);
     }
-    let remote_items = fetch_all_remote_items(&state.pool, source, progress.as_ref()).await?;
+    let user_id = ensure_authenticated(&state.pool, source, false).await?;
+    let views = fetch_remote_views(&state.pool, source, user_id.as_str()).await?;
+    let mut total_items = 0u64;
+    for view in &views {
+        let view_count = fetch_remote_items_total_count_for_view(
+            &state.pool,
+            source,
+            user_id.as_str(),
+            view.id.as_str(),
+        )
+        .await?;
+        total_items = total_items.saturating_add(view_count);
+    }
+
     let source_root = source_root_path(&target_library, source);
+    if let Some(handle) = &progress {
+        handle.set_phase("PreparingTargetLibrary", 5.0);
+    }
     reset_source_directory(&source_root).await?;
     cleanup_remote_source_items(
         &state.pool,
@@ -499,82 +545,113 @@ async fn sync_source_inner(
     )
     .await?;
 
-    let total_items = remote_items.len() as u64;
-    if let Some(handle) = &progress {
-        handle.set_write_progress(0, total_items);
-    }
     let root_item_id = upsert_virtual_root_item(&state.pool, source).await?;
     let mut view_parent_map: HashMap<String, Uuid> = HashMap::new();
     let mut series_parent_map: HashMap<String, Uuid> = HashMap::new();
     let mut season_parent_map: HashMap<String, Uuid> = HashMap::new();
+    let mut fetched_count = 0u64;
     let mut written_files = 0usize;
+    if let Some(handle) = &progress {
+        handle.set_streaming_progress(0, 0, total_items);
+    }
 
-    for item in &remote_items {
-        let view_parent_id = ensure_virtual_view_folder(
-            &state.pool,
-            source,
-            root_item_id,
-            item.view_id.as_str(),
-            item.view_name.as_str(),
-            &mut view_parent_map,
-        )
-        .await?;
-
-        let mut parent_id = Some(view_parent_id);
-        if item.item.item_type.eq_ignore_ascii_case("Episode") {
-            let series_parent_id = ensure_virtual_series_folder(
+    for view in &views {
+        let mut start_index = 0i64;
+        loop {
+            let page = fetch_remote_items_page_for_view(
                 &state.pool,
                 source,
-                item,
-                view_parent_id,
-                &mut series_parent_map,
+                user_id.as_str(),
+                view.id.as_str(),
+                start_index,
+                REMOTE_PAGE_SIZE,
             )
             .await?;
+            if page.items.is_empty() {
+                break;
+            }
 
-            let season_parent_id = ensure_virtual_season_folder(
-                &state.pool,
-                source,
-                item,
-                series_parent_id,
-                &mut season_parent_map,
-            )
-            .await?;
-            parent_id = Some(season_parent_id);
-        }
+            for base_item in page.items {
+                fetched_count = fetched_count.saturating_add(1);
+                let item = RemoteSyncItem {
+                    item: base_item,
+                    view_id: view.id.clone(),
+                    view_name: view.name.clone(),
+                };
 
-        let media_source_id = first_media_source_id(item);
-        let analysis = fetch_remote_playback_analysis(
-            &state.pool,
-            source,
-            item.item.id.as_str(),
-            media_source_id,
-        )
-        .await
-        .ok()
-        .flatten();
-        let upserted = upsert_virtual_media_item(
-            &state.pool,
-            source,
-            item,
-            parent_id,
-            media_source_id,
-            analysis.as_ref(),
-        )
-        .await?;
-        if let Some(analysis) = analysis {
-            repository::save_media_streams(&state.pool, upserted, &analysis).await?;
-            repository::update_media_item_metadata(&state.pool, upserted, &analysis).await?;
-        }
+                let view_parent_id = ensure_virtual_view_folder(
+                    &state.pool,
+                    source,
+                    root_item_id,
+                    item.view_id.as_str(),
+                    item.view_name.as_str(),
+                    &mut view_parent_map,
+                )
+                .await?;
 
-        written_files = written_files.saturating_add(1);
-        if let Some(handle) = &progress {
-            handle.set_write_progress(written_files as u64, total_items);
+                let mut parent_id = Some(view_parent_id);
+                if item.item.item_type.eq_ignore_ascii_case("Episode") {
+                    let series_parent_id = ensure_virtual_series_folder(
+                        &state.pool,
+                        source,
+                        &item,
+                        view_parent_id,
+                        &mut series_parent_map,
+                    )
+                    .await?;
+
+                    let season_parent_id = ensure_virtual_season_folder(
+                        &state.pool,
+                        source,
+                        &item,
+                        series_parent_id,
+                        &mut season_parent_map,
+                    )
+                    .await?;
+                    parent_id = Some(season_parent_id);
+                }
+
+                let media_source_id = first_media_source_id(&item);
+                let analysis = fetch_remote_playback_analysis(
+                    &state.pool,
+                    source,
+                    item.item.id.as_str(),
+                    media_source_id,
+                )
+                .await
+                .ok()
+                .flatten();
+                let upserted = upsert_virtual_media_item(
+                    &state.pool,
+                    source,
+                    &item,
+                    parent_id,
+                    media_source_id,
+                    analysis.as_ref(),
+                )
+                .await?;
+                if let Some(analysis) = analysis {
+                    repository::save_media_streams(&state.pool, upserted, &analysis).await?;
+                    repository::update_media_item_metadata(&state.pool, upserted, &analysis)
+                        .await?;
+                }
+
+                written_files = written_files.saturating_add(1);
+                if let Some(handle) = &progress {
+                    handle.set_streaming_progress(fetched_count, written_files as u64, total_items);
+                }
+            }
+
+            start_index += REMOTE_PAGE_SIZE;
+            if start_index >= page.total_record_count {
+                break;
+            }
         }
     }
 
     let scan_summary = ScanSummary {
         libraries: 1,
-        scanned_files: total_items as i64,
+        scanned_files: fetched_count as i64,
         imported_items: written_files as i64,
     };
 

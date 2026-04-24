@@ -105,7 +105,7 @@ function sourceProgressText(source: RemoteEmbySource) {
   }
   if (operation.Status === 'Succeeded') {
     const writtenFiles = operation.Result?.WrittenFiles ?? operation.WrittenFiles ?? 0;
-    return `最近任务完成 · 写入 ${writtenFiles} 个 STRM`;
+    return `最近任务完成 · 入库 ${writtenFiles} 个条目`;
   }
   if (operation.Status === 'Failed') {
     return `最近任务失败 · 已运行 ${runtime} 秒`;
@@ -510,7 +510,7 @@ onBeforeUnmount(() => {
               </p>
             </div>
             <div>
-              <p class="text-muted">写入 STRM</p>
+              <p class="text-muted">入库条目</p>
               <p class="text-highlighted mt-1 font-medium">{{ sourceOperation(source)?.WrittenFiles || 0 }}</p>
             </div>
             <UProgress
