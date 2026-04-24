@@ -29,6 +29,11 @@ env:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    env:
+      # 某些 runner/Buildx 组合会在「Check build summary support」阶段异常，
+      # 关闭 summary 与 record 上传可避免 iVBOR...（PNG Base64）这类非预期输出导致任务失败。
+      DOCKER_BUILD_SUMMARY: "false"
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
 
     steps:
       - name: Checkout

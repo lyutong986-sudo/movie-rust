@@ -681,3 +681,9 @@ npx vite build         # 构建成功
 | 线上强刷后仍加载 `index-h926ZtrD.js`、`SettingsIndex-BZTo4CvI.js` 等旧 chunk。 | 线上服务当前仍是旧静态资源；本地构建后新 chunk 为 `index-DoSIH5zm.js`、`SettingsIndex-CK393fAx.js`。 | 需要用新源码重新构建并部署镜像 / 静态目录；若使用 `docker-compose.yml` 当前的 `yuanhu66/movie-rust:latest`，需重新构建推送该镜像或切到本地 `build: .`。 |
 
 **校验**：`frontend> npm run build` —— ✅ 通过。
+
+**I. GitHub Actions `buildx` 摘要异常（2026-04-24）**
+
+| 现象 | 原因（定位） | 修复 |
+| --- | --- | --- |
+| CI 在 `docker/build-push-action@v6` 的 **Check build summary support** 阶段失败，报错中出现 `iVBOR...`（PNG Base64 片段） | 非 Dockerfile 编译错误，而是 Buildx summary / build record 探测链路在当前 runner 组合下异常。 | 在 `.github/workflows/docker-image.yml` 的 `docker` job 增加环境变量：`DOCKER_BUILD_SUMMARY=false`、`DOCKER_BUILD_RECORD_UPLOAD=false`，关闭 summary 与 record 上传，保留构建与推送主流程。 |
