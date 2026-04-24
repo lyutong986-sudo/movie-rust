@@ -64,7 +64,8 @@ jobs:
           push: false
           tags: movie-rust:ci
           cache-from: type=gha,scope=movie-rust
-          cache-to: type=gha,mode=max,scope=movie-rust
+          # GHA 缓存服务偶发 502（Unicorn）时，不应让构建失败
+          cache-to: type=gha,mode=max,scope=movie-rust,ignore-error=true
 
       - name: Build and push image
         if: >
@@ -81,4 +82,5 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/movie-rust:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/movie-rust:${{ env.IMAGE_TAG }}
           cache-from: type=gha,scope=movie-rust
-          cache-to: type=gha,mode=max,scope=movie-rust
+          # 导出缓存失败时继续成功推镜像，避免末尾 cache export 把任务打红
+          cache-to: type=gha,mode=max,scope=movie-rust,ignore-error=true

@@ -698,3 +698,9 @@ npx vite build         # 构建成功
 | 现象 | 原因（定位） | 修复 |
 | --- | --- | --- |
 | CI 在 `docker/build-push-action@v6` 的 **Check build summary support** 阶段失败，报错中出现 `iVBOR...`（PNG Base64 片段） | 非 Dockerfile 编译错误，而是 Buildx summary / build record 探测链路在当前 runner 组合下异常。 | 在 `.github/workflows/docker-image.yml` 的 `docker` job 增加环境变量：`DOCKER_BUILD_SUMMARY=false`、`DOCKER_BUILD_RECORD_UPLOAD=false`，关闭 summary 与 record 上传，保留构建与推送主流程。 |
+
+**J. GitHub Actions `cache-to gha` 502（Unicorn）导致尾段失败（2026-04-24）**
+
+| 现象 | 原因（定位） | 修复 |
+| --- | --- | --- |
+| 镜像已完成 `exporting` + `pushing manifest`，但在 `# exporting to GitHub Actions Cache` 阶段报 `failed to parse error response 502`（GitHub Unicorn HTML）后整任务失败。 | `cache-to: type=gha` 导出层到 GHA 缓存服务时偶发网关错误；这是缓存基础设施波动，不是 Dockerfile 或镜像推送失败。 | 将 PR 与 push 两个构建步骤的 `cache-to` 改为 `type=gha,mode=max,scope=movie-rust,ignore-error=true`，即“缓存导出失败不阻塞构建/推送结果”。 |
