@@ -175,7 +175,16 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             ADD COLUMN IF NOT EXISTS primary_image_path TEXT,
             ADD COLUMN IF NOT EXISTS backdrop_image_path TEXT,
             ADD COLUMN IF NOT EXISTS logo_image_path TEXT,
-            ADD COLUMN IF NOT EXISTS date_modified TIMESTAMPTZ NOT NULL DEFAULT now()
+            ADD COLUMN IF NOT EXISTS date_modified TIMESTAMPTZ NOT NULL DEFAULT now(),
+            ADD COLUMN IF NOT EXISTS easy_password_hash TEXT
+        "#,
+        // sessions.session_type 原本由 0015 迁移补齐；老库（迁移未跑到）在这里兜底。
+        r#"
+        ALTER TABLE sessions
+            ADD COLUMN IF NOT EXISTS session_type TEXT NOT NULL DEFAULT 'Interactive'
+        "#,
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_sessions_session_type ON sessions(session_type)
         "#,
         r#"
         ALTER TABLE media_items
