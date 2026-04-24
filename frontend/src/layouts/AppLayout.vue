@@ -422,7 +422,8 @@ function onKeyDown(e: KeyboardEvent) {
       </UDashboardNavbar>
 
       <template #body>
-        <div class="flex flex-col gap-6 p-4 sm:p-6">
+        <!-- flex 子项默认 min-height:auto 可能导致面板 body 高度为 0，主内容（含 EmptyState）不可见 -->
+        <div class="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto p-4 sm:p-6">
           <slot />
         </div>
       </template>

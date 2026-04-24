@@ -549,6 +549,90 @@ pub async fn delete_setting_value(pool: &sqlx::PgPool, key: &str) -> Result<(), 
     Ok(())
 }
 
+fn normalize_connect_guid_str(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|c| c == '{' || c == '}')
+        .replace('-', "")
+        .to_ascii_uppercase()
+}
+
+fn connect_link_payload_matches_target(payload: &Value, target: &str) -> bool {
+    if target.is_empty() {
+        return false;
+    }
+    let keys = [
+        "ConnectUserId",
+        "connectUserId",
+        "UserId",
+        "userId",
+        "Id",
+        "id",
+    ];
+    match payload {
+        Value::Object(map) => {
+            for k in keys {
+                if let Some(v) = map.get(k) {
+                    if let Some(s) = v.as_str() {
+                        if normalize_connect_guid_str(s) == *target {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        Value::String(s) => normalize_connect_guid_str(s) == *target,
+        _ => false,
+    }
+}
+
+/// 若 `POST /Users/{id}/Connect/Link` 存入了 `ExchangeToken` / `ConnectAccessKey` / `AccessKey`，
+/// 必须与请求头里的 Connect AccessKey 一致；未写入时仅要求 AccessKey 非空（与官方云校验相比为宽松模式，适合自托管）。
+pub fn connect_exchange_access_key_allowed(payload: &Value, access_key: &str) -> bool {
+    let key = access_key.trim();
+    if key.is_empty() {
+        return false;
+    }
+    match payload {
+        Value::Object(map) => {
+            let expected = map
+                .get("ExchangeToken")
+                .or_else(|| map.get("ConnectAccessKey"))
+                .or_else(|| map.get("AccessKey"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            match expected {
+                Some(exp) => exp == key,
+                None => true,
+            }
+        }
+        _ => true,
+    }
+}
+
+/// 根据 Emby Connect 的 `ConnectUserId` 查找已绑定 `user_connect_link:{local_id}` 的本地用户。
+pub async fn find_user_by_connect_user_id(
+    pool: &sqlx::PgPool,
+    connect_user_id: &str,
+) -> Result<Option<(Uuid, Value)>, AppError> {
+    let target = normalize_connect_guid_str(connect_user_id);
+    if target.is_empty() {
+        return Ok(None);
+    }
+    let users = list_users(pool, false).await?;
+    for user in users {
+        let setting_key = format!("user_connect_link:{}", user.id);
+        let Some(payload) = get_setting_value(pool, &setting_key).await? else {
+            continue;
+        };
+        if connect_link_payload_matches_target(&payload, &target) {
+            return Ok(Some((user.id, payload)));
+        }
+    }
+    Ok(None)
+}
+
 pub async fn delete_media_item(pool: &sqlx::PgPool, item_id: Uuid) -> Result<bool, AppError> {
     let result = sqlx::query("DELETE FROM media_items WHERE id = $1")
         .bind(item_id)

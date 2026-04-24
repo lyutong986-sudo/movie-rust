@@ -4,6 +4,7 @@ use axum::Router;
 pub mod admin;
 pub mod collections;
 pub mod compat;
+pub mod connect;
 pub mod devices;
 pub mod genres;
 pub mod images;
@@ -40,6 +41,7 @@ fn api_router() -> Router<AppState> {
         .merge(system::router())
         .merge(startup::router())
         .merge(users::router())
+        .merge(connect::router())
         .merge(items::router())
         .merge(images::router())
         .merge(videos::router())

@@ -12,13 +12,10 @@ use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        // Axum 同一路由重复注册会覆盖前者：必须合并 method，否则 GET 会丢失只剩 POST。
         .route(
             "/DisplayPreferences/{display_preferences_id}",
-            get(display_preferences),
-        )
-        .route(
-            "/DisplayPreferences/{display_preferences_id}",
-            post(update_display_preferences),
+            get(display_preferences).post(update_display_preferences),
         )
         .route(
             "/Users/{user_id}/DisplayPreferences/{display_preferences_id}",

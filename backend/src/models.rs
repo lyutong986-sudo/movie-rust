@@ -629,6 +629,15 @@ pub struct AuthenticationResult {
     pub server_id: String,
 }
 
+/// `GET /Connect/Exchange` 响应（Emby.Server.Connect.ConnectAuthenticationExchangeResult）。
+/// 参考：<https://dev.emby.media/reference/RestAPI/ConnectService/getConnectExchange.html>
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ConnectAuthenticationExchangeResult {
+    pub local_user_id: String,
+    pub access_token: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PublicSystemInfo {

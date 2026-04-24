@@ -1,6 +1,6 @@
 ﻿# Emby API 兼容性审计报告
 
-- 审计日期：2026-04-24（第十三轮前端补全落地后）
+- 审计日期：2026-04-24（第十六轮：部署 / SPA 状态码 / Docker·CI 补充后）
 - 项目：movie-rust（Rust + Axum 0.8 + PostgreSQL 后端）
 - 参考基线：
   1. 本地播放器模板 `模板项目/本地播放器模板/packages/lin_player_server_api/lib/services/emby_api.dart`
@@ -590,3 +590,77 @@ npx vite build         # 构建成功
 ### E. 总结
 
 36 项审计问题本轮全部落地（其中 P0 / P1 全部硬核实现，P2 除 Blurhash 仅保留字段外全部实现，P3 全部完成）。前端视觉、交互、可访问性、深链、品牌感、PWA 六个维度已对齐主流媒体平台早期量产版。下一阶段建议的增量方向：Intro Skipper 真检测、Collections / Playlists 真正 CRUD、移动端触摸手势（滑动快进 / 双击快退 / 三指快进）、以及服务端推送（WebSocket 事件驱动 UI）。
+
+## 十六、第十六轮：部署链路、SPA 文档状态码与单镜像 CI（2026-04-24）
+
+> 范围：生产环境访问 `https://test.emby.yun:4443` 时出现的「`/settings` 等 Vue 路由文档请求显示 404、但响应体为 `index.html`」问题；以及 Docker / GitHub Actions / OpenResty 配置与 Emby 客户端无直接字段契约，但影响 Web 管理端与自托管体验的一致性。
+
+### A. SPA 文档请求「假 404」根因与修复（后端）
+
+| 现象 | 原因 | 修复 |
+| --- | --- | --- |
+| `GET /settings`（及任意无对应静态文件的客户端路由）返回 **HTTP 404**，`Content-Type: text/html`，body 为完整 SPA `index.html`，且带 `cache-control: no-cache` | **tower-http** 的 `ServeDir::not_found_service` 在调用自定义回退服务后，会将**最终状态码强制改为 404**（官方文档：用于「自定义 404 页面」场景）。项目用其回退到 `index.html` 时，浏览器与 DevTools 仍显示 Not Found。 | `backend/src/main.rs` 改为 `ServeDir::new(static_dir).fallback(spa_index_service)`。**`fallback`** 保留回退服务返回的 **200 OK**（`serve_spa_index` 显式设置 `text/html; charset=utf-8` + `no-cache`）。 |
+
+**结论**：与 Emby API 路由无关；属 **HTTP 语义与 Vue Router 深链** 的运维/实现细节。部署新后端二进制或镜像后，直接访问 `/settings`、`/library/:id`、`/queue` 等应对**文档请求返回 200**。
+
+### B. OpenResty / Nginx：整站反代 Rust（推荐）
+
+- **推荐**：`location / { proxy_pass http://127.0.0.1:<后端端口>; ... }`，由 Rust 统一提供 API + 静态资源 + SPA 回退，避免 `root` + `try_files ... =404` 与反代混用导致异常状态码或重复逻辑。
+- 示例片段（含 WebSocket `map` 说明）见仓库 **`deploy/nginx-openresty-reverse-proxy.example.conf`**。
+- 若仍采用「静态 `root` + 仅 API 反代」：**勿**使用 `try_files $uri /index.html =404` 或 `error_page 404 /index.html` 而不写 `=200`，否则仍可能出现「404 + HTML」。
+
+### C. Docker 与 GitHub Actions：单镜像、CI 内构建 Vue
+
+| 项 | 说明 |
+| --- | --- |
+| **单镜像** | 根目录 **`Dockerfile`** 多阶段：Node 构建前端 → Rust `release` → 运行时镜像内 **`/app/public`** + `movie-rust-backend`。不存在单独的「前端镜像 / 后端镜像」推送。 |
+| **构建细节** | 前端阶段使用 **`npm ci`**；已 **`COPY frontend/public`**，保证 `manifest.webmanifest`、`favicon.svg` 等进入 `dist`。 |
+| **CI** | **`.github/workflows/docker-image.yml`** 为唯一与镜像相关的工作流（`main` / `master` / `oll` + `workflow_dispatch`）；PR 仅 build 不 push。已移除独立的 `frontend-ci.yml`，避免双流水线误解；Vue 构建在 **Docker 构建第一阶段**完成。 |
+| **compose** | `docker-compose.yml` 中应用服务示例镜像为 **`yuanhu66/movie-rust:latest`**，可按需改为本地 `build: .`。 |
+
+### D. 线上冒烟（参考）
+
+使用浏览器 DevTools / MCP 访问 `https://test.emby.yun:4443/`：首页文档与 API 为 200；部署 **§A** 修复后，**`/settings` 文档请求应与之一致为 200**（此前曾为 404 + SPA body）。
+
+### E. 小结
+
+本轮在兼容性报告中单列一节，便于后续排查：**Emby SDK / 播放器契约未变**；变更集中在 **SPA 托管语义（HTTP 状态码）**、**反向代理部署约定** 与 **单镜像 CI/CD**，避免将「假 404」误判为路由缺失或 Nginx 未反代。
+
+## 十七、第十七轮：官方 App / Connect 交换与会话偏好路由（2026-04-24）
+
+> 范围：**Emby 官方客户端**在 Connect 流程中调用的 `GET /Connect/Exchange`，以及 **DisplayPreferences** 在 Axum 下的方法注册问题。对齐 [getConnectExchange](https://dev.emby.media/reference/RestAPI/ConnectService/getConnectExchange.html) 的响应形状（`LocalUserId`、`AccessToken`）。
+
+### A. DisplayPreferences：避免 GET 被 POST 覆盖
+
+| 问题 | 说明 | 修复 |
+| --- | --- | --- |
+| 同一路径注册了两次 | Axum `Router::route` 对**完全相同的路径**后注册会覆盖先注册的 handler，若先 `get` 再 `post`，最终可能只剩一种 HTTP 方法。 | `backend/src/routes/compat.rs` 将 `/DisplayPreferences/{id}` 与 `/Users/{user_id}/DisplayPreferences/{id}` 合并为 **单条** `.route(..., get(...).post(...))`。 |
+
+### B. `GET /Connect/Exchange`（及 `/connect/exchange`）
+
+| 项 | 实现要点 |
+| --- | --- |
+| **查询参数** | `ConnectUserId`（兼容 `connectUserId`），缺失时返回 400。 |
+| **认证头** | 使用与全局一致的 `auth::extract_token`（`X-Emby-Token` / `X-MediaBrowser-Token` / `Authorization` 等），语义为 **Emby Connect 侧下发的 AccessKey**（非本地会话 token）。 |
+| **用户解析** | 扫描 `system_settings` 中键 `user_connect_link:{本地用户 UUID}`（由已有 `POST /Users/{id}/Connect/Link` 写入），在 JSON 对象中匹配 `ConnectUserId` / `UserId` / `Id` 等字段（GUID 去连字符、大小写不敏感）。 |
+| **密钥校验** | 若 Link 载荷中存在 `ExchangeToken` / `ConnectAccessKey` / `AccessKey` 之一，则必须与请求头 token **完全一致**；若均未设置，则仅要求 token **非空**（自托管宽松策略，便于未填交换密钥的场景）。 |
+| **登录策略** | 解析到 `DbUser` 后调用 `auth::ensure_login_policy`（远程访问、设备白名单、时段、最大会话数等与密码登录一致），再 `repository::create_session` 生成本地会话。 |
+| **响应 DTO** | `models::ConnectAuthenticationExchangeResult`，`#[serde(rename_all = "PascalCase")]` → JSON `LocalUserId`（Emby GUID 字符串）、`AccessToken`（新会话 token）。 |
+
+**涉及文件**：`backend/src/routes/connect.rs`（新）、`backend/src/routes/mod.rs`（`merge(connect::router())`）、`backend/src/repository.rs`（`find_user_by_connect_user_id`、`connect_exchange_access_key_allowed` 及 GUID 匹配辅助函数）、`backend/src/models.rs`（`ConnectAuthenticationExchangeResult`）。
+
+### C. 校验
+
+- `backend> cargo build` —— ✅ 通过（Connect 模块与 repository 增补无编译错误）。
+
+### D. 小结
+
+本轮补齐 **官方 Connect 换票** 路径，并与已有 **Connect/Link** 存储模型贯通；同时修复 **DisplayPreferences** 的路由注册方式，避免官方 App 的 **GET 显示偏好** 静默失效。
+
+### E. 线上首页主区域空白（MCP 实测 [test.emby.yun:4443](https://test.emby.yun:4443/)）
+
+| 现象 | 原因（推断） | 修复 |
+| --- | --- | --- |
+| 顶栏/侧栏正常，`/Users/.../Views` 与 `/Items` 均为 200，但 **主内容区仅底色、无「媒体库」或空状态文案** | Dashboard 布局下 **flex 子项未设 `min-h-0`** 时，滚动区高度可塌成 0，子页面仍在 DOM 但不可见。 | `frontend/src/layouts/AppLayout.vue` 中 `#body` 包裹层增加 `min-h-0 flex-1 overflow-y-auto`（保留原有 `gap` / `padding`）。 |
+
+**附**：首屏「正在连接服务器……」来自 `App.vue` 在 `state.initialized` 为 false 时的加载壳；控制台偶发 **`Error: 未登录`** 来自 `frontend/src/api/emby.ts` 的 `requireUserId()`，多为初始化与恢复会话的竞态，与上述布局问题独立。
