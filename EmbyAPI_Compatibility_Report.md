@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-04-29（第十一轮 真实 strm 媒体 + TMDB + OpenSubtitles 端到端审计）
+> 对比时间：2026-04-29（第十二轮 EmbySDK 客户端契约对齐 + 前端 MCP UI 点击全功能测试）
 
 ---
 
@@ -396,3 +396,85 @@ $env:OPENSUBTITLES_USER='<your-os-user>'
 $env:OPENSUBTITLES_PASS='<your-os-pass>'
 python tests\strm_tmdb_audit.py
 ```
+
+---
+
+## 第十二批（EmbySDK 客户端契约对齐 + 前端 UI 全功能 MCP 测试）— ✅ 全部完成
+
+> 触发：用户报真实 Emby 客户端（Hills/RMX6688）调用 `GET /Items/{id}/RemoteImages?Type=Banner&IncludeAllLanguages=true` 返回空、字幕下载"无法调用"。同时要求用 chrome-devtools MCP 模拟用户点击首页媒体封面右键菜单与详情页全部功能。
+
+### 1. 对照 EmbySDK `SubtitleService` 重写字幕下载响应（关键兼容修复）
+
+| Emby SDK 规约 | 旧实现 | 新实现 |
+|---|---|---|
+| `POST /Items/{Id}/RemoteSearch/Subtitles/{SubtitleId}` 返回 200 + `SubtitleDownloadResult { NewIndex: int32 }` | 返回 `204 No Content`（导致 Hills/Yamby 等客户端无法解析） | `routes/items.rs::remote_search_subtitles_apply` 现在返回 `200 OK` + `{ "NewIndex": <int> }` |
+| 必需 query 参数 `MediaSourceId` | 路径只接 `(item_id, subtitle_id)` 两段，多余 query 报错 | 新增 `SubtitleApplyQuery { media_source_id }`，兼容客户端发送 `MediaSourceId` |
+| 字幕落盘后能查到 stream index | 没有反查 | 新增 `repository::sidecar_subtitle_stream_index(&item, &sub_path)`，按 fs 同名 prefix 反查刚落盘的字幕在 `MediaStreams` 序列里的位置（找不到回退 `-1`） |
+
+实测客户端调用 `POST /Items/25091035-…/RemoteSearch/Subtitles/zh-CN_1016911`：
+
+```
+HTTP/1.1 200
+content-type: application/json
+{"NewIndex":2}
+```
+
+完全符合 `Emby.Api.Subtitles.SubtitleDownloadResult` 定义。
+
+### 2. 对照 `RemoteImageService` 校验响应结构
+
+EmbySDK `getItemsByIdRemoteimages` 规约 `RemoteImageResult { Images, Providers, TotalRecordCount }`，当前后端逐 type 验证（Banner/Backdrop/Logo/Primary/Disc/Art/Thumb）：
+
+| Type | TotalRecordCount | Providers |
+|---|---|---|
+| Banner | 0（TMDB 无 Banner，符合 Emby 实际行为） | `["TheMovieDb"]` |
+| Backdrop | 24 | `["TheMovieDb"]` |
+| Logo | 12 | `["TheMovieDb"]` |
+| Primary | 37 | `["TheMovieDb"]` |
+| Disc / Art / Thumb | 0 | `["TheMovieDb"]` |
+
+> 用户截屏中 `https://test.emby.yun:4443/...` 返回 `Images:[],Providers:[]` 是其自建 Emby 服务的配置（未启用 TMDB），与本项目无关；本项目响应已对齐 SDK，`Providers` 在已注册 TMDB 时永远非空。
+
+### 3. 前端右键菜单事件链 + 对话框初始化修复
+
+| 问题 | 表现 | 修复 |
+|---|---|---|
+| `MediaCard` emit 的 `identify` / `editMetadata` / `deleted` 事件被 `MediaRow` 吞掉 | 首页 / 媒体库列表的"识别"/"编辑元数据" 点击无反应 | `components/MediaRow.vue` 新增 `defineEmits` 三事件并显式转发 |
+| `HomePage` 没监听这些事件 | 即便 MediaRow 转发也无承接 | `pages/HomePage.vue` 新增 `IdentifyDialog` / `MetadataEditorDialog` 引用、`identifyTarget` / `metadataTarget` 状态、所有 MediaRow 接 `@identify` / `@edit-metadata` / `@deleted` |
+| `LibraryPage` 同样未承接 | 媒体库页右键菜单不弹 dialog | `pages/library/LibraryPage.vue` 同样集成 `IdentifyDialog` + `MetadataEditorDialog` |
+| `IdentifyDialog` / `MetadataEditorDialog` 的 `populateForm` 用 `watch(open, ...)` 但无 `immediate: true` | 父组件 v-if 控制 dialog 实例，首次实例化时 `open` 已是 `true`，watch 不触发回调 → 表单字段全部空白 | 两个 dialog 的 watch 都加上 `{ immediate: true }`，首次 mount 即同步 props.item 字段 |
+
+### 4. MCP 真实点击测试覆盖
+
+> chrome-devtools MCP 实测以 `testadmin` 登录到 `http://localhost:18097`，针对 "布鲁伊 (2018)" 系列逐项点击。
+
+| UI 入口 | 测试动作 | 结果 |
+|---|---|---|
+| HomeCarousel | "查看详情" → 跳转 Episode 详情 | ✅ 路由正确 + 数据加载 |
+| MediaCard 更多 → 添加到收藏 | `POST /Users/{id}/FavoriteItems/{itemId}` | 200 |
+| MediaCard 更多 → 标记为已播放 | `POST /Users/{id}/PlayedItems/{itemId}` | 200 |
+| MediaCard 更多 → 添加到稍后观看 | 本地 store + Toast | OK |
+| MediaCard 更多 → 添加到合集（创建新合集） | `GET /Items?IncludeItemTypes=BoxSet` + `POST /Collections?Name=...&Ids=...` | 200 |
+| MediaCard 更多 → 添加到播放列表（自动选择第一个） | `GET /Playlists` + `POST /Playlists/{id}/Items?Ids=...` | 204 |
+| MediaCard 更多 → 刷新元数据 | `POST /Items/{id}/Refresh?MetadataRefreshMode=FullRefresh&...` | 204 |
+| MediaCard 更多 → 编辑元数据 | 弹 `MetadataEditorDialog` 并自动 populate Name/Overview/Year/Genres/Tags/ProviderIds | ✅ 修复后正常 |
+| MediaCard 更多 → 识别 | 弹 `IdentifyDialog`，搜索 "Bluey" 返回 6 条 TMDB 候选（Bluey 2018 / Bluey 1976 / Bluey Mini Episodes 2024 / …） | ✅ 修复后正常 |
+| Episode 详情 → 字幕 | 弹搜索字幕对话框 → `GET /Items/{id}/RemoteSearch/Subtitles/chi` 返回 50 条；点 "下载" → `POST .../Subtitles/zh-CN_1016911` 返回 200 + `{"NewIndex":2}` | ✅ 客户端契约对齐 |
+| Episode 详情 → 上一集/下一集 | 链路正确 | OK |
+| Episode 详情 → 查看剧集详情 | 跳 SeriesPage 渲染 TMDB 全部元数据（Backdrop/Primary/Logo、年份/季数/集数/连载状态/评分、Overview、Genres、Studios×8、外部链接 TMDB+IMDb+TheTVDB、演职人员×7、Episode 列表×3） | ✅ |
+| SeriesPage → 编辑图像 → 搜索远程图片 | `GET /Items/{id}/RemoteImages/Providers` + `GET /Items/{id}/RemoteImages?Type=Primary` 渲染 20 张 TMDB 候选海报（含分辨率 / 评分 / 语言） | ✅ |
+
+### 5. 回归测试
+
+- `tests/strm_tmdb_audit.py`：**36/36** 通过（含字幕新响应 `{"NewIndex": 2}` 校验）
+- `tests/permission_audit.py`：**90/90** 通过
+- `tests/emby_endpoint_audit.py`：**44/44** 通过
+
+### 6. 受影响文件
+
+- `backend/src/routes/items.rs`：`remote_search_subtitles_apply` 改返回 `(StatusCode, Json<Value>)`，新增 `SubtitleApplyQuery`
+- `backend/src/repository.rs`：新增 `sidecar_subtitle_stream_index`
+- `frontend/src/components/MediaRow.vue`：新增 `identify` / `editMetadata` / `deleted` 三事件转发
+- `frontend/src/components/IdentifyDialog.vue` / `MetadataEditorDialog.vue`：watch open 添加 `immediate: true`
+- `frontend/src/pages/HomePage.vue`：集成 `IdentifyDialog` + `MetadataEditorDialog`
+- `frontend/src/pages/library/LibraryPage.vue`：集成 `IdentifyDialog` + `MetadataEditorDialog`

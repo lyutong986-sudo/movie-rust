@@ -22,6 +22,9 @@ const props = withDefaults(
 const emit = defineEmits<{
   select: [item: BaseItemDto];
   play: [item: BaseItemDto];
+  identify: [item: BaseItemDto];
+  editMetadata: [item: BaseItemDto];
+  deleted: [item: BaseItemDto];
 }>();
 
 const scroller = ref<HTMLElement | null>(null);
@@ -134,6 +137,9 @@ const cardWidth = computed(() =>
             :thumb="thumb"
             @play="emit('play', $event)"
             @select="emit('select', $event)"
+            @identify="emit('identify', $event)"
+            @edit-metadata="emit('editMetadata', $event)"
+            @deleted="emit('deleted', $event)"
           />
         </div>
       </template>

@@ -6,6 +6,8 @@ import MediaCardSkeleton from '../../components/MediaCardSkeleton.vue';
 import MediaListItem from '../../components/MediaListItem.vue';
 import EmptyState from '../../components/EmptyState.vue';
 import AlphaPicker from '../../components/AlphaPicker.vue';
+import IdentifyDialog from '../../components/IdentifyDialog.vue';
+import MetadataEditorDialog from '../../components/MetadataEditorDialog.vue';
 import {
   api,
   backToParent,
@@ -159,6 +161,29 @@ async function openMedia(item: BaseItemDto) {
 
 async function playItem(item: BaseItemDto) {
   await router.push(playbackRoute(item));
+}
+
+const identifyTarget = ref<BaseItemDto | null>(null);
+const identifyOpen = ref(false);
+const metadataTarget = ref<BaseItemDto | null>(null);
+const metadataOpen = ref(false);
+
+function openIdentify(item: BaseItemDto) {
+  identifyTarget.value = item;
+  identifyOpen.value = true;
+}
+
+function openMetadataEditor(item: BaseItemDto) {
+  metadataTarget.value = item;
+  metadataOpen.value = true;
+}
+
+function onItemDeleted() {
+  void loadItems();
+}
+
+async function reloadAfterMutation() {
+  await loadItems();
 }
 
 function toggleSortOrder() {
@@ -505,6 +530,9 @@ async function batchDelete() {
           :item="item"
           @play="playItem"
           @select="openMedia"
+          @identify="openIdentify"
+          @edit-metadata="openMetadataEditor"
+          @deleted="onItemDeleted"
         />
       </div>
       <div v-else class="flex flex-col gap-1">
@@ -539,6 +567,19 @@ async function batchDelete() {
       :action-label="filterBadgeCount ? '清空筛选' : ''"
       action-icon="i-lucide-sliders-horizontal"
       @action="resetLibraryFilters"
+    />
+
+    <IdentifyDialog
+      v-if="identifyTarget"
+      :item="identifyTarget"
+      v-model:open="identifyOpen"
+      @identified="reloadAfterMutation"
+    />
+    <MetadataEditorDialog
+      v-if="metadataTarget"
+      :item="metadataTarget"
+      v-model:open="metadataOpen"
+      @saved="reloadAfterMutation"
     />
   </div>
 </template>

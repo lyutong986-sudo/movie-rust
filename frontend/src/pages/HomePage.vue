@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import MediaRow from '../components/MediaRow.vue';
 import HeroCarousel from '../components/HeroCarousel.vue';
 import EmptyState from '../components/EmptyState.vue';
+import IdentifyDialog from '../components/IdentifyDialog.vue';
+import MetadataEditorDialog from '../components/MetadataEditorDialog.vue';
 import {
   backToHome,
   continueWatching,
@@ -24,6 +26,25 @@ import type { BaseItemDto } from '../api/emby';
 import { itemRoute, playbackRoute } from '../utils/navigation';
 
 const router = useRouter();
+
+const identifyTarget = ref<BaseItemDto | null>(null);
+const identifyOpen = ref(false);
+const metadataTarget = ref<BaseItemDto | null>(null);
+const metadataOpen = ref(false);
+
+function openIdentify(item: BaseItemDto) {
+  identifyTarget.value = item;
+  identifyOpen.value = true;
+}
+
+function openMetadataEditor(item: BaseItemDto) {
+  metadataTarget.value = item;
+  metadataOpen.value = true;
+}
+
+async function refreshAfterMutation() {
+  await enterHome();
+}
 
 const libraryList = computed(() => libraries.value ?? []);
 
@@ -132,6 +153,9 @@ async function playItem(item: BaseItemDto) {
           thumb
           @play="playItem"
           @select="openItem"
+          @identify="openIdentify"
+          @edit-metadata="openMetadataEditor"
+          @deleted="refreshAfterMutation"
         />
 
         <MediaRow
@@ -142,6 +166,9 @@ async function playItem(item: BaseItemDto) {
           thumb
           @play="playItem"
           @select="openItem"
+          @identify="openIdentify"
+          @edit-metadata="openMetadataEditor"
+          @deleted="refreshAfterMutation"
         />
 
         <MediaRow
@@ -152,6 +179,9 @@ async function playItem(item: BaseItemDto) {
           thumb
           @play="playItem"
           @select="openItem"
+          @identify="openIdentify"
+          @edit-metadata="openMetadataEditor"
+          @deleted="refreshAfterMutation"
         />
 
         <MediaRow
@@ -161,6 +191,9 @@ async function playItem(item: BaseItemDto) {
           :items="watchLater"
           @play="playItem"
           @select="openItem"
+          @identify="openIdentify"
+          @edit-metadata="openMetadataEditor"
+          @deleted="refreshAfterMutation"
         />
 
         <MediaRow
@@ -170,6 +203,9 @@ async function playItem(item: BaseItemDto) {
           :items="favorites"
           @play="playItem"
           @select="openItem"
+          @identify="openIdentify"
+          @edit-metadata="openMetadataEditor"
+          @deleted="refreshAfterMutation"
         />
 
         <MediaRow
@@ -179,6 +215,9 @@ async function playItem(item: BaseItemDto) {
           :items="latest"
           @play="playItem"
           @select="openItem"
+          @identify="openIdentify"
+          @edit-metadata="openMetadataEditor"
+          @deleted="refreshAfterMutation"
         />
 
         <template v-if="sid === 'libraryLatest'">
@@ -191,10 +230,26 @@ async function playItem(item: BaseItemDto) {
             :items="section.items"
             @play="playItem"
             @select="openItem"
+            @identify="openIdentify"
+            @edit-metadata="openMetadataEditor"
+            @deleted="refreshAfterMutation"
           />
         </template>
       </template>
     </div>
+
+    <IdentifyDialog
+      v-if="identifyTarget"
+      :item="identifyTarget"
+      v-model:open="identifyOpen"
+      @identified="refreshAfterMutation"
+    />
+    <MetadataEditorDialog
+      v-if="metadataTarget"
+      :item="metadataTarget"
+      v-model:open="metadataOpen"
+      @saved="refreshAfterMutation"
+    />
 
     <EmptyState
       v-else

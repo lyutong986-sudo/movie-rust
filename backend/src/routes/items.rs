@@ -2109,11 +2109,21 @@ async fn remote_search_subtitles_by_language(
     Ok(Json(Value::Array(items)))
 }
 
+/// Emby SDK `POST /Items/{Id}/RemoteSearch/Subtitles/{SubtitleId}` 的 query 参数。
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+#[allow(dead_code)]
+struct SubtitleApplyQuery {
+    #[serde(alias = "MediaSourceId")]
+    media_source_id: Option<String>,
+}
+
 async fn remote_search_subtitles_apply(
     _session: AuthSession,
     State(state): State<AppState>,
     Path((item_id, subtitle_id)): Path<(String, String)>,
-) -> Result<StatusCode, AppError> {
+    Query(_query): Query<SubtitleApplyQuery>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
     let item_uuid = crate::models::emby_id_to_uuid(&item_id)
         .map_err(|_| AppError::BadRequest("无效的 item_id".into()))?;
     let item = repository::get_media_item(&state.pool, item_uuid)
@@ -2185,7 +2195,13 @@ async fn remote_search_subtitles_apply(
         sub_path.display()
     );
 
-    Ok(StatusCode::NO_CONTENT)
+    // Emby SDK `SubtitleDownloadResult` 仅包含 `NewIndex`。新增的外部字幕落盘在
+    // `<媒体目录>/<stem>.<lang>.<format>`，重新枚举 sidecar 字幕，按 path 匹配
+    // 最新写入的文件返回其在 MediaStreams 序列中的 index；失败时回退为 -1，
+    // 与 Emby 服务端"未确定"的兜底语义一致。
+    let new_index = repository::sidecar_subtitle_stream_index(&item, &sub_path).unwrap_or(-1);
+
+    Ok((StatusCode::OK, Json(json!({ "NewIndex": new_index }))))
 }
 
 /// `GET /Providers/Subtitles/Subtitles/{Id}` — 直接通过 provider 下载字幕内容。

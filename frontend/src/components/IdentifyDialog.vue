@@ -38,7 +38,7 @@ watch(() => props.open, (v) => {
     searching.value = false;
     applying.value = null;
   }
-});
+}, { immediate: true });
 
 async function doSearch() {
   if (!searchName.value.trim() && !searchTmdb.value.trim() && !searchImdb.value.trim()) return;

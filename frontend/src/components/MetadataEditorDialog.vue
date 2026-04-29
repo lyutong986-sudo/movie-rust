@@ -62,7 +62,8 @@ watch(
     } finally {
       editorLoading.value = false;
     }
-  }
+  },
+  { immediate: true }
 );
 
 function splitCsv(value: string): string[] {

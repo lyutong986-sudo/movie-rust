@@ -8533,6 +8533,23 @@ pub fn subtitle_path_for_stream_index(item: &DbMediaItem, stream_index: i32) -> 
         .map(PathBuf::from)
 }
 
+/// 根据已写入磁盘的 sidecar 字幕路径，反查它在 Emby `MediaStreams` 序列中的
+/// 索引（视频路径同目录扫描，按完整 path 匹配）。供字幕下载完成后回填
+/// `SubtitleDownloadResult.NewIndex` 使用。
+pub fn sidecar_subtitle_stream_index(item: &DbMediaItem, sub_path: &Path) -> Option<i32> {
+    let canonical = sub_path.to_string_lossy().to_string();
+    subtitle_streams_for_item(item)
+        .into_iter()
+        .find(|stream| {
+            stream
+                .path
+                .as_deref()
+                .map(|path| path == canonical)
+                .unwrap_or(false)
+        })
+        .map(|stream| stream.index)
+}
+
 fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
     let video_path = Path::new(&item.path);
     let item_emby_id = uuid_to_emby_guid(&item.id);
