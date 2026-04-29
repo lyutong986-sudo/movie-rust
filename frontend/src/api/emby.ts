@@ -207,6 +207,40 @@ export interface AccessSchedule {
   EndHour: number;
 }
 
+export interface ImportEmbyUserItem {
+  Name: string;
+  LegacyPasswordHash: string;
+  LegacyPasswordFormat?: string;
+  ExternalId?: string;
+  Policy?: Partial<UserPolicy>;
+}
+
+export interface ImportEmbyUsersRequest {
+  Users: ImportEmbyUserItem[];
+  ConflictPolicy?: 'skip' | 'overwrite';
+  DefaultPolicy?: Partial<UserPolicy>;
+  DefaultLegacyFormat?: string;
+}
+
+export interface ImportedUserSummary {
+  UserId: string;
+  Name: string;
+  ExternalId?: string | null;
+}
+
+export interface ImportFailureSummary {
+  Name: string;
+  ExternalId?: string | null;
+  Error: string;
+}
+
+export interface ImportEmbyUsersResponse {
+  Created: ImportedUserSummary[];
+  Updated: ImportedUserSummary[];
+  Skipped: ImportedUserSummary[];
+  Failed: ImportFailureSummary[];
+}
+
 export interface UserPolicy {
   IsAdministrator: boolean;
   IsHidden?: boolean;
@@ -1729,6 +1763,25 @@ export class EmbyApi {
     const qs = params.toString();
     await this.request<void>(`/Persons/${personId}/Refresh${qs ? '?' + qs : ''}`, {
       method: 'POST',
+    });
+  }
+
+  /** 批量从 Emby SQLite 用户库导入。Body 见后端 `ImportEmbyUsersRequest`。 */
+  async importEmbyUsers(payload: ImportEmbyUsersRequest): Promise<ImportEmbyUsersResponse> {
+    return this.request<ImportEmbyUsersResponse>(`/api/admin/users/import-emby`, {
+      method: 'POST',
+      body: payload as unknown as Record<string, unknown>,
+    });
+  }
+
+  /** 一次性给一组用户应用相同的 Policy patch（部分字段，只覆盖 patch 内的键）。 */
+  async bulkUpdateUserPolicy(payload: {
+    UserIds: string[];
+    PolicyPatch: Partial<UserPolicy>;
+  }): Promise<{ Updated: string[]; Failed: Array<{ Name: string; Error: string }> }> {
+    return this.request(`/api/admin/users/policy/bulk`, {
+      method: 'POST',
+      body: payload as unknown as Record<string, unknown>,
     });
   }
 

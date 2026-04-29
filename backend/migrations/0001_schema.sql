@@ -49,15 +49,18 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- 老库兼容：如果 users 早于 0001 建立，这里用 ADD COLUMN IF NOT EXISTS 补齐。
 ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS easy_password_hash  text,
-    ADD COLUMN IF NOT EXISTS is_hidden           boolean NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS is_disabled         boolean NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS policy              jsonb   NOT NULL DEFAULT '{}'::jsonb,
-    ADD COLUMN IF NOT EXISTS configuration       jsonb   NOT NULL DEFAULT '{}'::jsonb,
-    ADD COLUMN IF NOT EXISTS primary_image_path  text,
-    ADD COLUMN IF NOT EXISTS backdrop_image_path text,
-    ADD COLUMN IF NOT EXISTS logo_image_path     text,
-    ADD COLUMN IF NOT EXISTS date_modified       timestamptz NOT NULL DEFAULT now();
+    ADD COLUMN IF NOT EXISTS easy_password_hash      text,
+    ADD COLUMN IF NOT EXISTS is_hidden               boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS is_disabled             boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS policy                  jsonb   NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS configuration           jsonb   NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS primary_image_path      text,
+    ADD COLUMN IF NOT EXISTS backdrop_image_path     text,
+    ADD COLUMN IF NOT EXISTS logo_image_path         text,
+    ADD COLUMN IF NOT EXISTS date_modified           timestamptz NOT NULL DEFAULT now(),
+    -- Emby SQLite 用户库导入：legacy_password_format='emby_sha1' 时，登录用 SHA1(plaintext) 比对。
+    ADD COLUMN IF NOT EXISTS legacy_password_format  text,
+    ADD COLUMN IF NOT EXISTS legacy_password_hash    text;
 
 -- ---------------------------------------------------------------------------
 -- sessions：登录会话 / 访问令牌

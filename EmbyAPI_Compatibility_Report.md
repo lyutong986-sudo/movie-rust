@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-04-29（第十四轮 人物简介 + 头像 TMDB 级联 + Refresh + 前端展示）
+> 对比时间：2026-04-29（第十五轮 Emby SQLite 用户库迁移 - sql.js 浏览器解析 + SHA1 兼容登录 + Argon2 自动升级）
 
 ---
 
@@ -701,3 +701,137 @@ POST /Persons/{personId}/Refresh
 - `PeopleValidationTask` 计划任务：每 7 天扫一遍 `metadata_synced_at IS NULL OR < now() - interval '7d'`，
   对 `provider_ids ? 'Tmdb'` 的人物批量补 biography（与 Jellyfin 上游对齐）
 - 前端在演员卡片悬浮弹出 `Tooltip` 显示 Overview 摘要（避免必须进详情页）
+
+---
+
+## 第十五批（Emby SQLite 用户库迁移 — sql.js + SHA1 兼容 + Argon2 自动升级）
+
+### 1. Emby `users.db` 调研
+
+实际表结构只有一张 `LocalUsersv2(Id INTEGER, guid BLOB(16), data TEXT)`；用户字段塞进 `data` 这个 JSON 串里：
+
+```json
+{ "Name":"...", "Password":"<40-char hex>", "ImageInfos":[],
+  "DateCreated":"...", "IdString":"<32-hex uuid>", ... }
+```
+
+`Password` 字段 **2400/2400 都是 40 字符 hex** → 裸 `SHA1(plaintext_utf8)`，**无盐**。
+绝大多数没 `EasyPassword`、没 `Policy`（老版本 emby）。
+`DA39A3EE5E6B...` = SHA1("")，`7C4A8D09CA37...` = SHA1("123456")。
+
+→ 校验逻辑等价于：`hex(SHA1(input)).upper() == stored_hex`（大小写不敏感）。
+
+### 2. 后端 schema（同源两点）
+
+`backend/migrations/0001_schema.sql` + `backend/src/main.rs::ensure_schema_compatibility` 同时为 `users` 表加：
+
+```
+ADD COLUMN IF NOT EXISTS legacy_password_format TEXT,   -- 'emby_sha1' | NULL
+ADD COLUMN IF NOT EXISTS legacy_password_hash   TEXT;
+```
+
+`DbUser`（`backend/src/models.rs`）相应新增两个 `Option<String>` 字段。
+
+### 3. 安全模块兼容验证
+
+`backend/src/security.rs::verify_legacy_password(format, stored_hash, password)`：
+
+- 仅在 `format == "emby_sha1"` 时启用
+- `hex(SHA1(input)) == stored_hash`，大小写无关
+- 单元测试覆盖：空密码 / 弱密码 / 大小写 / 错误密码 / 未知 format → 全 PASS
+
+### 4. 登录路径接入 fallback + 自动升级
+
+`backend/src/routes/users.rs::authenticate`：
+
+```text
+verify_password(argon2_hash, pw)        // 主路径
+  ↓ 失败
+verify_legacy_password(fmt, hash, pw)   // 仅当 legacy 字段存在
+  ↓ 命中
+upgrade_legacy_password(user_id, pw)    // 写 Argon2 + 清空 legacy
+```
+
+`backend/src/repository.rs`：
+
+- `upgrade_legacy_password(user_id, plaintext)` — 内部用，无密码长度限制
+- `change_user_password(...)` — 用户主动改密时也清 legacy 字段
+- `set_user_legacy_password(user_id, format, hash)` — 导入用
+
+### 5. 批量导入 + 批量改权限路由（仅 admin）
+
+| 端点 | 行为 |
+|---|---|
+| `POST /api/admin/users/import-emby` | body `{Users:[...], ConflictPolicy:'skip'\|'overwrite', DefaultPolicy:{...}, DefaultLegacyFormat:'emby_sha1'}`；逐条 `get_user_by_name` → 不存在则 `create_user`+`set_user_legacy_password`+`apply_user_policy_update`；存在按策略 skip / 覆盖 legacy；返回 `{Created/Updated/Skipped/Failed}` 四个数组 |
+| `POST /api/admin/users/policy/bulk` | body `{UserIds:[...], PolicyPatch:{...}}`；对每个 id 调 `apply_user_policy_update`（与 `/Users/{id}/Policy` 同链路，含"系统至少一个管理员/启用用户"安全约束） |
+
+`get_user_by_name / get_user_by_id / list_users` 三处显式 SELECT 列同步补 `legacy_password_format, legacy_password_hash`，避免 sqlx 把 None 当默认值返回。
+
+### 6. 前端：浏览器内 sql.js + 单页面闭环
+
+依赖：`npm i sql.js@^1.13.0`，把 `sql-wasm-browser.wasm` 与 `sql-wasm.wasm` 放到 `frontend/public/sql-wasm/`（vite 浏览器入口走 `sql-wasm-browser.js`）。
+
+新页面 `frontend/src/pages/settings/EmbyUserImport.vue` + 路由 `/settings/users/import-emby`，`UsersSettings.vue` 顶部加入"从 Emby 导入"入口。
+
+页面四步流：
+
+1. 上传 `users.db` → `initSqlJs({ locateFile })` → `db.exec("SELECT Id, guid, data FROM LocalUsersv2")`
+2. 默认 Policy 模板（管理员/远程访问/播放/下载/转码/媒体库白名单 多 checkbox）
+3. 解析后 UTable：勾选框 + 用户名 + Emby Id + SHA1 前 12 位 + 本地冲突徽章；筛选/全选/仅有密码/仅未导入
+4. 选 ConflictPolicy → 一键导入 → 弹"新建/已更新/跳过/失败"四宫格
+
+### 7. 验证
+
+#### Python e2e（`tests/emby_user_import_audit.py`，13/13 PASS）
+
+| 断言 | 结果 |
+|---|---|
+| `POST /api/admin/users/import-emby` 首次 200 + Created=3 | ✅ |
+| 三个 emby 用户用各自明文 SHA1 登录 200 | ✅ |
+| 管理员 Policy.IsAdministrator=True 持久化 | ✅ |
+| 第二次登录已走 Argon2（仍 200） | ✅ |
+| 错误密码 401 | ✅ |
+| `ConflictPolicy=skip` 重名 → 全部 Skipped | ✅ |
+| `ConflictPolicy=overwrite` 重名 → 全部 Updated | ✅ |
+| `POST /api/admin/users/policy/bulk` 批量降级管理员 | ✅ Updated=3 |
+| 降级后 admin=False、EnableContentDownloading=False 持久化 | ✅ |
+
+#### MCP 浏览器 UI 端到端（chrome-devtools-mcp）
+
+1. 生成 `tests/results/fake_emby_users.db`（3 用户：中文名 `测试管理员` / 弱密码 `Tom:123456` / 空密码 `pin_user`）
+2. 导航到 `/settings/users/import-emby` → 上传 → sql.js 解析出 3/3，"原 admin"徽章命中
+3. 点"导入 3 个用户" → 结果卡片显示 **新建 3 / 跳过 0 / 失败 0**
+4. 直接以 `Tom:123456`、`测试管理员:AdminPass2026!`、`pin_user:""` 登录 → 三人都返回 200
+5. PG 复读：三人 `password_hash` 已是 97 字符 Argon2、`legacy_password_format=NULL` → **登录后自动升级 + 清 legacy 字段** 完整闭环
+
+#### 验证升级后 legacy 字段被清空（直接 SQL 复读）
+
+```text
+    name    | argon2_len | fmt | is_admin
+------------+------------+-----+----------
+ pin_user   |         97 |     | f
+ Tom        |         97 |     | f
+ 测试管理员 |         97 |     | f
+```
+
+### 8. 回归
+
+- `tests/permission_audit.py`：**90/90** 通过
+- `tests/emby_endpoint_audit.py`：**44/44** 通过
+- `tests/emby_user_import_audit.py`（新增）：**13/13** 通过
+- `cargo test --bin movie-rust-backend security::`：**2/2** 通过
+
+### 9. 关键差异修复一览
+
+| Emby 用户库 | 本项目此前 | 本批后 |
+|---|---|---|
+| `LocalUsersv2.data.Password` 裸 SHA1 hex | 仅 Argon2，无法 import | ✅ `legacy_password_format='emby_sha1'` 走 fallback |
+| 用户登录后**透明**升级到现代算法 | 不存在 | ✅ `upgrade_legacy_password` + 清 legacy 字段 |
+| 管理员可批量灌入 + 一键改权限 | 仅单条 `POST /Users/New`、`POST /Users/{id}/Policy` | ✅ `import-emby` + `policy/bulk` |
+| 前端从 SQLite 读结构化用户 | 不存在 | ✅ sql.js 浏览器内解析 LocalUsersv2 |
+
+### 10. 待办（下一轮可选）
+
+- 给 `import-emby` 增加可选的 `RoleMap`：emby `Configuration.Policy.IsAdministrator` → 本项目 `IsAdministrator`，自动设管理员
+- 前端给已上传的"原 admin"用户**默认勾选"管理员"模板**，避免管理员被批量降级
+- 把"批量改权限"功能搬到 `UsersSettings.vue`：列表多选 + 顶部弹出 `policy/bulk` 表单

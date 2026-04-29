@@ -112,6 +112,12 @@ export const router = createRouter({
       meta: { title: '用户', section: 'admin', admin: true }
     },
     {
+      path: '/settings/users/import-emby',
+      name: 'settings-users-import-emby',
+      component: () => import('../pages/settings/EmbyUserImport.vue'),
+      meta: { title: '从 Emby 导入用户', section: 'admin', admin: true }
+    },
+    {
       path: '/settings/users/:userId',
       name: 'settings-user-detail',
       component: () => import('../pages/settings/UserDetailPage.vue'),

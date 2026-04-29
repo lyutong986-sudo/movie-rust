@@ -95,6 +95,8 @@ pub fn router() -> Router<AppState> {
         .route("/users/{user_id}/policy", post(update_user_policy))
         .route("/Users/ForgotPassword", post(forgot_password))
         .route("/Users/ForgotPassword/Pin", post(forgot_password_pin))
+        .route("/api/admin/users/import-emby", post(import_emby_users))
+        .route("/api/admin/users/policy/bulk", post(bulk_update_user_policy))
 }
 
 async fn public_users(State(state): State<AppState>) -> Result<Json<Vec<PublicUserDto>>, AppError> {
@@ -462,10 +464,37 @@ async fn authenticate(
             .unwrap_or_default()
     };
 
-    if !security::verify_password(&user.password_hash, password) {
-        repository::record_failed_login(&state.pool, &user).await?;
-        return Err(AppError::Unauthorized);
+    let primary_ok = security::verify_password(&user.password_hash, password);
+    let mut legacy_upgraded = false;
+    if !primary_ok {
+        // 主哈希（Argon2）失败时，再尝试外部用户库的旧哈希格式（如 Emby SQLite SHA1）。
+        // 命中后一次性把密码升级为 Argon2，下次登录仍走标准路径。
+        let legacy_ok = match (
+            user.legacy_password_format.as_deref(),
+            user.legacy_password_hash.as_deref(),
+        ) {
+            (Some(format), Some(stored)) if !format.is_empty() && !stored.is_empty() => {
+                security::verify_legacy_password(format, stored, password)
+            }
+            _ => false,
+        };
+        if !legacy_ok {
+            repository::record_failed_login(&state.pool, &user).await?;
+            return Err(AppError::Unauthorized);
+        }
+        if let Err(err) =
+            repository::upgrade_legacy_password(&state.pool, user.id, password).await
+        {
+            tracing::warn!(user_id = %user.id, ?err, "legacy 密码升级 Argon2 失败，仍允许本次登录");
+        } else {
+            legacy_upgraded = true;
+            tracing::info!(
+                user_id = %user.id,
+                "已用旧版哈希成功登录，并就地升级到 Argon2"
+            );
+        }
     }
+    let _ = legacy_upgraded;
 
     if !configuration.enable_local_password {
         return Err(AppError::Unauthorized);
@@ -993,6 +1022,313 @@ fn merge_json(target: &mut Value, patch: Value) {
         }
         (slot, value) => *slot = value,
     }
+}
+
+// ---------------------------------------------------------------------------
+// 批量导入 Emby SQLite 用户 + 批量改 Policy
+//
+// 使用场景：管理员把 Emby `users.db` 里 `LocalUsersv2.data` 的用户名+SHA1 密码
+// 批量灌进本项目，立刻就能用 emby 老密码登录；后续登录第一次成功时密码会被
+// 透明升级为 Argon2，legacy 字段被清空。
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ImportEmbyUsersRequest {
+    /// 一组待导入用户，每条至少含 `Name` 与 `LegacyPasswordHash`。
+    pub users: Vec<ImportEmbyUserItem>,
+    /// 重名策略：
+    /// - `"skip"`（默认）：本地已有同名用户时跳过
+    /// - `"overwrite"`：覆盖本地用户的 legacy 哈希（保留原 password_hash 不变 ——
+    ///   下次登录仍会先尝试 Argon2，失败再走 emby SHA1）
+    #[serde(default)]
+    pub conflict_policy: Option<String>,
+    /// 默认 Policy 模板（PascalCase），所有未在条目内单独指定 Policy 的用户都套用它。
+    /// 留空时用 `UserPolicyDto::default()`。
+    #[serde(default)]
+    pub default_policy: Option<Value>,
+    /// 默认 `legacy_password_format`，单条目里没指定时落到这个值。默认 `"emby_sha1"`。
+    #[serde(default)]
+    pub default_legacy_format: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ImportEmbyUserItem {
+    pub name: String,
+    pub legacy_password_hash: String,
+    #[serde(default)]
+    pub legacy_password_format: Option<String>,
+    /// 单条覆盖 Policy；与 `default_policy` 的关系是"先取条目，再 fallback default"。
+    #[serde(default)]
+    pub policy: Option<Value>,
+    /// 其他可选元数据（仅记录到响应，不写库）。
+    #[serde(default, alias = "EmbyId", alias = "IdString")]
+    pub external_id: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ImportEmbyUsersResponse {
+    pub created: Vec<ImportedUserSummary>,
+    pub updated: Vec<ImportedUserSummary>,
+    pub skipped: Vec<ImportedUserSummary>,
+    pub failed: Vec<ImportFailureSummary>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ImportedUserSummary {
+    pub user_id: String,
+    pub name: String,
+    pub external_id: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ImportFailureSummary {
+    pub name: String,
+    pub external_id: Option<String>,
+    pub error: String,
+}
+
+async fn import_emby_users(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<ImportEmbyUsersRequest>,
+) -> Result<Json<ImportEmbyUsersResponse>, AppError> {
+    auth::require_admin(&session)?;
+
+    let conflict = payload
+        .conflict_policy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("skip")
+        .to_ascii_lowercase();
+    if conflict != "skip" && conflict != "overwrite" {
+        return Err(AppError::BadRequest(
+            "ConflictPolicy 仅支持 skip / overwrite".to_string(),
+        ));
+    }
+    let default_format = payload
+        .default_legacy_format
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("emby_sha1")
+        .to_string();
+    let default_policy_value = payload
+        .default_policy
+        .clone()
+        .unwrap_or_else(|| serde_json::to_value(UserPolicyDto::default()).unwrap_or_default());
+
+    let mut response = ImportEmbyUsersResponse {
+        created: Vec::new(),
+        updated: Vec::new(),
+        skipped: Vec::new(),
+        failed: Vec::new(),
+    };
+
+    for item in payload.users {
+        let name = item.name.trim().to_string();
+        let external_id = item
+            .external_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if name.is_empty() {
+            response.failed.push(ImportFailureSummary {
+                name: item.name.clone(),
+                external_id: external_id.clone(),
+                error: "用户名为空".to_string(),
+            });
+            continue;
+        }
+        let legacy_hash = item.legacy_password_hash.trim();
+        if legacy_hash.is_empty() {
+            response.failed.push(ImportFailureSummary {
+                name,
+                external_id,
+                error: "缺少 LegacyPasswordHash".to_string(),
+            });
+            continue;
+        }
+        let format = item
+            .legacy_password_format
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&default_format)
+            .to_string();
+        let policy_value = item.policy.clone().unwrap_or_else(|| default_policy_value.clone());
+
+        match repository::get_user_by_name(&state.pool, &name).await {
+            Ok(Some(existing)) => {
+                if conflict == "skip" {
+                    response.skipped.push(ImportedUserSummary {
+                        user_id: uuid_to_emby_guid(&existing.id),
+                        name,
+                        external_id,
+                    });
+                    continue;
+                }
+                // overwrite：仅刷新 legacy 字段，不动 Argon2 主哈希
+                if let Err(err) = repository::set_user_legacy_password(
+                    &state.pool,
+                    existing.id,
+                    Some(&format),
+                    Some(legacy_hash),
+                )
+                .await
+                {
+                    response.failed.push(ImportFailureSummary {
+                        name,
+                        external_id,
+                        error: format!("更新 legacy 哈希失败: {err}"),
+                    });
+                    continue;
+                }
+                if let Err(err) =
+                    apply_user_policy_update(&state, existing.id, policy_value).await
+                {
+                    response.failed.push(ImportFailureSummary {
+                        name,
+                        external_id,
+                        error: format!("更新 Policy 失败: {err}"),
+                    });
+                    continue;
+                }
+                response.updated.push(ImportedUserSummary {
+                    user_id: uuid_to_emby_guid(&existing.id),
+                    name,
+                    external_id,
+                });
+            }
+            Ok(None) => {
+                // 创建：先用占位 Argon2（一段随机 token，永远无法用明文登录），再写 legacy 哈希。
+                // 这样登录路径会先 Argon2 失败 → 走 emby SHA1 fallback 命中 → 自动升级。
+                let placeholder = Uuid::new_v4().to_string();
+                let new_user = match repository::create_user(
+                    &state.pool,
+                    &name,
+                    Some(&placeholder),
+                    None,
+                )
+                .await
+                {
+                    Ok(u) => u,
+                    Err(err) => {
+                        response.failed.push(ImportFailureSummary {
+                            name,
+                            external_id,
+                            error: format!("创建用户失败: {err}"),
+                        });
+                        continue;
+                    }
+                };
+                if let Err(err) = repository::set_user_legacy_password(
+                    &state.pool,
+                    new_user.id,
+                    Some(&format),
+                    Some(legacy_hash),
+                )
+                .await
+                {
+                    response.failed.push(ImportFailureSummary {
+                        name,
+                        external_id,
+                        error: format!("写 legacy 哈希失败: {err}"),
+                    });
+                    continue;
+                }
+                if let Err(err) =
+                    apply_user_policy_update(&state, new_user.id, policy_value).await
+                {
+                    response.failed.push(ImportFailureSummary {
+                        name,
+                        external_id,
+                        error: format!("应用 Policy 失败: {err}"),
+                    });
+                    continue;
+                }
+                response.created.push(ImportedUserSummary {
+                    user_id: uuid_to_emby_guid(&new_user.id),
+                    name,
+                    external_id,
+                });
+            }
+            Err(err) => {
+                response.failed.push(ImportFailureSummary {
+                    name,
+                    external_id,
+                    error: format!("查询用户失败: {err}"),
+                });
+            }
+        }
+    }
+
+    Ok(Json(response))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct BulkUpdatePolicyRequest {
+    /// 待更新的用户 ID 列表（支持 Emby 32-hex GUID 或标准 UUID）
+    pub user_ids: Vec<String>,
+    /// 要 patch 进每个用户 Policy 的 JSON 片段（PascalCase 字段）
+    pub policy_patch: Value,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct BulkUpdatePolicyResponse {
+    pub updated: Vec<String>,
+    pub failed: Vec<ImportFailureSummary>,
+}
+
+async fn bulk_update_user_policy(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Json(payload): Json<BulkUpdatePolicyRequest>,
+) -> Result<Json<BulkUpdatePolicyResponse>, AppError> {
+    auth::require_admin(&session)?;
+    if payload.user_ids.is_empty() {
+        return Err(AppError::BadRequest("UserIds 不能为空".to_string()));
+    }
+    if !payload.policy_patch.is_object() {
+        return Err(AppError::BadRequest("PolicyPatch 必须是对象".to_string()));
+    }
+
+    let mut response = BulkUpdatePolicyResponse {
+        updated: Vec::new(),
+        failed: Vec::new(),
+    };
+    for raw_id in payload.user_ids {
+        let id = match crate::models::emby_id_to_uuid(&raw_id)
+            .or_else(|_| Uuid::parse_str(&raw_id))
+        {
+            Ok(v) => v,
+            Err(_) => {
+                response.failed.push(ImportFailureSummary {
+                    name: raw_id.clone(),
+                    external_id: None,
+                    error: "用户 ID 格式无效".to_string(),
+                });
+                continue;
+            }
+        };
+        match apply_user_policy_update(&state, id, payload.policy_patch.clone()).await {
+            Ok(()) => response.updated.push(uuid_to_emby_guid(&id)),
+            Err(err) => response.failed.push(ImportFailureSummary {
+                name: raw_id,
+                external_id: None,
+                error: err.to_string(),
+            }),
+        }
+    }
+    Ok(Json(response))
 }
 
 #[cfg(test)]

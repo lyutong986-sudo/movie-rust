@@ -339,7 +339,17 @@ function userStatus(account: UserDto) {
           <p class="text-muted text-xs uppercase tracking-wider">Users</p>
           <h2 class="text-highlighted text-xl font-semibold">用户管理</h2>
         </div>
-        <UButton icon="i-lucide-save" :loading="saving" @click="saveUser">保存更改</UButton>
+        <div class="flex flex-wrap items-center gap-2">
+          <UButton
+            color="neutral"
+            variant="soft"
+            icon="i-lucide-database"
+            @click="router.push('/settings/users/import-emby')"
+          >
+            从 Emby 导入
+          </UButton>
+          <UButton icon="i-lucide-save" :loading="saving" @click="saveUser">保存更改</UButton>
+        </div>
       </div>
 
       <UAlert v-if="error" color="error" icon="i-lucide-triangle-alert" :description="error" />

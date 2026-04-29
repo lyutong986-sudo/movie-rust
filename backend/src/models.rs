@@ -23,6 +23,13 @@ pub struct DbUser {
     pub easy_password_hash: Option<String>,
     #[sqlx(default)]
     pub created_at: Option<DateTime<Utc>>,
+    /// 兼容外部用户库的密码格式，目前仅 `emby_sha1`（Emby SQLite LocalUsersv2 裸 SHA1）。
+    /// 为 None 表示当前用户走标准 Argon2 校验。
+    #[sqlx(default)]
+    pub legacy_password_format: Option<String>,
+    /// 与 `legacy_password_format` 配套：导入时存入的旧版哈希原文（Emby 是 40 字符 hex）。
+    #[sqlx(default)]
+    pub legacy_password_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]

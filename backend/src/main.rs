@@ -224,15 +224,17 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         // -------------------------------------------------------------------
         r#"
         ALTER TABLE users
-            ADD COLUMN IF NOT EXISTS easy_password_hash  TEXT,
-            ADD COLUMN IF NOT EXISTS is_hidden           BOOLEAN NOT NULL DEFAULT false,
-            ADD COLUMN IF NOT EXISTS is_disabled         BOOLEAN NOT NULL DEFAULT false,
-            ADD COLUMN IF NOT EXISTS policy              JSONB   NOT NULL DEFAULT '{}'::jsonb,
-            ADD COLUMN IF NOT EXISTS configuration       JSONB   NOT NULL DEFAULT '{}'::jsonb,
-            ADD COLUMN IF NOT EXISTS primary_image_path  TEXT,
-            ADD COLUMN IF NOT EXISTS backdrop_image_path TEXT,
-            ADD COLUMN IF NOT EXISTS logo_image_path     TEXT,
-            ADD COLUMN IF NOT EXISTS date_modified       TIMESTAMPTZ NOT NULL DEFAULT now()
+            ADD COLUMN IF NOT EXISTS easy_password_hash      TEXT,
+            ADD COLUMN IF NOT EXISTS is_hidden               BOOLEAN NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS is_disabled             BOOLEAN NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS policy                  JSONB   NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS configuration           JSONB   NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS primary_image_path      TEXT,
+            ADD COLUMN IF NOT EXISTS backdrop_image_path     TEXT,
+            ADD COLUMN IF NOT EXISTS logo_image_path         TEXT,
+            ADD COLUMN IF NOT EXISTS date_modified           TIMESTAMPTZ NOT NULL DEFAULT now(),
+            ADD COLUMN IF NOT EXISTS legacy_password_format  TEXT,
+            ADD COLUMN IF NOT EXISTS legacy_password_hash    TEXT
         "#,
         // -------------------------------------------------------------------
         // sessions：会话令牌 + session_type + expires_at。

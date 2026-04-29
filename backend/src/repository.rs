@@ -1583,7 +1583,8 @@ pub async fn get_user_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Option<
         r#"
         SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
                configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
-               easy_password_hash, created_at
+               easy_password_hash, created_at,
+               legacy_password_format, legacy_password_hash
         FROM users
         WHERE lower(name) = lower($1)
         "#,
@@ -1598,7 +1599,8 @@ pub async fn get_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbUs
         r#"
         SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
                configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
-               easy_password_hash, created_at
+               easy_password_hash, created_at,
+               legacy_password_format, legacy_password_hash
         FROM users
         WHERE id = $1
         "#,
@@ -1697,12 +1699,77 @@ pub async fn change_user_password(
     }
 
     let password_hash = security::hash_password(password)?;
-    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
-        .bind(password_hash)
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+    // 写新密码时一并清掉 legacy 字段，确保旧版 SHA1 校验路径不会再被触发。
+    sqlx::query(
+        r#"
+        UPDATE users
+           SET password_hash = $1,
+               legacy_password_format = NULL,
+               legacy_password_hash = NULL,
+               date_modified = now()
+         WHERE id = $2
+        "#,
+    )
+    .bind(password_hash)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
 
+    Ok(())
+}
+
+/// 写入或清除某用户的 legacy 密码（外部用户库导入用）。
+///
+/// - `format=Some/hash=Some`：覆盖
+/// - 任一为 None：清除（`UPDATE … SET legacy_password_format = NULL, legacy_password_hash = NULL`）
+pub async fn set_user_legacy_password(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    format: Option<&str>,
+    hash: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE users
+           SET legacy_password_format = $1,
+               legacy_password_hash = $2,
+               date_modified = now()
+         WHERE id = $3
+        "#,
+    )
+    .bind(format)
+    .bind(hash)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 把已知明文密码升级为 Argon2，并清除 legacy 字段。
+///
+/// 与 `change_user_password` 的差异：
+/// - 不做长度限制（emby 老用户允许空密码 / 短 PIN，避免登录态切换时被拒）
+/// - 用于"SHA1 命中后透明升级"的内部流程
+pub async fn upgrade_legacy_password(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    plaintext: &str,
+) -> Result<(), AppError> {
+    let password_hash = security::hash_password(plaintext)?;
+    sqlx::query(
+        r#"
+        UPDATE users
+           SET password_hash = $1,
+               legacy_password_format = NULL,
+               legacy_password_hash = NULL,
+               date_modified = now()
+         WHERE id = $2
+        "#,
+    )
+    .bind(password_hash)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -1854,7 +1921,8 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
             r#"
             SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
                    configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
-                   easy_password_hash, created_at
+                   easy_password_hash, created_at,
+                   legacy_password_format, legacy_password_hash
             FROM users
             WHERE is_hidden = false AND is_disabled = false
             ORDER BY name
@@ -1867,7 +1935,8 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
             r#"
             SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
                    configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
-                   easy_password_hash, created_at
+                   easy_password_hash, created_at,
+                   legacy_password_format, legacy_password_hash
             FROM users
             ORDER BY name
             "#,
