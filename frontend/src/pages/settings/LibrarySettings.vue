@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import AddLibraryDialog from '../../components/AddLibraryDialog.vue';
+import ContextMenu from '../../components/ContextMenu.vue';
+import type { ContextMenuItem } from '../../components/ContextMenu.vue';
 import SettingsLayout from '../../layouts/SettingsLayout.vue';
 import {
   api,
@@ -19,7 +21,10 @@ import {
   totalLibraryItems,
   virtualFolders
 } from '../../store/app';
+import { useAppToast } from '../../composables/toast';
 import type { VirtualFolderInfo } from '../../api/emby';
+
+const toast = useAppToast();
 
 onMounted(async () => {
   if (isAdmin.value) {
@@ -201,6 +206,86 @@ async function remove(folder: VirtualFolderInfo) {
   }
   await deleteLibrary(folder);
 }
+
+const libCtxMenu = ref<InstanceType<typeof ContextMenu> | null>(null);
+const libCtxFolder = ref<VirtualFolderInfo | null>(null);
+const renameDialogOpen = ref(false);
+const renameValue = ref('');
+
+function openLibraryContextMenu(e: MouseEvent, folder: VirtualFolderInfo) {
+  libCtxFolder.value = folder;
+  libCtxMenu.value?.show(e);
+}
+
+const libMenuItems = computed<ContextMenuItem[][]>(() => {
+  const folder = libCtxFolder.value;
+  if (!folder) return [];
+  return [
+    [
+      { label: '编辑', icon: 'i-lucide-pencil', onSelect: () => edit(folder) },
+      {
+        label: '重命名',
+        icon: 'i-lucide-text-cursor-input',
+        onSelect: () => {
+          renameValue.value = folder.Name;
+          renameDialogOpen.value = true;
+        }
+      }
+    ],
+    [
+      {
+        label: '刷新元数据',
+        icon: 'i-lucide-refresh-cw',
+        onSelect: async () => {
+          try {
+            await api.refreshItemMetadata(folder.ItemId);
+            toast.success('元数据刷新已提交');
+          } catch {
+            toast.error('刷新元数据失败');
+          }
+        }
+      },
+      {
+        label: '扫描媒体库文件',
+        icon: 'i-lucide-refresh-ccw',
+        disabled: isFolderScanButtonDisabled(folder),
+        onSelect: () => scanFolder(folder)
+      },
+      {
+        label: '增量扫描',
+        icon: 'i-lucide-git-compare-arrows',
+        disabled: isFolderScanButtonDisabled(folder),
+        onSelect: () => scanFolderIncremental(folder)
+      }
+    ],
+    [
+      {
+        label: '删除',
+        icon: 'i-lucide-trash-2',
+        color: 'error',
+        onSelect: () => remove(folder)
+      }
+    ]
+  ];
+});
+
+async function submitRename() {
+  const folder = libCtxFolder.value;
+  if (!folder || !renameValue.value.trim()) return;
+  const newName = renameValue.value.trim();
+  if (newName === folder.Name) {
+    renameDialogOpen.value = false;
+    return;
+  }
+  try {
+    await api.renameVirtualFolder(folder.Name, newName);
+    toast.success(`已重命名为"${newName}"`);
+    renameDialogOpen.value = false;
+    await loadVirtualFolders();
+  } catch (err: any) {
+    toast.error('重命名失败: ' + (err?.message || err));
+  }
+}
 </script>
 
 <template>
@@ -325,7 +410,7 @@ async function remove(folder: VirtualFolderInfo) {
       </UCard>
 
       <div v-if="virtualFolders.length" class="grid gap-3 md:grid-cols-2">
-        <UCard v-for="folder in virtualFolders" :key="folder.ItemId">
+        <UCard v-for="folder in virtualFolders" :key="folder.ItemId" @contextmenu="openLibraryContextMenu($event, folder)">
           <div class="flex items-start gap-3">
             <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
               <UIcon :name="collectionIcon(folder.CollectionType)" class="size-5" />
@@ -427,5 +512,25 @@ async function remove(folder: VirtualFolderInfo) {
       @update:open="(v: boolean) => { if (!v) state.editingLibrary = null }"
       @close="state.editingLibrary = null"
     />
+
+    <ContextMenu
+      ref="libCtxMenu"
+      :items="libMenuItems"
+      :preview-title="libCtxFolder?.Name"
+      :preview-subtitle="libCtxFolder ? collectionLabel(libCtxFolder.CollectionType) : undefined"
+    />
+
+    <UModal v-model:open="renameDialogOpen">
+      <template #content>
+        <div class="p-6 space-y-4">
+          <h3 class="text-lg font-semibold text-highlighted">重命名媒体库</h3>
+          <UInput v-model="renameValue" autofocus placeholder="新名称" class="w-full" @keydown.enter="submitRename" />
+          <div class="flex justify-end gap-2">
+            <UButton color="neutral" variant="outline" @click="renameDialogOpen = false">取消</UButton>
+            <UButton @click="submitRename">确认</UButton>
+          </div>
+        </div>
+      </template>
+    </UModal>
   </SettingsLayout>
 </template>

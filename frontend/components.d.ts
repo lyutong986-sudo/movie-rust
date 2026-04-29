@@ -13,6 +13,7 @@ declare module 'vue' {
   export interface GlobalComponents {
     AddLibraryDialog: typeof import('./src/components/AddLibraryDialog.vue')['default']
     CommandPalette: typeof import('./src/components/CommandPalette.vue')['default']
+    ContextMenu: typeof import('./src/components/ContextMenu.vue')['default']
     EmptyState: typeof import('./src/components/EmptyState.vue')['default']
     HeroCarousel: typeof import('./src/components/HeroCarousel.vue')['default']
     MediaCard: typeof import('./src/components/MediaCard.vue')['default']

@@ -1441,6 +1441,10 @@ export class EmbyApi {
     });
   }
 
+  async deleteItem(itemId: string) {
+    return this.request<void>(`/Items/${itemId}/Delete`, { method: 'POST' });
+  }
+
   async refreshItemMetadata(
     itemId: string,
     options?: {

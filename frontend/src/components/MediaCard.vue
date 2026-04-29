@@ -1,16 +1,22 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted } from 'vue';
+import { useRouter } from 'vue-router';
 import type { BaseItemDto } from '../api/emby';
 import {
   api,
   enqueue,
+  isAdmin,
   isInWatchLater,
   itemSubtitle,
   toggleFavorite,
   togglePlayed,
   toggleWatchLater
 } from '../store/app';
+import { itemRoute } from '../utils/navigation';
+import { useAppToast } from '../composables/toast';
 import MediaQualityBadges from './MediaQualityBadges.vue';
+import ContextMenu from './ContextMenu.vue';
+import type { ContextMenuItem } from './ContextMenu.vue';
 
 const props = defineProps<{
   item: BaseItemDto;
@@ -21,10 +27,14 @@ const props = defineProps<{
 const emit = defineEmits<{
   play: [item: BaseItemDto];
   select: [item: BaseItemDto];
+  deleted: [item: BaseItemDto];
 }>();
 
+const router = useRouter();
+const toast = useAppToast();
 const imageError = ref(false);
 const blurhashUrl = ref('');
+const ctxMenu = ref<InstanceType<typeof ContextMenu> | null>(null);
 
 function extractBlurhash(item: BaseItemDto): string | null {
   const hashes = item.ImageBlurHashes;
@@ -105,54 +115,118 @@ const progress = computed(() => {
   return Math.max(0, Math.min(100, (ticks / runtime) * 100));
 });
 
-// 右键 / 更多菜单
-const menuItems = computed(() => {
-  const list: Array<Array<{ label: string; icon: string; onSelect?: () => void }>> = [];
-  const actions: Array<{ label: string; icon: string; onSelect?: () => void }> = [];
-  if (playable.value) {
-    actions.push({ label: '播放', icon: 'i-lucide-play', onSelect: () => emit('play', props.item) });
-    actions.push({
-      label: '加入队列',
-      icon: 'i-lucide-list-plus',
-      onSelect: () => enqueue(props.item, 'last')
+async function doRefreshMetadata() {
+  try {
+    await api.refreshItemMetadata(props.item.Id, {
+      metadataRefreshMode: 'FullRefresh',
+      imageRefreshMode: 'FullRefresh',
+      replaceAllMetadata: false,
+      replaceAllImages: false
     });
-    actions.push({
-      label: '作为下一首',
-      icon: 'i-lucide-play-circle',
-      onSelect: () => enqueue(props.item, 'next')
+    toast.success('元数据刷新已提交');
+  } catch (err: any) {
+    toast.error('刷新元数据失败: ' + (err?.message || err));
+  }
+}
+
+async function doDeleteItem() {
+  if (!window.confirm(`确定要删除"${props.item.Name}"吗？此操作不可撤销。`)) return;
+  try {
+    await api.deleteItem(props.item.Id);
+    toast.success(`已删除: ${props.item.Name}`);
+    emit('deleted', props.item);
+  } catch (err: any) {
+    toast.error('删除失败: ' + (err?.message || err));
+  }
+}
+
+function goToDetail() {
+  router.push(itemRoute(props.item));
+}
+
+const contextMenuItems = computed<ContextMenuItem[][]>(() => {
+  const playbackGroup: ContextMenuItem[] = [];
+  if (playable.value) {
+    playbackGroup.push({ label: '播放', icon: 'i-lucide-play', onSelect: () => emit('play', props.item) });
+    playbackGroup.push({ label: '加入队列', icon: 'i-lucide-list-plus', onSelect: () => enqueue(props.item, 'last') });
+    playbackGroup.push({ label: '作为下一首', icon: 'i-lucide-play-circle', onSelect: () => enqueue(props.item, 'next') });
+  }
+
+  const userGroup: ContextMenuItem[] = [
+    {
+      label: props.item.UserData?.IsFavorite ? '取消收藏' : '添加到收藏',
+      icon: props.item.UserData?.IsFavorite ? 'i-lucide-heart-off' : 'i-lucide-heart',
+      onSelect: () => void toggleFavorite(props.item)
+    },
+    {
+      label: props.item.UserData?.Played ? '标记未观看' : '标记为已播放',
+      icon: props.item.UserData?.Played ? 'i-lucide-eye-off' : 'i-lucide-check',
+      onSelect: () => void togglePlayed(props.item)
+    },
+    {
+      label: isInWatchLater(props.item.Id) ? '移出稍后观看' : '添加到稍后观看',
+      icon: 'i-lucide-clock',
+      onSelect: () => toggleWatchLater(props.item)
+    },
+    {
+      label: '添加到播放列表',
+      icon: 'i-lucide-list-music',
+      onSelect: async () => {
+        try {
+          const result = await api.listPlaylists();
+          const lists = result.Items ?? [];
+          if (lists.length > 0) {
+            await api.addPlaylistItems(lists[0].Id, [props.item.Id]);
+            toast.success('已添加到播放列表');
+          } else {
+            toast.info('暂无播放列表，请先创建');
+          }
+        } catch {
+          toast.error('添加失败');
+        }
+      }
+    }
+  ];
+
+  const adminGroup: ContextMenuItem[] = [];
+  if (isAdmin.value) {
+    adminGroup.push({
+      label: '刷新元数据',
+      icon: 'i-lucide-refresh-cw',
+      onSelect: doRefreshMetadata
+    });
+    adminGroup.push({
+      label: '编辑图像',
+      icon: 'i-lucide-image',
+      onSelect: goToDetail
+    });
+    adminGroup.push({
+      label: '删除',
+      icon: 'i-lucide-trash-2',
+      color: 'error',
+      onSelect: doDeleteItem
     });
   }
-  actions.push({
-    label: props.item.UserData?.IsFavorite ? '取消收藏' : '收藏',
-    icon: props.item.UserData?.IsFavorite ? 'i-lucide-heart-off' : 'i-lucide-heart',
-    onSelect: () => void toggleFavorite(props.item)
-  });
-  actions.push({
-    label: props.item.UserData?.Played ? '标记未观看' : '标记已观看',
-    icon: props.item.UserData?.Played ? 'i-lucide-eye-off' : 'i-lucide-eye',
-    onSelect: () => void togglePlayed(props.item)
-  });
-  actions.push({
-    label: isInWatchLater(props.item.Id) ? '移出稍后观看' : '添加到稍后观看',
-    icon: 'i-lucide-clock',
-    onSelect: () => toggleWatchLater(props.item)
-  });
-  list.push(actions);
-  list.push([
-    {
-      label: '查看详情',
-      icon: 'i-lucide-info',
-      onSelect: () => emit('select', props.item)
-    }
-  ]);
-  return list;
+
+  const groups: ContextMenuItem[][] = [];
+  if (playbackGroup.length) groups.push(playbackGroup);
+  groups.push(userGroup);
+  if (adminGroup.length) groups.push(adminGroup);
+  groups.push([{ label: '查看详情', icon: 'i-lucide-info', onSelect: () => emit('select', props.item) }]);
+  return groups;
 });
 
+// Shared open for both the hover button dropdown and contextmenu
 const showMenu = ref(false);
+const menuItems = computed(() => contextMenuItems.value);
 
-function openMenu(e: MouseEvent) {
+function openDropdown(e: MouseEvent) {
   e.preventDefault();
   showMenu.value = true;
+}
+
+function openContextMenu(e: MouseEvent) {
+  ctxMenu.value?.show(e);
 }
 </script>
 
@@ -160,7 +234,7 @@ function openMenu(e: MouseEvent) {
   <article
     class="media-card group relative flex cursor-pointer flex-col gap-2 transition"
     @click="emit('select', props.item)"
-    @contextmenu="openMenu"
+    @contextmenu="openContextMenu"
   >
     <div
       class="bg-elevated ring-default group-hover:ring-primary/60 relative overflow-hidden rounded-lg ring-1 transition-all group-hover:-translate-y-0.5 group-hover:shadow-xl"
@@ -252,6 +326,15 @@ function openMenu(e: MouseEvent) {
         />
       </UDropdownMenu>
     </div>
+
+    <!-- 右键上下文菜单 -->
+    <ContextMenu
+      ref="ctxMenu"
+      :items="contextMenuItems"
+      :preview-image="imageUrl || undefined"
+      :preview-title="title"
+      :preview-subtitle="secondary || undefined"
+    />
 
     <div class="min-w-0 space-y-0.5 px-0.5">
       <h3

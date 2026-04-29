@@ -9,6 +9,7 @@ import {
   loadLibraries,
   logout,
   parentStack,
+  scan,
   scanOperation,
   selectedItem,
   state,
@@ -16,8 +17,13 @@ import {
   user
 } from '../store/app';
 import CommandPalette from '../components/CommandPalette.vue';
+import ContextMenu from '../components/ContextMenu.vue';
+import type { ContextMenuItem } from '../components/ContextMenu.vue';
 import MiniPlayer from '../components/MiniPlayer.vue';
 import ShortcutsDialog from '../components/ShortcutsDialog.vue';
+import { useAppToast } from '../composables/toast';
+
+const toast = useAppToast();
 
 const router = useRouter();
 const route = useRoute();
@@ -296,6 +302,62 @@ function onKeyDown(e: KeyboardEvent) {
     void router.push('/settings');
   }
 }
+
+const sidebarCtxMenu = ref<InstanceType<typeof ContextMenu> | null>(null);
+const sidebarCtxLibrary = ref<{ id: string; name: string } | null>(null);
+
+function openSidebarLibraryCtx(e: MouseEvent, libId: string, libName: string) {
+  sidebarCtxLibrary.value = { id: libId, name: libName };
+  sidebarCtxMenu.value?.show(e);
+}
+
+const sidebarLibMenuItems = computed<ContextMenuItem[][]>(() => {
+  const lib = sidebarCtxLibrary.value;
+  if (!lib) return [];
+  const items: ContextMenuItem[][] = [
+    [
+      {
+        label: '打开媒体库',
+        icon: 'i-lucide-folder-open',
+        onSelect: () => router.push(`/library/${lib.id}`)
+      }
+    ]
+  ];
+  if (isAdmin.value) {
+    items.push([
+      {
+        label: '扫描媒体库',
+        icon: 'i-lucide-refresh-ccw',
+        onSelect: async () => {
+          try {
+            await scan(lib.id);
+            toast.success(`正在扫描 "${lib.name}"`);
+          } catch {
+            toast.error('扫描失败');
+          }
+        }
+      },
+      {
+        label: '刷新元数据',
+        icon: 'i-lucide-refresh-cw',
+        onSelect: async () => {
+          try {
+            await api.refreshItemMetadata(lib.id);
+            toast.success('元数据刷新已提交');
+          } catch {
+            toast.error('刷新元数据失败');
+          }
+        }
+      },
+      {
+        label: '管理媒体库',
+        icon: 'i-lucide-settings',
+        onSelect: () => router.push('/settings/libraries')
+      }
+    ]);
+  }
+  return items;
+});
 </script>
 
 <template>
@@ -335,8 +397,22 @@ function onKeyDown(e: KeyboardEvent) {
             {{ librarySummaryText }}
           </p>
         </div>
+        <nav v-if="libraryNavItems.length && !collapsed" class="flex flex-col gap-0.5 px-2">
+          <RouterLink
+            v-for="navItem in libraryNavItems"
+            :key="navItem.to"
+            :to="navItem.to"
+            class="group flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors"
+            :class="navItem.active ? 'bg-primary/10 text-primary font-medium' : 'text-muted hover:bg-default hover:text-highlighted'"
+            @contextmenu="openSidebarLibraryCtx($event, navItem.to.replace('/library/', ''), navItem.label)"
+          >
+            <UIcon :name="navItem.icon" class="size-4 shrink-0" />
+            <span class="truncate flex-1">{{ navItem.label }}</span>
+            <span v-if="navItem.badge" class="text-muted text-xs tabular-nums">{{ navItem.badge }}</span>
+          </RouterLink>
+        </nav>
         <UNavigationMenu
-          v-if="libraryNavItems.length"
+          v-else-if="libraryNavItems.length && collapsed"
           :collapsed="collapsed"
           :items="libraryNavItems"
           orientation="vertical"
@@ -462,5 +538,11 @@ function onKeyDown(e: KeyboardEvent) {
     <CommandPalette v-model:open="paletteOpen" />
     <ShortcutsDialog v-model:open="shortcutsOpen" />
     <MiniPlayer />
+
+    <ContextMenu
+      ref="sidebarCtxMenu"
+      :items="sidebarLibMenuItems"
+      :preview-title="sidebarCtxLibrary?.name"
+    />
   </UDashboardGroup>
 </template>
