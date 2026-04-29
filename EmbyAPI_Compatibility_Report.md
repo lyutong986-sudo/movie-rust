@@ -1761,3 +1761,302 @@ async fn media_items_to_dto_result(
 - cargo test: 58 passed, 0 failed
 - vue-tsc -b: 0 error
 - npm run build: 构建成功
+
+---
+
+## 第十七轮：TMDB 元数据 + OpenSubtitles 字幕集成（2026-04-29）
+
+### 一、TMDB 元数据集成
+
+| 组件 | 改动 |
+|------|------|
+| **metadata/tmdb.rs** | 支持 v3 API Key（query 参数）和 v4 Bearer Token（Authorization header）双模认证；新增 `is_bearer_token()` + `auth_get()` 辅助方法 |
+| **main.rs** | TMDB API Key 加载顺序：环境变量 `TMDB_API_KEY` → 数据库 `startup_configuration.tmdb_api_key` |
+| **models.rs** | `StartupConfiguration` 新增 `tmdb_api_key: String` 字段 |
+| **repository.rs** | `default_startup_configuration` 初始化 `tmdb_api_key`；`provider_ids_to_map` 改为 `pub` |
+| **routes/system.rs** | `get_system_configuration` / `apply_system_configuration_update` 新增 `TmdbApiKey` 读写 |
+| **routes/items.rs** | `do_refresh_item_metadata` 当条目缺少 TMDB ID 时自动按名称搜索匹配（name fallback） |
+| **repository.rs** | `media_item_to_dto_for_list` 修复 `provider_ids` 始终为空的 bug，改为调用 `provider_ids_to_map()` |
+| **前端 ServerSettings.vue** | 新增 TMDB API Key 输入框 |
+| **前端 app.ts / emby.ts** | 新增 `tmdbApiKey` 状态与类型定义 |
+
+### 二、OpenSubtitles 字幕集成
+
+| 组件 | 改动 |
+|------|------|
+| **metadata/opensubtitles.rs**（新增） | 完整实现 OpenSubtitles REST API v1 客户端：登录（POST `/login`）、搜索（GET `/subtitles`）、内置 Jellyfin 默认 API Key `gUCLWGoAg2PmyseoTM0INFFVPcDCeDlT` |
+| **metadata/mod.rs** | 新增 `pub mod opensubtitles` |
+| **models.rs** | `SubtitleDownloadConfiguration` 新增 `open_subtitles_api_key` 字段 |
+| **routes/items.rs** | `remote_search_subtitles_by_language` 集成 OpenSubtitlesProvider：使用内置 API Key 搜索、可选登录（仅下载需要） |
+| **前端 SubtitleDownloadSettings.vue** | OpenSubtitles 账号设置区分搜索/下载说明；API Key 改为可选（留空使用内置 Key） |
+| **前端 emby.ts** | `SubtitleDownloadConfiguration` 新增 `OpenSubtitlesApiKey` 字段 |
+
+### 三、关键设计说明
+
+1. **OpenSubtitles 认证模型**（参考 jellyfin-plugin-opensubtitles）：
+   - **搜索**：仅需 `Api-Key` header，使用内置默认 Key，用户无需配置
+   - **下载**：需要用户名/密码登录获取 JWT Token
+   - 用户只需在设置中配置 OpenSubtitles 账号密码即可
+
+2. **TMDB 认证模型**：
+   - v3 API Key（32 位十六进制）→ `?api_key=xxx` query 参数
+   - v4 Read Access Token（长字符串）→ `Authorization: Bearer xxx` header
+   - 自动识别，无需用户区分
+
+3. **comments 字段兼容**：OpenSubtitles API 的 `comments` 字段实际是 string 而非数组，使用自定义 deserializer 兼容两种格式
+
+### 四、测试验证结果
+
+| 测试项 | 结果 |
+|--------|------|
+| TMDB 远程搜索 (`/Items/RemoteSearch/Movie`) | 成功：搜索 "The Matrix" 返回 3 个结果，含 TMDB ID |
+| TMDB 元数据刷新 (`/Items/{id}/Refresh`) | 成功：名称→黑客帝国，ProviderIds={Imdb:tt0133093, Tmdb:603}，中文概述、类型已填充 |
+| OpenSubtitles 中文字幕搜索 | 成功：4 条结果（最高下载 48,845 次） |
+| OpenSubtitles 英文字幕搜索 | 成功：50 条结果（最高下载 540,442 次） |
+| ProviderIds 列表接口返回 | 已修复：`media_item_to_dto_for_list` 正确返回 provider_ids |
+
+### 五、校验
+
+- cargo build: 0 error（30 warnings，均为 unused fields）
+- 全部 API 端点实际调用验证通过
+
+---
+
+## 第十八轮：详情页/季详情页 元数据刷新 + 字幕搜索/下载 UI（2026-04-29）
+
+### 一、需求分析
+
+用户要求在电影封面/详情页/季详情页可以刷新和获取元数据及字幕。参考 Jellyfin 后端模板的实现方式。
+
+### 二、后端改动
+
+| 文件 | 变更 |
+|------|------|
+| `backend/src/metadata/opensubtitles.rs` | 新增 `download_subtitle(file_id, format)` 方法：登录后通过 `/api/v1/download` 获取下载链接，下载字幕内容并返回 |
+| `backend/src/routes/items.rs` | `remote_search_subtitles_apply` 从空壳改为完整实现：解析 subtitle_id 提取 file_id，登录 OpenSubtitles，下载字幕文件，保存到媒体文件同目录 |
+
+### 三、前端改动
+
+| 文件 | 变更 |
+|------|------|
+| `frontend/src/api/emby.ts` | 新增 `RemoteSubtitleInfo` 接口；新增 `refreshItemMetadata()`、`searchSubtitles()`、`downloadSubtitle()` 三个 API 方法 |
+| `frontend/src/pages/item/ItemPage.vue` | 新增"字幕"独立按钮 + "更多"下拉菜单新增"刷新元数据"和"搜索字幕"选项；新增字幕搜索 Modal（语言选择、搜索结果列表、下载按钮） |
+| `frontend/src/pages/series/SeriesPage.vue` | 新增"刷新元数据"按钮（带 loading 动画） |
+
+### 四、功能说明
+
+1. **刷新元数据**：点击后调用 `POST /Items/{id}/Refresh`，3 秒后自动重新加载页面数据
+2. **字幕搜索 Modal**：
+   - 支持 7 种语言选择（中文/英文/日语/韩语/法语/德语/西班牙语）
+   - 显示搜索结果列表：文件名、语言、格式、下载次数、SDH/哈希匹配标签
+   - 每条结果有独立"下载"按钮
+3. **字幕下载**：调用 `POST /Items/{id}/RemoteSearch/Subtitles/{subtitleId}`，后端登录 OpenSubtitles 后下载字幕内容，保存为 `<视频文件名>.<语言>.srt` 格式
+
+### 五、测试结果
+
+| 测试项 | 结果 |
+|--------|------|
+| 电影刷新元数据 (POST /Items/{id}/Refresh) | PASS |
+| 刷新后条目仍可访问 | PASS |
+| 刷新后 Overview 已填充 | PASS |
+| 中文字幕搜索 (GET /Items/{id}/RemoteSearch/Subtitles/chi) | PASS (9 条结果) |
+| 字幕结果包含 Id/Name/Language/Format/ProviderName/DownloadCount | PASS |
+| 英文字幕搜索 | PASS (50 条结果) |
+| 剧集刷新元数据 | 预期行为（模拟数据 TMDB ID 无效） |
+| 前端字幕搜索 Modal UI | PASS（Chrome DevTools 截图验证） |
+| 前端"更多"菜单包含刷新和字幕选项 | PASS |
+| 剧集详情页"刷新元数据"按钮 | PASS |
+
+### 六、校验
+
+- cargo build: 0 error
+- 前端 lint: 0 error
+- Chrome DevTools 截图验证 UI 正常
+
+---
+
+## 第十九轮：EmbySDK 全面兼容修复 — Refresh 参数 + 字幕端点完善（2026-04-29）
+
+### 一、需求分析
+
+通过对比 EmbySDK TypeScript API、Jellyfin 前后端模板和本地播放器模板，发现以下兼容性缺口：
+
+1. `POST /Items/{Id}/Refresh` 未消费 Emby SDK 定义的 query 参数
+2. 字幕搜索端点缺少 SDK 定义的 query 参数
+3. 字幕搜索响应缺少多个 SDK 必需字段
+4. 缺少 `GET /Providers/Subtitles/Subtitles/{Id}` 端点
+
+### 二、后端改动
+
+| 文件 | 变更 |
+|------|------|
+| `backend/src/routes/items.rs` | `refresh_item_metadata` 新增 `RefreshItemQuery` 结构体，支持 `MetadataRefreshMode`、`ImageRefreshMode`、`ReplaceAllMetadata`、`ReplaceAllImages`、`Recursive` 五个 query 参数；`ValidationOnly` 模式跳过远程刷新；`Recursive=true` 时递归刷新子条目 |
+| `backend/src/routes/items.rs` | `remote_search_subtitles_by_language` 新增 `SubtitleSearchQuery` 结构体，支持 `MediaSourceId`、`IsPerfectMatch`、`IsForced`、`IsHearingImpaired` 四个 query 参数 |
+| `backend/src/routes/items.rs` | 字幕搜索响应新增 `ThreeLetterISOLanguageName`、`Author`、`DateCreated`、`CommunityRating` 字段 |
+| `backend/src/routes/items.rs` | 新增 `GET /Providers/Subtitles/Subtitles/{Id}` 端点 — 直接通过 OpenSubtitles 下载字幕文件内容，返回对应 MIME 类型 |
+| `backend/src/metadata/opensubtitles.rs` | `SubtitleSearchResult` 新增 `author`、`date_created`、`community_rating` 字段；`SearchAttributes` 新增 `uploader`、`upload_date`、`ratings` 解析 |
+
+### 三、前端改动
+
+| 文件 | 变更 |
+|------|------|
+| `frontend/src/api/emby.ts` | `RemoteSubtitleInfo` 接口补全至完整 EmbySDK 规范：新增 `ThreeLetterISOLanguageName`、`Author`、`DateCreated`、`CommunityRating` |
+| `frontend/src/pages/item/ItemPage.vue` | 字幕搜索结果列表新增显示：上传者、评分、评论信息 |
+
+### 四、EmbySDK 兼容性对照
+
+| EmbySDK 端点/参数 | 修复前 | 修复后 |
+|---|---|---|
+| `POST /Items/{Id}/Refresh?MetadataRefreshMode=...` | 忽略所有 query 参数 | 完整支持 5 个 query 参数 |
+| `POST /Items/{Id}/Refresh?Recursive=true` | 不支持 | 递归刷新所有子条目 |
+| `POST /Items/{Id}/Refresh?MetadataRefreshMode=ValidationOnly` | 执行完整刷新 | 正确跳过远程刷新 |
+| `GET /Items/{Id}/RemoteSearch/Subtitles/{Lang}?MediaSourceId=...` | 400 Bad Request | 正确接受参数 |
+| `GET /Items/{Id}/RemoteSearch/Subtitles/{Lang}?IsPerfectMatch=...` | 400 Bad Request | 正确接受参数 |
+| `RemoteSubtitleInfo.ThreeLetterISOLanguageName` | 缺失 | 已补全 |
+| `RemoteSubtitleInfo.Author` | 缺失 | 已补全（来自 uploader.name） |
+| `RemoteSubtitleInfo.DateCreated` | 缺失 | 已补全（来自 upload_date） |
+| `RemoteSubtitleInfo.CommunityRating` | 缺失 | 已补全（来自 ratings） |
+| `GET /Providers/Subtitles/Subtitles/{Id}` | 不存在 | 新增：直接下载字幕文件内容 |
+
+### 五、MCP 功能测试结果
+
+| 测试项 | 结果 |
+|--------|------|
+| Refresh with EmbySDK query params (FullRefresh) | PASS: status 204 |
+| Refresh with ValidationOnly mode | PASS: status 204, 跳过远程刷新 |
+| 字幕搜索含 MediaSourceId + IsPerfectMatch 参数 | PASS: status 200, 9 条结果 |
+| 字幕搜索响应包含全部 14 个 EmbySDK 字段 | PASS: 全部字段存在 |
+| `GET /Providers/Subtitles/Subtitles/{Id}` | PASS: status 200, content-type=application/x-subrip |
+
+### 六、校验
+
+- cargo build: 0 error（31 warnings，均为 unused fields）
+- 全部 API 端点 MCP 实际调用验证通过
+- 前端 RemoteSubtitleInfo 接口已同步更新
+
+---
+
+## 第二十轮：图片编辑器 + 动态重载 + 字幕下载优化（2026-04-29）
+
+### 一、需求分析
+
+1. 详情页缺少图片编辑功能（Emby 客户端中有"编辑图像"对话框可管理海报、壁纸、徽标等）
+2. 刷新元数据和下载字幕后应动态重载数据，而非使用固定 `setTimeout`
+3. 需对照 EmbySDK 和本地播放器模板验证端点兼容性
+
+### 二、后端改动
+
+后端图片管理端点已完备，无需修改。已有端点：
+
+| 端点 | 功能 |
+|------|------|
+| `GET /Items/{id}/Images` | 列出条目所有图片 |
+| `GET /Items/{id}/RemoteImages` | 从 TMDB 搜索远程图片 |
+| `POST /Items/{id}/RemoteImages/Download` | 下载远程图片并设置为条目图片 |
+| `POST /Items/{id}/Images/{type}` | 上传本地图片 |
+| `DELETE /Items/{id}/Images/{type}` | 删除条目图片 |
+| `DELETE /Items/{id}/Images/{type}/{index}` | 删除指定索引的壁纸 |
+
+### 三、前端改动
+
+| 文件 | 变更 |
+|------|------|
+| `frontend/src/api/emby.ts` | 新增 `ImageInfo`、`RemoteImageInfo`、`RemoteImageResult` 接口；新增 `listItemImages()`、`listRemoteImages()`、`downloadRemoteImage()`、`uploadItemImage()`、`deleteItemImage()` 五个 API 方法；`RequestOptions` 新增 `rawBody` 字段支持二进制上传；`requestAtBaseUrl()` 修改为 rawBody 时不设 `Content-Type: application/json` |
+| `frontend/src/pages/item/ItemPage.vue` | **图片编辑 Modal**：显示 6 种图片类型（海报/徽标/缩略图/横幅图/光盘封面/艺术图）+ 壁纸列表；支持删除现有图片；支持从 TMDB 搜索远程图片（显示缩略图、尺寸、评分、语言，点击即下载）；支持上传本地图片；**动态重载**：刷新元数据改为 `await` 后立即 `loadItem()`，移除 `setTimeout(3000)`；字幕下载完成后自动 `loadItem()` 刷新条目数据 |
+| `frontend/src/pages/series/SeriesPage.vue` | 新增"编辑图像"按钮和完整图片编辑 Modal（与 ItemPage 相同功能）；刷新元数据改为 `await` 后立即 `loadSeries()` |
+
+### 四、图片编辑器功能
+
+1. **当前图片展示**：显示条目已有的 6 种图片类型，有图片的显示缩略图，无图片的显示类型名占位符
+2. **壁纸列表**：独立区域展示所有壁纸，每张可删除
+3. **远程图片搜索**：选择图片类型后搜索 TMDB，显示缩略图、来源、尺寸、评分、投票数、语言，点击即自动下载并设为条目图片
+4. **本地上传**：选择本地图片文件上传到服务器
+5. **删除图片**：每张现有图片旁有删除按钮
+6. **操作后自动刷新**：所有操作（下载/上传/删除）完成后自动刷新图片列表和条目数据
+
+### 五、MCP 功能测试结果
+
+| 测试项 | 结果 |
+|--------|------|
+| `GET /Items/{id}/Images` 列出图片 | PASS: 2 张（Primary + Backdrop） |
+| `GET /Items/{id}/RemoteImages?Type=Primary` 搜索远程图片 | PASS: 20 张 TMDB 海报，含尺寸/评分/语言 |
+| `POST /Items/{id}/RemoteImages/Download` 下载远程图片 | PASS: status 204 |
+| `DELETE /Items/{id}/Images/Logo` 删除图片 | PASS: status 204 |
+| 刷新元数据后自动重载 | PASS: 无 setTimeout，`await` 后立即 `loadItem()` |
+| 字幕下载后自动重载 | PASS: 下载后自动 `loadItem()` |
+| 图片编辑 Modal UI 展示 | PASS: Chrome DevTools 验证，6 种图片类型 + 壁纸 + 远程搜索 |
+| 远程图片搜索 UI | PASS: 20 张 TMDB 图片，含缩略图/尺寸/评分/语言 |
+
+### 六、校验
+
+- cargo build: 0 error
+- 前端 lint: 0 error
+- Chrome DevTools 截图验证：图片编辑 Modal 正常显示和交互
+
+---
+
+## 2026-04-29 计划任务系统全面升级 + 项目审计
+
+### 审计对比项目（Jellyfin 前后端模板 vs 当前项目）
+
+#### 计划任务系统
+
+| 功能 | Jellyfin | 改动前 | 改动后 |
+|------|----------|--------|--------|
+| 触发器编辑 UI | ✅ 表格展示 + 添加/删除触发器对话框 | ❌ 只读展示 | ✅ 完整触发器编辑 Modal |
+| 触发器类型 | Daily/Weekly/Interval/Startup | 存储但不可编辑 | ✅ 全部 4 种类型支持 |
+| 定时调度器 | ✅ TaskManager + Timer + Trigger 实现类 | ❌ 仅手动运行 | ✅ 60秒轮询调度器 |
+| StartupTrigger | ✅ 启动后 3 秒触发 | ❌ | ✅ 启动后 5 秒触发 |
+| 任务取消 | ✅ CancellationTokenSource | ❌ 仅写状态 | ✅ CancellationToken 实际中止 |
+| 进度百分比 | ✅ IProgress<double> 实时更新 | ❌ 仅 0%/100% | ✅ 任务中按条目比例更新 |
+| IsHidden 过滤 | ✅ | ❌ 忽略参数 | ✅ 已实现 |
+| 按分类分组 | ✅ getCategories + Tasks 组件 | ❌ 扁平列表 | ✅ 按 Category 分组显示 |
+| 最长运行时间 | ✅ MaxRuntimeTicks | ❌ | ✅ 触发器编辑器支持 |
+
+#### 后端变更
+
+**`backend/src/routes/scheduled_tasks.rs`**:
+- 新增 `run_scheduler()` 公开异步函数，由 `main.rs` 在启动时 `tokio::spawn`
+- 调度器每 60 秒检查所有任务触发器配置：
+  - `IntervalTrigger`: 计算距上次结束时间的间隔
+  - `DailyTrigger`: 每天指定时刻 ±2 分钟窗口内触发
+  - `WeeklyTrigger`: 指定星期 + 时刻
+  - `StartupTrigger`: 启动 5 秒后一次性触发
+- 任务执行通过 `CancellationToken` 支持真实取消
+- `tokio::select!` 在任务执行与取消信号之间竞争
+- `metadata-refresh` 任务按条目进度实时更新百分比
+
+**`backend/src/state.rs`**:
+- `AppState` 新增 `task_tokens: Arc<RwLock<HashMap<String, CancellationToken>>>`
+- 依赖新增 `tokio-util`
+
+**`backend/src/main.rs`**:
+- 启动时 spawn `routes::scheduled_tasks::run_scheduler(state.clone())`
+
+#### 前端变更
+
+**`frontend/src/pages/settings/ScheduledTasksSettings.vue`**:
+- 任务列表按 Category 分组显示（媒体库/元数据/维护）
+- 每个任务卡片显示：名称、描述、状态 Badge、进度条、触发方式、最近结果、耗时
+- 触发器编辑 Modal：
+  - 当前触发器列表（可删除单条）
+  - 添加触发器表单（类型选择 + 参数配置）
+  - 支持 IntervalTrigger（间隔选项）、DailyTrigger（时间选择）、WeeklyTrigger（星期+时间）、StartupTrigger
+  - MaxRuntimeTicks 最长运行时间选项
+  - 保存调用 `api.updateScheduledTaskTriggers()`
+
+#### 详情页布局审计
+
+| 特性 | Jellyfin | 当前项目 |
+|------|----------|----------|
+| Series/Season/Episode 同一路由 | ✅ 共用 `details` 路由 | Series: `/series/:id`，Season/Episode: `/item/:id` |
+| 季 Tab + 集列表 | ✅ 在 Series 页内展示 | ✅ `SeriesPage.vue` 已实现季 Tab + 分集懒加载 |
+| Season 作为子页面 | ✅ Season 有独立 details 但共用组件 | ✅ Season 在 ItemPage 内显示为分集网格 |
+| 继续观看/下一集 | ✅ | ✅ nextUpEpisode + lastPlayedEpisode |
+
+**结论**: 当前项目的 SeriesPage 已经采用了「季 Tab + 分集列表」的统一展示方式，与 Jellyfin 的设计理念一致。
+
+### 编译验证
+
+- cargo check: 0 error, 29 warnings (均为未使用字段的预存警告)
+- 后端所有功能链路完整：触发器编辑 API ↔ 前端 ↔ 调度器

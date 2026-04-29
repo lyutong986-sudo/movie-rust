@@ -346,6 +346,9 @@ CREATE INDEX IF NOT EXISTS idx_media_items_date_created ON media_items(date_crea
 CREATE INDEX IF NOT EXISTS idx_media_items_community_rating ON media_items(community_rating DESC NULLS LAST);
 CREATE INDEX IF NOT EXISTS idx_media_items_type_sort ON media_items(item_type, sort_name);
 CREATE INDEX IF NOT EXISTS idx_media_items_type_date ON media_items(item_type, date_created DESC);
+CREATE INDEX IF NOT EXISTS idx_media_items_type_series ON media_items(item_type, series_id) WHERE series_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_media_items_genres_gin ON media_items USING gin (genres);
+CREATE INDEX IF NOT EXISTS idx_media_items_episode_nextup ON media_items(series_id, parent_index_number, index_number) WHERE item_type = 'Episode';
 
 -- pg_trgm 全文搜索加速（ILIKE '%xxx%'）
 DO $$ BEGIN

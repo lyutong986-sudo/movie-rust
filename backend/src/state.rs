@@ -4,6 +4,7 @@ use crate::{
 };
 use sqlx::PgPool;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -17,4 +18,5 @@ pub struct AppState {
     >,
     pub transcoder: Transcoder,
     pub work_limiters: WorkLimiters,
+    pub task_tokens: Arc<tokio::sync::RwLock<std::collections::HashMap<String, CancellationToken>>>,
 }

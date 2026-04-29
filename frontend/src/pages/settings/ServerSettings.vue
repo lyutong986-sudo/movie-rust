@@ -94,6 +94,9 @@ onMounted(async () => {
             <UInput v-model.number="state.tmdbMetadataThreadCount" type="number" :min="1" :max="32" class="w-full" />
           </UFormField>
         </div>
+        <UFormField class="mt-4" label="TMDB API Key" hint="在 themoviedb.org 注册获取 API v3 密钥">
+          <UInput v-model.trim="state.tmdbApiKey" placeholder="TMDB API Key (v3)" class="w-full" />
+        </UFormField>
         <template #footer>
           <div class="flex justify-end">
             <UButton type="submit" :loading="state.busy" icon="i-lucide-save">保存服务器设置</UButton>

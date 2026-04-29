@@ -700,6 +700,17 @@ async fn work_limiter_config(state: &AppState) -> Result<WorkLimiterConfig, AppE
     Ok(config)
 }
 
+pub fn item_image_storage_path_pub(
+    state: &AppState,
+    item: &crate::models::DbMediaItem,
+    library_options: &LibraryOptionsDto,
+    image_type: &str,
+    backdrop_index: Option<i32>,
+    extension: &str,
+) -> PathBuf {
+    item_image_storage_path(state, item, library_options, image_type, backdrop_index, extension)
+}
+
 fn item_image_storage_path(
     state: &AppState,
     item: &crate::models::DbMediaItem,

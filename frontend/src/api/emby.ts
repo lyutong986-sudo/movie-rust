@@ -82,6 +82,53 @@ export interface SubtitleDownloadConfiguration {
   SkipIfGraphicalSubsPresent: boolean;
   OpenSubtitlesUsername: string;
   OpenSubtitlesPassword: string;
+  OpenSubtitlesApiKey: string;
+}
+
+export interface RemoteSubtitleInfo {
+  ThreeLetterISOLanguageName?: string;
+  Id: string;
+  ProviderName: string;
+  Name: string;
+  Format: string;
+  Author?: string;
+  Comment?: string;
+  DateCreated?: string;
+  CommunityRating?: number;
+  DownloadCount?: number;
+  IsHashMatch?: boolean;
+  IsForced?: boolean;
+  IsHearingImpaired?: boolean;
+  Language?: string;
+}
+
+export interface ImageInfo {
+  ImageType: string;
+  ImageIndex?: number;
+  ImageTag?: string;
+  Path?: string;
+  Height?: number;
+  Width?: number;
+  Size?: number;
+}
+
+export interface RemoteImageInfo {
+  ProviderName: string;
+  Url: string;
+  ThumbnailUrl?: string;
+  Height?: number;
+  Width?: number;
+  CommunityRating?: number;
+  VoteCount?: number;
+  Language?: string;
+  Type: string;
+  RatingType?: string;
+}
+
+export interface RemoteImageResult {
+  Images: RemoteImageInfo[];
+  TotalRecordCount: number;
+  Providers: string[];
 }
 
 export interface ScheduledTaskTrigger {
@@ -482,6 +529,7 @@ export interface StartupConfiguration {
   LibraryScanThreadCount: number;
   StrmAnalysisThreadCount: number;
   TmdbMetadataThreadCount: number;
+  TmdbApiKey: string;
 }
 
 export interface UserSettingsResponse {
@@ -1393,6 +1441,75 @@ export class EmbyApi {
     });
   }
 
+  async refreshItemMetadata(
+    itemId: string,
+    options?: {
+      metadataRefreshMode?: 'Default' | 'FullRefresh' | 'ValidationOnly';
+      imageRefreshMode?: 'Default' | 'FullRefresh' | 'ValidationOnly';
+      replaceAllMetadata?: boolean;
+      replaceAllImages?: boolean;
+    }
+  ) {
+    const params = new URLSearchParams({
+      MetadataRefreshMode: options?.metadataRefreshMode || 'FullRefresh',
+      ImageRefreshMode: options?.imageRefreshMode || 'FullRefresh',
+      ReplaceAllMetadata: String(options?.replaceAllMetadata ?? true),
+      ReplaceAllImages: String(options?.replaceAllImages ?? true)
+    });
+    return this.request<void>(`/Items/${itemId}/Refresh?${params}`, {
+      method: 'POST'
+    });
+  }
+
+  async searchSubtitles(itemId: string, language: string) {
+    return this.request<RemoteSubtitleInfo[]>(
+      `/Items/${itemId}/RemoteSearch/Subtitles/${encodeURIComponent(language)}`
+    );
+  }
+
+  async downloadSubtitle(itemId: string, subtitleId: string) {
+    return this.request<void>(
+      `/Items/${itemId}/RemoteSearch/Subtitles/${encodeURIComponent(subtitleId)}`,
+      { method: 'POST' }
+    );
+  }
+
+  async listItemImages(itemId: string) {
+    return this.request<ImageInfo[]>(`/Items/${itemId}/Images`);
+  }
+
+  async listRemoteImages(itemId: string, options?: { type?: string; IncludeAllLanguages?: boolean; limit?: number }) {
+    const params = new URLSearchParams();
+    if (options?.type) params.set('Type', options.type);
+    if (options?.IncludeAllLanguages) params.set('IncludeAllLanguages', 'true');
+    if (options?.limit) params.set('Limit', String(options.limit));
+    const qs = params.toString();
+    return this.request<RemoteImageResult>(`/Items/${itemId}/RemoteImages${qs ? `?${qs}` : ''}`);
+  }
+
+  async downloadRemoteImage(itemId: string, imageUrl: string, imageType: string) {
+    const params = new URLSearchParams({ ImageUrl: imageUrl, Type: imageType });
+    return this.request<void>(`/Items/${itemId}/RemoteImages/Download?${params}`, {
+      method: 'POST'
+    });
+  }
+
+  async uploadItemImage(itemId: string, imageType: string, imageData: Blob) {
+    const arrayBuffer = await imageData.arrayBuffer();
+    return this.request<void>(`/Items/${itemId}/Images/${imageType}`, {
+      method: 'POST',
+      headers: { 'Content-Type': imageData.type || 'image/jpeg' },
+      rawBody: new Uint8Array(arrayBuffer)
+    });
+  }
+
+  async deleteItemImage(itemId: string, imageType: string, index?: number) {
+    const path = index !== undefined
+      ? `/Items/${itemId}/Images/${imageType}/${index}`
+      : `/Items/${itemId}/Images/${imageType}`;
+    return this.request<void>(path, { method: 'DELETE' });
+  }
+
   async changePassword(userId: string, payload: { CurrentPw?: string; CurrentPassword?: string; NewPw: string }) {
     return this.request<void>(`/Users/${userId}/Password`, {
       method: 'POST',
@@ -1702,7 +1819,9 @@ export class EmbyApi {
 
   private async requestAtBaseUrl<T>(baseUrl: string, path: string, options: RequestOptions = {}) {
     const headers = new Headers(options.headers);
-    headers.set('Content-Type', 'application/json');
+    if (!options.rawBody) {
+      headers.set('Content-Type', 'application/json');
+    }
     if (options.auth !== false && this.token) {
       headers.set('X-Emby-Token', this.token);
       headers.set(
@@ -1715,10 +1834,17 @@ export class EmbyApi {
       );
     }
 
+    let fetchBody: BodyInit | undefined;
+    if (options.rawBody) {
+      fetchBody = options.rawBody;
+    } else if (options.body) {
+      fetchBody = JSON.stringify(options.body);
+    }
+
     const response = await fetch(`${normalizeBaseUrl(baseUrl)}${path}`, {
       method: options.method || 'GET',
       headers,
-      body: options.body ? JSON.stringify(options.body) : undefined
+      body: fetchBody
     });
 
     if (!response.ok) {
@@ -1742,6 +1868,7 @@ interface RequestOptions {
   method?: string;
   headers?: HeadersInit;
   body?: unknown;
+  rawBody?: BodyInit;
   auth?: boolean;
 }
 

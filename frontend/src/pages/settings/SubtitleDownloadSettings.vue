@@ -19,7 +19,8 @@ const form = reactive<SubtitleDownloadConfiguration>({
   SkipIfAudioTrackPresent: false,
   SkipIfGraphicalSubsPresent: true,
   OpenSubtitlesUsername: '',
-  OpenSubtitlesPassword: ''
+  OpenSubtitlesPassword: '',
+  OpenSubtitlesApiKey: ''
 });
 
 const languageOptions = [
@@ -148,6 +149,7 @@ async function save() {
         <template #header>
           <h3 class="text-highlighted text-sm font-semibold">OpenSubtitles 账号</h3>
         </template>
+        <p class="text-muted mb-3 text-xs">搜索字幕无需登录。如需下载字幕，请填写 OpenSubtitles 账号密码。</p>
         <div class="grid gap-4 sm:grid-cols-2">
           <UFormField label="用户名">
             <UInput v-model.trim="form.OpenSubtitlesUsername" placeholder="OpenSubtitles 用户名" class="w-full" />
@@ -156,6 +158,9 @@ async function save() {
             <UInput v-model="form.OpenSubtitlesPassword" type="password" class="w-full" />
           </UFormField>
         </div>
+        <UFormField class="mt-4" label="API Key（可选）" hint="留空将使用内置 API Key">
+          <UInput v-model.trim="form.OpenSubtitlesApiKey" placeholder="留空使用内置 Key" class="w-full" />
+        </UFormField>
         <template #footer>
           <div class="flex justify-end">
             <UButton type="submit" :loading="saving" icon="i-lucide-save">保存字幕下载策略</UButton>

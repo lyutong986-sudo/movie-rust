@@ -2,8 +2,9 @@
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import MediaRow from '../../components/MediaRow.vue';
-import type { BaseItemDto } from '../../api/emby';
+import type { BaseItemDto, ImageInfo, RemoteImageInfo } from '../../api/emby';
 import { api } from '../../store/app';
+import { useAppToast } from '../../composables/toast';
 import { genreRoute, itemRoute, playbackRoute } from '../../utils/navigation';
 
 interface SeasonSection {
@@ -18,6 +19,7 @@ interface SeasonSection {
 
 const route = useRoute();
 const router = useRouter();
+const toast = useAppToast();
 const EPISODES_PAGE_SIZE = 60;
 let seriesRequestToken = 0;
 
@@ -311,6 +313,131 @@ function runtimeText(item: BaseItemDto) {
 function episodeThumb(episode: BaseItemDto) {
   return api.itemImageUrl(episode) || api.backdropUrl(episode);
 }
+
+const refreshing = ref(false);
+
+async function refreshMetadata() {
+  if (!series.value || refreshing.value) return;
+  refreshing.value = true;
+  try {
+    await api.refreshItemMetadata(series.value.Id);
+    toast.success('元数据刷新完成');
+    if (series.value) {
+      await loadSeries(series.value.Id);
+      try {
+        itemImages.value = await api.listItemImages(series.value.Id);
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '刷新失败');
+  } finally {
+    refreshing.value = false;
+  }
+}
+
+const imageEditorOpen = ref(false);
+const itemImages = ref<ImageInfo[]>([]);
+const remoteImages = ref<RemoteImageInfo[]>([]);
+const remoteImageType = ref('Primary');
+const remoteImageLoading = ref(false);
+const imageUploading = ref(false);
+const imageDeletingType = ref<string | null>(null);
+
+const imageTypeLabels: Record<string, string> = {
+  Primary: '海报', Backdrop: '壁纸', Logo: '徽标', Thumb: '缩略图',
+  Banner: '横幅图', Disc: '光盘封面', Art: '艺术图'
+};
+
+async function openImageEditor() {
+  if (!series.value) return;
+  imageEditorOpen.value = true;
+  remoteImages.value = [];
+  try {
+    itemImages.value = await api.listItemImages(series.value.Id);
+  } catch {
+    itemImages.value = [];
+  }
+}
+
+async function searchRemoteImages() {
+  if (!series.value) return;
+  remoteImageLoading.value = true;
+  try {
+    const result = await api.listRemoteImages(series.value.Id, {
+      type: remoteImageType.value,
+      IncludeAllLanguages: true,
+      limit: 20
+    });
+    remoteImages.value = result.Images || [];
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '搜索远程图片失败');
+    remoteImages.value = [];
+  } finally {
+    remoteImageLoading.value = false;
+  }
+}
+
+async function downloadRemoteImage(img: RemoteImageInfo) {
+  if (!series.value || imageUploading.value) return;
+  imageUploading.value = true;
+  try {
+    await api.downloadRemoteImage(series.value.Id, img.Url, img.Type);
+    toast.success('图片已下载');
+    itemImages.value = await api.listItemImages(series.value.Id);
+    await loadSeries(series.value.Id);
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '图片下载失败');
+  } finally {
+    imageUploading.value = false;
+  }
+}
+
+async function handleImageUpload(event: Event) {
+  if (!series.value) return;
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  imageUploading.value = true;
+  try {
+    await api.uploadItemImage(series.value.Id, remoteImageType.value, file);
+    toast.success('图片已上传');
+    itemImages.value = await api.listItemImages(series.value.Id);
+    await loadSeries(series.value.Id);
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '图片上传失败');
+  } finally {
+    imageUploading.value = false;
+    input.value = '';
+  }
+}
+
+async function deleteImage(imageType: string, index?: number) {
+  if (!series.value || imageDeletingType.value) return;
+  imageDeletingType.value = imageType;
+  try {
+    await api.deleteItemImage(series.value.Id, imageType, index);
+    toast.success('图片已删除');
+    itemImages.value = await api.listItemImages(series.value.Id);
+    await loadSeries(series.value.Id);
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '删除失败');
+  } finally {
+    imageDeletingType.value = null;
+  }
+}
+
+function seriesImageUrl(imageType: string, index?: number) {
+  if (!series.value) return '';
+  const tag = imageType === 'Backdrop'
+    ? series.value.BackdropImageTags?.[index ?? 0]
+    : series.value.ImageTags?.[imageType];
+  if (!tag) return '';
+  const base = `${api.baseUrl}/Items/${series.value.Id}/Images/${imageType}`;
+  const qs = `api_key=${encodeURIComponent(api.token)}&tag=${encodeURIComponent(tag)}&quality=90&maxWidth=300`;
+  return index !== undefined ? `${base}/${index}?${qs}` : `${base}?${qs}`;
+}
 </script>
 
 <template>
@@ -401,6 +528,23 @@ function episodeThumb(episode: BaseItemDto) {
               <template v-else>
                 {{ startEpisode.IndexNumber ? `从 ${episodeLabel(startEpisode)} 开始播放` : '播放' }}
               </template>
+            </UButton>
+            <UButton
+              color="neutral"
+              variant="subtle"
+              icon="i-lucide-refresh-cw"
+              :loading="refreshing"
+              @click="refreshMetadata"
+            >
+              刷新元数据
+            </UButton>
+            <UButton
+              color="neutral"
+              variant="subtle"
+              icon="i-lucide-image"
+              @click="openImageEditor"
+            >
+              编辑图像
             </UButton>
           </div>
         </div>
@@ -575,4 +719,140 @@ function episodeThumb(episode: BaseItemDto) {
     />
     <div v-else-if="relatedLoading" class="text-muted text-sm">正在加载更多剧集...</div>
   </div>
+
+  <!-- 图像编辑 modal -->
+  <UModal v-model:open="imageEditorOpen" :ui="{ content: 'max-w-3xl' }">
+    <template #header>
+      <div class="flex items-center justify-between">
+        <h3 class="text-highlighted text-base font-semibold">编辑图像</h3>
+      </div>
+    </template>
+    <template #body>
+      <div class="space-y-6">
+        <div>
+          <h4 class="text-highlighted mb-3 text-sm font-semibold">图像</h4>
+          <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+            <div
+              v-for="imgType in ['Primary', 'Logo', 'Thumb', 'Banner', 'Disc', 'Art']"
+              :key="imgType"
+              class="border-default overflow-hidden rounded-lg border"
+            >
+              <div class="bg-elevated/30 relative aspect-video">
+                <img
+                  v-if="seriesImageUrl(imgType)"
+                  :src="seriesImageUrl(imgType)"
+                  :alt="imageTypeLabels[imgType]"
+                  class="size-full object-contain"
+                />
+                <div v-else class="text-muted flex size-full items-center justify-center text-xs">
+                  {{ imageTypeLabels[imgType] || imgType }}
+                </div>
+              </div>
+              <div class="flex items-center justify-between p-2">
+                <span class="text-muted text-xs">{{ imageTypeLabels[imgType] || imgType }}</span>
+                <UButton
+                  v-if="seriesImageUrl(imgType)"
+                  size="xs"
+                  color="error"
+                  variant="ghost"
+                  icon="i-lucide-trash-2"
+                  :loading="imageDeletingType === imgType"
+                  @click="deleteImage(imgType)"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="series?.BackdropImageTags?.length">
+          <h4 class="text-highlighted mb-3 text-sm font-semibold">壁纸</h4>
+          <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <div
+              v-for="(tag, idx) in series.BackdropImageTags"
+              :key="tag"
+              class="border-default overflow-hidden rounded-lg border"
+            >
+              <div class="bg-elevated/30 relative aspect-video">
+                <img :src="seriesImageUrl('Backdrop', idx)" alt="壁纸" class="size-full object-cover" />
+              </div>
+              <div class="flex items-center justify-between p-2">
+                <span class="text-muted text-xs">壁纸 {{ idx + 1 }}</span>
+                <UButton
+                  size="xs"
+                  color="error"
+                  variant="ghost"
+                  icon="i-lucide-trash-2"
+                  :loading="imageDeletingType === `Backdrop-${idx}`"
+                  @click="deleteImage('Backdrop', idx)"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <USeparator />
+
+        <div>
+          <h4 class="text-highlighted mb-3 text-sm font-semibold">搜索远程图片</h4>
+          <div class="flex items-center gap-3">
+            <USelectMenu
+              v-model="remoteImageType"
+              :items="[
+                { label: '海报', value: 'Primary' },
+                { label: '壁纸', value: 'Backdrop' },
+                { label: '徽标', value: 'Logo' },
+                { label: '缩略图', value: 'Thumb' },
+                { label: '横幅图', value: 'Banner' }
+              ]"
+              value-key="value"
+              class="w-32"
+            />
+            <UButton icon="i-lucide-search" :loading="remoteImageLoading" @click="searchRemoteImages">
+              搜索
+            </UButton>
+            <label class="cursor-pointer">
+              <UButton as="span" icon="i-lucide-upload" variant="outline" :loading="imageUploading">
+                上传本地图片
+              </UButton>
+              <input type="file" accept="image/*" class="hidden" @change="handleImageUpload" />
+            </label>
+          </div>
+
+          <div v-if="remoteImageLoading" class="flex flex-col items-center gap-2 py-8">
+            <UProgress animation="carousel" class="w-48" />
+            <p class="text-muted text-sm">正在搜索远程图片…</p>
+          </div>
+
+          <div v-else-if="remoteImages.length" class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <div
+              v-for="(img, idx) in remoteImages"
+              :key="idx"
+              class="border-default hover:border-primary cursor-pointer overflow-hidden rounded-lg border transition"
+              @click="downloadRemoteImage(img)"
+            >
+              <div class="bg-elevated/30 relative aspect-video">
+                <img
+                  :src="img.ThumbnailUrl || img.Url"
+                  :alt="img.ProviderName"
+                  class="size-full object-contain"
+                  loading="lazy"
+                />
+              </div>
+              <div class="p-2">
+                <div class="text-muted flex items-center justify-between text-xs">
+                  <span>{{ img.ProviderName }}</span>
+                  <span v-if="img.Width && img.Height">{{ img.Width }}×{{ img.Height }}</span>
+                </div>
+                <div v-if="img.CommunityRating" class="text-muted text-xs">
+                  评分 {{ img.CommunityRating.toFixed(1) }}
+                  <span v-if="img.VoteCount">({{ img.VoteCount }})</span>
+                </div>
+                <div v-if="img.Language" class="text-muted text-xs">{{ img.Language }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+  </UModal>
 </template>

@@ -390,6 +390,7 @@ async fn build_system_configuration(state: &AppState) -> Result<Value, crate::er
         "LibraryScanThreadCount": startup.library_scan_thread_count,
         "StrmAnalysisThreadCount": startup.strm_analysis_thread_count,
         "TmdbMetadataThreadCount": startup.tmdb_metadata_thread_count,
+        "TmdbApiKey": startup.tmdb_api_key,
         "EnableRemoteAccess": remote_access.enable_remote_access,
         "EnableAutomaticPortMapping": remote_access.enable_automatic_port_mapping.unwrap_or(false),
         "Encoding": encoding
@@ -411,6 +412,7 @@ async fn apply_system_configuration_update(
         || payload.get("LibraryScanThreadCount").is_some()
         || payload.get("StrmAnalysisThreadCount").is_some()
         || payload.get("TmdbMetadataThreadCount").is_some()
+        || payload.get("TmdbApiKey").is_some()
     {
         let current = repository::startup_configuration(&state.pool, &state.config).await?;
         let mut current_value = serde_json::to_value(current)?;

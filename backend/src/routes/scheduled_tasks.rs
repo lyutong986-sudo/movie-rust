@@ -4,9 +4,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveTime, Timelike, Utc, Weekday};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     auth::{require_admin, AuthSession},
@@ -33,6 +34,10 @@ pub fn router() -> Router<AppState> {
             "/scheduledtasks/running/{task_id}/cancel",
             post(cancel_task),
         )
+        .route(
+            "/ScheduledTasks/Running/{task_id}/Delete",
+            post(cancel_task),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,8 +47,6 @@ struct TaskListQuery {
     is_hidden: Option<bool>,
 }
 
-/// 内置可用的后台任务清单。目前以元数据刷新 / 媒体库扫描为主，
-/// 客户端的任务面板可直接显示这些。
 fn builtin_tasks() -> Vec<TaskDescriptor> {
     vec![
         TaskDescriptor {
@@ -51,44 +54,44 @@ fn builtin_tasks() -> Vec<TaskDescriptor> {
             name: "媒体库扫描",
             description: "扫描所有媒体库目录，发现并录入新的媒体文件。",
             category: "Library",
-            default_trigger: TriggerInfo {
+            default_triggers: vec![TriggerInfo {
                 trigger_type: "IntervalTrigger",
                 interval_ticks: Some(30_000 * 10_000_000),
                 ..TriggerInfo::default()
-            },
+            }],
         },
         TaskDescriptor {
             id: "metadata-refresh",
             name: "元数据刷新",
             description: "对缺少或过期元数据的条目调用 TMDB 等外部源进行刷新。",
             category: "Metadata",
-            default_trigger: TriggerInfo {
+            default_triggers: vec![TriggerInfo {
                 trigger_type: "DailyTrigger",
                 time_of_day_ticks: Some(3 * 3600 * 10_000_000),
                 ..TriggerInfo::default()
-            },
+            }],
         },
         TaskDescriptor {
             id: "cleanup-transcodes",
             name: "清理转码临时目录",
             description: "删除遗留的 HLS / 分片缓存文件。",
             category: "Maintenance",
-            default_trigger: TriggerInfo {
+            default_triggers: vec![TriggerInfo {
                 trigger_type: "DailyTrigger",
                 time_of_day_ticks: Some(5 * 3600 * 10_000_000),
                 ..TriggerInfo::default()
-            },
+            }],
         },
         TaskDescriptor {
             id: "cleanup-activity-log",
             name: "清理活动日志",
             description: "删除超过保留天数的活动日志条目。",
             category: "Maintenance",
-            default_trigger: TriggerInfo {
+            default_triggers: vec![TriggerInfo {
                 trigger_type: "IntervalTrigger",
                 interval_ticks: Some(24 * 3600 * 10_000_000),
                 ..TriggerInfo::default()
-            },
+            }],
         },
     ]
 }
@@ -99,7 +102,7 @@ struct TaskDescriptor {
     name: &'static str,
     description: &'static str,
     category: &'static str,
-    default_trigger: TriggerInfo,
+    default_triggers: Vec<TriggerInfo>,
 }
 
 #[derive(Clone, Default)]
@@ -165,10 +168,9 @@ struct TaskRuntimeState {
 }
 
 fn descriptor_to_value(desc: &TaskDescriptor, state: &TaskRuntimeState) -> Value {
-    let triggers_value = state
-        .triggers
-        .clone()
-        .unwrap_or_else(|| Value::Array(vec![desc.default_trigger.to_value()]));
+    let triggers_value = state.triggers.clone().unwrap_or_else(|| {
+        Value::Array(desc.default_triggers.iter().map(|t| t.to_value()).collect())
+    });
 
     json!({
         "Name": desc.name,
@@ -184,17 +186,31 @@ fn descriptor_to_value(desc: &TaskDescriptor, state: &TaskRuntimeState) -> Value
     })
 }
 
+fn get_task_triggers(desc: &TaskDescriptor, state: &TaskRuntimeState) -> Vec<Value> {
+    match &state.triggers {
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => desc.default_triggers.iter().map(|t| t.to_value()).collect(),
+    }
+}
+
 async fn list_tasks(
     session: AuthSession,
     State(state): State<AppState>,
-    Query(_query): Query<TaskListQuery>,
+    Query(query): Query<TaskListQuery>,
 ) -> Result<Json<Vec<Value>>, AppError> {
     require_admin(&session)?;
     let descriptors = builtin_tasks();
     let mut out = Vec::with_capacity(descriptors.len());
     for desc in descriptors {
         let runtime = read_state(&state.pool, desc.id).await?;
-        out.push(descriptor_to_value(&desc, &runtime));
+        let task_value = descriptor_to_value(&desc, &runtime);
+        if let Some(hidden) = query.is_hidden {
+            let is_hidden = task_value["IsHidden"].as_bool().unwrap_or(false);
+            if is_hidden != hidden {
+                continue;
+            }
+        }
+        out.push(task_value);
     }
     Ok(Json(out))
 }
@@ -251,57 +267,14 @@ async fn start_task(
         return Err(AppError::NotFound(format!("任务不存在: {task_id}")));
     };
 
-    repository::set_setting_value(
-        &state.pool,
-        &format!("task:{}:state", desc.id),
-        json!("Running"),
-    )
-    .await?;
-    repository::set_setting_value(
-        &state.pool,
-        &format!("task:{}:progress", desc.id),
-        json!(0.0),
-    )
-    .await?;
+    {
+        let tokens = state.task_tokens.read().await;
+        if tokens.contains_key(desc.id) {
+            return Ok(StatusCode::NO_CONTENT);
+        }
+    }
 
-    // 按任务类型触发真实后台任务。不阻塞响应。
-    let pool = state.pool.clone();
-    let state_clone = state.clone();
-    let task_id = desc.id.to_string();
-    tokio::spawn(async move {
-        let start = Utc::now();
-        let result = run_task(&state_clone, &task_id).await;
-        let end = Utc::now();
-        let duration_ticks = (end.signed_duration_since(start).num_milliseconds() * 10_000).max(0);
-        let (status, error) = match &result {
-            Ok(_) => ("Completed", None),
-            Err(err) => ("Failed", Some(err.to_string())),
-        };
-        let key_state = format!("task:{task_id}:state");
-        let _ = repository::set_setting_value(&pool, &key_state, json!("Idle")).await;
-        let _ =
-            repository::set_setting_value(&pool, &format!("task:{task_id}:progress"), json!(100.0))
-                .await;
-        let _ = repository::set_setting_value(
-            &pool,
-            &format!("task:{task_id}:last_end"),
-            json!(end.to_rfc3339()),
-        )
-        .await;
-        let _ = repository::set_setting_value(
-            &pool,
-            &format!("task:{task_id}:last_exec"),
-            json!({
-                "Status": status,
-                "StartTime": start.to_rfc3339(),
-                "EndTime": end.to_rfc3339(),
-                "DurationTicks": duration_ticks,
-                "ErrorMessage": error,
-            }),
-        )
-        .await;
-    });
-
+    spawn_task_execution(state.clone(), desc.id.to_string()).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -312,13 +285,95 @@ async fn cancel_task(
 ) -> Result<StatusCode, AppError> {
     require_admin(&session)?;
     let key = task_id.to_ascii_lowercase();
+    {
+        let tokens = state.task_tokens.read().await;
+        if let Some(token) = tokens.get(&key) {
+            token.cancel();
+        }
+    }
     repository::set_setting_value(
         &state.pool,
         &format!("task:{key}:state"),
-        json!("Cancelled"),
+        json!("Cancelling"),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn spawn_task_execution(state: AppState, task_id: String) {
+    let cancel_token = CancellationToken::new();
+    {
+        let mut tokens = state.task_tokens.write().await;
+        tokens.insert(task_id.clone(), cancel_token.clone());
+    }
+
+    let _ = repository::set_setting_value(
+        &state.pool,
+        &format!("task:{}:state", task_id),
+        json!("Running"),
+    )
+    .await;
+    let _ = repository::set_setting_value(
+        &state.pool,
+        &format!("task:{}:progress", task_id),
+        json!(0.0),
+    )
+    .await;
+
+    let pool = state.pool.clone();
+    let state_clone = state.clone();
+    let task_id_clone = task_id.clone();
+    tokio::spawn(async move {
+        let start = Utc::now();
+        let result = tokio::select! {
+            res = run_task(&state_clone, &task_id_clone) => res,
+            _ = cancel_token.cancelled() => {
+                Err(AppError::Internal("任务已被取消".to_string()))
+            }
+        };
+        let end = Utc::now();
+        let duration_ticks = (end.signed_duration_since(start).num_milliseconds() * 10_000).max(0);
+        let (status, error) = match &result {
+            Ok(_) => ("Completed", None),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("取消") {
+                    ("Cancelled", Some(msg))
+                } else {
+                    ("Failed", Some(msg))
+                }
+            }
+        };
+        let _ = repository::set_setting_value(&pool, &format!("task:{task_id_clone}:state"), json!("Idle")).await;
+        let _ = repository::set_setting_value(&pool, &format!("task:{task_id_clone}:progress"), json!(100.0)).await;
+        let _ = repository::set_setting_value(
+            &pool,
+            &format!("task:{task_id_clone}:last_end"),
+            json!(end.to_rfc3339()),
+        )
+        .await;
+        let _ = repository::set_setting_value(
+            &pool,
+            &format!("task:{task_id_clone}:last_exec"),
+            json!({
+                "Status": status,
+                "StartTime": start.to_rfc3339(),
+                "EndTime": end.to_rfc3339(),
+                "DurationTicks": duration_ticks,
+                "ErrorMessage": error,
+            }),
+        )
+        .await;
+        {
+            let mut tokens = state_clone.task_tokens.write().await;
+            tokens.remove(&task_id_clone);
+        }
+    });
+}
+
+async fn set_progress(pool: &sqlx::PgPool, task_id: &str, pct: f64) {
+    let _ =
+        repository::set_setting_value(pool, &format!("task:{task_id}:progress"), json!(pct)).await;
 }
 
 async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
@@ -331,24 +386,28 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
                 state.work_limiters.clone(),
             )
             .await?;
+            set_progress(&state.pool, task_id, 100.0).await;
             Ok(())
         }
         "metadata-refresh" => {
-            // 刷新若干需要更新的条目。命中 do_refresh_item_metadata。
             let candidates = repository::list_media_items(
                 &state.pool,
                 repository::ItemListOptions {
-                    include_types: vec!["Movie".into(), "Series".into(), "Episode".into()],
+                    include_types: vec!["Movie".into(), "Series".into()],
                     recursive: true,
                     start_index: 0,
-                    limit: 50,
+                    limit: 200,
                     ..Default::default()
                 },
             )
             .await?;
-            for item in candidates.items {
+            let total = candidates.items.len().max(1);
+            for (i, item) in candidates.items.iter().enumerate() {
+                let pct = (i as f64 / total as f64) * 100.0;
+                set_progress(&state.pool, task_id, pct).await;
                 let _ = crate::routes::items::do_refresh_item_metadata(state, item.id).await;
             }
+            set_progress(&state.pool, task_id, 100.0).await;
             Ok(())
         }
         "cleanup-transcodes" => {
@@ -363,6 +422,7 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
                     }
                 }
             }
+            set_progress(&state.pool, task_id, 100.0).await;
             Ok(())
         }
         "cleanup-activity-log" => {
@@ -371,9 +431,149 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
             )
             .execute(&state.pool)
             .await?;
+            set_progress(&state.pool, task_id, 100.0).await;
             Ok(())
         }
         _ => Err(AppError::NotFound(format!("未知任务: {task_id}"))),
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// 定时调度器
+// ────────────────────────────────────────────────────────────────────────
+
+pub async fn run_scheduler(state: AppState) {
+    tracing::info!("计划任务调度器已启动");
+
+    // StartupTrigger: 启动后 5 秒执行
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    fire_startup_triggers(&state).await;
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+        check_and_fire_triggers(&state).await;
+    }
+}
+
+async fn fire_startup_triggers(state: &AppState) {
+    let descriptors = builtin_tasks();
+    for desc in &descriptors {
+        let runtime = match read_state(&state.pool, desc.id).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let triggers = get_task_triggers(desc, &runtime);
+        let has_startup = triggers.iter().any(|t| {
+            t.get("Type")
+                .and_then(|v| v.as_str())
+                .map_or(false, |s| s == "StartupTrigger")
+        });
+        if has_startup && runtime.status == "Idle" {
+            tracing::info!(task = desc.id, "StartupTrigger: 启动时触发任务");
+            spawn_task_execution(state.clone(), desc.id.to_string()).await;
+        }
+    }
+}
+
+async fn check_and_fire_triggers(state: &AppState) {
+    let descriptors = builtin_tasks();
+    let now = Utc::now();
+
+    for desc in &descriptors {
+        let runtime = match read_state(&state.pool, desc.id).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if runtime.status != "Idle" {
+            continue;
+        }
+
+        let triggers = get_task_triggers(desc, &runtime);
+        let should_fire = triggers.iter().any(|trigger| {
+            let ttype = trigger
+                .get("Type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            match ttype {
+                "IntervalTrigger" => {
+                    let interval_ticks = trigger
+                        .get("IntervalTicks")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    if interval_ticks <= 0 {
+                        return false;
+                    }
+                    let interval_secs = interval_ticks / 10_000_000;
+                    let last_end = runtime.last_end_time.unwrap_or(DateTime::UNIX_EPOCH);
+                    let elapsed = now.signed_duration_since(last_end).num_seconds();
+                    elapsed >= interval_secs
+                }
+                "DailyTrigger" => {
+                    let time_ticks = trigger
+                        .get("TimeOfDayTicks")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let target_secs = (time_ticks / 10_000_000) as u32;
+                    let target_time = NaiveTime::from_num_seconds_from_midnight_opt(
+                        target_secs.min(86399),
+                        0,
+                    )
+                    .unwrap_or_default();
+                    let now_time = now.time();
+                    let diff_secs =
+                        (now_time.num_seconds_from_midnight() as i64) - (target_time.num_seconds_from_midnight() as i64);
+                    if !(0..=120).contains(&diff_secs) {
+                        return false;
+                    }
+                    let last_end = runtime.last_end_time.unwrap_or(DateTime::UNIX_EPOCH);
+                    now.signed_duration_since(last_end).num_hours() >= 12
+                }
+                "WeeklyTrigger" => {
+                    let day_str = trigger
+                        .get("DayOfWeek")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Monday");
+                    let target_weekday = match day_str {
+                        "Sunday" => Weekday::Sun,
+                        "Monday" => Weekday::Mon,
+                        "Tuesday" => Weekday::Tue,
+                        "Wednesday" => Weekday::Wed,
+                        "Thursday" => Weekday::Thu,
+                        "Friday" => Weekday::Fri,
+                        "Saturday" => Weekday::Sat,
+                        _ => Weekday::Mon,
+                    };
+                    if now.weekday() != target_weekday {
+                        return false;
+                    }
+                    let time_ticks = trigger
+                        .get("TimeOfDayTicks")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let target_secs = (time_ticks / 10_000_000) as u32;
+                    let target_time = NaiveTime::from_num_seconds_from_midnight_opt(
+                        target_secs.min(86399),
+                        0,
+                    )
+                    .unwrap_or_default();
+                    let now_time = now.time();
+                    let diff_secs =
+                        (now_time.num_seconds_from_midnight() as i64) - (target_time.num_seconds_from_midnight() as i64);
+                    if !(0..=120).contains(&diff_secs) {
+                        return false;
+                    }
+                    let last_end = runtime.last_end_time.unwrap_or(DateTime::UNIX_EPOCH);
+                    now.signed_duration_since(last_end).num_hours() >= 36
+                }
+                _ => false,
+            }
+        });
+
+        if should_fire {
+            tracing::info!(task = desc.id, "调度器触发任务执行");
+            spawn_task_execution(state.clone(), desc.id.to_string()).await;
+        }
     }
 }
 

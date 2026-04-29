@@ -864,6 +864,8 @@ pub struct SubtitleDownloadConfiguration {
     pub open_subtitles_username: String,
     #[serde(alias = "openSubtitlesPassword")]
     pub open_subtitles_password: String,
+    #[serde(default, alias = "openSubtitlesApiKey")]
+    pub open_subtitles_api_key: String,
 }
 
 impl Default for SubtitleDownloadConfiguration {
@@ -877,6 +879,7 @@ impl Default for SubtitleDownloadConfiguration {
             skip_if_graphical_subs_present: true,
             open_subtitles_username: String::new(),
             open_subtitles_password: String::new(),
+            open_subtitles_api_key: String::new(),
         }
     }
 }
@@ -968,6 +971,8 @@ pub struct StartupConfiguration {
     pub strm_analysis_thread_count: i32,
     #[serde(default = "default_tmdb_metadata_thread_count")]
     pub tmdb_metadata_thread_count: i32,
+    #[serde(default)]
+    pub tmdb_api_key: String,
 }
 
 fn default_library_scan_thread_count() -> i32 {

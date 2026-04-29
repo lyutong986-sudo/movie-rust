@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import MediaCard from '../../components/MediaCard.vue';
 import MediaRow from '../../components/MediaRow.vue';
 import MediaQualityBadges from '../../components/MediaQualityBadges.vue';
-import type { BaseItemDto, MediaStreamDto, PlaylistInfo } from '../../api/emby';
+import type { BaseItemDto, ImageInfo, MediaStreamDto, PlaylistInfo, RemoteImageInfo, RemoteSubtitleInfo } from '../../api/emby';
 import {
   api,
   enqueue,
@@ -375,6 +375,179 @@ function toggleLater() {
   toast.success(wasIn ? '已从稍后观看移除' : '已添加到稍后观看');
 }
 
+const refreshing = ref(false);
+const subtitleOpen = ref(false);
+const subtitleLang = ref('chi');
+const subtitleResults = ref<RemoteSubtitleInfo[]>([]);
+const subtitleSearching = ref(false);
+const subtitleDownloading = ref<string | null>(null);
+
+const subtitleLangOptions = [
+  { label: '中文', value: 'chi' },
+  { label: '英文', value: 'eng' },
+  { label: '日语', value: 'jpn' },
+  { label: '韩语', value: 'kor' },
+  { label: '法语', value: 'fre' },
+  { label: '德语', value: 'ger' },
+  { label: '西班牙语', value: 'spa' }
+];
+
+const imageEditorOpen = ref(false);
+const itemImages = ref<ImageInfo[]>([]);
+const remoteImages = ref<RemoteImageInfo[]>([]);
+const remoteImageType = ref('Primary');
+const remoteImageLoading = ref(false);
+const imageUploading = ref(false);
+const imageDeletingType = ref<string | null>(null);
+
+const imageTypeLabels: Record<string, string> = {
+  Primary: '海报', Backdrop: '壁纸', Logo: '徽标', Thumb: '缩略图',
+  Banner: '横幅图', Disc: '光盘封面', Art: '艺术图'
+};
+
+async function openImageEditor() {
+  if (!item.value) return;
+  imageEditorOpen.value = true;
+  remoteImages.value = [];
+  try {
+    itemImages.value = await api.listItemImages(item.value.Id);
+  } catch {
+    itemImages.value = [];
+  }
+}
+
+async function searchRemoteImages() {
+  if (!item.value) return;
+  remoteImageLoading.value = true;
+  try {
+    const result = await api.listRemoteImages(item.value.Id, {
+      type: remoteImageType.value,
+      IncludeAllLanguages: true,
+      limit: 20
+    });
+    remoteImages.value = result.Images || [];
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '搜索远程图片失败');
+    remoteImages.value = [];
+  } finally {
+    remoteImageLoading.value = false;
+  }
+}
+
+async function downloadRemoteImage(img: RemoteImageInfo) {
+  if (!item.value || imageUploading.value) return;
+  imageUploading.value = true;
+  try {
+    await api.downloadRemoteImage(item.value.Id, img.Url, img.Type);
+    toast.success('图片已下载');
+    itemImages.value = await api.listItemImages(item.value.Id);
+    await loadItem(item.value.Id);
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '图片下载失败');
+  } finally {
+    imageUploading.value = false;
+  }
+}
+
+async function handleImageUpload(event: Event) {
+  if (!item.value) return;
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  imageUploading.value = true;
+  try {
+    await api.uploadItemImage(item.value.Id, remoteImageType.value, file);
+    toast.success('图片已上传');
+    itemImages.value = await api.listItemImages(item.value.Id);
+    await loadItem(item.value.Id);
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '图片上传失败');
+  } finally {
+    imageUploading.value = false;
+    input.value = '';
+  }
+}
+
+async function deleteImage(imageType: string, index?: number) {
+  if (!item.value || imageDeletingType.value) return;
+  imageDeletingType.value = imageType;
+  try {
+    await api.deleteItemImage(item.value.Id, imageType, index);
+    toast.success('图片已删除');
+    itemImages.value = await api.listItemImages(item.value.Id);
+    await loadItem(item.value.Id);
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '删除失败');
+  } finally {
+    imageDeletingType.value = null;
+  }
+}
+
+function itemImageUrl(imageType: string, index?: number) {
+  if (!item.value) return '';
+  const tag = imageType === 'Backdrop'
+    ? item.value.BackdropImageTags?.[index ?? 0]
+    : item.value.ImageTags?.[imageType];
+  if (!tag) return '';
+  const base = `${api.baseUrl}/Items/${item.value.Id}/Images/${imageType}`;
+  const qs = `api_key=${encodeURIComponent(api.token)}&tag=${encodeURIComponent(tag)}&quality=90&maxWidth=300`;
+  return index !== undefined ? `${base}/${index}?${qs}` : `${base}?${qs}`;
+}
+
+async function refreshMetadata() {
+  if (!item.value || refreshing.value) return;
+  refreshing.value = true;
+  try {
+    await api.refreshItemMetadata(item.value.Id);
+    toast.success('元数据刷新完成');
+    if (item.value) {
+      await loadItem(item.value.Id);
+      try {
+        itemImages.value = await api.listItemImages(item.value.Id);
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '刷新失败');
+  } finally {
+    refreshing.value = false;
+  }
+}
+
+async function openSubtitleSearch() {
+  subtitleOpen.value = true;
+  subtitleResults.value = [];
+  await searchSubtitles();
+}
+
+async function searchSubtitles() {
+  if (!item.value) return;
+  subtitleSearching.value = true;
+  subtitleResults.value = [];
+  try {
+    subtitleResults.value = await api.searchSubtitles(item.value.Id, subtitleLang.value);
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '字幕搜索失败');
+  } finally {
+    subtitleSearching.value = false;
+  }
+}
+
+async function downloadSubtitle(sub: RemoteSubtitleInfo) {
+  if (!item.value || subtitleDownloading.value) return;
+  subtitleDownloading.value = sub.Id;
+  try {
+    await api.downloadSubtitle(item.value.Id, sub.Id);
+    toast.success(`字幕已下载: ${sub.Name}`);
+    await loadItem(item.value.Id);
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : '字幕下载失败');
+  } finally {
+    subtitleDownloading.value = null;
+  }
+}
+
 const tocTabs = computed(() => {
   const tabs: Array<{ label: string; value: string }> = [];
   if (chapters.value.length) tabs.push({ label: '章节', value: 'chapters' });
@@ -520,8 +693,22 @@ watch(
             >
               {{ item.UserData?.Played ? '标记未看' : '标记已看' }}
             </UButton>
+            <UButton
+              v-if="!item.IsFolder"
+              color="neutral"
+              variant="subtle"
+              icon="i-lucide-captions"
+              @click="openSubtitleSearch"
+            >
+              字幕
+            </UButton>
             <UDropdownMenu
               :items="[
+                [
+                  { label: '刷新元数据', icon: 'i-lucide-refresh-cw', onSelect: refreshMetadata, disabled: refreshing },
+                  { label: '搜索字幕', icon: 'i-lucide-captions', onSelect: openSubtitleSearch, disabled: item.IsFolder },
+                  { label: '编辑图像', icon: 'i-lucide-image', onSelect: openImageEditor }
+                ],
                 [
                   { label: '添加到队列', icon: 'i-lucide-list-plus', onSelect: () => enqueueCurrent('last') },
                   { label: '作为下一首', icon: 'i-lucide-play-circle', onSelect: () => enqueueCurrent('next') },
@@ -812,6 +999,239 @@ watch(
             <div class="flex gap-2">
               <UInput v-model="newPlaylistName" placeholder="新播放列表名称" class="flex-1" />
               <UButton icon="i-lucide-list-plus" @click="createAndAddPlaylist">创建并加入</UButton>
+            </div>
+          </div>
+        </div>
+      </template>
+    </UModal>
+
+    <!-- 字幕搜索 modal -->
+    <UModal v-model:open="subtitleOpen" :ui="{ content: 'max-w-2xl' }">
+      <template #header>
+        <div class="flex items-center justify-between">
+          <h3 class="text-highlighted text-base font-semibold">搜索字幕</h3>
+        </div>
+      </template>
+      <template #body>
+        <div class="space-y-4">
+          <div class="flex items-center gap-3">
+            <USelectMenu
+              v-model="subtitleLang"
+              :items="subtitleLangOptions"
+              value-key="value"
+              class="w-36"
+            />
+            <UButton
+              icon="i-lucide-search"
+              :loading="subtitleSearching"
+              @click="searchSubtitles"
+            >
+              搜索
+            </UButton>
+            <span v-if="subtitleResults.length" class="text-muted text-sm">
+              找到 {{ subtitleResults.length }} 条结果
+            </span>
+          </div>
+
+          <div v-if="subtitleSearching" class="flex flex-col items-center gap-2 py-8">
+            <UProgress animation="carousel" class="w-48" />
+            <p class="text-muted text-sm">正在搜索字幕…</p>
+          </div>
+
+          <div v-else-if="subtitleResults.length" class="max-h-96 space-y-2 overflow-y-auto">
+            <div
+              v-for="sub in subtitleResults"
+              :key="sub.Id"
+              class="border-default hover:bg-elevated/40 flex items-center gap-3 rounded-lg border p-3 transition"
+            >
+              <div class="min-w-0 flex-1">
+                <p class="text-highlighted truncate text-sm font-medium" :title="sub.Name">
+                  {{ sub.Name }}
+                </p>
+                <div class="text-muted mt-0.5 flex flex-wrap gap-2 text-xs">
+                  <span>{{ sub.ThreeLetterISOLanguageName || sub.Language }}</span>
+                  <span>{{ sub.Format?.toUpperCase() }}</span>
+                  <span v-if="sub.Author">{{ sub.Author }}</span>
+                  <span v-if="sub.DownloadCount">下载 {{ sub.DownloadCount?.toLocaleString() }} 次</span>
+                  <span v-if="sub.CommunityRating">评分 {{ sub.CommunityRating?.toFixed(1) }}</span>
+                  <UBadge v-if="sub.IsHearingImpaired" size="xs" color="warning" variant="soft">SDH</UBadge>
+                  <UBadge v-if="sub.IsHashMatch" size="xs" color="success" variant="soft">哈希匹配</UBadge>
+                </div>
+                <p v-if="sub.Comment" class="text-muted mt-0.5 truncate text-xs italic" :title="sub.Comment">
+                  {{ sub.Comment }}
+                </p>
+              </div>
+              <UButton
+                size="sm"
+                icon="i-lucide-download"
+                :loading="subtitleDownloading === sub.Id"
+                :disabled="!!subtitleDownloading"
+                @click="downloadSubtitle(sub)"
+              >
+                下载
+              </UButton>
+            </div>
+          </div>
+
+          <div v-else class="text-muted py-8 text-center text-sm">
+            <UIcon name="i-lucide-captions" class="mx-auto mb-2 size-8 opacity-50" />
+            <p>选择语言后点击搜索</p>
+          </div>
+        </div>
+      </template>
+    </UModal>
+
+    <!-- 图像编辑 modal -->
+    <UModal v-model:open="imageEditorOpen" :ui="{ content: 'max-w-3xl' }">
+      <template #header>
+        <div class="flex items-center justify-between">
+          <h3 class="text-highlighted text-base font-semibold">编辑图像</h3>
+        </div>
+      </template>
+      <template #body>
+        <div class="space-y-6">
+          <!-- 当前图片列表 -->
+          <div>
+            <h4 class="text-highlighted mb-3 text-sm font-semibold">图像</h4>
+            <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+              <div
+                v-for="imgType in ['Primary', 'Logo', 'Thumb', 'Banner', 'Disc', 'Art']"
+                :key="imgType"
+                class="border-default overflow-hidden rounded-lg border"
+              >
+                <div class="bg-elevated/30 relative aspect-video">
+                  <img
+                    v-if="itemImageUrl(imgType)"
+                    :src="itemImageUrl(imgType)"
+                    :alt="imageTypeLabels[imgType]"
+                    class="size-full object-contain"
+                  />
+                  <div v-else class="text-muted flex size-full items-center justify-center text-xs">
+                    {{ imageTypeLabels[imgType] || imgType }}
+                  </div>
+                </div>
+                <div class="flex items-center justify-between p-2">
+                  <span class="text-muted text-xs">{{ imageTypeLabels[imgType] || imgType }}</span>
+                  <UButton
+                    v-if="itemImageUrl(imgType)"
+                    size="xs"
+                    color="error"
+                    variant="ghost"
+                    icon="i-lucide-trash-2"
+                    :loading="imageDeletingType === imgType"
+                    @click="deleteImage(imgType)"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 壁纸列表 -->
+          <div v-if="item?.BackdropImageTags?.length">
+            <h4 class="text-highlighted mb-3 text-sm font-semibold">壁纸</h4>
+            <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <div
+                v-for="(tag, idx) in item.BackdropImageTags"
+                :key="tag"
+                class="border-default overflow-hidden rounded-lg border"
+              >
+                <div class="bg-elevated/30 relative aspect-video">
+                  <img
+                    :src="itemImageUrl('Backdrop', idx)"
+                    alt="壁纸"
+                    class="size-full object-cover"
+                  />
+                </div>
+                <div class="flex items-center justify-between p-2">
+                  <span class="text-muted text-xs">壁纸 {{ idx + 1 }}</span>
+                  <UButton
+                    size="xs"
+                    color="error"
+                    variant="ghost"
+                    icon="i-lucide-trash-2"
+                    :loading="imageDeletingType === `Backdrop-${idx}`"
+                    @click="deleteImage('Backdrop', idx)"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <USeparator />
+
+          <!-- 远程图片搜索 -->
+          <div>
+            <h4 class="text-highlighted mb-3 text-sm font-semibold">搜索远程图片</h4>
+            <div class="flex items-center gap-3">
+              <USelectMenu
+                v-model="remoteImageType"
+                :items="[
+                  { label: '海报', value: 'Primary' },
+                  { label: '壁纸', value: 'Backdrop' },
+                  { label: '徽标', value: 'Logo' },
+                  { label: '缩略图', value: 'Thumb' },
+                  { label: '横幅图', value: 'Banner' }
+                ]"
+                value-key="value"
+                class="w-32"
+              />
+              <UButton
+                icon="i-lucide-search"
+                :loading="remoteImageLoading"
+                @click="searchRemoteImages"
+              >
+                搜索
+              </UButton>
+              <label class="cursor-pointer">
+                <UButton
+                  as="span"
+                  icon="i-lucide-upload"
+                  variant="outline"
+                  :loading="imageUploading"
+                >
+                  上传本地图片
+                </UButton>
+                <input
+                  type="file"
+                  accept="image/*"
+                  class="hidden"
+                  @change="handleImageUpload"
+                />
+              </label>
+            </div>
+
+            <div v-if="remoteImageLoading" class="flex flex-col items-center gap-2 py-8">
+              <UProgress animation="carousel" class="w-48" />
+              <p class="text-muted text-sm">正在搜索远程图片…</p>
+            </div>
+
+            <div v-else-if="remoteImages.length" class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <div
+                v-for="(img, idx) in remoteImages"
+                :key="idx"
+                class="border-default hover:border-primary cursor-pointer overflow-hidden rounded-lg border transition"
+                @click="downloadRemoteImage(img)"
+              >
+                <div class="bg-elevated/30 relative aspect-video">
+                  <img
+                    :src="img.ThumbnailUrl || img.Url"
+                    :alt="img.ProviderName"
+                    class="size-full object-contain"
+                    loading="lazy"
+                  />
+                </div>
+                <div class="p-2">
+                  <div class="text-muted flex items-center justify-between text-xs">
+                    <span>{{ img.ProviderName }}</span>
+                    <span v-if="img.Width && img.Height">{{ img.Width }}×{{ img.Height }}</span>
+                  </div>
+                  <div v-if="img.CommunityRating" class="text-muted text-xs">
+                    评分 {{ img.CommunityRating.toFixed(1) }}
+                    <span v-if="img.VoteCount">({{ img.VoteCount }})</span>
+                  </div>
+                  <div v-if="img.Language" class="text-muted text-xs">{{ img.Language }}</div>
+                </div>
+              </div>
             </div>
           </div>
         </div>

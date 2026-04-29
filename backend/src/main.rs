@@ -71,7 +71,16 @@ async fn main() -> Result<()> {
 
     let mut metadata_manager = metadata::provider::MetadataProviderManager::new();
 
-    if let Some(tmdb_api_key) = &config.tmdb_api_key {
+    let tmdb_api_key = match &config.tmdb_api_key {
+        Some(key) => Some(key.clone()),
+        None => {
+            let startup = repository::startup_configuration(&pool, &config).await.ok();
+            startup
+                .map(|s| s.tmdb_api_key)
+                .filter(|k| !k.trim().is_empty())
+        }
+    };
+    if let Some(tmdb_api_key) = tmdb_api_key {
         let tmdb_provider = metadata::tmdb::TmdbProvider::new_with_preferences(
             tmdb_api_key.clone(),
             &config.preferred_metadata_language,
@@ -79,6 +88,8 @@ async fn main() -> Result<()> {
         );
         metadata_manager.register_provider(Box::new(tmdb_provider));
         tracing::info!("TMDB 元数据提供者已注册");
+    } else {
+        tracing::warn!("未配置 TMDB API Key（设置 TMDB_API_KEY 环境变量或在系统设置中配置）");
     }
 
     let bind_addr = config.bind_addr()?;
@@ -96,6 +107,7 @@ async fn main() -> Result<()> {
         websocket_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         transcoder,
         work_limiters,
+        task_tokens: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // SPA 入口：
@@ -129,6 +141,8 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     tracing::info!("Movie Rust backend listening on http://{}", bind_addr);
+
+    tokio::spawn(routes::scheduled_tasks::run_scheduler(state.clone()));
 
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
@@ -395,6 +409,9 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_community_rating ON media_items(community_rating DESC NULLS LAST)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_type_sort ON media_items(item_type, sort_name)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_type_date ON media_items(item_type, date_created DESC)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_type_series ON media_items(item_type, series_id) WHERE series_id IS NOT NULL"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_genres_gin ON media_items USING gin (genres)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_episode_nextup ON media_items(series_id, parent_index_number, index_number) WHERE item_type = 'Episode'"#,
         // pg_trgm 全文搜索加速
         r#"DO $$ BEGIN CREATE EXTENSION IF NOT EXISTS pg_trgm; EXCEPTION WHEN OTHERS THEN NULL; END $$"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_name_trgm ON media_items USING gin (name gin_trgm_ops)"#,

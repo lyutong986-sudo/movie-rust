@@ -557,6 +557,7 @@ fn default_startup_configuration(config: &Config) -> StartupConfiguration {
         library_scan_thread_count: 2,
         strm_analysis_thread_count: 8,
         tmdb_metadata_thread_count: 4,
+        tmdb_api_key: config.tmdb_api_key.clone().unwrap_or_default(),
     }
 }
 
@@ -4594,66 +4595,103 @@ pub async fn get_next_up_episodes(
     server_id: Uuid,
     start_index: i64,
     limit: i64,
+    enable_total_record_count: bool,
 ) -> Result<QueryResult<BaseItemDto>, AppError> {
-    let total_record_count: i64 = sqlx::query_scalar(
-        r#"
-        WITH ranked AS (
-            SELECT
-                mi.id,
-                row_number() OVER (
-                    PARTITION BY COALESCE(season.parent_id, mi.parent_id, mi.id)
-                    ORDER BY
-                        mi.series_name NULLS LAST,
-                        mi.parent_index_number NULLS LAST,
-                        mi.index_number NULLS LAST,
-                        mi.sort_name
-                ) AS next_rank
-            FROM media_items mi
-            LEFT JOIN media_items season ON season.id = mi.parent_id AND season.item_type = 'Season'
-            LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
-            WHERE mi.item_type = 'Episode'
-              AND COALESCE(uid.is_played, false) = false
-              AND (
-                  $2::uuid IS NULL
-                  OR mi.parent_id = $2
-                  OR mi.library_id = $2
-                  OR season.parent_id = $2
-                  OR season.library_id = $2
-              )
+    // When a specific SeriesId is provided, use the indexed series_id column
+    // instead of the expensive LEFT JOIN + OR chain across the entire table.
+    let (scope_sql_fragment, use_series_fast_path) = if parent_id.is_some() {
+        (
+            r#"AND (
+                mi.series_id = $2
+                OR mi.parent_id = $2
+                OR mi.library_id = $2
+            )"#,
+            true,
         )
-        SELECT COUNT(*) FROM ranked WHERE next_rank = 1
-        "#,
-    )
-    .bind(user_id)
-    .bind(parent_id)
-    .fetch_one(pool)
-    .await?;
+    } else {
+        (
+            r#"AND (
+                $2::uuid IS NULL
+            )"#,
+            false,
+        )
+    };
 
-    let rows = sqlx::query_as::<_, DbMediaItem>(
+    let total_record_count = if enable_total_record_count {
+        let count_sql = if use_series_fast_path {
+            // For a single series, just count distinct seasons that have unplayed episodes
+            format!(
+                r#"
+                SELECT COUNT(DISTINCT mi.parent_id) FROM media_items mi
+                LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
+                WHERE mi.item_type = 'Episode'
+                  AND COALESCE(uid.is_played, false) = false
+                  {}
+                "#,
+                scope_sql_fragment
+            )
+        } else {
+            format!(
+                r#"
+                WITH ranked AS (
+                    SELECT
+                        mi.id,
+                        row_number() OVER (
+                            PARTITION BY COALESCE(mi.series_id, mi.parent_id, mi.id)
+                            ORDER BY mi.parent_index_number NULLS LAST,
+                                     mi.index_number NULLS LAST,
+                                     mi.sort_name
+                        ) AS next_rank
+                    FROM media_items mi
+                    LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
+                    WHERE mi.item_type = 'Episode'
+                      AND COALESCE(uid.is_played, false) = false
+                      {}
+                )
+                SELECT COUNT(*) FROM ranked WHERE next_rank = 1
+                "#,
+                scope_sql_fragment
+            )
+        };
+        sqlx::query_scalar(&count_sql)
+            .bind(user_id)
+            .bind(parent_id)
+            .fetch_one(pool)
+            .await?
+    } else {
+        0i64
+    };
+
+    let data_sql = format!(
         r#"
         WITH ranked AS (
             SELECT
-                mi.*,
+                mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name,
+                mi.item_type, mi.media_type, mi.path, mi.container, mi.overview,
+                mi.production_year, mi.official_rating, mi.community_rating,
+                mi.critic_rating, mi.runtime_ticks, mi.premiere_date,
+                mi.status, mi.end_date, mi.air_days, mi.air_time,
+                mi.series_name, mi.season_name,
+                mi.index_number, mi.index_number_end, mi.parent_index_number,
+                mi.provider_ids, mi.genres, mi.studios, mi.tags,
+                mi.production_locations, mi.width, mi.height,
+                mi.bit_rate, mi.video_codec, mi.audio_codec,
+                mi.image_primary_path, mi.backdrop_path, mi.logo_path,
+                mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path,
+                mi.backdrop_paths, mi.remote_trailers,
+                mi.date_created, mi.date_modified, mi.image_blur_hashes,
                 row_number() OVER (
-                    PARTITION BY COALESCE(season.parent_id, mi.parent_id, mi.id)
+                    PARTITION BY COALESCE(mi.series_id, mi.parent_id, mi.id)
                     ORDER BY
-                        mi.series_name NULLS LAST,
                         mi.parent_index_number NULLS LAST,
                         mi.index_number NULLS LAST,
                         mi.sort_name
                 ) AS next_rank
             FROM media_items mi
-            LEFT JOIN media_items season ON season.id = mi.parent_id AND season.item_type = 'Season'
             LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
             WHERE mi.item_type = 'Episode'
               AND COALESCE(uid.is_played, false) = false
-              AND (
-                  $2::uuid IS NULL
-                  OR mi.parent_id = $2
-                  OR mi.library_id = $2
-                  OR season.parent_id = $2
-                  OR season.library_id = $2
-              )
+              {}
         )
         SELECT
             id, parent_id, name, original_title, sort_name, item_type,
@@ -4673,13 +4711,16 @@ pub async fn get_next_up_episodes(
                  sort_name
         OFFSET $3 LIMIT $4
         "#,
-    )
-    .bind(user_id)
-    .bind(parent_id)
-    .bind(start_index.max(0))
-    .bind(limit.clamp(1, 200))
-    .fetch_all(pool)
-    .await?;
+        scope_sql_fragment
+    );
+
+    let rows = sqlx::query_as::<_, DbMediaItem>(&data_sql)
+        .bind(user_id)
+        .bind(parent_id)
+        .bind(start_index.max(0))
+        .bind(limit.clamp(1, 200))
+        .fetch_all(pool)
+        .await?;
 
     let row_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
     let user_data_map = get_user_item_data_batch(pool, user_id, &row_ids).await?;
@@ -7136,7 +7177,7 @@ pub fn media_item_to_dto_for_list(
         real_frame_rate: None,
         genres: item.genres.clone(),
         genre_items: genre_items_from_names(&item.genres),
-        provider_ids: BTreeMap::new(),
+        provider_ids: provider_ids_to_map(&item.provider_ids),
         external_urls: Vec::new(),
         production_locations: item.production_locations.clone(),
         size: None,
@@ -8451,7 +8492,7 @@ pub fn is_folder_item_public(item: &DbMediaItem) -> bool {
     is_folder_item(item)
 }
 
-fn provider_ids_to_map(value: &Value) -> BTreeMap<String, String> {
+pub fn provider_ids_to_map(value: &Value) -> BTreeMap<String, String> {
     value
         .as_object()
         .map(|object| {
@@ -10025,143 +10066,92 @@ pub async fn find_similar_items(
     group_items_into_collections: bool,
 ) -> Result<Vec<BaseItemDto>, AppError> {
     let target_identity = item_identity_key(target_item, &provider_ids_for_item(target_item));
+    let fetch_limit = limit.saturating_mul(3).min(200);
 
-    // 简单的相似性算法：基于类型和标签查找相似项目
-    // 1. 排除目标项目自身
-    // 2. 匹配相同类型（电影、电视剧等）
-    // 3. 匹配共同标签（genres）
-    // 4. 按生产年份相近排序
-
-    // 如果目标项目没有标签，则只按类型和年份查找
-    if target_item.genres.is_empty() {
-        let similar_items = sqlx::query_as::<_, DbMediaItem>(
+    let similar_items = if target_item.genres.is_empty() {
+        sqlx::query_as::<_, DbMediaItem>(
             r#"
-            SELECT *
+            SELECT id, parent_id, name, original_title, sort_name, item_type,
+                   media_type, path, container, overview, production_year,
+                   official_rating, community_rating, critic_rating, runtime_ticks,
+                   premiere_date, status, end_date, air_days, air_time,
+                   series_name, season_name, index_number, index_number_end,
+                   parent_index_number, provider_ids, genres, studios, tags,
+                   production_locations, width, height, bit_rate, video_codec,
+                   audio_codec, image_primary_path, backdrop_path, logo_path,
+                   thumb_path, art_path, banner_path, disc_path, backdrop_paths,
+                   remote_trailers, date_created, date_modified, image_blur_hashes
             FROM media_items
-            WHERE id != $1
-              AND item_type = $2
-              AND media_type = $3
-            ORDER BY ABS(COALESCE(production_year, 0) - COALESCE($4, 0)) ASC
+            WHERE id != $1 AND item_type = $2
+            ORDER BY ABS(COALESCE(production_year, 0) - COALESCE($3, 0)) ASC
+            LIMIT $4
+            "#,
+        )
+        .bind(&target_item.id)
+        .bind(&target_item.item_type)
+        .bind(target_item.production_year)
+        .bind(fetch_limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, DbMediaItem>(
+            r#"
+            SELECT id, parent_id, name, original_title, sort_name, item_type,
+                   media_type, path, container, overview, production_year,
+                   official_rating, community_rating, critic_rating, runtime_ticks,
+                   premiere_date, status, end_date, air_days, air_time,
+                   series_name, season_name, index_number, index_number_end,
+                   parent_index_number, provider_ids, genres, studios, tags,
+                   production_locations, width, height, bit_rate, video_codec,
+                   audio_codec, image_primary_path, backdrop_path, logo_path,
+                   thumb_path, art_path, banner_path, disc_path, backdrop_paths,
+                   remote_trailers, date_created, date_modified, image_blur_hashes
+            FROM media_items
+            WHERE id != $1 AND item_type = $2 AND genres && $3
+            ORDER BY
+                cardinality(
+                    ARRAY(SELECT unnest(genres) INTERSECT SELECT unnest($3::text[]))
+                ) DESC,
+                ABS(COALESCE(production_year, 0) - COALESCE($4, 0)) ASC
             LIMIT $5
             "#,
         )
         .bind(&target_item.id)
         .bind(&target_item.item_type)
-        .bind(&target_item.media_type)
+        .bind(&target_item.genres)
         .bind(target_item.production_year)
-        .bind(limit)
+        .bind(fetch_limit)
         .fetch_all(pool)
-        .await?;
+        .await?
+    };
 
-        let mut result = Vec::new();
-        let mut seen_identity_keys = BTreeSet::new();
-        for item in similar_items {
-            if same_item_identity(target_identity.as_deref(), &item) {
-                continue;
-            }
-            let identity_key = item_identity_key(&item, &provider_ids_for_item(&item))
-                .unwrap_or_else(|| format!("item:{}", item.id));
-            if group_items_into_collections && !seen_identity_keys.insert(identity_key) {
-                continue;
-            }
-            result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
-            if result.len() >= limit as usize {
-                break;
-            }
-        }
-        return Ok(result);
-    }
-
-    // 查找有共同标签的项目
-    // 使用数组重叠操作符 && 来查找有共同标签的项目
-    let similar_items = sqlx::query_as::<_, DbMediaItem>(
-        r#"
-        SELECT mi.*
-        FROM media_items mi
-        WHERE mi.id != $1
-          AND mi.item_type = $2
-          AND mi.media_type = $3
-          AND mi.genres && $4  -- 有重叠的标签
-        ORDER BY (
-            -- 计算相似度分数：共同标签数量 + 年份相近度
-            (SELECT COUNT(*) FROM unnest(mi.genres) AS g WHERE g = ANY($4)) * 10 +
-            CASE 
-                WHEN ABS(COALESCE(mi.production_year, 0) - COALESCE($5, 0)) <= 5 THEN 5
-                WHEN ABS(COALESCE(mi.production_year, 0) - COALESCE($5, 0)) <= 10 THEN 2
-                ELSE 0
-            END
-        ) DESC
-        LIMIT $6
-        "#,
-    )
-    .bind(&target_item.id)
-    .bind(&target_item.item_type)
-    .bind(&target_item.media_type)
-    .bind(&target_item.genres)
-    .bind(target_item.production_year)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
+    let row_ids: Vec<Uuid> = similar_items.iter().map(|r| r.id).collect();
+    let user_data_map = if let Some(uid) = user_id {
+        get_user_item_data_batch(pool, uid, &row_ids).await?
+    } else {
+        std::collections::HashMap::new()
+    };
 
     let mut result = Vec::new();
     let mut seen_identity_keys = BTreeSet::new();
-    for item in similar_items {
-        if same_item_identity(target_identity.as_deref(), &item) {
+    for item in &similar_items {
+        if same_item_identity(target_identity.as_deref(), item) {
             continue;
         }
-        let identity_key = item_identity_key(&item, &provider_ids_for_item(&item))
+        let identity_key = item_identity_key(item, &provider_ids_for_item(item))
             .unwrap_or_else(|| format!("item:{}", item.id));
         if group_items_into_collections && !seen_identity_keys.insert(identity_key) {
             continue;
         }
-        result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
+        let prefetched = Some(user_data_map.get(&item.id).cloned());
+        result.push(media_item_to_dto_for_list(
+            item,
+            server_id,
+            prefetched,
+            DtoCountPrefetch::default(),
+        ));
         if result.len() >= limit as usize {
             break;
-        }
-    }
-
-    // 如果找到的项目不足限制数量，则用相同类型的其他项目补充
-    if result.len() < limit as usize {
-        let remaining_limit = limit - result.len() as i64;
-        let exclude_ids: Vec<Uuid> = result
-            .iter()
-            .filter_map(|dto| Uuid::parse_str(&dto.id).ok())
-            .collect();
-
-        let additional_items = sqlx::query_as::<_, DbMediaItem>(
-            r#"
-            SELECT *
-            FROM media_items
-            WHERE id != $1
-              AND item_type = $2
-              AND media_type = $3
-              AND NOT (id = ANY($4))
-            ORDER BY ABS(COALESCE(production_year, 0) - COALESCE($5, 0)) ASC
-            LIMIT $6
-            "#,
-        )
-        .bind(&target_item.id)
-        .bind(&target_item.item_type)
-        .bind(&target_item.media_type)
-        .bind(&exclude_ids)
-        .bind(target_item.production_year)
-        .bind(remaining_limit)
-        .fetch_all(pool)
-        .await?;
-
-        for item in additional_items {
-            if same_item_identity(target_identity.as_deref(), &item) {
-                continue;
-            }
-            let identity_key = item_identity_key(&item, &provider_ids_for_item(&item))
-                .unwrap_or_else(|| format!("item:{}", item.id));
-            if group_items_into_collections && !seen_identity_keys.insert(identity_key) {
-                continue;
-            }
-            result.push(media_item_to_dto(pool, &item, user_id, server_id).await?);
-            if result.len() >= limit as usize {
-                break;
-            }
         }
     }
 

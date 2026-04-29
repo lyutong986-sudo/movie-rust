@@ -49,6 +49,7 @@ export const state = reactive({
   libraryScanThreadCount: 2,
   strmAnalysisThreadCount: 8,
   tmdbMetadataThreadCount: 4,
+  tmdbApiKey: '',
   allowRemoteAccess: false,
   enableUPNP: false,
   showWizardPassword: false,
@@ -210,6 +211,7 @@ export async function loadStartupWizard() {
       configuration.StrmAnalysisThreadCount || state.strmAnalysisThreadCount;
     state.tmdbMetadataThreadCount =
       configuration.TmdbMetadataThreadCount || state.tmdbMetadataThreadCount;
+    state.tmdbApiKey = configuration.TmdbApiKey || state.tmdbApiKey;
 
     const firstUser = await api.firstStartupUser();
     if (firstUser) {
@@ -228,7 +230,8 @@ export function startupConfigurationPayload() {
     PreferredMetadataLanguage: state.metadataLanguage,
     LibraryScanThreadCount: Number(state.libraryScanThreadCount) || 2,
     StrmAnalysisThreadCount: Number(state.strmAnalysisThreadCount) || 8,
-    TmdbMetadataThreadCount: Number(state.tmdbMetadataThreadCount) || 4
+    TmdbMetadataThreadCount: Number(state.tmdbMetadataThreadCount) || 4,
+    TmdbApiKey: state.tmdbApiKey || ''
   };
 }
 
@@ -653,6 +656,7 @@ export async function loadAdminData() {
       configuration.StrmAnalysisThreadCount || state.strmAnalysisThreadCount;
     state.tmdbMetadataThreadCount =
       configuration.TmdbMetadataThreadCount || state.tmdbMetadataThreadCount;
+    state.tmdbApiKey = configuration.TmdbApiKey || state.tmdbApiKey;
     await loadVirtualFolders();
   });
 }

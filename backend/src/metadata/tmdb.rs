@@ -81,10 +81,24 @@ impl TmdbProvider {
         format!("{}{}", self.config.base_url, endpoint)
     }
 
-    /// 添加API密钥参数
+    fn is_bearer_token(&self) -> bool {
+        self.config.api_key.len() > 40
+    }
+
     fn add_api_key(&self, params: &mut HashMap<String, String>) {
-        params.insert("api_key".to_string(), self.config.api_key.clone());
+        if !self.is_bearer_token() {
+            params.insert("api_key".to_string(), self.config.api_key.clone());
+        }
         params.insert("language".to_string(), self.config.language.clone());
+    }
+
+    fn auth_get(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        let r = self.client.get(url);
+        if self.is_bearer_token() {
+            r.bearer_auth(&self.config.api_key)
+        } else {
+            r
+        }
     }
 
     /// 搜索人物
@@ -98,8 +112,7 @@ impl TmdbProvider {
         params.insert("page".to_string(), "1".to_string());
 
         let response = self
-            .client
-            .get(self.build_url("/search/person"))
+            .auth_get(self.build_url("/search/person"))
             .query(&params)
             .send()
             .await?
@@ -119,8 +132,7 @@ impl TmdbProvider {
 
         let url = self.build_url(&format!("/person/{}", person_id));
         let response = self
-            .client
-            .get(&url)
+            .auth_get(&url)
             .query(&params)
             .send()
             .await?
@@ -140,8 +152,7 @@ impl TmdbProvider {
 
         let url = self.build_url(&format!("/person/{}/combined_credits", person_id));
         let response = self
-            .client
-            .get(&url)
+            .auth_get(&url)
             .query(&params)
             .send()
             .await?
@@ -164,8 +175,7 @@ impl TmdbProvider {
 
         let url = self.build_url(&format!("/movie/{movie_id}"));
         let response = self
-            .client
-            .get(&url)
+            .auth_get(&url)
             .query(&params)
             .send()
             .await?
@@ -181,8 +191,7 @@ impl TmdbProvider {
 
         let url = self.build_url(&format!("/tv/{}", tv_id));
         let response = self
-            .client
-            .get(&url)
+            .auth_get(&url)
             .query(&params)
             .send()
             .await?
@@ -204,8 +213,7 @@ impl TmdbProvider {
 
         let url = self.build_url(&format!("/movie/{movie_id}/images"));
         let response = self
-            .client
-            .get(&url)
+            .auth_get(&url)
             .query(&params)
             .send()
             .await?
@@ -224,8 +232,7 @@ impl TmdbProvider {
 
         let url = self.build_url(&format!("/tv/{tv_id}/images"));
         let response = self
-            .client
-            .get(&url)
+            .auth_get(&url)
             .query(&params)
             .send()
             .await?
@@ -244,8 +251,7 @@ impl TmdbProvider {
 
         let url = self.build_url(&format!("/tv/{tv_id}/season/{season_number}"));
         let response = self
-            .client
-            .get(&url)
+            .auth_get(&url)
             .query(&params)
             .send()
             .await?
@@ -263,8 +269,7 @@ impl TmdbProvider {
 
         let url = self.build_url(&format!("/movie/{movie_id}/credits"));
         let response = self
-            .client
-            .get(&url)
+            .auth_get(&url)
             .query(&params)
             .send()
             .await?
@@ -279,8 +284,7 @@ impl TmdbProvider {
 
         let url = self.build_url(&format!("/tv/{tv_id}/credits"));
         let response = self
-            .client
-            .get(&url)
+            .auth_get(&url)
             .query(&params)
             .send()
             .await?
@@ -304,8 +308,7 @@ impl TmdbProvider {
         }
 
         let response = self
-            .client
-            .get(self.build_url("/search/movie"))
+            .auth_get(self.build_url("/search/movie"))
             .query(&params)
             .send()
             .await?
@@ -329,8 +332,7 @@ impl TmdbProvider {
         }
 
         let response = self
-            .client
-            .get(self.build_url("/search/tv"))
+            .auth_get(self.build_url("/search/tv"))
             .query(&params)
             .send()
             .await?

@@ -179,6 +179,10 @@ pub fn router() -> Router<AppState> {
         .route("/Trailers", get(trailers))
         .route("/Movies/Recommendations", get(movies_recommendations))
         .route("/movies/recommendations", get(movies_recommendations))
+        .route(
+            "/Providers/Subtitles/Subtitles/{subtitle_id}",
+            get(providers_subtitles_by_id),
+        )
 }
 
 async fn user_views(
@@ -670,8 +674,8 @@ async fn latest_items(
     query.sort_by = Some("DateCreated".to_string());
     query.sort_order = Some("Descending".to_string());
     query.limit = query.limit.or(Some(20));
+    query.enable_total_record_count = Some(false);
 
-    // 如果没有指定包含的类型，默认显示Movie和Series，不显示Episode
     if query.include_item_types.is_none() {
         query.include_item_types = Some("Movie,Series".to_string());
     }
@@ -2009,22 +2013,249 @@ async fn delete_item_tag(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Emby SDK `GET /Items/{Id}/RemoteSearch/Subtitles/{Language}` 的 query 参数。
+#[derive(Debug, serde::Deserialize)]
+#[serde(default)]
+#[allow(dead_code)]
+struct SubtitleSearchQuery {
+    #[serde(alias = "MediaSourceId")]
+    media_source_id: Option<String>,
+    #[serde(alias = "IsPerfectMatch")]
+    is_perfect_match: Option<bool>,
+    #[serde(alias = "IsForced")]
+    is_forced: Option<bool>,
+    #[serde(alias = "IsHearingImpaired")]
+    is_hearing_impaired: Option<bool>,
+}
+
+impl Default for SubtitleSearchQuery {
+    fn default() -> Self {
+        Self {
+            media_source_id: None,
+            is_perfect_match: None,
+            is_forced: None,
+            is_hearing_impaired: None,
+        }
+    }
+}
+
 async fn remote_search_subtitles_by_language(
     _session: AuthSession,
-    Path((_item_id, _language)): Path<(String, String)>,
+    State(state): State<AppState>,
+    Path((item_id, language)): Path<(String, String)>,
+    Query(_params): Query<SubtitleSearchQuery>,
 ) -> Result<Json<Value>, AppError> {
-    Ok(Json(json!({
-        "Items": [],
-        "TotalRecordCount": 0
-    })))
+    let item_uuid = crate::models::emby_id_to_uuid(&item_id)
+        .map_err(|_| AppError::BadRequest("无效的 item_id".into()))?;
+    let item = repository::get_media_item(&state.pool, item_uuid)
+        .await?
+        .ok_or_else(|| AppError::NotFound("条目不存在".into()))?;
+
+    let sub_config = repository::subtitle_download_configuration(&state.pool).await?;
+
+    let api_key = if sub_config.open_subtitles_api_key.is_empty() {
+        String::new()
+    } else {
+        sub_config.open_subtitles_api_key.clone()
+    };
+    let mut provider =
+        crate::metadata::opensubtitles::OpenSubtitlesProvider::new(&api_key);
+    if !sub_config.open_subtitles_username.is_empty()
+        && !sub_config.open_subtitles_password.is_empty()
+    {
+        if let Err(e) = provider
+            .login(
+                &sub_config.open_subtitles_username,
+                &sub_config.open_subtitles_password,
+            )
+            .await
+        {
+            tracing::warn!("OpenSubtitles 登录失败（搜索仍可继续）: {e}");
+        }
+    }
+
+    let provider_ids = crate::repository::provider_ids_to_map(&item.provider_ids);
+    let imdb_id = provider_ids.get("Imdb").map(|s| s.as_str());
+    let results = provider
+        .search_subtitles(&item.name, &language, imdb_id, item.production_year)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("OpenSubtitles 搜索失败: {e}");
+            Vec::new()
+        });
+
+    let items: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            json!({
+                "ThreeLetterISOLanguageName": r.language,
+                "Id": format!("{}_{}", r.id, r.file_id),
+                "ProviderName": r.provider_name,
+                "Name": r.name,
+                "Format": r.format,
+                "Author": r.author,
+                "Comment": r.comment,
+                "DateCreated": r.date_created,
+                "CommunityRating": r.community_rating,
+                "DownloadCount": r.download_count,
+                "IsHashMatch": false,
+                "IsForced": false,
+                "IsHearingImpaired": r.is_hearing_impaired,
+                "Language": r.language,
+            })
+        })
+        .collect();
+
+    Ok(Json(Value::Array(items)))
 }
 
 async fn remote_search_subtitles_apply(
     _session: AuthSession,
-    // 这里复用语言/字幕 ID 路径段；Emby 客户端实际只会调用 POST，不再区分字段。
-    Path((_item_id, _language_or_subtitle_id)): Path<(String, String)>,
+    State(state): State<AppState>,
+    Path((item_id, subtitle_id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
+    let item_uuid = crate::models::emby_id_to_uuid(&item_id)
+        .map_err(|_| AppError::BadRequest("无效的 item_id".into()))?;
+    let item = repository::get_media_item(&state.pool, item_uuid)
+        .await?
+        .ok_or_else(|| AppError::NotFound("条目不存在".into()))?;
+
+    let parts: Vec<&str> = subtitle_id.split('_').collect();
+    let file_id: i64 = parts
+        .last()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| AppError::BadRequest("无效的字幕 ID 格式".into()))?;
+
+    let sub_config = repository::subtitle_download_configuration(&state.pool).await?;
+
+    if sub_config.open_subtitles_username.is_empty()
+        || sub_config.open_subtitles_password.is_empty()
+    {
+        return Err(AppError::BadRequest(
+            "需要配置 OpenSubtitles 用户名和密码才能下载字幕".into(),
+        ));
+    }
+
+    let api_key = if sub_config.open_subtitles_api_key.is_empty() {
+        String::new()
+    } else {
+        sub_config.open_subtitles_api_key.clone()
+    };
+    let mut provider = crate::metadata::opensubtitles::OpenSubtitlesProvider::new(&api_key);
+    provider
+        .login(
+            &sub_config.open_subtitles_username,
+            &sub_config.open_subtitles_password,
+        )
+        .await
+        .map_err(|e| AppError::BadRequest(format!("OpenSubtitles 登录失败: {e}")))?;
+
+    let format = if subtitle_id.contains("srt") {
+        "srt"
+    } else if subtitle_id.contains("ass") {
+        "ass"
+    } else {
+        "srt"
+    };
+
+    let result = provider
+        .download_subtitle(file_id, format)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("字幕下载失败: {e}")))?;
+
+    let media_path = std::path::Path::new(&item.path);
+    let sub_dir = media_path.parent().unwrap_or(media_path);
+    let stem = media_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| item.name.clone());
+
+    let lang_suffix = parts.first().unwrap_or(&"und");
+    let sub_filename = format!("{stem}.{lang_suffix}.{}", result.format);
+    let sub_path = sub_dir.join(&sub_filename);
+
+    if let Err(e) = tokio::fs::write(&sub_path, &result.content).await {
+        tracing::warn!("写入字幕文件失败: {e} path={}", sub_path.display());
+        return Err(AppError::BadRequest(format!("写入字幕文件失败: {e}")));
+    }
+
+    tracing::info!(
+        "字幕已下载: {} -> {}",
+        subtitle_id,
+        sub_path.display()
+    );
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /Providers/Subtitles/Subtitles/{Id}` — 直接通过 provider 下载字幕内容。
+/// Emby SDK 定义此端点用于获取字幕文件内容。
+async fn providers_subtitles_by_id(
+    _session: AuthSession,
+    State(state): State<AppState>,
+    Path(subtitle_id): Path<String>,
+) -> Result<(StatusCode, [(axum::http::header::HeaderName, String); 2], String), AppError> {
+    let parts: Vec<&str> = subtitle_id.split('_').collect();
+    let file_id: i64 = parts
+        .last()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| AppError::BadRequest("无效的字幕 ID 格式".into()))?;
+
+    let sub_config = repository::subtitle_download_configuration(&state.pool).await?;
+
+    if sub_config.open_subtitles_username.is_empty()
+        || sub_config.open_subtitles_password.is_empty()
+    {
+        return Err(AppError::BadRequest(
+            "需要配置 OpenSubtitles 用户名和密码才能下载字幕".into(),
+        ));
+    }
+
+    let api_key = if sub_config.open_subtitles_api_key.is_empty() {
+        String::new()
+    } else {
+        sub_config.open_subtitles_api_key.clone()
+    };
+    let mut provider = crate::metadata::opensubtitles::OpenSubtitlesProvider::new(&api_key);
+    provider
+        .login(
+            &sub_config.open_subtitles_username,
+            &sub_config.open_subtitles_password,
+        )
+        .await
+        .map_err(|e| AppError::BadRequest(format!("OpenSubtitles 登录失败: {e}")))?;
+
+    let format = if subtitle_id.contains("srt") {
+        "srt"
+    } else if subtitle_id.contains("ass") {
+        "ass"
+    } else {
+        "srt"
+    };
+
+    let result = provider
+        .download_subtitle(file_id, format)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("字幕下载失败: {e}")))?;
+
+    let content_type = match result.format.as_str() {
+        "srt" => "application/x-subrip",
+        "ass" | "ssa" => "text/x-ssa",
+        "vtt" => "text/vtt",
+        _ => "text/plain",
+    };
+
+    Ok((
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"subtitle.{}\"", result.format),
+            ),
+        ],
+        result.content,
+    ))
 }
 
 async fn items_intros(_session: AuthSession) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
@@ -2993,14 +3224,67 @@ async fn item_dto(
     ))
 }
 
+/// Emby SDK `POST /Items/{Id}/Refresh` 的 query 参数。
+#[derive(Debug, serde::Deserialize)]
+#[serde(default)]
+#[allow(dead_code)]
+struct RefreshItemQuery {
+    #[serde(alias = "MetadataRefreshMode")]
+    metadata_refresh_mode: String,
+    #[serde(alias = "ImageRefreshMode")]
+    image_refresh_mode: String,
+    #[serde(alias = "ReplaceAllMetadata")]
+    replace_all_metadata: bool,
+    #[serde(alias = "ReplaceAllImages")]
+    replace_all_images: bool,
+    #[serde(alias = "Recursive")]
+    recursive: bool,
+}
+
+impl Default for RefreshItemQuery {
+    fn default() -> Self {
+        Self {
+            metadata_refresh_mode: "FullRefresh".to_string(),
+            image_refresh_mode: "FullRefresh".to_string(),
+            replace_all_metadata: true,
+            replace_all_images: true,
+            recursive: false,
+        }
+    }
+}
+
 async fn refresh_item_metadata(
     _session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
+    Query(params): Query<RefreshItemQuery>,
 ) -> Result<StatusCode, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+
+    if params.metadata_refresh_mode == "ValidationOnly" {
+        tracing::debug!(item_id = %item_id, "ValidationOnly 模式，跳过远程元数据刷新");
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
     do_refresh_item_metadata(&state, item_id).await?;
+
+    if params.recursive {
+        let child_ids: Vec<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM media_items WHERE parent_id = $1"
+        )
+        .bind(item_id)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+
+        for (child_id,) in child_ids {
+            if let Err(e) = do_refresh_item_metadata(&state, child_id).await {
+                tracing::warn!(child_id = %child_id, ?e, "递归刷新子条目失败");
+            }
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3028,14 +3312,6 @@ pub(crate) async fn do_refresh_item_metadata(
         .acquire(WorkLimiterKind::LibraryScan)
         .await;
 
-    let Some(tmdb_id) = tmdb_id_from_provider_ids(&item.provider_ids) else {
-        tracing::debug!(
-            item_id = %item.id,
-            item_type = %item.item_type,
-            "跳过远程元数据刷新：条目缺少 TMDb provider id"
-        );
-        return Ok(());
-    };
     let Some(metadata_manager) = state.metadata_manager.as_ref() else {
         tracing::debug!(
             item_id = %item.id,
@@ -3050,6 +3326,72 @@ pub(crate) async fn do_refresh_item_metadata(
             "跳过远程元数据刷新：未配置 TMDb 元数据提供者"
         );
         return Ok(());
+    };
+
+    let tmdb_id = match tmdb_id_from_provider_ids(&item.provider_ids) {
+        Some(id) => id,
+        None => {
+            tracing::info!(
+                item_id = %item.id,
+                name = %item.name,
+                "条目缺少 TMDb provider id，尝试按名称搜索"
+            );
+            let search_result = if item.item_type.eq_ignore_ascii_case("Movie") {
+                provider
+                    .search_movie(&item.name, item.production_year)
+                    .await
+                    .ok()
+            } else if item.item_type.eq_ignore_ascii_case("Series") {
+                provider
+                    .search_series(&item.name, item.production_year)
+                    .await
+                    .ok()
+            } else {
+                None
+            };
+            let found_id = search_result
+                .as_ref()
+                .and_then(|results| results.first())
+                .map(|hit| hit.external_id.clone());
+            match found_id {
+                Some(id) => {
+                    tracing::info!(
+                        item_id = %item.id,
+                        tmdb_id = %id,
+                        "按名称搜索找到 TMDb ID"
+                    );
+                    id
+                }
+                None => {
+                    tracing::debug!(
+                        item_id = %item.id,
+                        name = %item.name,
+                        "按名称搜索未找到 TMDb 结果，跳过刷新"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    let tmdb_id = resolve_tmdb_id_with_fallback(
+        &*provider,
+        state,
+        &item,
+        tmdb_id,
+    )
+    .await;
+
+    let tmdb_id = match tmdb_id {
+        Some(id) => id,
+        None => {
+            tracing::warn!(
+                item_id = %item.id,
+                name = %item.name,
+                "TMDB ID 无效且名称搜索未找到结果，跳过刷新"
+            );
+            return Ok(());
+        }
     };
 
     if item.item_type.eq_ignore_ascii_case("Series") {
@@ -3105,6 +3447,149 @@ pub(crate) async fn do_refresh_item_metadata(
         person_service.upsert_item_person(item.id, person).await?;
     }
 
+    // --- 同步获取全部图像 (Primary / Backdrop / Logo) ---
+    let _tmdb_permit = state
+        .work_limiters
+        .acquire(WorkLimiterKind::TmdbMetadata)
+        .await;
+    let remote_images = provider
+        .get_remote_images(media_type, &tmdb_id)
+        .await
+        .unwrap_or_default();
+    drop(_tmdb_permit);
+
+    let item_fresh = repository::get_media_item(&state.pool, item.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+
+    let image_types_to_download: &[&str] = &["Primary", "Backdrop", "Logo"];
+    for &img_type in image_types_to_download {
+        let already_has = match img_type {
+            "Primary" => item_fresh.image_primary_path.as_ref().map_or(false, |p| {
+                !p.is_empty() && !p.starts_with("http://") && !p.starts_with("https://")
+            }),
+            "Backdrop" => item_fresh.backdrop_path.as_ref().map_or(false, |p| {
+                !p.is_empty() && !p.starts_with("http://") && !p.starts_with("https://")
+            }),
+            "Logo" => item_fresh.logo_path.as_ref().map_or(false, |p| {
+                !p.is_empty() && !p.starts_with("http://") && !p.starts_with("https://")
+            }),
+            _ => false,
+        };
+        if already_has {
+            continue;
+        }
+        let best = remote_images
+            .iter()
+            .filter(|img| img.image_type.eq_ignore_ascii_case(img_type))
+            .max_by(|a, b| {
+                a.vote_count
+                    .unwrap_or(0)
+                    .cmp(&b.vote_count.unwrap_or(0))
+                    .then_with(|| {
+                        a.community_rating
+                            .unwrap_or(0.0)
+                            .partial_cmp(&b.community_rating.unwrap_or(0.0))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+        if let Some(img) = best {
+            if let Err(e) = download_and_save_image(
+                state,
+                &item_fresh,
+                &library_options,
+                img_type,
+                &img.url,
+                None,
+            )
+            .await
+            {
+                tracing::warn!(
+                    item_id = %item.id,
+                    image_type = img_type,
+                    ?e,
+                    "刷新元数据时下载图片失败"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn download_and_save_image(
+    state: &AppState,
+    item: &crate::models::DbMediaItem,
+    library_options: &LibraryOptionsDto,
+    image_type: &str,
+    image_url: &str,
+    backdrop_index: Option<i32>,
+) -> Result<(), AppError> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(image_url)
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("下载远程图片失败: {e}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::Internal(format!(
+            "远程图片返回非成功状态: {}",
+            response.status()
+        )));
+    }
+    let content_type = response
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("读取远程图片失败: {e}")))?;
+    if bytes.is_empty() {
+        return Err(AppError::Internal("图片内容为空".to_string()));
+    }
+
+    let extension = match content_type.to_ascii_lowercase().as_str() {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "jpg",
+    };
+
+    let path = super::images::item_image_storage_path_pub(
+        state,
+        item,
+        library_options,
+        image_type,
+        backdrop_index,
+        extension,
+    );
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(AppError::Io)?;
+    }
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(AppError::Io)?;
+
+    repository::update_media_item_image_path(
+        &state.pool,
+        item.id,
+        image_type,
+        Some(&path.to_string_lossy()),
+        backdrop_index,
+    )
+    .await?;
+
+    tracing::info!(
+        item_id = %item.id,
+        image_type,
+        path = %path.display(),
+        "刷新元数据时自动下载图片成功"
+    );
     Ok(())
 }
 
@@ -3255,6 +3740,86 @@ impl MetadataProvider for RouteProviderRef<'_> {
     ) -> Result<Vec<crate::metadata::provider::ExternalMediaSearchResult>, AppError> {
         self.inner.search_series(name, year).await
     }
+}
+
+async fn resolve_tmdb_id_with_fallback(
+    provider: &dyn crate::metadata::provider::MetadataProvider,
+    state: &AppState,
+    item: &crate::models::DbMediaItem,
+    original_id: String,
+) -> Option<String> {
+    let _tmdb_permit = state
+        .work_limiters
+        .acquire(WorkLimiterKind::TmdbMetadata)
+        .await;
+
+    let test_ok = if item.item_type.eq_ignore_ascii_case("Series") {
+        provider.get_series_details(&original_id).await.is_ok()
+    } else {
+        provider.get_movie_details(&original_id).await.is_ok()
+    };
+    drop(_tmdb_permit);
+
+    if test_ok {
+        return Some(original_id);
+    }
+
+    tracing::warn!(
+        item_id = %item.id,
+        name = %item.name,
+        tmdb_id = %original_id,
+        "TMDB ID 无效（404），尝试按名称重新搜索"
+    );
+
+    let _tmdb_permit = state
+        .work_limiters
+        .acquire(WorkLimiterKind::TmdbMetadata)
+        .await;
+    let search_result: Option<Vec<crate::metadata::provider::ExternalMediaSearchResult>> =
+        if item.item_type.eq_ignore_ascii_case("Movie") {
+            provider
+                .search_movie(&item.name, item.production_year)
+                .await
+                .ok()
+        } else if item.item_type.eq_ignore_ascii_case("Series") {
+            provider
+                .search_series(&item.name, item.production_year)
+                .await
+                .ok()
+        } else {
+            None
+        };
+    drop(_tmdb_permit);
+
+    let new_id = search_result
+        .as_ref()
+        .and_then(|results| results.first())
+        .map(|hit| hit.external_id.clone());
+
+    if let Some(ref new) = new_id {
+        tracing::info!(
+            item_id = %item.id,
+            old_tmdb_id = %original_id,
+            new_tmdb_id = %new,
+            "名称搜索找到新的 TMDB ID，更新 provider_ids"
+        );
+        let mut pids = item
+            .provider_ids
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        pids.insert(
+            "Tmdb".to_string(),
+            serde_json::Value::String(new.clone()),
+        );
+        let _ = sqlx::query("UPDATE media_items SET provider_ids = $1 WHERE id = $2")
+            .bind(serde_json::Value::Object(pids))
+            .bind(item.id)
+            .execute(&state.pool)
+            .await;
+    }
+
+    new_id
 }
 
 fn tmdb_id_from_provider_ids(value: &serde_json::Value) -> Option<String> {

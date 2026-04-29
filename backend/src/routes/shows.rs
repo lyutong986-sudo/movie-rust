@@ -31,11 +31,9 @@ async fn get_next_up(
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     let scope_id = query.series_id.or(query.parent_id);
-    // 把 limit/start_index 透传到 SQL，避免大库把上万条 Episode 拉到内存再切片。
-    // 前端常见 Limit 在 1~50 区间；但 apply_items_query_to_show_result 会再做一次本地过滤，
-    // 所以 SQL 层留一点冗余（2x）用于内存侧筛除不满足 videoTypes/genres/years 的条目。
     let sql_start = query.start_index.unwrap_or(0).max(0);
     let sql_limit = query.limit.unwrap_or(50).clamp(1, 2000).saturating_mul(2);
+    let enable_count = query.enable_total_record_count.unwrap_or(true);
     let result = repository::get_next_up_episodes(
         &state.pool,
         user_id,
@@ -43,6 +41,7 @@ async fn get_next_up(
         state.config.server_id,
         sql_start,
         sql_limit,
+        enable_count,
     )
     .await?;
     Ok(Json(apply_items_query_to_show_result(result.items, &query)))
