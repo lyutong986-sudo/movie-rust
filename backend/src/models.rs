@@ -470,6 +470,7 @@ pub struct UserPolicyDto {
     pub enable_user_preference_access: bool,
     pub max_parental_rating: Option<i32>,
     pub max_parental_sub_rating: Option<i32>,
+    #[serde(rename = "SimultaneousStreamLimit", alias = "MaxActiveSessions")]
     pub max_active_sessions: i32,
     pub invalid_login_attempt_count: i32,
     pub login_attempts_before_lockout: i32,
@@ -478,17 +479,17 @@ pub struct UserPolicyDto {
     pub allowed_tags: Vec<String>,
     pub block_unrated_items: Vec<String>,
     pub access_schedules: Vec<AccessScheduleDto>,
-    #[serde(deserialize_with = "deserialize_uuid_list_lossy")]
+    #[serde(deserialize_with = "deserialize_uuid_list_lossy", serialize_with = "serialize_uuid_list_emby")]
     pub enabled_folders: Vec<Uuid>,
     pub enable_all_folders: bool,
-    #[serde(deserialize_with = "deserialize_uuid_list_lossy")]
+    #[serde(deserialize_with = "deserialize_uuid_list_lossy", serialize_with = "serialize_uuid_list_emby")]
     pub enabled_channels: Vec<Uuid>,
     pub enable_all_channels: bool,
     pub enabled_devices: Vec<String>,
     pub enable_all_devices: bool,
-    #[serde(deserialize_with = "deserialize_uuid_list_lossy")]
+    #[serde(deserialize_with = "deserialize_uuid_list_lossy", serialize_with = "serialize_uuid_list_emby")]
     pub blocked_media_folders: Vec<Uuid>,
-    #[serde(deserialize_with = "deserialize_uuid_list_lossy")]
+    #[serde(deserialize_with = "deserialize_uuid_list_lossy", serialize_with = "serialize_uuid_list_emby")]
     pub blocked_channels: Vec<Uuid>,
     pub authentication_provider_id: String,
     pub password_reset_provider_id: String,
@@ -567,6 +568,21 @@ impl Default for UserPolicyDto {
             enable_subtitle_downloading: false,
         }
     }
+}
+
+/// 序列化 `Vec<Uuid>` 为 Emby GUID 格式字符串列表（大写含连字符），
+/// 与 `uuid_to_emby_guid` / `VirtualFolders.Guid` 输出一致，
+/// 使 Sakura_embyboss 等管理工具做字符串比较时不会因大小写不一致而失配。
+fn serialize_uuid_list_emby<S>(uuids: &[Uuid], s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(uuids.len()))?;
+    for u in uuids {
+        seq.serialize_element(&uuid_to_emby_guid(u))?;
+    }
+    seq.end()
 }
 
 /// 把 `Vec<Value>`（JSON 数组）反序列化成 `Vec<Uuid>`，单条无法解析为 Uuid 时不报错而是丢弃。

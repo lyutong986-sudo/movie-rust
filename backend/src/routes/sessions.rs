@@ -6,6 +6,7 @@ use crate::{
     state::AppState,
 };
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
     http::StatusCode,
     routing::{delete, get, post},
@@ -360,13 +361,21 @@ async fn session_commands(
     Ok(Json(result))
 }
 
+fn bytes_to_json(bytes: &Bytes) -> Value {
+    if bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(bytes).unwrap_or_else(|_| json!({}))
+    }
+}
+
 async fn update_capabilities(
     session: AuthSession,
     State(state): State<AppState>,
-    body: Option<Json<Value>>,
+    body: Bytes,
 ) -> Result<StatusCode, AppError> {
     auth::require_interactive_session(&session)?;
-    let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
+    let payload = bytes_to_json(&body);
     repository::set_session_capabilities(&state.pool, &session.access_token, payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -384,11 +393,11 @@ async fn no_content_for_session(
     session: AuthSession,
     State(state): State<AppState>,
     Path(id): Path<String>,
-    body: Option<Json<Value>>,
+    body: Bytes,
 ) -> Result<StatusCode, AppError> {
     auth::require_interactive_session(&session)?;
     ensure_session_control_access(&state, &session, &id).await?;
-    let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
+    let payload = bytes_to_json(&body);
     let command_name = payload
         .get("Name")
         .or_else(|| payload.get("Command"))
@@ -406,11 +415,11 @@ async fn update_session_viewing(
     session: AuthSession,
     State(state): State<AppState>,
     Path(id): Path<String>,
-    body: Option<Json<Value>>,
+    body: Bytes,
 ) -> Result<StatusCode, AppError> {
     auth::require_interactive_session(&session)?;
     ensure_session_control_access(&state, &session, &id).await?;
-    let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
+    let payload = bytes_to_json(&body);
     repository::set_session_viewing(&state.pool, &id, payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -419,11 +428,11 @@ async fn message_for_session(
     session: AuthSession,
     State(state): State<AppState>,
     Path(id): Path<String>,
-    body: Option<Json<Value>>,
+    body: Bytes,
 ) -> Result<StatusCode, AppError> {
     auth::require_interactive_session(&session)?;
     ensure_session_control_access(&state, &session, &id).await?;
-    let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
+    let payload = bytes_to_json(&body);
     repository::record_session_command(&state.pool, &id, "DisplayMessage", payload.clone()).await?;
     repository::apply_session_command_state(&state.pool, &id, "DisplayMessage", &payload).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -433,11 +442,11 @@ async fn no_content_for_session_command(
     session: AuthSession,
     State(state): State<AppState>,
     Path((id, command)): Path<(String, String)>,
-    body: Option<Json<Value>>,
+    body: Bytes,
 ) -> Result<StatusCode, AppError> {
     auth::require_interactive_session(&session)?;
     ensure_session_control_access(&state, &session, &id).await?;
-    let payload = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
+    let payload = bytes_to_json(&body);
     repository::record_session_command(&state.pool, &id, &command, payload.clone()).await?;
     repository::apply_session_command_state(&state.pool, &id, &command, &payload).await?;
     Ok(StatusCode::NO_CONTENT)

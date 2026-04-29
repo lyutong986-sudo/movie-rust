@@ -105,7 +105,7 @@ pub fn require_admin(session: &AuthSession) -> Result<(), AppError> {
 }
 
 pub fn require_interactive_session(session: &AuthSession) -> Result<(), AppError> {
-    if session.is_api_key {
+    if session.is_api_key && !session.is_admin {
         Err(AppError::Forbidden)
     } else {
         Ok(())
