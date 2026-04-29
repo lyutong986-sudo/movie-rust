@@ -331,6 +331,7 @@ export interface BaseItemDto {
   OriginalTitle?: string;
   CollectionType?: string;
   MediaType?: string;
+  Status?: string;
   Container?: string;
   ParentId?: string;
   SeriesId?: string;
@@ -727,7 +728,7 @@ export interface SimilarQueryOptions {
 }
 
 export interface NextUpQueryOptions {
-  seriesId: string;
+  seriesId?: string;
   parentId?: string;
   startIndex?: number;
   limit?: number;
@@ -1636,7 +1637,7 @@ export class EmbyApi {
   }
 
   async getCollections() {
-    return this.request<ItemQueryResult>(`/Items?IncludeItemTypes=BoxSet&Recursive=true&api_key=${encodeURIComponent(this.token)}`);
+    return this.request<QueryResult<BaseItemDto>>(`/Items?IncludeItemTypes=BoxSet&Recursive=true&api_key=${encodeURIComponent(this.token)}`);
   }
 
   async createCollection(name: string, ids?: string[]) {
@@ -1777,10 +1778,12 @@ export class EmbyApi {
       ? { seriesId: seriesIdOrOptions, limit }
       : seriesIdOrOptions;
     const params = new URLSearchParams({
-      SeriesId: options.seriesId,
       UserId: userId,
       Limit: String(options.limit ?? 1)
     });
+    if (options.seriesId) {
+      params.set('SeriesId', options.seriesId);
+    }
     if (options.parentId) {
       params.set('ParentId', options.parentId);
     }

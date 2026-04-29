@@ -1694,7 +1694,7 @@ pub async fn create_user(
 
 pub async fn user_last_activity(pool: &sqlx::PgPool, user_id: Uuid) -> Result<Option<DateTime<Utc>>, AppError> {
     let row: Option<DateTime<Utc>> = sqlx::query_scalar(
-        "SELECT MAX(last_activity_at) FROM auth_sessions WHERE user_id = $1",
+        "SELECT MAX(last_activity_at) FROM sessions WHERE user_id = $1",
     )
     .bind(user_id)
     .fetch_one(pool)

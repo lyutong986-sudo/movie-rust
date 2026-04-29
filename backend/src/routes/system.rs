@@ -120,8 +120,8 @@ async fn public_info(
     let local_addr = format!("http://{}:{}", state.config.host, state.config.port);
     Ok(Json(PublicSystemInfo {
         local_addresses: vec![local_addr.clone()],
-        local_address: local_addr,
-        wan_address: None,
+        local_address: local_addr.clone(),
+        wan_address: state.config.public_url.clone().or_else(|| Some(local_addr.clone())),
         server_name: startup.server_name,
         version: env!("CARGO_PKG_VERSION").to_string(),
         product_name: "Movie Rust".to_string(),

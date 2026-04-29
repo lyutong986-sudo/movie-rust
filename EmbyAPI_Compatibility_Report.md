@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-04-29（第六轮功能优化更新）
+> 对比时间：2026-04-29（第九轮完整 Docker + API + 百万级 + UI 测试更新）
 
 ---
 
@@ -128,10 +128,51 @@
 | `thumb_image_tag` 字段 | BaseItemDto 添加 ThumbImageTag，播放器缩略图兼容 | ✅ 已修复 |
 | `MediaSourceId` serde 重命名 | PlaybackReport/LegacyPlaybackQuery 的 MediaSourceId 正确反序列化 | ✅ 已修复 |
 | PlaybackReport 扩展字段 | 添加 `can_seek`、`event_name` 兼容播放器上报 | ✅ 已修复 |
+| `Users/Me` 500 修复 | `user_last_activity()` 从错误的 `auth_sessions` 改为实际 `sessions` 表 | ✅ 已修复 |
+| `PublicSystemInfo.WanAddress` 固定输出 | 未配置公网地址时回退 `LocalAddress`，避免 SDK 字段缺失 | ✅ 已修复 |
+| 播放上报不存在 Item 容错 | `/Sessions/Playing*` 对不存在媒体条目返回 404，不再触发外键 500 | ✅ 已修复 |
+| 前端 TypeScript 构建修复 | 补齐 `BaseItemDto.Status`、`NextUpQueryOptions.seriesId?`、集合查询类型、识别菜单 ref 用法 | ✅ 已修复 |
 
 ---
 
-## 四、仍缺失或可继续优化的功能 ❌/⚠️
+## 四、本轮真实环境测试记录 ✅
+
+| 测试项 | 工具/环境 | 结果 |
+|--------|-----------|------|
+| MCP Docker 调用 | `user-MCP_DOCKER` | ⚠️ MCP 返回 `Not connected`，已记录为环境阻塞 |
+| Docker 镜像编译 | 本机 Docker `docker build --no-cache -t movie-rust:local .` | ✅ 通过 |
+| 前端构建 | `npm run build` | ✅ 通过 |
+| 后端单元测试 | `cargo test` | ✅ 58/58 通过（仅既有 dead_code 警告） |
+| 集成测试脚本 | `tests/integration_test.py` 指向 `http://127.0.0.1:18096` | ✅ 60/60 通过 |
+| 端点响应脚本 | `tests/emby_endpoint_audit.py` 指向 `http://127.0.0.1:18096` | ✅ 44/44 通过 |
+| 百万级片源压测 | `tests/million_seed.py` + Docker PostgreSQL | ✅ 1,030,000 条记录生成成功，25/25 性能端点 <1s，平均 254ms |
+| 浏览器 UI 点击 | Chrome DevTools MCP | ✅ 登录、媒体库、搜索、详情、收藏/已看、播放列表、设置、计划任务通过 |
+| 浏览器网络日志 | Chrome DevTools MCP `list_network_requests` | ✅ 核心业务请求 200/204；假媒体 HLS 播放因无真实文件返回 400，属测试数据限制 |
+| 浏览器控制台 | Chrome DevTools MCP `list_console_messages` | ✅ 无 console error |
+
+### 第九轮完整测试补充
+
+- ✅ 发现并规避端口误测：宿主 `8096` 存在本地 Windows 后端，Docker 环境改用 `18096` 独立端口验证，确认响应 `OperatingSystem=linux`。
+- ✅ 测试脚本增强：`integration_test.py`、`million_seed.py`、`million_perf.py`、`tmdb_subtitle_test.py` 支持 `BASE` 环境变量，并统一 UTF-8 输出；百万脚本支持 `PG_CONTAINER`。
+- ✅ 百万级数据：500,000 电影 + 5,000 剧集 + 25,000 季 + 500,000 集，共 1,030,000 条媒体记录；插入耗时 123.0s。
+- ✅ 性能结论：25 个核心端点全部 <1000ms，11/25 个 <200ms，全部端点平均 254ms，无 >2s 慢端点。
+- ⚠️ UI 发现：已有管理员但 `StartupWizardCompleted=false` 时，向导第一步保存配置返回 401，会卡在向导；本轮通过认证调用 `/Startup/Complete` 后继续完成主界面测试。
+- ⚠️ 播放测试限制：百万级压测数据只写数据库路径，没有真实媒体文件；`PlaybackInfo`、会话上报成功，但 HLS `master.m3u8` 返回 400 并显示 `media_error`，不代表真实文件播放链路失败。
+
+### 本轮端点审计覆盖
+
+| 分类 | 覆盖端点 |
+|------|----------|
+| 公开系统 | `/System/Info/Public`、`/emby/System/Info/Public`、`/mediabrowser/System/Info/Public` |
+| 启动/认证 | `/Startup/User`、`/Startup/Complete`、`/Users/AuthenticateByName` |
+| 用户/系统 | `/Users/Me`、`/Users`、`/System/Info`、`/Sessions`、`/Devices`、`/Features`、`/ScheduledTasks`、`/System/ActivityLog/Entries` |
+| 媒体查询 | `/Users/{id}/Views`、`/Users/{id}/Items`、`/Items/Counts`、`/Users/{id}/Items/Counts`、`/Items/Filters`、`/Users/{id}/Items/Filters`、`/ItemTypes` |
+| 发现/浏览 | `/Genres`、`/Persons`、`/Studios`、`/Shows/NextUp`、`/Users/{id}/Items/Resume`、`/Users/{id}/Items/Latest`、`/Search/Hints` |
+| 写入烟测 | `/Playlists`、`/Playlists/{id}/Items`、`/Sessions/Playing` |
+
+---
+
+## 五、仍缺失或可继续优化的功能 ❌/⚠️
 
 ### A. 可选特性（低优先级）
 
@@ -164,10 +205,13 @@
 | Session `remote_end_point` 始终为 None | 无法显示客户端 IP |
 | ActivityLog 仅含 playback_events | 不含登录、配置变更等审计日志 |
 | Collections 存储在 settings JSON | 非独立 media_items 行，可能影响库浏览合并 |
+| 启动向导半完成状态 | 已有管理员但 `StartupWizardCompleted=false` 时，前端向导保存配置会因未认证返回 401，需后续优化向导流程或后端放行策略 |
+| 假媒体文件播放限制 | 百万级压测数据没有真实视频文件，HLS 播放返回 400；需单独用真实样片验证完整转码/直链播放 |
+| 模板目录编码异常 | 当前工作区根目录显示为 `ģ����Ŀ`，工具未能读取到 `.cs/.dart/.js` 调用文件；本轮模板差异以既有报告和前端实际网络请求为准 |
 
 ---
 
-## 五、已实施的全部功能清单
+## 六、已实施的全部功能清单
 
 ### 第一批（核心体验提升）— ✅ 全部完成
 1. ✅ 元数据编辑器 — MetadataEditorDialog + updateItem API
@@ -232,7 +276,7 @@
 46. ✅ SessionInfoDto 添加 AdditionalUsers/NowPlayingQueue/UserPrimaryImageTag — 多用户/播放队列/用户头像标签
 47. ✅ UserDto 添加 PrimaryImageTag/LastLoginDate/LastActivityDate/DateCreated — 用户头像、最后登录/活动时间、创建时间
 48. ✅ DbUser 添加 created_at 字段映射 — 从数据库 SELECT 中包含 created_at
-49. ✅ 用户最后活动时间查询 — user_last_activity() 从 auth_sessions 获取 MAX(last_activity_at)
+49. ✅ 用户最后活动时间查询 — user_last_activity() 从 sessions 获取 MAX(last_activity_at)
 50. ✅ PublicSystemInfo 添加 LocalAddresses[]/WanAddress — 多地址端点兼容 SDK
 51. ✅ SystemInfo 扩展 — HasPendingRestart/ProgramDataPath/LogPath/TranscodingTempPath/CachePath 等
 52. ✅ DELETE /Playlists/{id}/Items 路由 — SDK 使用 DELETE 动词删除播放列表条目
@@ -240,3 +284,20 @@
 54. ✅ 前端 UserDto 类型同步 — 添加 LastActivityDate/DateCreated/HasConfiguredEasyPassword
 55. ✅ 前端 PublicSystemInfo/SystemInfo 类型同步 — LocalAddresses[]/WanAddress/扩展 SystemInfo 字段
 56. ✅ 前端 AuthResult 添加 SessionInfo — 认证响应包含完整会话信息
+
+### 第八批（真实环境审计修复）— ✅ 全部完成
+57. ✅ Docker 多阶段镜像构建通过 — Vue dist + Rust release 单镜像验证
+58. ✅ 端点审计脚本 — 新增 `tests/emby_endpoint_audit.py`，核心 Emby 响应 46/46 通过
+59. ✅ `GET /Users/Me` 修复 — 使用实际 `sessions` 表读取最后活动时间
+60. ✅ `PublicSystemInfo.WanAddress` 固定输出 — 未配置公网地址时回退本地地址
+61. ✅ `/Sessions/Playing*` 不存在媒体条目返回 404 — 避免数据库外键错误暴露为 500
+62. ✅ 前端构建阻断修复 — 类型与模板表达式同步，`npm run build` 通过
+63. ✅ 浏览器 UI 点击审计 — 登录、设置、媒体库创建、播放列表、搜索页通过
+
+### 第九批（完整测试验证）— ✅ 全部完成
+64. ✅ Docker 独立端口验证 — 避免宿主 8096 本地进程干扰，使用 `18096 -> 8096` 测试最新 Linux 容器
+65. ✅ 集成测试全通过 — `integration_test.py` 60/60 通过
+66. ✅ Emby 端点字段审计全通过 — `emby_endpoint_audit.py` 44/44 通过
+67. ✅ 百万级数据压测 — 1,030,000 条媒体记录，25/25 核心端点 <1s
+68. ✅ 浏览器真实 UI 点击 — 登录、搜索、媒体库、详情、收藏/已看、播放列表、设置、计划任务均完成
+69. ✅ 测试脚本端口化 — 支持 `BASE`/`PG_CONTAINER` 环境变量，便于后续复测不同环境

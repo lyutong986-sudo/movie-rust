@@ -800,7 +800,7 @@ watch(
                   { label: '刷新元数据', icon: 'i-lucide-refresh-cw', onSelect: refreshMetadata, disabled: refreshing },
                   ...(isAdmin ? [
                     { label: '编辑元数据', icon: 'i-lucide-file-edit', onSelect: openMetadataEditor },
-                    { label: '识别', icon: 'i-lucide-search', onSelect: () => { identifyOpen.value = true; } }
+                    { label: '识别', icon: 'i-lucide-search', onSelect: () => { identifyOpen = true; } }
                   ] : []),
                   { label: '搜索字幕', icon: 'i-lucide-captions', onSelect: openSubtitleSearch, disabled: item.IsFolder },
                   { label: '编辑图像', icon: 'i-lucide-image', onSelect: openImageEditor }

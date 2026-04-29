@@ -552,6 +552,11 @@ async fn record_report(
     auth::require_interactive_session(session)?;
     let user_id = report.user_id.unwrap_or(session.user_id);
     ensure_user_access(session, user_id)?;
+    if let Some(item_id) = report.item_id {
+        if repository::get_media_item(&state.pool, item_id).await?.is_none() {
+            return Err(AppError::NotFound("媒体条目不存在".to_string()));
+        }
+    }
     repository::record_playback_event(
         &state.pool,
         user_id,
@@ -621,6 +626,9 @@ async fn record_legacy_for_user(
     query: LegacyPlaybackQuery,
 ) -> Result<StatusCode, AppError> {
     ensure_user_access(session, user_id)?;
+    if repository::get_media_item(&state.pool, item_id).await?.is_none() {
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    }
     let played_to_completion = if event_type == "Stopped" {
         query.position_ticks.is_none_or(|ticks| ticks > 0)
     } else {
