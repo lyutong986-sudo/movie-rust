@@ -232,7 +232,9 @@ async fn user_by_id(
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
-    Ok(Json(repository::user_to_dto(&user, state.config.server_id)))
+    let mut dto = repository::user_to_dto(&user, state.config.server_id);
+    dto.last_activity_date = repository::user_last_activity(&state.pool, user_id).await?;
+    Ok(Json(dto))
 }
 
 async fn me(
@@ -242,7 +244,9 @@ async fn me(
     let user = repository::get_user_by_id(&state.pool, session.user_id)
         .await?
         .ok_or(AppError::Unauthorized)?;
-    Ok(Json(repository::user_to_dto(&user, state.config.server_id)))
+    let mut dto = repository::user_to_dto(&user, state.config.server_id);
+    dto.last_activity_date = repository::user_last_activity(&state.pool, session.user_id).await?;
+    Ok(Json(dto))
 }
 
 async fn create_user(
@@ -486,9 +490,14 @@ async fn authenticate(
     )
     .await?;
 
+    let mut user_dto = repository::user_to_dto(&user, state.config.server_id);
+    let now = chrono::Utc::now();
+    user_dto.last_login_date = Some(now);
+    user_dto.last_activity_date = Some(now);
+
     Ok(Json(AuthenticationResult {
-        user: repository::user_to_dto(&user, state.config.server_id),
-        session_info: repository::session_to_dto(&session),
+        user: user_dto,
+        session_info: repository::session_to_dto(&session, state.config.server_id),
         access_token: session.access_token,
         server_id: uuid_to_emby_guid(&state.config.server_id),
     }))

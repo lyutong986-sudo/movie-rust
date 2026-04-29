@@ -21,6 +21,8 @@ pub struct DbUser {
     pub date_modified: DateTime<Utc>,
     #[sqlx(default)]
     pub easy_password_hash: Option<String>,
+    #[sqlx(default)]
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -391,6 +393,14 @@ pub struct UserDto {
     pub has_password: bool,
     pub has_configured_password: bool,
     pub has_configured_easy_password: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_image_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_login_date: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_date: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_created: Option<DateTime<Utc>>,
     pub policy: UserPolicyDto,
     pub configuration: UserConfigurationDto,
 }
@@ -593,6 +603,7 @@ pub struct SessionInfoDto {
     pub id: String,
     pub user_id: String,
     pub user_name: String,
+    pub server_id: String,
     pub client: String,
     pub device_id: String,
     pub device_name: String,
@@ -612,6 +623,12 @@ pub struct SessionInfoDto {
     pub now_viewing_item: Option<BaseItemDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub play_state: Option<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub additional_users: Vec<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub now_playing_queue: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_primary_image_tag: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -668,6 +685,10 @@ pub struct ConnectAuthenticationExchangeResult {
 #[serde(rename_all = "PascalCase")]
 pub struct PublicSystemInfo {
     pub local_address: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub local_addresses: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wan_address: Option<String>,
     pub server_name: String,
     pub version: String,
     pub product_name: String,
@@ -680,6 +701,10 @@ pub struct PublicSystemInfo {
 #[serde(rename_all = "PascalCase")]
 pub struct SystemInfo {
     pub local_address: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub local_addresses: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wan_address: Option<String>,
     pub server_name: String,
     pub version: String,
     pub product_name: String,
@@ -688,6 +713,13 @@ pub struct SystemInfo {
     pub startup_wizard_completed: bool,
     pub can_self_restart: bool,
     pub encoder_location_type: String,
+    pub has_pending_restart: bool,
+    pub program_data_path: String,
+    pub items_by_name_path: String,
+    pub log_path: String,
+    pub internal_metadata_path: String,
+    pub transcoding_temp_path: String,
+    pub cache_path: String,
 }
 
 #[derive(Debug, Serialize)]

@@ -130,7 +130,7 @@ async fn list_sessions(
     };
     let mut items = Vec::with_capacity(sessions.len());
     for session in sessions {
-        let mut dto = repository::session_to_dto(&session);
+        let mut dto = repository::session_to_dto(&session, state.config.server_id);
         if let Some(runtime) = repository::session_runtime_state(
             &state.pool,
             &session.access_token,

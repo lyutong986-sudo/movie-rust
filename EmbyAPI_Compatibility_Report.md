@@ -226,3 +226,17 @@
 42. ✅ thumb_image_tag — BaseItemDto 添加 ThumbImageTag 字段
 43. ✅ MediaSourceId serde — PlaybackReport/LegacyPlaybackQuery 正确反序列化
 44. ✅ PlaybackReport 扩展 — 添加 can_seek/event_name 字段
+
+### 第七批（EmbySDK 全量审计对齐）— ✅ 全部完成
+45. ✅ SessionInfoDto 添加 ServerId — 官方播放器通过会话获取 ServerId
+46. ✅ SessionInfoDto 添加 AdditionalUsers/NowPlayingQueue/UserPrimaryImageTag — 多用户/播放队列/用户头像标签
+47. ✅ UserDto 添加 PrimaryImageTag/LastLoginDate/LastActivityDate/DateCreated — 用户头像、最后登录/活动时间、创建时间
+48. ✅ DbUser 添加 created_at 字段映射 — 从数据库 SELECT 中包含 created_at
+49. ✅ 用户最后活动时间查询 — user_last_activity() 从 auth_sessions 获取 MAX(last_activity_at)
+50. ✅ PublicSystemInfo 添加 LocalAddresses[]/WanAddress — 多地址端点兼容 SDK
+51. ✅ SystemInfo 扩展 — HasPendingRestart/ProgramDataPath/LogPath/TranscodingTempPath/CachePath 等
+52. ✅ DELETE /Playlists/{id}/Items 路由 — SDK 使用 DELETE 动词删除播放列表条目
+53. ✅ 前端 SessionInfo 类型同步 — 添加 ServerId/NowPlayingItem/PlayState/AdditionalUsers/NowPlayingQueue
+54. ✅ 前端 UserDto 类型同步 — 添加 LastActivityDate/DateCreated/HasConfiguredEasyPassword
+55. ✅ 前端 PublicSystemInfo/SystemInfo 类型同步 — LocalAddresses[]/WanAddress/扩展 SystemInfo 字段
+56. ✅ 前端 AuthResult 添加 SessionInfo — 认证响应包含完整会话信息

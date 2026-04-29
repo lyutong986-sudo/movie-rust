@@ -1607,7 +1607,7 @@ pub async fn get_user_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Option<
         r#"
         SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
                configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
-               easy_password_hash
+               easy_password_hash, created_at
         FROM users
         WHERE lower(name) = lower($1)
         "#,
@@ -1622,7 +1622,7 @@ pub async fn get_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbUs
         r#"
         SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
                configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
-               easy_password_hash
+               easy_password_hash, created_at
         FROM users
         WHERE id = $1
         "#,
@@ -1690,6 +1690,16 @@ pub async fn create_user(
     get_user_by_id(pool, id)
         .await?
         .ok_or_else(|| AppError::Internal("创建用户后无法读取用户".to_string()))
+}
+
+pub async fn user_last_activity(pool: &sqlx::PgPool, user_id: Uuid) -> Result<Option<DateTime<Utc>>, AppError> {
+    let row: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT MAX(last_activity_at) FROM auth_sessions WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
 }
 
 pub async fn delete_user(pool: &sqlx::PgPool, user_id: Uuid) -> Result<(), AppError> {
@@ -1868,7 +1878,7 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
             r#"
             SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
                    configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
-                   easy_password_hash
+                   easy_password_hash, created_at
             FROM users
             WHERE is_hidden = false AND is_disabled = false
             ORDER BY name
@@ -1881,7 +1891,7 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
             r#"
             SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
                    configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
-                   easy_password_hash
+                   easy_password_hash, created_at
             FROM users
             ORDER BY name
             "#,
@@ -6701,6 +6711,12 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
         .as_deref()
         .is_some_and(|hash| !hash.trim().is_empty());
 
+    let primary_image_tag = user
+        .primary_image_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(|_| user.date_modified.timestamp().to_string());
+
     UserDto {
         name: user.name.clone(),
         server_id: uuid_to_emby_guid(&server_id),
@@ -6708,6 +6724,10 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
         has_password,
         has_configured_password: has_password,
         has_configured_easy_password: has_easy_password,
+        primary_image_tag,
+        last_login_date: None,
+        last_activity_date: None,
+        date_created: user.created_at,
         policy,
         configuration,
     }
@@ -6730,11 +6750,12 @@ pub fn user_to_public_dto(user: &DbUser, server_id: Uuid) -> PublicUserDto {
     }
 }
 
-pub fn session_to_dto(session: &AuthSessionRow) -> SessionInfoDto {
+pub fn session_to_dto(session: &AuthSessionRow, server_id: Uuid) -> SessionInfoDto {
     SessionInfoDto {
         id: session.access_token.clone(),
         user_id: session.user_id.to_string(),
         user_name: session.user_name.clone(),
+        server_id: uuid_to_emby_guid(&server_id),
         client: session
             .client
             .clone()
@@ -6797,6 +6818,9 @@ pub fn session_to_dto(session: &AuthSessionRow) -> SessionInfoDto {
         now_playing_item: None,
         now_viewing_item: None,
         play_state: None,
+        additional_users: vec![],
+        now_playing_queue: vec![],
+        user_primary_image_tag: None,
     }
 }
 

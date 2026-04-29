@@ -4,8 +4,11 @@ export interface UserDto {
   ServerId: string;
   HasPassword?: boolean;
   HasConfiguredPassword?: boolean;
+  HasConfiguredEasyPassword?: boolean;
   PrimaryImageTag?: string;
   LastLoginDate?: string;
+  LastActivityDate?: string;
+  DateCreated?: string;
   Policy: UserPolicy;
   Configuration?: UserConfiguration;
 }
@@ -245,12 +248,15 @@ export interface UserPolicy {
 
 export interface AuthResult {
   User: UserDto;
+  SessionInfo?: SessionInfo;
   AccessToken: string;
   ServerId: string;
 }
 
 export interface PublicSystemInfo {
   LocalAddress: string;
+  LocalAddresses?: string[];
+  WanAddress?: string;
   ServerName: string;
   Version: string;
   ProductName: string;
@@ -262,18 +268,36 @@ export interface PublicSystemInfo {
 export interface SystemInfo extends PublicSystemInfo {
   CanSelfRestart: boolean;
   EncoderLocationType?: string;
+  HasPendingRestart?: boolean;
+  ProgramDataPath?: string;
+  ItemsByNamePath?: string;
+  LogPath?: string;
+  InternalMetadataPath?: string;
+  TranscodingTempPath?: string;
+  CachePath?: string;
 }
 
 export interface SessionInfo {
   Id: string;
   UserId: string;
   UserName: string;
+  ServerId: string;
   Client: string;
   DeviceId: string;
   DeviceName: string;
   ApplicationVersion: string;
   IsActive: boolean;
   LastActivityDate: string;
+  RemoteEndPoint?: string;
+  SupportsRemoteControl?: boolean;
+  PlayableMediaTypes?: string[];
+  SupportedCommands?: string[];
+  NowPlayingItem?: BaseItemDto;
+  NowViewingItem?: BaseItemDto;
+  PlayState?: Record<string, unknown>;
+  AdditionalUsers?: unknown[];
+  NowPlayingQueue?: unknown[];
+  UserPrimaryImageTag?: string;
 }
 
 export interface ActivityLogEntry {

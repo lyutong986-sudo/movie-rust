@@ -117,8 +117,11 @@ async fn public_info(
     let startup_wizard_completed = repository::startup_wizard_completed(&state.pool).await?;
     let startup = repository::startup_configuration(&state.pool, &state.config).await?;
 
+    let local_addr = format!("http://{}:{}", state.config.host, state.config.port);
     Ok(Json(PublicSystemInfo {
-        local_address: format!("http://{}:{}", state.config.host, state.config.port),
+        local_addresses: vec![local_addr.clone()],
+        local_address: local_addr,
+        wan_address: None,
         server_name: startup.server_name,
         version: env!("CARGO_PKG_VERSION").to_string(),
         product_name: "Movie Rust".to_string(),
@@ -135,8 +138,14 @@ async fn system_info(
     let startup_wizard_completed = repository::startup_wizard_completed(&state.pool).await?;
     let startup = repository::startup_configuration(&state.pool, &state.config).await?;
 
+    let local_addr = format!("http://{}:{}", state.config.host, state.config.port);
+    let encoding = repository::encoding_options(&state.pool, &state.config).await?;
+    let log_path = state.config.log_dir.display().to_string();
+    let transcode_path = state.config.transcode_dir.display().to_string();
     Ok(Json(SystemInfo {
-        local_address: format!("http://{}:{}", state.config.host, state.config.port),
+        local_addresses: vec![local_addr.clone()],
+        local_address: local_addr,
+        wan_address: state.config.public_url.clone(),
         server_name: startup.server_name,
         version: env!("CARGO_PKG_VERSION").to_string(),
         product_name: "Movie Rust".to_string(),
@@ -144,9 +153,14 @@ async fn system_info(
         id: uuid_to_emby_guid(&state.config.server_id),
         startup_wizard_completed,
         can_self_restart: false,
-        encoder_location_type: repository::encoding_options(&state.pool, &state.config)
-            .await?
-            .encoder_location_type,
+        encoder_location_type: encoding.encoder_location_type,
+        has_pending_restart: false,
+        program_data_path: String::new(),
+        items_by_name_path: String::new(),
+        log_path,
+        internal_metadata_path: String::new(),
+        transcoding_temp_path: transcode_path,
+        cache_path: String::new(),
     }))
 }
 

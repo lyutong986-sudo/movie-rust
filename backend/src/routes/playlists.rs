@@ -33,11 +33,11 @@ pub fn router() -> Router<AppState> {
         .route("/Playlists/{playlist_id}", delete(delete_playlist_route))
         .route(
             "/Playlists/{playlist_id}/Items",
-            get(list_playlist_items).post(add_playlist_items_route),
+            get(list_playlist_items).post(add_playlist_items_route).delete(remove_playlist_items_route),
         )
         .route(
             "/playlists/{playlist_id}/items",
-            get(list_playlist_items).post(add_playlist_items_route),
+            get(list_playlist_items).post(add_playlist_items_route).delete(remove_playlist_items_route),
         )
         .route(
             "/Playlists/{playlist_id}/Items/Delete",
