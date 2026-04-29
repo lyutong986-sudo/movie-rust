@@ -4,11 +4,16 @@ import { useRoute, useRouter } from 'vue-router';
 import MediaCard from '../../components/MediaCard.vue';
 import MediaRow from '../../components/MediaRow.vue';
 import MediaQualityBadges from '../../components/MediaQualityBadges.vue';
+import MetadataEditorDialog from '../../components/MetadataEditorDialog.vue';
+import IdentifyDialog from '../../components/IdentifyDialog.vue';
+import MediaInfoDialog from '../../components/MediaInfoDialog.vue';
+import CollectionEditorDialog from '../../components/CollectionEditorDialog.vue';
 import type { BaseItemDto, ImageInfo, MediaStreamDto, PlaylistInfo, RemoteImageInfo, RemoteSubtitleInfo } from '../../api/emby';
 import {
   api,
   enqueue,
   fileSize,
+  isAdmin,
   isInWatchLater,
   streamLabel,
   streamText,
@@ -376,6 +381,10 @@ function toggleLater() {
 }
 
 const refreshing = ref(false);
+const mediaInfoOpen = ref(false);
+const metadataEditorOpen = ref(false);
+const identifyOpen = ref(false);
+const collectionDialogOpen = ref(false);
 const subtitleOpen = ref(false);
 const subtitleLang = ref('chi');
 const subtitleResults = ref<RemoteSubtitleInfo[]>([]);
@@ -492,6 +501,22 @@ function itemImageUrl(imageType: string, index?: number) {
   const base = `${api.baseUrl}/Items/${item.value.Id}/Images/${imageType}`;
   const qs = `api_key=${encodeURIComponent(api.token)}&tag=${encodeURIComponent(tag)}&quality=90&maxWidth=300`;
   return index !== undefined ? `${base}/${index}?${qs}` : `${base}?${qs}`;
+}
+
+function openMetadataEditor() {
+  metadataEditorOpen.value = true;
+}
+
+async function onMetadataSaved() {
+  if (item.value) {
+    await loadItem(item.value.Id);
+  }
+}
+
+async function onIdentified() {
+  if (item.value) {
+    await loadItem(item.value.Id);
+  }
 }
 
 async function refreshMetadata() {
@@ -702,10 +727,31 @@ watch(
             >
               字幕
             </UButton>
+            <UButton
+              color="neutral"
+              variant="subtle"
+              icon="i-lucide-folder-plus"
+              @click="collectionDialogOpen = true"
+            >
+              添加到合集
+            </UButton>
+            <UButton
+              v-if="!item.IsFolder"
+              color="neutral"
+              variant="subtle"
+              icon="i-lucide-file-video"
+              @click="mediaInfoOpen = true"
+            >
+              媒体信息
+            </UButton>
             <UDropdownMenu
               :items="[
                 [
                   { label: '刷新元数据', icon: 'i-lucide-refresh-cw', onSelect: refreshMetadata, disabled: refreshing },
+                  ...(isAdmin ? [
+                    { label: '编辑元数据', icon: 'i-lucide-file-edit', onSelect: openMetadataEditor },
+                    { label: '识别', icon: 'i-lucide-search', onSelect: () => { identifyOpen.value = true; } }
+                  ] : []),
                   { label: '搜索字幕', icon: 'i-lucide-captions', onSelect: openSubtitleSearch, disabled: item.IsFolder },
                   { label: '编辑图像', icon: 'i-lucide-image', onSelect: openImageEditor }
                 ],
@@ -1080,6 +1126,36 @@ watch(
         </div>
       </template>
     </UModal>
+
+    <!-- 合集编辑 modal -->
+    <CollectionEditorDialog
+      v-if="item"
+      :item-ids="[item.Id]"
+      v-model:open="collectionDialogOpen"
+    />
+
+    <!-- 元数据编辑 modal -->
+    <MetadataEditorDialog
+      v-if="item"
+      :item="item"
+      v-model:open="metadataEditorOpen"
+      @saved="onMetadataSaved"
+    />
+
+    <!-- 识别 modal -->
+    <IdentifyDialog
+      v-if="item"
+      :item="item"
+      v-model:open="identifyOpen"
+      @identified="onIdentified"
+    />
+
+    <!-- 媒体信息 modal -->
+    <MediaInfoDialog
+      v-if="item"
+      :item="item"
+      v-model:open="mediaInfoOpen"
+    />
 
     <!-- 图像编辑 modal -->
     <UModal v-model:open="imageEditorOpen" :ui="{ content: 'max-w-3xl' }">

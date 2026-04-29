@@ -304,6 +304,7 @@ export interface BaseItemDto {
   IsFolder: boolean;
   PlaylistItemId?: string;
   SortName?: string;
+  OriginalTitle?: string;
   CollectionType?: string;
   MediaType?: string;
   Container?: string;
@@ -365,6 +366,7 @@ export interface BaseItemDto {
     SupportsTranscoding?: boolean;
     AddApiKeyToDirectStreamUrl?: boolean;
     Size?: number;
+    Bitrate?: number;
     ETag?: string;
     DefaultAudioStreamIndex?: number;
     DefaultSubtitleStreamIndex?: number;
@@ -395,6 +397,7 @@ export interface MediaStreamDto {
   Codec?: string;
   Language?: string;
   DisplayTitle?: string;
+  Title?: string;
   IsDefault: boolean;
   IsForced: boolean;
   Width?: number;
@@ -407,6 +410,17 @@ export interface MediaStreamDto {
   DeliveryUrl?: string;
   SupportsExternalStream: boolean;
   Path?: string;
+  AspectRatio?: string;
+  RealFrameRate?: number;
+  BitDepth?: number;
+  ColorSpace?: string;
+  ColorPrimaries?: string;
+  ColorTransfer?: string;
+  VideoRange?: string;
+  VideoRangeType?: string;
+  Profile?: string;
+  Level?: number;
+  ChannelLayout?: string;
 }
 
 export interface QueryResult<T> {
@@ -627,6 +641,22 @@ export interface CreateLibraryPayload {
   LibraryOptions: LibraryOptions;
 }
 
+export interface ExternalIdInfo {
+  Name: string;
+  Key: string;
+  UrlFormatString?: string;
+  Type?: string;
+}
+
+export interface MetadataEditorInfo {
+  ExternalIdInfos: ExternalIdInfo[];
+  ParentalRatingOptions?: Array<{ Name: string; Value: number }>;
+  Countries?: Array<{ DisplayName: string; Name: string; TwoLetterISORegionName: string }>;
+  Cultures?: Array<{ DisplayName: string; Name: string; ThreeLetterISOLanguageName: string; TwoLetterISOLanguageName: string }>;
+  ContentType?: string;
+  ContentTypeOptions?: Array<{ Name: string; Value: string }>;
+}
+
 export interface ItemQueryOptions {
   includeTypes?: string[];
   genres?: string[];
@@ -645,6 +675,8 @@ export interface ItemQueryOptions {
   imageTypeLimit?: number;
   enableImageTypes?: string[];
   enableTotalRecordCount?: boolean;
+  nameStartsWith?: string;
+  nameLessThan?: string;
 }
 
 export interface LatestQueryOptions {
@@ -978,6 +1010,10 @@ export class EmbyApi {
     return this.request<UserDto[]>('/Users');
   }
 
+  async getUser(userId: string) {
+    return this.request<UserDto>(`/Users/${encodeURIComponent(userId)}`);
+  }
+
   async createUser(name: string, options?: { password?: string; copyFromUserId?: string }) {
     return this.request<UserDto>('/Users/New', {
       method: 'POST',
@@ -1025,12 +1061,20 @@ export class EmbyApi {
     return this.request<SessionInfo[]>('/Sessions');
   }
 
-  async activity(limit = 50) {
-    return this.request<QueryResult<ActivityLogEntry>>(`/System/ActivityLog/Entries?Limit=${limit}`);
+  async activity(limit = 50, userId?: string) {
+    const params = new URLSearchParams({ Limit: String(limit) });
+    if (userId) params.set('UserId', userId);
+    return this.request<QueryResult<ActivityLogEntry>>(`/System/ActivityLog/Entries?${params}`);
   }
 
   async serverLogs() {
     return this.request<LogFileDto[]>('/System/Logs');
+  }
+
+  async getLogFile(filename: string) {
+    return this.request<string>(`/System/Logs/${encodeURIComponent(filename)}`, {
+      responseType: 'text'
+    });
   }
 
   async createFirstAdmin(payload: { Name: string; Password: string }) {
@@ -1137,6 +1181,12 @@ export class EmbyApi {
     }
     if (options.hasSubtitles !== undefined) {
       params.set('HasSubtitles', String(options.hasSubtitles));
+    }
+    if (options.nameStartsWith) {
+      params.set('NameStartsWith', options.nameStartsWith);
+    }
+    if (options.nameLessThan) {
+      params.set('NameLessThan', options.nameLessThan);
     }
     if (options.fields?.length) {
       params.set('Fields', options.fields.join(','));
@@ -1465,6 +1515,38 @@ export class EmbyApi {
     });
   }
 
+  async updateItem(itemId: string, body: Partial<BaseItemDto>) {
+    return this.request<void>(`/Items/${encodeURIComponent(itemId)}`, {
+      method: 'POST',
+      body
+    });
+  }
+
+  async getMetadataEditor(itemId: string) {
+    return this.request<MetadataEditorInfo>(`/Items/${encodeURIComponent(itemId)}/MetadataEditor`);
+  }
+
+  async remoteSearchMovie(query: { SearchInfo: { Name: string; Year?: number; ProviderIds?: Record<string, string> } }) {
+    return this.request<any[]>('/Items/RemoteSearch/Movie', {
+      method: 'POST',
+      body: query
+    });
+  }
+
+  async remoteSearchSeries(query: { SearchInfo: { Name: string; Year?: number; ProviderIds?: Record<string, string> } }) {
+    return this.request<any[]>('/Items/RemoteSearch/Series', {
+      method: 'POST',
+      body: query
+    });
+  }
+
+  async remoteSearchApply(itemId: string, result: any) {
+    return this.request<void>(`/Items/RemoteSearch/Apply/${encodeURIComponent(itemId)}`, {
+      method: 'POST',
+      body: result
+    });
+  }
+
   async searchSubtitles(itemId: string, language: string) {
     return this.request<RemoteSubtitleInfo[]>(
       `/Items/${itemId}/RemoteSearch/Subtitles/${encodeURIComponent(language)}`
@@ -1519,6 +1601,26 @@ export class EmbyApi {
       method: 'POST',
       body: payload
     });
+  }
+
+  async getCollections() {
+    return this.request<ItemQueryResult>(`/Items?IncludeItemTypes=BoxSet&Recursive=true&api_key=${encodeURIComponent(this.token)}`);
+  }
+
+  async createCollection(name: string, ids?: string[]) {
+    const params = new URLSearchParams({ Name: name });
+    if (ids?.length) params.set('Ids', ids.join(','));
+    return this.request<BaseItemDto>(`/Collections?${params}`, { method: 'POST' });
+  }
+
+  async addCollectionItems(collectionId: string, ids: string[]) {
+    const params = new URLSearchParams({ Ids: ids.join(',') });
+    return this.request<void>(`/Collections/${collectionId}/Items?${params}`, { method: 'POST' });
+  }
+
+  async removeCollectionItems(collectionId: string, ids: string[]) {
+    const params = new URLSearchParams({ Ids: ids.join(',') });
+    return this.request<void>(`/Collections/${collectionId}/Items?${params}`, { method: 'DELETE' });
   }
 
   itemImageUrl(item: BaseItemDto) {
@@ -1864,6 +1966,10 @@ export class EmbyApi {
       return undefined as T;
     }
 
+    if (options.responseType === 'text') {
+      return (await response.text()) as T;
+    }
+
     return (await response.json()) as T;
   }
 }
@@ -1874,6 +1980,7 @@ interface RequestOptions {
   body?: unknown;
   rawBody?: BodyInit;
   auth?: boolean;
+  responseType?: 'json' | 'text';
 }
 
 function readJson<T>(key: string): T | null {

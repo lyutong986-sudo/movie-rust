@@ -10,10 +10,20 @@ import {
   nextInQueue,
   playQueue,
   playQueueIndex,
+  playbackItem,
+  playbackPaused,
+  playbackCurrentTime,
+  playbackDuration,
+  playbackVolume,
+  playbackMuted,
+  registerPlaybackCallbacks,
+  unregisterPlaybackCallbacks,
+  clearPlaybackState,
   streamLabel,
   streamText
 } from '../../store/app';
 import { itemRoute, playbackRoute } from '../../utils/navigation';
+import UpNextDialog from '../../components/UpNextDialog.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -46,7 +56,9 @@ const selectedAudioIndex = ref<number | null>(null);
 const selectedSubtitleIndex = ref<number | null>(null);
 const activeSourceCandidate = ref(0);
 const nextUpEpisode = ref<BaseItemDto | null>(null);
+const upNextDismissed = ref(false);
 const seekPreview = ref<{ x: number; time: number } | null>(null);
+const subtitleOffset = ref(0);
 
 interface TrickplayInfo {
   Width: number;
@@ -198,7 +210,8 @@ const showSkipIntro = computed(() => {
 const showNextUp = computed(() => {
   if (!nextUpEpisode.value) return false;
   if (!duration.value) return false;
-  return duration.value - currentTime.value <= 25 && duration.value - currentTime.value > 0;
+  if (upNextDismissed.value) return false;
+  return duration.value - currentTime.value <= 30 && duration.value - currentTime.value > 0;
 });
 
 watch(
@@ -211,6 +224,10 @@ watch(
   { immediate: true }
 );
 
+watch(subtitleOffset, (offset) => {
+  applySubtitleOffset(offset);
+});
+
 watch(
   () => currentSourceIndex.value,
   async () => {
@@ -221,6 +238,14 @@ watch(
 );
 
 onMounted(async () => {
+  registerPlaybackCallbacks({
+    seek: (s) => seekTo(s),
+    togglePause: () => togglePlayback(),
+    setVolume: (v) => setVolume(v),
+    stop: () => { void closePlayer(); },
+    prev: undefined,
+    next: () => { void playNextIfAny(); }
+  });
   await ensurePlaybackEngines();
   initVideoJsPlayer();
   if (sourceCandidates.value.length) {
@@ -231,6 +256,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(async () => {
+  unregisterPlaybackCallbacks();
+  clearPlaybackState();
   window.clearTimeout(overlayTimer);
   document.removeEventListener('fullscreenchange', onFullscreenChange);
   window.removeEventListener('keydown', onKeyDown);
@@ -344,6 +371,8 @@ async function loadPlayback(nextItemId: string) {
   hasStopped = false;
   lastProgressSecond = -10;
   nextUpEpisode.value = null;
+  upNextDismissed.value = false;
+  subtitleOffset.value = 0;
 
   try {
     const [loadedItem, playback] = await Promise.all([
@@ -356,6 +385,7 @@ async function loadPlayback(nextItemId: string) {
       MediaSources: playback.MediaSources,
       MediaStreams: playback.MediaSources[0]?.MediaStreams || loadedItem.MediaStreams
     };
+    playbackItem.value = item.value;
     currentSourceIndex.value = 0;
     activeSourceCandidate.value = 0;
     playSessionId.value = playback.PlaySessionId;
@@ -452,6 +482,7 @@ async function stopPlayback(forceCompleted = false) {
 
 async function onPlay() {
   paused.value = false;
+  playbackPaused.value = false;
   touchOverlay();
   if (!item.value || !playSessionId.value) return;
   if (!hasStarted) {
@@ -469,6 +500,7 @@ async function onPlay() {
 
 async function onPause() {
   paused.value = true;
+  playbackPaused.value = true;
   touchOverlay();
   await reportProgress(true);
 }
@@ -484,6 +516,8 @@ function onTimeUpdate() {
   if (!player) return;
   currentTime.value = player.currentTime;
   duration.value = player.duration || 0;
+  playbackCurrentTime.value = player.currentTime;
+  playbackDuration.value = player.duration || 0;
   if (player.buffered.length) {
     buffered.value = player.buffered.end(player.buffered.length - 1);
   }
@@ -499,6 +533,8 @@ function onVolumeChange() {
   if (!player) return;
   volume.value = player.volume;
   muted.value = player.muted;
+  playbackVolume.value = player.volume;
+  playbackMuted.value = player.muted;
 }
 
 function onRateChange() {
@@ -608,14 +644,42 @@ function selectSubtitle(index: number | null) {
   const player = videoRef.value;
   if (!player) return;
   Array.from(player.textTracks).forEach((track) => {
-    // 内部 textTracks 顺序与 subtitleTracks 对应
     track.mode = 'disabled';
   });
   if (index === null) return;
   const trackPos = subtitleTracks.value.findIndex((t) => t.index === index);
   if (trackPos >= 0 && player.textTracks[trackPos]) {
     player.textTracks[trackPos].mode = 'showing';
+    if (subtitleOffset.value !== 0) {
+      setTimeout(() => applySubtitleOffset(subtitleOffset.value), 100);
+    }
   }
+}
+
+function applySubtitleOffset(offsetSeconds: number) {
+  const video = videoRef.value;
+  if (!video) return;
+  for (let i = 0; i < video.textTracks.length; i++) {
+    const track = video.textTracks[i];
+    if (!track.cues) continue;
+    for (let j = 0; j < track.cues.length; j++) {
+      const cue = track.cues[j] as any;
+      if (cue._origStart === undefined) {
+        cue._origStart = cue.startTime;
+        cue._origEnd = cue.endTime;
+      }
+      cue.startTime = cue._origStart + offsetSeconds;
+      cue.endTime = cue._origEnd + offsetSeconds;
+    }
+  }
+}
+
+function adjustSubtitleOffset(delta: number) {
+  subtitleOffset.value = Math.round((subtitleOffset.value + delta) * 10) / 10;
+}
+
+function resetSubtitleOffset() {
+  subtitleOffset.value = 0;
 }
 
 function selectAudio(index: number) {
@@ -871,28 +935,15 @@ const rateMenu = computed(() =>
     </transition>
 
     <!-- Next up -->
-    <transition name="fade">
-      <div
-        v-if="showNextUp"
-        class="absolute bottom-28 right-8 z-20 flex items-center gap-3 rounded-xl bg-black/80 p-3 pr-4 ring-1 ring-white/20 backdrop-blur"
-      >
-        <div class="relative h-16 w-28 flex-shrink-0 overflow-hidden rounded">
-          <img
-            v-if="api.backdropUrl(nextUpEpisode!) || api.itemImageUrl(nextUpEpisode!)"
-            :src="api.backdropUrl(nextUpEpisode!) || api.itemImageUrl(nextUpEpisode!)"
-            :alt="nextUpEpisode!.Name"
-            class="h-full w-full object-cover"
-          />
-        </div>
-        <div class="min-w-0 max-w-xs">
-          <p class="text-xs uppercase tracking-wider text-white/60">即将播放</p>
-          <p class="truncate text-sm font-semibold">{{ nextUpEpisode!.Name }}</p>
-          <UButton size="xs" class="mt-2" icon="i-lucide-skip-forward" @click="playNextIfAny">
-            立即播放 (N)
-          </UButton>
-        </div>
-      </div>
-    </transition>
+    <UpNextDialog
+      v-if="nextUpEpisode"
+      :next-episode="nextUpEpisode"
+      :visible="showNextUp"
+      :countdown-seconds="30"
+      @play-next="playNextIfAny"
+      @dismiss="upNextDismissed = true"
+      @update:visible="(v: boolean) => { if (!v) upNextDismissed = true; }"
+    />
 
     <transition
       enter-active-class="transition-opacity duration-200"
@@ -1076,6 +1127,41 @@ const rateMenu = computed(() =>
                   aria-label="字幕"
                 />
               </UDropdownMenu>
+
+              <!-- 字幕偏移 -->
+              <div v-if="selectedSubtitleIndex !== null" class="flex items-center gap-0.5">
+                <UButton
+                  color="neutral"
+                  variant="ghost"
+                  icon="i-lucide-minus"
+                  size="xs"
+                  class="!text-white"
+                  @click="adjustSubtitleOffset(-0.5)"
+                  aria-label="字幕延迟"
+                />
+                <span class="min-w-14 text-center text-xs tabular-nums text-white/80">
+                  {{ subtitleOffset > 0 ? '+' : '' }}{{ subtitleOffset.toFixed(1) }}秒
+                </span>
+                <UButton
+                  color="neutral"
+                  variant="ghost"
+                  icon="i-lucide-plus"
+                  size="xs"
+                  class="!text-white"
+                  @click="adjustSubtitleOffset(0.5)"
+                  aria-label="字幕提前"
+                />
+                <UButton
+                  v-if="subtitleOffset !== 0"
+                  color="neutral"
+                  variant="ghost"
+                  size="xs"
+                  class="!text-white !text-xs"
+                  @click="resetSubtitleOffset"
+                >
+                  重置
+                </UButton>
+              </div>
 
               <!-- 音轨 -->
               <UDropdownMenu v-if="audioStreams.length > 1" :items="audioMenu">

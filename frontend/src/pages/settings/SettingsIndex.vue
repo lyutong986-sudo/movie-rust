@@ -47,6 +47,12 @@ const userEntries = computed<SettingsEntry[]>(() => [
     title: '字幕',
     description: '客户端字幕样式与默认字幕偏好。',
     to: '/settings/subtitles'
+  },
+  {
+    icon: 'i-lucide-layout-dashboard',
+    title: '主页布局',
+    description: '调整首页各板块的显示顺序和可见性。',
+    to: '/settings/home-layout'
   }
 ]);
 

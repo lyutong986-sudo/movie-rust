@@ -58,10 +58,22 @@ export const router = createRouter({
       meta: { title: '设置', section: 'settings' }
     },
     {
+      path: '/settings/dashboard',
+      name: 'settings-dashboard',
+      component: () => import('../pages/settings/DashboardHome.vue'),
+      meta: { title: '仪表盘', section: 'admin', admin: true }
+    },
+    {
       path: '/settings/account',
       name: 'settings-account',
       component: () => import('../pages/settings/AccountSettings.vue'),
       meta: { title: '账户', section: 'settings' }
+    },
+    {
+      path: '/settings/home-layout',
+      name: 'settings-home-layout',
+      component: () => import('../pages/settings/HomeLayoutSettings.vue'),
+      meta: { title: '主页布局', section: 'settings' }
     },
     {
       path: '/settings/server',
@@ -86,6 +98,12 @@ export const router = createRouter({
       name: 'settings-users',
       component: () => import('../pages/settings/UsersSettings.vue'),
       meta: { title: '用户', section: 'admin', admin: true }
+    },
+    {
+      path: '/settings/users/:userId',
+      name: 'settings-user-detail',
+      component: () => import('../pages/settings/UserDetailPage.vue'),
+      meta: { title: '用户详情', section: 'admin', admin: true }
     },
     {
       path: '/settings/playback',

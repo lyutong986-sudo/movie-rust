@@ -319,7 +319,7 @@ onBeforeUnmount(() => stopPolling());
             <div class="flex flex-wrap items-start justify-between gap-3">
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
-                  <h4 class="text-highlighted text-sm font-semibold">{{ task.Name }}</h4>
+                  <h4 class="text-highlighted cursor-pointer text-sm font-semibold hover:underline" @click="openTriggerEditor(task)">{{ task.Name }}</h4>
                   <UBadge variant="soft" :color="stateColor(task.State)" size="xs">
                     {{ task.State === 'Running' ? '运行中' : task.State === 'Idle' ? '空闲' : task.State }}
                   </UBadge>
@@ -433,15 +433,50 @@ onBeforeUnmount(() => stopPolling());
       </div>
 
       <!-- 触发器编辑对话框 -->
-      <UModal v-model:open="editingTaskId" @update:open="(v: any) => { if (!v) closeTriggerEditor() }">
+      <UModal :open="!!editingTaskId" @update:open="(v: boolean) => { if (!v) closeTriggerEditor() }">
         <template #content>
           <div class="p-5 space-y-5">
             <div>
-              <h3 class="text-highlighted text-lg font-semibold">编辑触发器</h3>
-              <p class="text-muted text-sm mt-1">{{ editingTask?.Name }}</p>
+              <div class="flex items-center gap-2">
+                <h3 class="text-highlighted text-lg font-semibold">{{ editingTask?.Name }}</h3>
+                <UBadge v-if="editingTask?.State" variant="soft" :color="stateColor(editingTask.State)" size="xs">
+                  {{ editingTask.State === 'Running' ? '运行中' : editingTask.State === 'Idle' ? '空闲' : editingTask.State }}
+                </UBadge>
+              </div>
+              <p class="text-muted mt-1 text-sm">{{ editingTask?.Description }}</p>
+              <p class="text-muted mt-0.5 text-xs">分类：{{ categoryLabel(editingTask?.Category || '') }}</p>
             </div>
 
-            <!-- 现有触发器列表 -->
+            <div v-if="editingTask?.LastExecutionResult" class="space-y-1 rounded-lg border border-default p-3">
+              <p class="text-highlighted text-sm font-medium">上次执行结果</p>
+              <div class="grid gap-2 text-xs sm:grid-cols-3">
+                <div>
+                  <p class="text-muted">状态</p>
+                  <UBadge variant="subtle" :color="statusColor(editingTask.LastExecutionResult.Status)" size="xs">
+                    {{ editingTask.LastExecutionResult.Status || '-' }}
+                  </UBadge>
+                </div>
+                <div>
+                  <p class="text-muted">开始时间</p>
+                  <p class="text-highlighted">{{ formatTime(editingTask.LastExecutionResult.StartTimeUtc || editingTask.LastExecutionResult.StartTime) }}</p>
+                </div>
+                <div>
+                  <p class="text-muted">结束时间</p>
+                  <p class="text-highlighted">{{ formatTime(editingTask.LastExecutionResult.EndTimeUtc || editingTask.LastExecutionResult.EndTime) }}</p>
+                </div>
+              </div>
+              <UAlert
+                v-if="editingTask.LastExecutionResult.ErrorMessage"
+                color="error"
+                icon="i-lucide-badge-alert"
+                :description="editingTask.LastExecutionResult.ErrorMessage"
+                size="sm"
+                class="mt-2"
+              />
+            </div>
+
+            <USeparator />
+
             <div class="space-y-2">
               <p class="text-highlighted text-sm font-medium">当前触发器</p>
               <div v-if="!editTriggers.length" class="text-muted text-xs rounded-lg border border-dashed border-default p-4 text-center">

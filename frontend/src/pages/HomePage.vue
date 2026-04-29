@@ -10,6 +10,7 @@ import {
   enterHome,
   favorites,
   homeItems,
+  homeSections,
   isAdmin,
   latest,
   latestByLibrary,
@@ -47,6 +48,10 @@ const latestSections = computed(() =>
       items: latestByLibrary.value[library.Id] || []
     }))
     .filter((section) => section.items.length)
+);
+
+const orderedSectionIds = computed(() =>
+  homeSections.value.filter((s) => s.enabled).map((s) => s.id)
 );
 
 onMounted(async () => {
@@ -117,63 +122,67 @@ async function playItem(item: BaseItemDto) {
         </div>
       </section>
 
-      <MediaRow
-        v-if="continueWatching.length"
-        title="继续观看"
-        icon="i-lucide-play-circle"
-        :items="continueWatching"
-        thumb
-        @play="playItem"
-        @select="openItem"
-      />
+      <template v-for="sid in orderedSectionIds" :key="sid">
+        <MediaRow
+          v-if="sid === 'resume' && continueWatching.length"
+          title="继续观看"
+          icon="i-lucide-play-circle"
+          :items="continueWatching"
+          thumb
+          @play="playItem"
+          @select="openItem"
+        />
 
-      <MediaRow
-        v-if="playQueue.length"
-        title="播放队列"
-        icon="i-lucide-list-video"
-        :items="playQueue"
-        thumb
-        @play="playItem"
-        @select="openItem"
-      />
+        <MediaRow
+          v-if="sid === 'playQueue' && playQueue.length"
+          title="播放队列"
+          icon="i-lucide-list-video"
+          :items="playQueue"
+          thumb
+          @play="playItem"
+          @select="openItem"
+        />
 
-      <MediaRow
-        v-if="watchLater.length"
-        title="稍后观看"
-        icon="i-lucide-clock"
-        :items="watchLater"
-        @play="playItem"
-        @select="openItem"
-      />
+        <MediaRow
+          v-if="sid === 'watchLater' && watchLater.length"
+          title="稍后观看"
+          icon="i-lucide-clock"
+          :items="watchLater"
+          @play="playItem"
+          @select="openItem"
+        />
 
-      <MediaRow
-        v-if="favorites.length"
-        title="收藏"
-        icon="i-lucide-heart"
-        :items="favorites"
-        @play="playItem"
-        @select="openItem"
-      />
+        <MediaRow
+          v-if="sid === 'favorites' && favorites.length"
+          title="收藏"
+          icon="i-lucide-heart"
+          :items="favorites"
+          @play="playItem"
+          @select="openItem"
+        />
 
-      <MediaRow
-        v-if="latest.length"
-        title="最近添加"
-        icon="i-lucide-sparkles"
-        :items="latest"
-        @play="playItem"
-        @select="openItem"
-      />
+        <MediaRow
+          v-if="sid === 'latest' && latest.length"
+          title="最近添加"
+          icon="i-lucide-sparkles"
+          :items="latest"
+          @play="playItem"
+          @select="openItem"
+        />
 
-      <MediaRow
-        v-for="section in latestSections"
-        :key="section.library.Id"
-        :title="section.library.Name"
-        :hint="section.label"
-        :icon="libraryIcon(section.library.CollectionType)"
-        :items="section.items"
-        @play="playItem"
-        @select="openItem"
-      />
+        <template v-if="sid === 'libraryLatest'">
+          <MediaRow
+            v-for="section in latestSections"
+            :key="section.library.Id"
+            :title="section.library.Name"
+            :hint="section.label"
+            :icon="libraryIcon(section.library.CollectionType)"
+            :items="section.items"
+            @play="playItem"
+            @select="openItem"
+          />
+        </template>
+      </template>
     </div>
 
     <EmptyState

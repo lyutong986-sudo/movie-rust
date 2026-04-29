@@ -2,8 +2,11 @@
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import MediaRow from '../../components/MediaRow.vue';
+import MetadataEditorDialog from '../../components/MetadataEditorDialog.vue';
+import IdentifyDialog from '../../components/IdentifyDialog.vue';
+import CollectionEditorDialog from '../../components/CollectionEditorDialog.vue';
 import type { BaseItemDto, ImageInfo, RemoteImageInfo } from '../../api/emby';
-import { api } from '../../store/app';
+import { api, isAdmin, playAll, shufflePlay } from '../../store/app';
 import { useAppToast } from '../../composables/toast';
 import { genreRoute, itemRoute, playbackRoute } from '../../utils/navigation';
 
@@ -315,6 +318,25 @@ function episodeThumb(episode: BaseItemDto) {
 }
 
 const refreshing = ref(false);
+const metadataEditorOpen = ref(false);
+const identifyOpen = ref(false);
+const collectionDialogOpen = ref(false);
+
+function openMetadataEditor() {
+  metadataEditorOpen.value = true;
+}
+
+async function onMetadataSaved() {
+  if (series.value) {
+    await loadSeries(series.value.Id);
+  }
+}
+
+async function onIdentified() {
+  if (series.value) {
+    await loadSeries(series.value.Id);
+  }
+}
 
 async function refreshMetadata() {
   if (!series.value || refreshing.value) return;
@@ -532,11 +554,55 @@ function seriesImageUrl(imageType: string, index?: number) {
             <UButton
               color="neutral"
               variant="subtle"
+              icon="i-lucide-play"
+              :disabled="!activeSeason?.episodes.length"
+              @click="playAll(activeSeason?.episodes || [])"
+            >
+              全部播放
+            </UButton>
+            <UButton
+              color="neutral"
+              variant="subtle"
+              icon="i-lucide-shuffle"
+              :disabled="!activeSeason?.episodes.length"
+              @click="shufflePlay(activeSeason?.episodes || [])"
+            >
+              随机播放
+            </UButton>
+            <UButton
+              color="neutral"
+              variant="subtle"
               icon="i-lucide-refresh-cw"
               :loading="refreshing"
               @click="refreshMetadata"
             >
               刷新元数据
+            </UButton>
+            <UButton
+              v-if="isAdmin"
+              color="neutral"
+              variant="subtle"
+              icon="i-lucide-file-edit"
+              @click="openMetadataEditor"
+            >
+              编辑元数据
+            </UButton>
+            <UButton
+              v-if="isAdmin"
+              color="neutral"
+              variant="subtle"
+              icon="i-lucide-search"
+              @click="identifyOpen = true"
+            >
+              识别
+            </UButton>
+            <UButton
+              color="neutral"
+              variant="subtle"
+              icon="i-lucide-folder-plus"
+              @click="collectionDialogOpen = true"
+            >
+              添加到合集
             </UButton>
             <UButton
               color="neutral"
@@ -719,6 +785,29 @@ function seriesImageUrl(imageType: string, index?: number) {
     />
     <div v-else-if="relatedLoading" class="text-muted text-sm">正在加载更多剧集...</div>
   </div>
+
+  <!-- 元数据编辑 modal -->
+  <MetadataEditorDialog
+    v-if="series"
+    :item="series"
+    v-model:open="metadataEditorOpen"
+    @saved="onMetadataSaved"
+  />
+
+  <!-- 识别 modal -->
+  <IdentifyDialog
+    v-if="series"
+    :item="series"
+    v-model:open="identifyOpen"
+    @identified="onIdentified"
+  />
+
+  <!-- 合集编辑 modal -->
+  <CollectionEditorDialog
+    v-if="series"
+    :item-ids="[series.Id]"
+    v-model:open="collectionDialogOpen"
+  />
 
   <!-- 图像编辑 modal -->
   <UModal v-model:open="imageEditorOpen" :ui="{ content: 'max-w-3xl' }">

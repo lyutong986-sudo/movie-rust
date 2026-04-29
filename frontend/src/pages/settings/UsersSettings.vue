@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
 import SettingsLayout from '../../layouts/SettingsLayout.vue';
 import { api, adminUsers, isAdmin, libraries, loadAdminData } from '../../store/app';
 import type { AccessSchedule, UserConfiguration, UserDto, UserPolicy } from '../../api/emby';
+
+const router = useRouter();
 
 const selectedUserId = ref('');
 const newUserName = ref('');
@@ -365,24 +368,35 @@ function userStatus(account: UserDto) {
 
       <div class="grid gap-4 lg:grid-cols-[260px_1fr]">
         <aside class="space-y-2">
-          <button
+          <div
             v-for="account in adminUsers"
             :key="account.Id"
-            type="button"
-            class="flex w-full items-center gap-3 rounded-lg border border-default p-3 text-start transition"
+            class="flex w-full items-center gap-3 rounded-lg border border-default p-3 transition"
             :class="
               account.Id === selectedUserId
                 ? 'bg-primary/10 ring-1 ring-primary/50'
                 : 'hover:bg-elevated/50'
             "
-            @click="selectedUserId = account.Id"
           >
-            <UAvatar :alt="account.Name" :text="account.Name.slice(0, 1).toUpperCase()" size="sm" />
-            <div class="min-w-0 flex-1">
-              <p class="text-highlighted truncate text-sm font-medium">{{ account.Name }}</p>
-              <p class="text-muted truncate text-xs">{{ userStatus(account) }}</p>
-            </div>
-          </button>
+            <button
+              type="button"
+              class="flex min-w-0 flex-1 items-center gap-3 text-start"
+              @click="selectedUserId = account.Id"
+            >
+              <UAvatar :alt="account.Name" :text="account.Name.slice(0, 1).toUpperCase()" size="sm" />
+              <div class="min-w-0 flex-1">
+                <p class="text-highlighted truncate text-sm font-medium">{{ account.Name }}</p>
+                <p class="text-muted truncate text-xs">{{ userStatus(account) }}</p>
+              </div>
+            </button>
+            <UButton
+              variant="ghost"
+              icon="i-lucide-external-link"
+              size="xs"
+              title="查看详情"
+              @click="router.push(`/settings/users/${account.Id}`)"
+            />
+          </div>
         </aside>
 
         <div v-if="selectedUser" class="space-y-4">

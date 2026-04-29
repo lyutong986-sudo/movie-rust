@@ -1,5 +1,7 @@
 import { computed, reactive, ref } from 'vue';
 import { EmbyApi } from '../api/emby';
+import { router } from '../router';
+import { playbackRoute } from '../utils/navigation';
 import type {
   BaseItemDto,
   CreateLibraryPayload,
@@ -33,7 +35,72 @@ function itemsFromQuery<T>(result: { Items?: T[] | null }): T[] {
 
 const SERVERS_KEY = 'movie-rust-servers';
 const CURRENT_SERVER_KEY = 'movie-rust-current-server';
+const LIBRARY_LAYOUT_KEY = 'libraryLayout';
+const HOME_SECTIONS_KEY = 'homeSections';
 const LIBRARY_PAGE_SIZE = 72;
+
+export interface HomeSectionItem {
+  id: string;
+  name: string;
+  enabled: boolean;
+}
+
+const DEFAULT_HOME_SECTIONS: HomeSectionItem[] = [
+  { id: 'resume', name: '继续观看', enabled: true },
+  { id: 'playQueue', name: '播放队列', enabled: true },
+  { id: 'watchLater', name: '稍后观看', enabled: true },
+  { id: 'favorites', name: '收藏', enabled: true },
+  { id: 'latest', name: '最近添加', enabled: true },
+  { id: 'libraryLatest', name: '各媒体库最新', enabled: true }
+];
+
+export type LibraryLayout = 'grid' | 'list' | 'detail';
+
+export const libraryLayout = ref<LibraryLayout>(
+  (localStorage.getItem(LIBRARY_LAYOUT_KEY) as LibraryLayout) || 'grid'
+);
+
+export function setLibraryLayout(layout: LibraryLayout) {
+  libraryLayout.value = layout;
+  localStorage.setItem(LIBRARY_LAYOUT_KEY, layout);
+}
+
+function loadHomeSections(): HomeSectionItem[] {
+  const stored = readJson<HomeSectionItem[]>(HOME_SECTIONS_KEY);
+  if (!stored?.length) return DEFAULT_HOME_SECTIONS.map((s) => ({ ...s }));
+  const knownIds = new Set(DEFAULT_HOME_SECTIONS.map((s) => s.id));
+  const merged = stored.filter((s) => knownIds.has(s.id));
+  const seenIds = new Set(merged.map((s) => s.id));
+  for (const def of DEFAULT_HOME_SECTIONS) {
+    if (!seenIds.has(def.id)) merged.push({ ...def });
+  }
+  return merged;
+}
+
+export const homeSections = ref<HomeSectionItem[]>(loadHomeSections());
+
+function persistHomeSections() {
+  localStorage.setItem(HOME_SECTIONS_KEY, JSON.stringify(homeSections.value));
+}
+
+export function setHomeSections(sections: HomeSectionItem[]) {
+  homeSections.value = sections;
+  persistHomeSections();
+}
+
+export function moveHomeSection(fromIndex: number, toIndex: number) {
+  const list = homeSections.value.slice();
+  const clamped = Math.max(0, Math.min(toIndex, list.length - 1));
+  const [item] = list.splice(fromIndex, 1);
+  list.splice(clamped, 0, item);
+  homeSections.value = list;
+  persistHomeSections();
+}
+
+export function resetHomeSections() {
+  homeSections.value = DEFAULT_HOME_SECTIONS.map((s) => ({ ...s }));
+  persistHomeSections();
+}
 
 export const state = reactive({
   serverName: 'Movie Rust',
@@ -99,6 +166,29 @@ export const systemInfo = ref<SystemInfo | null>(null);
 export const selectedItem = ref<BaseItemDto | null>(null);
 export const parentStack = ref<BaseItemDto[]>([]);
 export const scanOperation = ref<ScanOperation | null>(null);
+
+export const selectedItems = reactive(new Set<string>());
+export const selectionMode = ref(false);
+
+export function toggleSelection(itemId: string) {
+  if (selectedItems.has(itemId)) {
+    selectedItems.delete(itemId);
+    if (selectedItems.size === 0) selectionMode.value = false;
+  } else {
+    selectedItems.add(itemId);
+  }
+}
+
+export function clearSelection() {
+  selectedItems.clear();
+  selectionMode.value = false;
+}
+
+export function enableSelectionMode() {
+  selectionMode.value = true;
+}
+
+export const nameStartsWith = ref('');
 
 let scanPollTimer = 0;
 let libraryRawFetchedCount = 0;
@@ -512,7 +602,7 @@ function filterHdrItems(list: BaseItemDto[]) {
 function buildLibraryItemsOptions(startIndex: number, limit: number) {
   const videoTypes: string[] = [];
   if (state.libraryOnly4K) videoTypes.push('Video4K');
-  return {
+  const opts: import('../api/emby').ItemQueryOptions = {
     includeTypes: state.libraryViewType ? [state.libraryViewType] : undefined,
     genres: state.libraryGenres.length ? state.libraryGenres : undefined,
     years: state.libraryYears.length ? state.libraryYears : undefined,
@@ -523,12 +613,18 @@ function buildLibraryItemsOptions(startIndex: number, limit: number) {
     sortOrder: state.librarySortAscending ? 'Ascending' as const : 'Descending' as const,
     limit,
     startIndex,
-    // 列表卡只用到：图片、名字/年份、质量徽章（需 MediaStreams.Video）、ChildCount。
     fields: ['MediaStreams', 'MediaSources', 'ChildCount'],
     imageTypeLimit: 1,
     enableImageTypes: ['Primary', 'Thumb', 'Backdrop', 'Logo'],
     enableTotalRecordCount: true
   };
+  const letter = nameStartsWith.value;
+  if (letter === '#') {
+    opts.nameLessThan = 'A';
+  } else if (letter) {
+    opts.nameStartsWith = letter;
+  }
+  return opts;
 }
 
 async function fetchLibraryItemsPage(startIndex: number, limit: number) {
@@ -1133,6 +1229,80 @@ function readText(key: string) {
   return localStorage.getItem(key) || '';
 }
 
+// ======== 全局播放状态（MiniPlayer 读取，VideoPlaybackPage 写入） ========
+
+export const playbackItem = ref<BaseItemDto | null>(null);
+export const playbackPaused = ref(true);
+export const playbackCurrentTime = ref(0);
+export const playbackDuration = ref(0);
+export const playbackVolume = ref(1);
+export const playbackMuted = ref(false);
+
+let _seekCallback: ((seconds: number) => void) | null = null;
+let _togglePauseCallback: (() => void) | null = null;
+let _setVolumeCallback: ((v: number) => void) | null = null;
+let _stopCallback: (() => void) | null = null;
+let _prevCallback: (() => void) | null = null;
+let _nextCallback: (() => void) | null = null;
+
+export function registerPlaybackCallbacks(cbs: {
+  seek: (seconds: number) => void;
+  togglePause: () => void;
+  setVolume: (v: number) => void;
+  stop: () => void;
+  prev?: () => void;
+  next?: () => void;
+}) {
+  _seekCallback = cbs.seek;
+  _togglePauseCallback = cbs.togglePause;
+  _setVolumeCallback = cbs.setVolume;
+  _stopCallback = cbs.stop;
+  _prevCallback = cbs.prev || null;
+  _nextCallback = cbs.next || null;
+}
+
+export function unregisterPlaybackCallbacks() {
+  _seekCallback = null;
+  _togglePauseCallback = null;
+  _setVolumeCallback = null;
+  _stopCallback = null;
+  _prevCallback = null;
+  _nextCallback = null;
+}
+
+export function miniPlayerSeek(seconds: number) {
+  _seekCallback?.(seconds);
+}
+
+export function miniPlayerTogglePause() {
+  _togglePauseCallback?.();
+}
+
+export function miniPlayerSetVolume(v: number) {
+  _setVolumeCallback?.(v);
+}
+
+export function miniPlayerStop() {
+  _stopCallback?.();
+}
+
+export function miniPlayerPrev() {
+  _prevCallback?.();
+}
+
+export function miniPlayerNext() {
+  _nextCallback?.();
+}
+
+export const hasPlaybackCallbacks = computed(() => _togglePauseCallback !== null);
+
+export function clearPlaybackState() {
+  playbackItem.value = null;
+  playbackPaused.value = true;
+  playbackCurrentTime.value = 0;
+  playbackDuration.value = 0;
+}
+
 // ======== 播放队列 / 稍后观看 ========
 
 const QUEUE_KEY = 'movie-rust-queue';
@@ -1203,6 +1373,25 @@ export function toggleWatchLater(item: BaseItemDto) {
 
 export function isInWatchLater(id: string) {
   return watchLater.value.some((entry) => entry.Id === id);
+}
+
+export function playAll(list: BaseItemDto[]) {
+  const playable = list.filter((item) => !item.IsFolder);
+  if (!playable.length) return;
+  setQueue(playable, 0);
+  void router.push(playbackRoute(playable[0]));
+}
+
+export function shufflePlay(list: BaseItemDto[]) {
+  const playable = list.filter((item) => !item.IsFolder);
+  if (!playable.length) return;
+  const shuffled = playable.slice();
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  setQueue(shuffled, 0);
+  void router.push(playbackRoute(shuffled[0]));
 }
 
 // ======== 详情栈编码到 URL（刷新保留面包屑） ========

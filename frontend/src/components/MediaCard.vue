@@ -5,11 +5,15 @@ import type { BaseItemDto } from '../api/emby';
 import {
   api,
   enqueue,
+  enableSelectionMode,
   isAdmin,
   isInWatchLater,
   itemSubtitle,
+  selectedItems,
+  selectionMode,
   toggleFavorite,
   togglePlayed,
+  toggleSelection,
   toggleWatchLater
 } from '../store/app';
 import { itemRoute } from '../utils/navigation';
@@ -17,6 +21,7 @@ import { useAppToast } from '../composables/toast';
 import MediaQualityBadges from './MediaQualityBadges.vue';
 import ContextMenu from './ContextMenu.vue';
 import type { ContextMenuItem } from './ContextMenu.vue';
+import CollectionEditorDialog from './CollectionEditorDialog.vue';
 
 const props = defineProps<{
   item: BaseItemDto;
@@ -28,6 +33,8 @@ const emit = defineEmits<{
   play: [item: BaseItemDto];
   select: [item: BaseItemDto];
   deleted: [item: BaseItemDto];
+  editMetadata: [item: BaseItemDto];
+  identify: [item: BaseItemDto];
 }>();
 
 const router = useRouter();
@@ -35,6 +42,8 @@ const toast = useAppToast();
 const imageError = ref(false);
 const blurhashUrl = ref('');
 const ctxMenu = ref<InstanceType<typeof ContextMenu> | null>(null);
+const collectionDialogOpen = ref(false);
+const collectionDialogItemIds = ref<string[]>([]);
 
 function extractBlurhash(item: BaseItemDto): string | null {
   const hashes = item.ImageBlurHashes;
@@ -108,6 +117,8 @@ const fallbackLabel = computed(() => {
   return (props.item.Name || '').slice(0, 1).toUpperCase() || '?';
 });
 
+const isSelected = computed(() => selectedItems.has(props.item.Id));
+
 const progress = computed(() => {
   const ticks = props.item.UserData?.PlaybackPositionTicks ?? 0;
   const runtime = props.item.RunTimeTicks ?? 0;
@@ -169,6 +180,14 @@ const contextMenuItems = computed<ContextMenuItem[][]>(() => {
       onSelect: () => toggleWatchLater(props.item)
     },
     {
+      label: '添加到合集',
+      icon: 'i-lucide-folder-plus',
+      onSelect: () => {
+        collectionDialogItemIds.value = [props.item.Id];
+        collectionDialogOpen.value = true;
+      }
+    },
+    {
       label: '添加到播放列表',
       icon: 'i-lucide-list-music',
       onSelect: async () => {
@@ -194,6 +213,16 @@ const contextMenuItems = computed<ContextMenuItem[][]>(() => {
       label: '刷新元数据',
       icon: 'i-lucide-refresh-cw',
       onSelect: doRefreshMetadata
+    });
+    adminGroup.push({
+      label: '编辑元数据',
+      icon: 'i-lucide-file-edit',
+      onSelect: () => emit('editMetadata', props.item)
+    });
+    adminGroup.push({
+      label: '识别',
+      icon: 'i-lucide-search',
+      onSelect: () => emit('identify', props.item)
     });
     adminGroup.push({
       label: '编辑图像',
@@ -228,17 +257,32 @@ function openDropdown(e: MouseEvent) {
 function openContextMenu(e: MouseEvent) {
   ctxMenu.value?.show(e);
 }
+
+function handleCardClick(e: MouseEvent) {
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault();
+    enableSelectionMode();
+    toggleSelection(props.item.Id);
+    return;
+  }
+  if (selectionMode.value) {
+    toggleSelection(props.item.Id);
+    return;
+  }
+  emit('select', props.item);
+}
 </script>
 
 <template>
   <article
     class="media-card group relative flex cursor-pointer flex-col gap-2 transition"
-    @click="emit('select', props.item)"
+    :class="isSelected ? 'ring-2 ring-primary rounded-lg' : ''"
+    @click="handleCardClick"
     @contextmenu="openContextMenu"
   >
     <div
       class="bg-elevated ring-default group-hover:ring-primary/60 relative overflow-hidden rounded-lg ring-1 transition-all group-hover:-translate-y-0.5 group-hover:shadow-xl"
-      :class="props.thumb ? 'aspect-video' : 'aspect-[2/3]'"
+      :class="[props.thumb ? 'aspect-video' : 'aspect-[2/3]', isSelected ? 'opacity-80' : '']"
     >
       <img
         v-if="blurhashUrl && !showImage"
@@ -274,8 +318,22 @@ function openContextMenu(e: MouseEvent) {
         />
       </div>
 
+      <!-- 选择复选框 -->
+      <div
+        v-if="selectionMode"
+        class="absolute left-2 top-2 z-10"
+        @click.stop="toggleSelection(props.item.Id)"
+      >
+        <div
+          class="flex h-6 w-6 items-center justify-center rounded-md border-2 transition-colors"
+          :class="isSelected ? 'border-primary bg-primary text-primary-contrast' : 'border-white/70 bg-black/40'"
+        >
+          <UIcon v-if="isSelected" name="i-lucide-check" class="size-4" />
+        </div>
+      </div>
+
       <!-- 质量角标 -->
-      <div class="absolute left-2 top-2 flex flex-col items-start gap-1">
+      <div class="absolute left-2 flex flex-col items-start gap-1" :class="selectionMode ? 'top-10' : 'top-2'">
         <MediaQualityBadges :item="props.item" compact />
       </div>
 
@@ -334,6 +392,11 @@ function openContextMenu(e: MouseEvent) {
       :preview-image="imageUrl || undefined"
       :preview-title="title"
       :preview-subtitle="secondary || undefined"
+    />
+
+    <CollectionEditorDialog
+      :item-ids="collectionDialogItemIds"
+      v-model:open="collectionDialogOpen"
     />
 
     <div class="min-w-0 space-y-0.5 px-0.5">

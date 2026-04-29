@@ -3,13 +3,18 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router';
 import MediaCard from '../../components/MediaCard.vue';
 import MediaCardSkeleton from '../../components/MediaCardSkeleton.vue';
+import MediaListItem from '../../components/MediaListItem.vue';
 import EmptyState from '../../components/EmptyState.vue';
+import AlphaPicker from '../../components/AlphaPicker.vue';
 import {
+  api,
   backToParent,
+  clearSelection,
   currentParentName,
   hydrateParentStack,
   items,
   libraryHasMore,
+  libraryLayout,
   libraryLoadedCount,
   libraryLoadingMore,
   libraryTotalCount,
@@ -17,14 +22,23 @@ import {
   loadItems,
   loadLibraryGenres,
   libraryGenresCache,
+  nameStartsWith,
   parentStack,
+  playAll,
   resetLibraryFilters,
+  selectedItems,
   selectedLibrary,
+  selectionMode,
   serializeParentStack,
+  setLibraryLayout,
+  shufflePlay,
   state
 } from '../../store/app';
 import type { BaseItemDto } from '../../api/emby';
 import { itemRoute, playbackRoute } from '../../utils/navigation';
+import { useAppToast } from '../../composables/toast';
+
+const toast = useAppToast();
 
 const route = useRoute();
 const router = useRouter();
@@ -104,7 +118,8 @@ watch(
     state.libraryFavoritesOnly,
     state.libraryOnly4K,
     state.libraryOnlyHDR,
-    state.librarySubtitlesOnly
+    state.librarySubtitlesOnly,
+    nameStartsWith.value
   ],
   async () => {
     if (state.selectedLibraryId) {
@@ -186,6 +201,78 @@ onMounted(() => {
 onBeforeUnmount(() => {
   loadMoreObserver?.disconnect();
 });
+
+const selectedCount = computed(() => selectedItems.size);
+const batchBusy = ref(false);
+
+async function batchMarkPlayed() {
+  batchBusy.value = true;
+  try {
+    for (const id of selectedItems) {
+      await api.markPlayed(id, true);
+    }
+    toast.success(`已将 ${selectedItems.size} 项标记为已播放`);
+    clearSelection();
+    await loadItems();
+  } catch (err: any) {
+    toast.error('批量操作失败: ' + (err?.message || err));
+  } finally {
+    batchBusy.value = false;
+  }
+}
+
+async function batchMarkFavorite() {
+  batchBusy.value = true;
+  try {
+    for (const id of selectedItems) {
+      await api.markFavorite(id, true);
+    }
+    toast.success(`已将 ${selectedItems.size} 项标记为收藏`);
+    clearSelection();
+    await loadItems();
+  } catch (err: any) {
+    toast.error('批量操作失败: ' + (err?.message || err));
+  } finally {
+    batchBusy.value = false;
+  }
+}
+
+async function batchRefreshMetadata() {
+  batchBusy.value = true;
+  try {
+    for (const id of selectedItems) {
+      await api.refreshItemMetadata(id, {
+        metadataRefreshMode: 'FullRefresh',
+        imageRefreshMode: 'FullRefresh',
+        replaceAllMetadata: false,
+        replaceAllImages: false
+      });
+    }
+    toast.success(`已提交 ${selectedItems.size} 项的元数据刷新`);
+    clearSelection();
+  } catch (err: any) {
+    toast.error('批量操作失败: ' + (err?.message || err));
+  } finally {
+    batchBusy.value = false;
+  }
+}
+
+async function batchDelete() {
+  if (!window.confirm(`确定要删除选中的 ${selectedItems.size} 项吗？此操作不可撤销。`)) return;
+  batchBusy.value = true;
+  try {
+    for (const id of selectedItems) {
+      await api.deleteItem(id);
+    }
+    toast.success(`已删除 ${selectedItems.size} 项`);
+    clearSelection();
+    await loadItems();
+  } catch (err: any) {
+    toast.error('批量删除失败: ' + (err?.message || err));
+  } finally {
+    batchBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -303,6 +390,27 @@ onBeforeUnmount(() => {
           </template>
         </UPopover>
 
+        <UButton
+          color="neutral"
+          variant="soft"
+          size="sm"
+          icon="i-lucide-play"
+          :disabled="!items.length"
+          @click="playAll(items)"
+        >
+          全部播放
+        </UButton>
+        <UButton
+          color="neutral"
+          variant="soft"
+          size="sm"
+          icon="i-lucide-shuffle"
+          :disabled="!items.length"
+          @click="shufflePlay(items)"
+        >
+          随机播放
+        </UButton>
+
         <USelect v-model="state.librarySortBy" :items="SORT_OPTIONS" size="sm" class="w-36" />
         <UButton
           color="neutral"
@@ -315,8 +423,70 @@ onBeforeUnmount(() => {
         >
           {{ state.librarySortAscending ? '升序' : '降序' }}
         </UButton>
+
+        <div class="border-default flex items-center gap-0.5 rounded-lg border p-0.5">
+          <UButton
+            color="neutral"
+            :variant="libraryLayout === 'grid' ? 'solid' : 'ghost'"
+            size="xs"
+            icon="i-lucide-grid-3x3"
+            title="网格"
+            @click="setLibraryLayout('grid')"
+          />
+          <UButton
+            color="neutral"
+            :variant="libraryLayout === 'list' ? 'solid' : 'ghost'"
+            size="xs"
+            icon="i-lucide-list"
+            title="列表"
+            @click="setLibraryLayout('list')"
+          />
+          <UButton
+            color="neutral"
+            :variant="libraryLayout === 'detail' ? 'solid' : 'ghost'"
+            size="xs"
+            icon="i-lucide-layout-list"
+            title="详情"
+            @click="setLibraryLayout('detail')"
+          />
+        </div>
       </div>
     </div>
+
+    <AlphaPicker v-model="nameStartsWith" />
+
+    <Transition
+      enter-active-class="transition duration-200 ease-out"
+      enter-from-class="translate-y-4 opacity-0"
+      enter-to-class="translate-y-0 opacity-100"
+      leave-active-class="transition duration-150 ease-in"
+      leave-from-class="translate-y-0 opacity-100"
+      leave-to-class="translate-y-4 opacity-0"
+    >
+      <div
+        v-if="selectedCount > 0"
+        class="bg-elevated border-default sticky top-0 z-30 flex flex-wrap items-center justify-between gap-2 rounded-xl border p-3 shadow-lg"
+      >
+        <span class="text-highlighted text-sm font-medium">已选择 {{ selectedCount }} 项</span>
+        <div class="flex flex-wrap items-center gap-2">
+          <UButton color="primary" variant="soft" size="sm" icon="i-lucide-check" :loading="batchBusy" @click="batchMarkPlayed">
+            标记已播放
+          </UButton>
+          <UButton color="primary" variant="soft" size="sm" icon="i-lucide-heart" :loading="batchBusy" @click="batchMarkFavorite">
+            标记收藏
+          </UButton>
+          <UButton color="primary" variant="soft" size="sm" icon="i-lucide-refresh-cw" :loading="batchBusy" @click="batchRefreshMetadata">
+            刷新元数据
+          </UButton>
+          <UButton color="error" variant="soft" size="sm" icon="i-lucide-trash-2" :loading="batchBusy" @click="batchDelete">
+            删除
+          </UButton>
+          <UButton color="neutral" variant="ghost" size="sm" icon="i-lucide-x" @click="clearSelection">
+            取消选择
+          </UButton>
+        </div>
+      </div>
+    </Transition>
 
     <div
       v-if="state.busy && !items.length"
@@ -324,18 +494,29 @@ onBeforeUnmount(() => {
     >
       <MediaCardSkeleton v-for="i in 14" :key="i" />
     </div>
-    <div
-      v-else-if="items.length"
-      class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7"
-    >
-      <MediaCard
-        v-for="item in items"
-        :key="item.Id"
-        :item="item"
-        @play="playItem"
-        @select="openMedia"
-      />
-    </div>
+    <template v-else-if="items.length">
+      <div
+        v-if="libraryLayout === 'grid'"
+        class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7"
+      >
+        <MediaCard
+          v-for="item in items"
+          :key="item.Id"
+          :item="item"
+          @play="playItem"
+          @select="openMedia"
+        />
+      </div>
+      <div v-else class="flex flex-col gap-1">
+        <MediaListItem
+          v-for="item in items"
+          :key="item.Id"
+          :item="item"
+          :detailed="libraryLayout === 'detail'"
+          @select="openMedia"
+        />
+      </div>
+    </template>
     <div v-if="items.length" class="flex flex-col items-center gap-2 py-2">
       <div ref="loadMoreTrigger" class="h-0.5 w-full" />
       <UButton
