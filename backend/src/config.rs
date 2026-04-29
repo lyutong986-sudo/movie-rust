@@ -27,6 +27,7 @@ pub struct Config {
     pub transcode_threads: u32,
     pub enable_transcoding: bool,
     pub max_transcode_sessions: u32,
+    pub allowed_origins: Vec<String>,
 }
 
 impl Config {
@@ -98,6 +99,15 @@ impl Config {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(4),
+            allowed_origins: env::var("APP_ALLOWED_ORIGINS")
+                .ok()
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 

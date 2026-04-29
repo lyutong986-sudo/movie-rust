@@ -689,7 +689,7 @@ async fn subtitle_stream_legacy(
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
-        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩?ID 鏍煎紡: {}", path.item_id)))?;
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
     serve_subtitle(&state, item_id, path.index, request).await
@@ -713,7 +713,7 @@ async fn subtitle_stream_with_start_legacy(
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
-        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩?ID 鏍煎紡: {}", path.item_id)))?;
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
     serve_subtitle(&state, item_id, path.index, request).await
@@ -759,7 +759,7 @@ async fn attachment_stream(
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
-        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩?ID 鏍煎紡: {}", path.item_id)))?;
+        .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
     serve_attachment(&state, item_id, path.index, request).await
@@ -1215,7 +1215,7 @@ async fn serve_attachment(
     });
 
     if !attachment_exists {
-        return Err(AppError::NotFound("闄勪欢娴佷笉瀛樺湪".to_string()));
+        return Err(AppError::NotFound("附件流不存在".to_string()));
     }
 
     let fallback_image = item

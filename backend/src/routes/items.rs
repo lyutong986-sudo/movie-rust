@@ -2922,7 +2922,7 @@ async fn hide_from_resume(
 ) -> Result<Json<UserItemDataDto>, AppError> {
     ensure_user_access(&session, user_id)?;
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     ensure_media_item_exists(&state, item_id).await?;
     if !should_hide_from_resume(&query) {
         return Ok(Json(
@@ -2955,7 +2955,7 @@ async fn additional_parts(
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("鏃犳晥鐨勯」鐩甀D鏍煎紡: {}", item_id_str)))?;
+        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     let result = repository::get_additional_parts_for_item(
         &state.pool,
         item_id,

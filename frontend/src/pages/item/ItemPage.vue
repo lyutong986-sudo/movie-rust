@@ -302,14 +302,14 @@ async function playItem(target: BaseItemDto) {
 
 async function toggleFavorite() {
   if (!item.value) return;
-  const userData = await api.markFavorite(item.value.Id, !item.value.UserData.IsFavorite);
+  const userData = await api.markFavorite(item.value.Id, !item.value.UserData?.IsFavorite);
   item.value = { ...item.value, UserData: { ...item.value.UserData, ...userData } };
   toast.success(userData.IsFavorite ? '已加入收藏' : '已取消收藏');
 }
 
 async function togglePlayed() {
   if (!item.value) return;
-  const userData = await api.markPlayed(item.value.Id, !item.value.UserData.Played);
+  const userData = await api.markPlayed(item.value.Id, !item.value.UserData?.Played);
   item.value = { ...item.value, UserData: { ...item.value.UserData, ...userData } };
 }
 
@@ -507,18 +507,18 @@ watch(
             <UButton
               color="neutral"
               variant="subtle"
-              :icon="item.UserData.IsFavorite ? 'i-lucide-heart-off' : 'i-lucide-heart'"
+              :icon="item.UserData?.IsFavorite ? 'i-lucide-heart-off' : 'i-lucide-heart'"
               @click="toggleFavorite"
             >
-              {{ item.UserData.IsFavorite ? '取消收藏' : '加入收藏' }}
+              {{ item.UserData?.IsFavorite ? '取消收藏' : '加入收藏' }}
             </UButton>
             <UButton
               color="neutral"
               variant="subtle"
-              :icon="item.UserData.Played ? 'i-lucide-eye-off' : 'i-lucide-eye'"
+              :icon="item.UserData?.Played ? 'i-lucide-eye-off' : 'i-lucide-eye'"
               @click="togglePlayed"
             >
-              {{ item.UserData.Played ? '标记未看' : '标记已看' }}
+              {{ item.UserData?.Played ? '标记未看' : '标记已看' }}
             </UButton>
             <UDropdownMenu
               :items="[

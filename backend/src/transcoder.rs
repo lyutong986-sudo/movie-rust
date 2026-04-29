@@ -17,49 +17,49 @@ use crate::{
     models::{EncodingOptionsDto, VideoStreamQuery},
 };
 
-/// 杞爜浼氳瘽鐘舵€?
+/// 转码会话状态
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscodingSessionState {
-    /// 姝ｅ湪鍒濆鍖?
+    /// 正在初始化
     Initializing,
     /// 姝ｅ湪杞爜
     Transcoding,
-    /// 宸插畬鎴愶紙HLS/DASH 鏂囦欢宸茬敓鎴愶級
+    /// 已完成（HLS/DASH 文件已生成）
     Completed,
     /// 宸插け璐?
     Failed(String),
-    /// 宸插彇娑?
+    /// 已取消
     Cancelled,
 }
 
-/// 杞爜浼氳瘽淇℃伅
+/// 转码会话信息
 #[derive(Debug, Clone)]
 pub struct TranscodingSession {
-    /// 浼氳瘽ID
+    /// 会话 ID
     pub id: Uuid,
-    /// 濯掍綋椤笽D
+    /// 媒体项 ID
     pub media_item_id: Uuid,
     /// 鐢ㄦ埛ID
     pub user_id: Uuid,
     /// 璁惧ID
     pub device_id: String,
-    /// 杞爜鍙傛暟
+    /// 转码参数
     pub params: VideoStreamQuery,
-    /// 杞爜鍗忚 (HLS/DASH)
+    /// 转码协议 (HLS/DASH)
     pub protocol: String,
-    /// 杈撳嚭鐩綍
+    /// 输出目录
     pub output_dir: PathBuf,
-    /// 涓绘挱鏀惧垪琛ㄦ枃浠?
+    /// 主播放列表文件
     pub playlist_path: PathBuf,
-    /// 浼氳瘽鐘舵€?
+    /// 会话状态
     pub state: TranscodingSessionState,
-    /// 鍒涘缓鏃堕棿
+    /// 创建时间
     pub created_at: Instant,
-    /// 鏈€鍚庢洿鏂版椂闂?
+    /// 最后更新时间
     pub updated_at: Instant,
-    /// 杞爜杩涘害锛?.0-1.0锛?
+    /// 转码进度 (0.0-1.0)
     pub progress: f32,
-    /// 閿欒淇℃伅锛堝鏋滃け璐ワ級
+    /// 错误信息（如果失败）
     pub error: Option<String>,
     /// FFmpeg 杩涚▼ID
     pub ffmpeg_pid: Option<u32>,
@@ -68,17 +68,17 @@ pub struct TranscodingSession {
 /// FFmpeg杞爜鍣?
 #[derive(Clone)]
 pub struct Transcoder {
-    /// 閰嶇疆
+    /// 配置
     config: Arc<Config>,
-    /// 杞爜浼氳瘽鏄犲皠琛?
+    /// 转码会话映射表
     sessions: Arc<RwLock<HashMap<Uuid, TranscodingSession>>>,
-    /// 淇″彿閲忛檺鍒舵渶澶ц浆鐮佷細璇濇暟
+    /// 信号量限制最大转码会话数
     session_semaphore: Arc<Semaphore>,
     cancellation_senders: Arc<RwLock<HashMap<Uuid, oneshot::Sender<()>>>>,
 }
 
 impl Transcoder {
-    /// 鍒涘缓鏂扮殑杞爜鍣?
+    /// 创建新的转码器
     pub fn new(config: Arc<Config>) -> Self {
         let max_sessions = config.max_transcode_sessions.max(1);
 
@@ -90,7 +90,7 @@ impl Transcoder {
         }
     }
 
-    /// 寮€濮嬭浆鐮佷細璇?
+    /// 开始转码会话
     pub async fn start_transcoding(
         &self,
         media_item_id: Uuid,
@@ -100,12 +100,12 @@ impl Transcoder {
         options: EncodingOptionsDto,
         input_path: &Path,
     ) -> Result<TranscodingSession, AppError> {
-        // 妫€鏌ユ槸鍚﹀惎鐢ㄨ浆鐮?
+        // 检查是否启用转码
         if !options.enable_transcoding {
             return Err(AppError::TranscodingDisabled);
         }
 
-        // 鑾峰彇淇″彿閲忚鍙紙绛夊緟绌洪棽妲戒綅锛?
+        // 获取信号量许可（等待空闲槽位）
         let permit = self
             .session_semaphore
             .clone()
@@ -113,27 +113,27 @@ impl Transcoder {
             .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        // 鐢熸垚浼氳瘽ID鍜岃緭鍑虹洰褰?
+        // 生成会话 ID 和输出目录
         let session_id = Uuid::new_v4();
         let output_dir =
             PathBuf::from(&options.transcoding_temp_path).join(format!("session_{}", session_id));
 
-        // 鍒涘缓杈撳嚭鐩綍
+        // 创建输出目录
         tokio::fs::create_dir_all(&output_dir)
             .await
             .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
-        // 纭畾杞爜鍗忚
+        // 确定转码协议
         let protocol = params
             .transcoding_protocol
             .as_deref()
             .unwrap_or("hls")
             .to_lowercase();
 
-        // 鏋勫缓鎾斁鍒楄〃璺緞
+        // 构建播放列表路径
         let playlist_path = output_dir.join("playlist.m3u8");
 
-        // 鍒涘缓鍒濆浼氳瘽瀵硅薄
+        // 创建初始会话对象
         let session = TranscodingSession {
             id: session_id,
             media_item_id,
@@ -151,21 +151,21 @@ impl Transcoder {
             ffmpeg_pid: None,
         };
 
-        // 瀛樺偍浼氳瘽
+        // 存储会话
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(session_id, session.clone());
         }
 
         tracing::info!(
-            "寮€濮嬭浆鐮佷細璇? session_id={}, media_item_id={}, protocol={}, input={:?}",
+            "开始转码会话: session_id={}, media_item_id={}, protocol={}, input={:?}",
             session_id,
             media_item_id,
             protocol,
             input_path
         );
 
-        // 鏇存柊浼氳瘽鐘舵€佷负杞爜涓?
+        // 更新会话状态为转码中
         {
             let mut sessions = self.sessions.write().await;
             if let Some(session) = sessions.get_mut(&session_id) {
@@ -174,7 +174,7 @@ impl Transcoder {
             }
         }
 
-        // 鏋勫缓FFmpeg鍛戒护琛屽弬鏁?
+        // 构建 FFmpeg 命令行参数
         let ffmpeg_args =
             self.build_ffmpeg_args(input_path, &output_dir, &params, &protocol, &options)?;
         let ffmpeg_path = if options.encoder_location_type.eq_ignore_ascii_case("Custom") {
@@ -186,25 +186,25 @@ impl Transcoder {
         // 鍚姩FFmpeg杩涚▼
         let mut cmd = Command::new(ffmpeg_path);
         cmd.args(&ffmpeg_args);
-        cmd.stdout(std::process::Stdio::null()); // 閲嶅畾鍚戞爣鍑嗚緭鍑?
-        cmd.stderr(std::process::Stdio::piped()); // 鎹曡幏鏍囧噯閿欒鐢ㄤ簬璋冭瘯
+        cmd.stdout(std::process::Stdio::null()); // 重定向标准输出
+        cmd.stderr(std::process::Stdio::piped()); // 捕获标准错误用于调试
         cmd.kill_on_drop(true);
 
         tracing::debug!(
-            "鎵цFFmpeg鍛戒护: {} {}",
+            "执行 FFmpeg 命令: {} {}",
             ffmpeg_path,
             ffmpeg_args.join(" ")
         );
 
         let child = cmd.spawn().map_err(|e| {
-            tracing::error!("鍚姩FFmpeg杩涚▼澶辫触: {}", e);
-            AppError::FfmpegError(format!("鍚姩FFmpeg杩涚▼澶辫触: {}", e))
+            tracing::error!("启动 FFmpeg 进程失败: {}", e);
+            AppError::FfmpegError(format!("启动 FFmpeg 进程失败: {}", e))
         })?;
 
-        // 鑾峰彇杩涚▼ID
+        // 获取进程 ID
         let pid = child.id();
 
-        // 鏇存柊浼氳瘽鐘舵€侊紝璁板綍杩涚▼ID
+        // 更新会话状态，记录进程 ID
         {
             let mut sessions = self.sessions.write().await;
             if let Some(session) = sessions.get_mut(&session_id) {
@@ -223,7 +223,7 @@ impl Transcoder {
         let senders_clone = self.cancellation_senders.clone();
         let session_id_clone = session_id;
 
-        // 鍚姩鍚庡彴浠诲姟鐩戞帶FFmpeg杩涚▼
+        // 启动后台任务监控 FFmpeg 进程
         tokio::spawn(async move {
             let _permit = permit;
             let output = wait_for_ffmpeg_or_cancel(child, cancel_rx).await;
@@ -245,18 +245,18 @@ impl Transcoder {
                     }
                     FfmpegCompletion::Finished(Ok(status)) => {
                         let error_msg = format!(
-                            "FFmpeg杩涚▼澶辫触锛岄€€鍑虹爜: {}",
+                            "FFmpeg 进程失败，退出码: {}",
                             status.code().unwrap_or(-1)
                         );
                         session.state = TranscodingSessionState::Failed(error_msg.clone());
                         session.error = Some(error_msg.clone());
-                        tracing::error!("杞爜浼氳瘽 {} 澶辫触: {}", session_id_clone, error_msg);
+                        tracing::error!("转码会话 {} 失败: {}", session_id_clone, error_msg);
                     }
                     FfmpegCompletion::Finished(Err(e)) => {
-                        let error_msg = format!("绛夊緟FFmpeg杩涚▼澶辫触: {}", e);
+                        let error_msg = format!("等待 FFmpeg 进程失败: {}", e);
                         session.state = TranscodingSessionState::Failed(error_msg.clone());
                         session.error = Some(error_msg.clone());
-                        tracing::error!("杞爜浼氳瘽 {} 澶辫触: {}", session_id_clone, error_msg);
+                        tracing::error!("转码会话 {} 失败: {}", session_id_clone, error_msg);
                     }
                     FfmpegCompletion::Cancelled => {
                         session.state = TranscodingSessionState::Cancelled;
@@ -270,13 +270,13 @@ impl Transcoder {
         Ok(session)
     }
 
-    /// 鑾峰彇杞爜浼氳瘽
+    /// 获取转码会话
     pub async fn get_session(&self, session_id: Uuid) -> Option<TranscodingSession> {
         let sessions = self.sessions.read().await;
         sessions.get(&session_id).cloned()
     }
 
-    /// 鍋滄杞爜浼氳瘽
+    /// 停止转码会话
     pub async fn stop_transcoding(&self, session_id: Uuid) -> Result<(), AppError> {
         if let Some(sender) = self.cancellation_senders.write().await.remove(&session_id) {
             let _ = sender.send(());
@@ -286,7 +286,7 @@ impl Transcoder {
         if let Some(session) = sessions.get_mut(&session_id) {
             session.state = TranscodingSessionState::Cancelled;
             session.updated_at = Instant::now();
-            tracing::info!("鍋滄杞爜浼氳瘽: {}", session_id);
+            tracing::info!("停止转码会话: {}", session_id);
         }
 
         Ok(())
@@ -322,8 +322,8 @@ impl Transcoder {
         count
     }
 
-    /// 娓呯悊杩囨湡鐨勮浆鐮佷細璇?
-    /// 鏋勫缓FFmpeg鍛戒护琛屽弬鏁?
+    #[allow(dead_code)]
+    /// 构建 FFmpeg 命令行参数
     fn build_ffmpeg_args(
         &self,
         input_path: &Path,
@@ -334,7 +334,7 @@ impl Transcoder {
     ) -> Result<Vec<String>, AppError> {
         let mut args = vec!["-i".to_string(), input_path.to_string_lossy().to_string()];
 
-        // 瑙嗛缂栫爜鍙傛暟
+        // 视频编码参数
         if let Some(video_codec) = &params.video_codec {
             args.push("-c:v".to_string());
             args.push(ffmpeg_video_encoder(video_codec, options).to_string());
@@ -343,7 +343,7 @@ impl Transcoder {
             args.push(ffmpeg_video_encoder("h264", options).to_string());
         } else {
             args.push("-c:v".to_string());
-            args.push("copy".to_string()); // 榛樿澶嶅埗瑙嗛娴?
+            args.push("copy".to_string()); // 默认复制视频流
         }
 
         if protocol.eq_ignore_ascii_case("hls") && !options.h264_preset.trim().is_empty() {
@@ -356,13 +356,13 @@ impl Transcoder {
             args.push(options.h264_crf.to_string());
         }
 
-        // 瑙嗛鐮佺巼闄愬埗
+        // 视频码率限制
         if let Some(max_bitrate) = params.max_video_bitrate {
             args.push("-b:v".to_string());
             args.push(format!("{}k", max_bitrate / 1000));
         }
 
-        // 鍒嗚鲸鐜囬檺鍒?
+        // 分辨率限制
         if params.max_width.is_some() || params.max_height.is_some() {
             let width = params.max_width.unwrap_or(1920);
             let height = params.max_height.unwrap_or(1080);
@@ -373,7 +373,7 @@ impl Transcoder {
             ));
         }
 
-        // 闊抽缂栫爜鍙傛暟
+        // 音频编码参数
         if let Some(audio_codec) = &params.audio_codec {
             args.push("-c:a".to_string());
             args.push(ffmpeg_audio_encoder(audio_codec).to_string());
@@ -382,16 +382,16 @@ impl Transcoder {
             args.push("aac".to_string());
         } else {
             args.push("-c:a".to_string());
-            args.push("copy".to_string()); // 榛樿澶嶅埗闊抽娴?
+            args.push("copy".to_string()); // 默认复制音频流
         }
 
-        // 闊抽澹伴亾闄愬埗
+        // 音频声道限制
         if let Some(max_channels) = params.max_audio_channels {
             args.push("-ac".to_string());
             args.push(max_channels.to_string());
         }
 
-        // 绾跨▼鏁?
+        // 线程数
         let threads = match options.encoding_thread_count {
             0 => num_cpus::get() as u32,
             value if value > 0 => value as u32,
@@ -400,15 +400,15 @@ impl Transcoder {
         args.push("-threads".to_string());
         args.push(threads.to_string());
 
-        // 杈撳嚭鏍煎紡
+        // 输出格式
         match protocol {
             "hls" => {
                 args.push("-f".to_string());
                 args.push("hls".to_string());
                 args.push("-hls_time".to_string());
-                args.push("6".to_string()); // 鍒嗘鏃堕暱
+                args.push("6".to_string()); // 分片时长
                 args.push("-hls_list_size".to_string());
-                args.push("0".to_string()); // 0琛ㄧず鏃犻檺鍒楄〃
+                args.push("0".to_string()); // 0 表示无限列表
                 args.push("-hls_segment_filename".to_string());
                 args.push(
                     output_dir
@@ -427,11 +427,11 @@ impl Transcoder {
                 args.push("-f".to_string());
                 args.push("dash".to_string());
                 args.push("-seg_duration".to_string());
-                args.push("6".to_string()); // 鍒嗘鏃堕暱
+                args.push("6".to_string()); // 分片时长
                 args.push("-window_size".to_string());
-                args.push("5".to_string()); // 绐楀彛澶у皬
+                args.push("5".to_string()); // 窗口大小
                 args.push("-extra_window_size".to_string());
-                args.push("5".to_string()); // 棰濆绐楀彛澶у皬
+                args.push("5".to_string()); // 额外窗口大小
                 args.push(
                     output_dir
                         .join("playlist.mpd")

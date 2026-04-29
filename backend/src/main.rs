@@ -28,7 +28,7 @@ use std::sync::Arc;
 use crate::transcoder::Transcoder;
 use crate::work_limiter::{WorkLimiterConfig, WorkLimiters};
 use tower_http::{
-    cors::CorsLayer,
+    cors::{AllowOrigin, Any, CorsLayer},
     services::ServeDir,
     trace::{DefaultMakeSpan, DefaultOnFailure, DefaultOnResponse, TraceLayer},
 };
@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
     let app = routes::router(state.clone())
         .fallback_service(spa)
         .layer(http_trace)
-        .layer(CorsLayer::permissive());
+        .layer(build_cors_layer(&state.config));
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     tracing::info!("Movie Rust backend listening on http://{}", bind_addr);
@@ -578,9 +578,50 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
 
     for statement in compatibility_sql {
         if let Err(error) = sqlx::query(statement).execute(pool).await {
-            tracing::warn!("Schema 兼容性补齐跳过（不影响启动）: {error}");
+            tracing::error!("Schema 兼容性补齐失败: {error}");
         }
     }
 
     Ok(())
+}
+
+fn build_cors_layer(config: &config::Config) -> CorsLayer {
+    use axum::http::{header, Method};
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::OPTIONS,
+        Method::HEAD,
+    ];
+    let headers = [
+        header::AUTHORIZATION,
+        header::CONTENT_TYPE,
+        header::ACCEPT,
+        header::ORIGIN,
+        header::HeaderName::from_static("x-emby-token"),
+        header::HeaderName::from_static("x-mediabrowser-token"),
+        header::HeaderName::from_static("x-emby-authorization"),
+    ];
+
+    if config.allowed_origins.is_empty() {
+        tracing::info!("CORS: APP_ALLOWED_ORIGINS 未设置，允许所有来源（开发模式）");
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(methods)
+            .allow_headers(Any)
+    } else {
+        let origins: Vec<_> = config
+            .allowed_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        tracing::info!("CORS: 已配置 {} 个允许来源", origins.len());
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(methods)
+            .allow_headers(headers)
+            .allow_credentials(true)
+    }
 }

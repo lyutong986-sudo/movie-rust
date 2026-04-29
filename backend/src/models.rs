@@ -652,7 +652,8 @@ pub struct AuthenticationResult {
     pub server_id: String,
 }
 
-/// `GET /Connect/Exchange` 闁告繂绉寸花鏌ユ晬閸︽by.Server.Connect.ConnectAuthenticationExchangeResult闁挎稑顦埀?/// 闁告瑥鍊介埀顒€鍠涚槐?https://dev.emby.media/reference/RestAPI/ConnectService/getConnectExchange.html>
+/// `GET /Connect/Exchange` 对应 Emby ConnectAuthenticationExchangeResult
+/// 参考 <https://dev.emby.media/reference/RestAPI/ConnectService/getConnectExchange.html>
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ConnectAuthenticationExchangeResult {
@@ -2242,19 +2243,19 @@ pub struct EpisodesQuery {
     pub _api_key: Option<String>,
 }
 
-/// 閻忓繐鎽橴ID閺夌儐鍓氬畷鍙夌▔缁″超by API闁稿繒鍘ч鎰版儍閸曨偁浜ｉ柛鎰攢UID闁哄秶鍘х槐?
+/// 将 UUID 转换为 Emby API 使用的 GUID 格式字符串
 pub fn uuid_to_emby_guid(uuid: &Uuid) -> String {
     uuid.to_string().to_uppercase()
 }
-/// 閻忓繐鎸糾by API濞戞搩鍘惧▓鎱朌閻庢稒顨堥浣圭▔閼艰埖绁柟璇℃線鐠愮兙UID
-/// 闁衡偓椤栨稑鐦柡宥囧帶缁?
-/// 1. 缂佸墽鏌桿ID (濠? "12345678-1234-1234-1234-123456789012")
-/// 2. Emby GUID闁哄秶鍘х槐?(濠㈠爢鍐ㄦ櫢UUID)
-/// 3. mediasource_{GUID} 闁哄秶鍘х槐?(濠? "mediasource_12345678-1234-1234-1234-123456789012")
+/// 将 Emby API 返回的 ID 解析为本地 UUID
+/// 支持的格式:
+/// 1. 标准 UUID
+/// 2. Emby GUID 格式 (无连字符)
+/// 3. mediasource_{GUID} 格式
 pub fn emby_id_to_uuid(id_str: &str) -> Result<Uuid, uuid::Error> {
-    // 婵☆偀鍋撻柡灞诲劜濡叉悂宕ラ敂鑺バ?mediasource_ 闁告挸绉剁槐?
+    // 检查并去除可能的 mediasource_ 前缀
     let id_to_parse = if id_str.starts_with("mediasource_") {
-        &id_str[12..] // 缂佸顭峰▍?"mediasource_" 闁告挸绉剁槐?
+        &id_str[12..] // 去除 "mediasource_" 前缀
     } else {
         id_str
     };
@@ -2267,17 +2268,17 @@ where
 {
     use serde::Deserialize;
 
-    // 闁稿繐鐗嗛惃鍓ф嫚閺囨氨绋婂☉鎾虫惈閻⊙呯箔閿旇儻顩柛娆忕Т缁參宕氬Δ鈧€?
+    // 自定义反序列化器: 空字符串视为 None
     let opt_str: Option<String> = Option::deserialize(deserializer)?;
 
     match opt_str {
-        Some(s) if s.trim().is_empty() => Ok(None), // 缂佸苯鎼悺褏绮敂鑳洬閻熸瑥妫旂拹鐑磑ne
+        Some(s) if s.trim().is_empty() => Ok(None), // 空字符串视为 None
         Some(s) => {
             let normalized = s.trim();
             if normalized.eq_ignore_ascii_case("root") {
                 return Ok(Some(Uuid::nil()));
             }
-            // 閻忓繑绻嗛惁顖滄喆閿濆棛鈧祵UID
+            // 尝试解析为标准 UUID
             Uuid::parse_str(normalized)
                 .map(Some)
                 .map_err(serde::de::Error::custom)
@@ -2290,7 +2291,7 @@ where
 #[serde(rename_all = "PascalCase")]
 pub struct GetSimilarItems {
     #[serde(skip)]
-    pub id: Option<String>, // 濞寸姴姘﹂惌鎯ь嚗閸曨偄妫橀柡浣哄瑜颁線宕ｉ弽鐢电濞戞挸绉堕弫閬嶅蓟閵夘煈鍤勯悗娑欘殘椤戜焦绋夐懠缂庢帡寮?    #[serde(default, alias = "UserId", alias = "userId")]
+    pub id: Option<String>,
     pub user_id: Option<Uuid>,
     #[serde(default, alias = "Limit")]
     pub limit: Option<i64>,
@@ -2362,7 +2363,7 @@ pub struct PlaybackInfoDto {
 #[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct DeviceProfile {
-    // 缂佺姭鍋撻柛鏍ㄧ墳椤旀洘寰勯崶顒€甯崇紓鍐惧櫙缁辨繈宕ユ惔锝囨暰闁告瑯鍨辨晶璺ㄤ沪?    #[serde(default)]
+    // 客户端提交的设备能力描述
     pub max_streaming_bitrate: Option<i64>,
     #[serde(default)]
     pub max_static_bitrate: Option<i64>,

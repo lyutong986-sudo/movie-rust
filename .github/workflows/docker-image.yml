@@ -47,9 +47,7 @@ jobs:
       - name: Log in to Docker Hub
         if: >
           github.event_name == 'push' &&
-          (github.ref == 'refs/heads/main' ||
-           github.ref == 'refs/heads/master' ||
-           github.ref == 'refs/heads/oll')
+          github.ref == 'refs/heads/span'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -70,9 +68,7 @@ jobs:
       - name: Build and push image
         if: >
           github.event_name == 'push' &&
-          (github.ref == 'refs/heads/main' ||
-           github.ref == 'refs/heads/master' ||
-           github.ref == 'refs/heads/oll')
+          github.ref == 'refs/heads/span'
         uses: docker/build-push-action@v6
         with:
           context: .

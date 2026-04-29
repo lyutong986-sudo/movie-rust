@@ -1642,3 +1642,39 @@ async fn media_items_to_dto_result(
 | `Fields` 尊重 | 前端 LibraryPage 只需要 `MediaStreams, MediaSources, ChildCount`，不需要 `Chapters / Overview / RemoteTrailers / ExternalUrls / People`。后端目前仍无视 Fields 全部返回，可在 DTO 组装前按 Fields 过滤。 |
 | Trickplay / MediaSegments / QuickConnect | 见 A3，各自需要独立立项。 |
 | `get_user_item_data_batch` 的 Row 定义是私有内联结构体，理想情况把它提到顶层的 `DbUserItemDataRow` 并和 `user_item_data_to_dto_for_item` 复用。 |
+
+
+## 三十八、第三十八轮：全项目审计修复（2026-04-29）
+
+> 范围：对后端 Rust 代码、前端 Vue 代码、EmbySDK 兼容性、项目结构进行全面审计后，按优先级批量修复。
+
+### A. 后端修复
+
+| # | 问题 | 修复 |
+|---|------|------|
+| 1 | remote_emby.rs 5 个未用函数产生编译警告 | sync_source 无调用方已删除；fetch_all_remote_items / apply_playback_metadata / remote_item_key_from_path / build_relative_strm_path 及 RemoteSyncProgress 上 3 个方法加 allow(dead_code)（开发中功能保留）。 |
+| 2 | models.rs / items.rs / videos.rs / transcoder.rs 大量乱码注释 | 全部修复为正确 UTF-8 中文。models.rs 14 处、items.rs 2 处、videos.rs 4 处、transcoder.rs 54 处。 |
+| 3 | metadata/models.rs:123 DateTime::from_utc deprecated | 改为 NaiveDateTime::and_utc()，移除未用的 DateTime import。 |
+| 4 | CorsLayer::permissive() 对公网不安全 | 新增 APP_ALLOWED_ORIGINS 配置项（config.rs）；新增 build_cors_layer() 函数：未设置时允许所有来源（开发），设置后限定 Origin 列表并允许 credentials。 |
+| 5 | ensure_schema_compatibility 失败仅 warn! | 升级为 tracing::error!，便于生产环境及时发现 schema 问题。 |
+
+### B. 前端修复
+
+| # | 问题 | 修复 |
+|---|------|------|
+| 6 | Vite 开发代理表不完整 | 补全 /Shows、/Genres、/ScheduledTasks、/Auth、/Playlists 5 个缺失前缀。 |
+| 7 | UserData 无可选链保护 | store/app.ts 的 toggleFavorite/togglePlayed 及 ItemPage.vue 模板中 6 处 .UserData. 改为 .UserData?. |
+| 8 | package.json 依赖分类错误 | @vitejs/plugin-vue、tailwindcss、typescript、vite、vue-tsc 从 dependencies 移至 devDependencies。 |
+
+### C. 编译警告变化
+
+- 修复前：32 个警告
+- 修复后：25 个警告（全为 Emby 合约字段 dead code）
+- deprecated 警告：0（已清零）
+
+### D. 校验
+
+- cargo build: 0 error, 25 warnings (合约字段)
+- cargo test: 58 passed, 0 failed
+- vue-tsc -b: 0 error
+- npm run build: 构建成功

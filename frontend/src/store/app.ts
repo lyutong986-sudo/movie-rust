@@ -913,14 +913,14 @@ async function refreshPublicUsersAfterLogout() {
 
 export async function toggleFavorite(item: BaseItemDto) {
   await run(async () => {
-    const userData = await api.markFavorite(item.Id, !item.UserData.IsFavorite);
+    const userData = await api.markFavorite(item.Id, !item.UserData?.IsFavorite);
     applyUserData(item.Id, userData);
   });
 }
 
 export async function togglePlayed(item: BaseItemDto) {
   await run(async () => {
-    const userData = await api.markPlayed(item.Id, !item.UserData.Played);
+    const userData = await api.markPlayed(item.Id, !item.UserData?.Played);
     applyUserData(item.Id, userData);
   });
 }

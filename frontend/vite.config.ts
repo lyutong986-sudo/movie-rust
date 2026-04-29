@@ -29,6 +29,11 @@ export default defineConfig({
       '/UserItems': 'http://127.0.0.1:8096',
       '/UserFavoriteItems': 'http://127.0.0.1:8096',
       '/UserPlayedItems': 'http://127.0.0.1:8096',
+      '/Shows': 'http://127.0.0.1:8096',
+      '/Genres': 'http://127.0.0.1:8096',
+      '/ScheduledTasks': 'http://127.0.0.1:8096',
+      '/Auth': 'http://127.0.0.1:8096',
+      '/Playlists': 'http://127.0.0.1:8096',
       '/Branding': 'http://127.0.0.1:8096',
       '/api': 'http://127.0.0.1:8096'
     }

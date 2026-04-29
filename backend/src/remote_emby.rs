@@ -85,6 +85,7 @@ impl RemoteSyncProgress {
         });
     }
 
+    #[allow(dead_code)]
     pub fn set_fetch_progress(&self, fetched_items: u64, total_items: u64) {
         let snapshot = self.snapshot.clone();
         if let Ok(mut guard) = snapshot.try_write() {
@@ -113,6 +114,7 @@ impl RemoteSyncProgress {
         });
     }
 
+    #[allow(dead_code)]
     pub fn set_write_progress(&self, written_files: u64, total_items: u64) {
         let snapshot = self.snapshot.clone();
         if let Ok(mut guard) = snapshot.try_write() {
@@ -171,6 +173,7 @@ impl RemoteSyncProgress {
         });
     }
 
+    #[allow(dead_code)]
     pub fn apply_scan_snapshot(&self, scan: &scanner::ScanProgressSnapshot) {
         let snapshot = self.snapshot.clone();
         let scan_percent = scan.percent.clamp(0.0, 96.0);
@@ -572,13 +575,6 @@ fn normalize_display_mode(value: &str) -> &'static str {
     } else {
         REMOTE_DISPLAY_MODE_SEPARATE
     }
-}
-
-pub async fn sync_source(
-    state: &AppState,
-    source_id: Uuid,
-) -> Result<RemoteEmbySyncResult, AppError> {
-    sync_source_with_progress(state, source_id, None).await
 }
 
 pub async fn sync_source_with_progress(
@@ -1469,6 +1465,7 @@ async fn upsert_virtual_media_item(
     .await
 }
 
+#[allow(dead_code)]
 async fn fetch_all_remote_items(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
@@ -2023,6 +2020,7 @@ fn remote_playback_stream_to_analysis_stream(
     }
 }
 
+#[allow(dead_code)]
 async fn apply_playback_metadata_to_scanned_items(
     pool: &sqlx::PgPool,
     library_id: Uuid,
@@ -2061,6 +2059,7 @@ async fn apply_playback_metadata_to_scanned_items(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn remote_item_key_from_path(path: &str) -> Option<String> {
     let file_name = Path::new(path).file_name()?.to_string_lossy();
     if !file_name.to_ascii_lowercase().ends_with(".strm") {
@@ -2145,6 +2144,7 @@ async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse
     parse_remote_json_response(response, endpoint.as_str()).await
 }
 
+#[allow(dead_code)]
 fn build_relative_strm_path(item: &RemoteSyncItem) -> Option<PathBuf> {
     if item.item.id.trim().is_empty() || item.item.name.trim().is_empty() {
         return None;
