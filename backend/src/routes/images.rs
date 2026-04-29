@@ -226,6 +226,21 @@ async fn list_item_images(
                 });
             }
         }
+    } else if let Some(library) = repository::get_library(&state.pool, item_id).await? {
+        if let Some(path) = library.primary_image_path.as_ref() {
+            if !path.trim().is_empty() {
+                let tag = library
+                    .primary_image_tag
+                    .clone()
+                    .unwrap_or_else(|| library.created_at.timestamp().to_string());
+                images.push(ImageInfoDto {
+                    image_type: "Primary".to_string(),
+                    image_index: None,
+                    image_tag: tag,
+                    path: path.clone(),
+                });
+            }
+        }
     } else {
         return Err(AppError::NotFound("媒体条目不存在".to_string()));
     }
@@ -1116,9 +1131,34 @@ async fn upload_item_image_impl(
     }
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
-    let item = repository::get_media_item(&state.pool, item_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let item = match repository::get_media_item(&state.pool, item_id).await? {
+        Some(item) => item,
+        None => {
+            if let Some(library) =
+                repository::get_library(&state.pool, item_id).await?
+            {
+                let normalized = normalized_item_image_type(&image_type);
+                if !normalized.eq_ignore_ascii_case("Primary") {
+                    return Err(AppError::BadRequest(format!(
+                        "媒体库仅支持 Primary 封面，收到 {normalized}"
+                    )));
+                }
+                let extension = image_extension_from_headers(&headers);
+                let dir = state.config.static_dir.join("library-images");
+                fs::create_dir_all(&dir).await.map_err(AppError::Io)?;
+                let path = dir.join(format!("{}-primary.{}", library.id, extension));
+                fs::write(&path, &body).await.map_err(AppError::Io)?;
+                repository::update_library_image_path(
+                    &state.pool,
+                    library.id,
+                    Some(&path.to_string_lossy()),
+                )
+                .await?;
+                return Ok(StatusCode::NO_CONTENT);
+            }
+            return Err(AppError::NotFound("媒体条目不存在".to_string()));
+        }
+    };
 
     let image_type = normalized_item_image_type(&image_type);
     let extension = image_extension_from_headers(&headers);
@@ -1159,9 +1199,32 @@ async fn delete_item_image_impl(
     }
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
-    let item = repository::get_media_item(&state.pool, item_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let item = match repository::get_media_item(&state.pool, item_id).await? {
+        Some(item) => item,
+        None => {
+            if let Some(library) =
+                repository::get_library(&state.pool, item_id).await?
+            {
+                let normalized = normalized_item_image_type(&image_type);
+                if !normalized.eq_ignore_ascii_case("Primary") {
+                    return Err(AppError::BadRequest(format!(
+                        "媒体库仅支持 Primary 封面，收到 {normalized}"
+                    )));
+                }
+                if let Some(path) = library.primary_image_path.as_ref() {
+                    let path_buf = PathBuf::from(path);
+                    if path_buf.exists()
+                        && path_buf.starts_with(state.config.static_dir.join("library-images"))
+                    {
+                        let _ = fs::remove_file(path_buf).await;
+                    }
+                }
+                repository::update_library_image_path(&state.pool, library.id, None).await?;
+                return Ok(StatusCode::NO_CONTENT);
+            }
+            return Err(AppError::NotFound("媒体条目不存在".to_string()));
+        }
+    };
     let image_type = normalized_item_image_type(&image_type);
     let idx = backdrop_index.unwrap_or(0);
     let current_path = match image_type.as_str() {
@@ -1237,6 +1300,22 @@ async fn serve_item_image(
         if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
             if let Some(path) = resolve_person_image_path(&state, &person.id, &image_type).await? {
                 return serve_image(&path, request).await;
+            }
+            return Err(AppError::NotFound("图片不存在".to_string()));
+        }
+        if let Some(library) = repository::get_library(&state.pool, item_id).await? {
+            let normalized = normalized_item_image_type(&image_type);
+            if normalized.eq_ignore_ascii_case("Primary") {
+                if let Some(path) = library.primary_image_path.as_ref() {
+                    if !path.trim().is_empty() {
+                        return serve_image(path, request).await;
+                    }
+                }
+                if let Some((_, child_path, _)) =
+                    repository::first_library_child_image(&state.pool, library.id).await?
+                {
+                    return serve_image(&child_path, request).await;
+                }
             }
             return Err(AppError::NotFound("图片不存在".to_string()));
         }

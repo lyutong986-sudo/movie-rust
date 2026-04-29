@@ -33,6 +33,8 @@ pub struct DbLibrary {
     pub path: String,
     pub library_options: Value,
     pub created_at: DateTime<Utc>,
+    pub primary_image_path: Option<String>,
+    pub primary_image_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -195,6 +197,10 @@ pub struct DbPerson {
     pub favorite_count: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub death_date: Option<DateTime<Utc>>,
+    pub place_of_birth: Option<String>,
+    pub homepage_url: Option<String>,
+    pub metadata_synced_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -2146,7 +2152,13 @@ pub struct PersonDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub premiere_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub production_year: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "ProductionLocations")]
+    pub production_locations: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homepage_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_tags: Option<std::collections::HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

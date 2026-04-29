@@ -349,6 +349,9 @@ export interface BaseItemDto {
   ParentIndexNumber?: number;
   DateCreated?: string;
   PremiereDate?: string;
+  EndDate?: string;
+  ProductionLocations?: string[];
+  ExternalUrls?: Array<{ Name: string; Url: string }>;
   ImageTags?: Record<string, string>;
   BackdropImageTags?: string[];
   PrimaryImageAspectRatio?: number;
@@ -1714,6 +1717,19 @@ export class EmbyApi {
     if (opts?.startIndex) params.set('StartIndex', String(opts.startIndex));
     const qs = params.toString();
     return this.request<BaseItemDto[]>(`/Persons/${personId}/Items${qs ? '?' + qs : ''}`);
+  }
+
+  /**
+   * 触发后端从 TMDB 拉取该演员的简介、出生日期、出生地与头像。
+   * 若 `replaceAllImages=true` 会强制覆盖已有头像，否则仅在缺失时下载。
+   */
+  async refreshPerson(personId: string, opts?: { replaceAllImages?: boolean }): Promise<void> {
+    const params = new URLSearchParams();
+    if (opts?.replaceAllImages) params.set('ReplaceAllImages', 'true');
+    const qs = params.toString();
+    await this.request<void>(`/Persons/${personId}/Refresh${qs ? '?' + qs : ''}`, {
+      method: 'POST',
+    });
   }
 
   async similar(itemId: string, limit?: number): Promise<QueryResult<BaseItemDto>>;

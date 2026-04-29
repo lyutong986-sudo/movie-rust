@@ -996,6 +996,51 @@ pub async fn get_items_by_genre(
 
 // 人物相关函数
 
+/// 将 `DbPerson` 转换为对外 `PersonDto`，统一处理 image_tags / 出生地 / 主页 等字段。
+pub(crate) fn db_person_to_dto(person: DbPerson) -> PersonDto {
+    let provider_ids: Option<std::collections::HashMap<String, String>> =
+        if person.provider_ids.is_null() {
+            None
+        } else {
+            serde_json::from_value(person.provider_ids.clone()).ok()
+        };
+
+    let primary_image_tag = person
+        .primary_image_path
+        .as_ref()
+        .map(|_| person.updated_at.timestamp().to_string());
+    let image_tags = primary_image_tag.as_ref().map(|tag| {
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("Primary".to_string(), tag.clone());
+        tags
+    });
+
+    let production_locations = person
+        .place_of_birth
+        .as_ref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| vec![s.clone()]);
+
+    PersonDto {
+        name: person.name,
+        id: uuid_to_emby_guid(&person.id),
+        role: None,
+        person_type: None,
+        primary_image_tag,
+        sort_name: person.sort_name,
+        overview: person.overview,
+        external_url: person.external_url,
+        premiere_date: person.premiere_date.map(|dt| dt.to_rfc3339()),
+        end_date: person.death_date.map(|dt| dt.to_rfc3339()),
+        production_year: person.production_year,
+        production_locations,
+        homepage_url: person.homepage_url,
+        image_tags,
+        provider_ids,
+        favorite: None,
+    }
+}
+
 pub async fn get_persons(
     pool: &sqlx::PgPool,
     start_index: Option<i32>,
@@ -1036,47 +1081,7 @@ pub async fn get_persons(
         .await?
     };
 
-    let person_dtos = persons
-        .into_iter()
-        .map(|person| {
-            // 将provider_ids JSON转换为HashMap
-            let provider_ids: Option<std::collections::HashMap<String, String>> =
-                if person.provider_ids.is_null() {
-                    None
-                } else {
-                    match serde_json::from_value(person.provider_ids.clone()) {
-                        Ok(map) => Some(map),
-                        Err(_) => None,
-                    }
-                };
-
-            PersonDto {
-                name: person.name,
-                id: uuid_to_emby_guid(&person.id),
-                role: None,
-                person_type: None,
-                primary_image_tag: person
-                    .primary_image_path
-                    .as_ref()
-                    .map(|_| person.updated_at.timestamp().to_string()),
-                sort_name: person.sort_name,
-                overview: person.overview,
-                external_url: person.external_url,
-                premiere_date: person.premiere_date.map(|dt| dt.to_rfc3339()),
-                production_year: person.production_year,
-                image_tags: person.primary_image_path.as_ref().map(|_| {
-                    let mut tags = std::collections::HashMap::new();
-                    tags.insert(
-                        "Primary".to_string(),
-                        person.updated_at.timestamp().to_string(),
-                    );
-                    tags
-                }),
-                provider_ids,
-                favorite: None,
-            }
-        })
-        .collect();
+    let person_dtos = persons.into_iter().map(db_person_to_dto).collect();
 
     Ok(person_dtos)
 }
@@ -1096,48 +1101,7 @@ pub async fn get_person_by_uuid(
     .fetch_optional(pool)
     .await?;
 
-    if let Some(person) = person {
-        // 将provider_ids JSON转换为HashMap
-        let provider_ids: Option<std::collections::HashMap<String, String>> =
-            if person.provider_ids.is_null() {
-                None
-            } else {
-                match serde_json::from_value(person.provider_ids.clone()) {
-                    Ok(map) => Some(map),
-                    Err(_) => None,
-                }
-            };
-
-        let person_dto = PersonDto {
-            name: person.name,
-            id: uuid_to_emby_guid(&person.id),
-            role: None,
-            person_type: None,
-            primary_image_tag: person
-                .primary_image_path
-                .as_ref()
-                .map(|_| person.updated_at.timestamp().to_string()),
-            sort_name: person.sort_name,
-            overview: person.overview,
-            external_url: person.external_url,
-            premiere_date: person.premiere_date.map(|dt| dt.to_rfc3339()),
-            production_year: person.production_year,
-            image_tags: person.primary_image_path.as_ref().map(|_| {
-                let mut tags = std::collections::HashMap::new();
-                tags.insert(
-                    "Primary".to_string(),
-                    person.updated_at.timestamp().to_string(),
-                );
-                tags
-            }),
-            provider_ids,
-            favorite: None,
-        };
-
-        Ok(Some(person_dto))
-    } else {
-        Ok(None)
-    }
+    Ok(person.map(db_person_to_dto))
 }
 
 pub async fn get_person_by_name(pool: &sqlx::PgPool, name: &str) -> Result<PersonDto, AppError> {
@@ -1153,48 +1117,9 @@ pub async fn get_person_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Perso
     .fetch_optional(pool)
     .await?;
 
-    if let Some(person) = person {
-        // 将provider_ids JSON转换为HashMap
-        let provider_ids: Option<std::collections::HashMap<String, String>> =
-            if person.provider_ids.is_null() {
-                None
-            } else {
-                match serde_json::from_value(person.provider_ids.clone()) {
-                    Ok(map) => Some(map),
-                    Err(_) => None,
-                }
-            };
-
-        let person_dto = PersonDto {
-            name: person.name,
-            id: uuid_to_emby_guid(&person.id),
-            role: None,
-            person_type: None,
-            primary_image_tag: person
-                .primary_image_path
-                .as_ref()
-                .map(|_| person.updated_at.timestamp().to_string()),
-            sort_name: person.sort_name,
-            overview: person.overview,
-            external_url: person.external_url,
-            premiere_date: person.premiere_date.map(|dt| dt.to_rfc3339()),
-            production_year: person.production_year,
-            image_tags: person.primary_image_path.as_ref().map(|_| {
-                let mut tags = std::collections::HashMap::new();
-                tags.insert(
-                    "Primary".to_string(),
-                    person.updated_at.timestamp().to_string(),
-                );
-                tags
-            }),
-            provider_ids,
-            favorite: None,
-        };
-
-        Ok(person_dto)
-    } else {
-        Err(AppError::NotFound(format!("Person not found: {}", name)))
-    }
+    person
+        .map(db_person_to_dto)
+        .ok_or_else(|| AppError::NotFound(format!("Person not found: {}", name)))
 }
 
 pub async fn get_person_image_path(
@@ -1406,9 +1331,10 @@ pub async fn create_person(pool: &sqlx::PgPool, person: &DbPerson) -> Result<Uui
             name, sort_name, overview, external_url,
             provider_ids, premiere_date, production_year,
             primary_image_path, backdrop_image_path, logo_image_path,
-            favorite_count, created_at, updated_at
+            favorite_count, created_at, updated_at,
+            death_date, place_of_birth, homepage_url, metadata_synced_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         ON CONFLICT (name, sort_name)
         DO UPDATE SET
             overview = COALESCE(EXCLUDED.overview, persons.overview),
@@ -1422,6 +1348,10 @@ pub async fn create_person(pool: &sqlx::PgPool, person: &DbPerson) -> Result<Uui
             primary_image_path = COALESCE(persons.primary_image_path, EXCLUDED.primary_image_path),
             backdrop_image_path = COALESCE(persons.backdrop_image_path, EXCLUDED.backdrop_image_path),
             logo_image_path = COALESCE(persons.logo_image_path, EXCLUDED.logo_image_path),
+            death_date = COALESCE(EXCLUDED.death_date, persons.death_date),
+            place_of_birth = COALESCE(EXCLUDED.place_of_birth, persons.place_of_birth),
+            homepage_url = COALESCE(EXCLUDED.homepage_url, persons.homepage_url),
+            metadata_synced_at = COALESCE(EXCLUDED.metadata_synced_at, persons.metadata_synced_at),
             updated_at = EXCLUDED.updated_at
         RETURNING id
         "#,
@@ -1439,6 +1369,10 @@ pub async fn create_person(pool: &sqlx::PgPool, person: &DbPerson) -> Result<Uui
     .bind(person.favorite_count)
     .bind(person.created_at)
     .bind(person.updated_at)
+    .bind(person.death_date)
+    .bind(&person.place_of_birth)
+    .bind(&person.homepage_url)
+    .bind(person.metadata_synced_at)
     .fetch_one(pool)
     .await?;
 
@@ -1455,14 +1389,21 @@ pub async fn update_person(
         UPDATE persons
         SET name = $2,
             sort_name = $3,
-            overview = $4,
-            external_url = $5,
-            provider_ids = $6,
-            premiere_date = $7,
-            production_year = $8,
-            primary_image_path = $9,
-            backdrop_image_path = $10,
-            logo_image_path = $11,
+            overview = COALESCE($4, persons.overview),
+            external_url = COALESCE($5, persons.external_url),
+            provider_ids = CASE
+                WHEN persons.provider_ids = '{}'::jsonb THEN $6
+                ELSE persons.provider_ids || COALESCE($6, '{}'::jsonb)
+            END,
+            premiere_date = COALESCE($7, persons.premiere_date),
+            production_year = COALESCE($8, persons.production_year),
+            primary_image_path = COALESCE($9, persons.primary_image_path),
+            backdrop_image_path = COALESCE($10, persons.backdrop_image_path),
+            logo_image_path = COALESCE($11, persons.logo_image_path),
+            death_date = COALESCE($13, persons.death_date),
+            place_of_birth = COALESCE($14, persons.place_of_birth),
+            homepage_url = COALESCE($15, persons.homepage_url),
+            metadata_synced_at = $16,
             updated_at = $12
         WHERE id = $1
         "#,
@@ -1479,6 +1420,10 @@ pub async fn update_person(
     .bind(&person.backdrop_image_path)
     .bind(&person.logo_image_path)
     .bind(chrono::Utc::now())
+    .bind(person.death_date)
+    .bind(&person.place_of_birth)
+    .bind(&person.homepage_url)
+    .bind(person.metadata_synced_at)
     .execute(pool)
     .await?;
 
@@ -2025,6 +1970,93 @@ pub async fn update_person_image_path(
         .bind(person_id)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// 取某个 media_item 关联的人物 UUID 列表，按 Actor 优先 + sort_order 升序，限制前 `limit` 个。
+///
+/// 用于 `PersonService::refresh_persons_for_item`：在刷新 Series/Movie 元数据后顺手把
+/// cast/director 的简介与头像补完，但只挑前 N 个避免 TMDB 限流。
+pub async fn list_item_person_ids(
+    pool: &sqlx::PgPool,
+    item_id: Uuid,
+    limit: usize,
+) -> Result<Vec<Uuid>, AppError> {
+    let rows = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT pr.person_id
+        FROM person_roles pr
+        WHERE pr.media_item_id = $1
+        ORDER BY
+            CASE pr.role_type
+                WHEN 'Actor' THEN 0
+                WHEN 'Director' THEN 1
+                WHEN 'Writer' THEN 2
+                WHEN 'Producer' THEN 3
+                ELSE 4
+            END,
+            pr.sort_order
+        LIMIT $2
+        "#,
+    )
+    .bind(item_id)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 仅 patch 人物的元数据（biography/出生地/外部链接），不动 image 路径。
+///
+/// 与 `update_person` 的区别：
+/// - 不要求传入完整 `DbPerson`，省掉外部回填 image 路径的负担
+/// - `provider_ids` 走 jsonb 合并而非整体替换，避免覆盖之前由 NFO 写入的 Imdb/Tvdb 等
+pub async fn patch_person_metadata(
+    pool: &sqlx::PgPool,
+    person_id: Uuid,
+    overview: Option<&str>,
+    external_url: Option<&str>,
+    provider_ids: Option<&Value>,
+    premiere_date: Option<DateTime<Utc>>,
+    death_date: Option<DateTime<Utc>>,
+    production_year: Option<i32>,
+    place_of_birth: Option<&str>,
+    homepage_url: Option<&str>,
+    sort_name: Option<&str>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE persons
+           SET overview            = COALESCE($2, overview),
+               external_url        = COALESCE($3, external_url),
+               provider_ids        = CASE
+                                       WHEN $4::jsonb IS NULL THEN provider_ids
+                                       WHEN provider_ids = '{}'::jsonb THEN $4::jsonb
+                                       ELSE provider_ids || $4::jsonb
+                                     END,
+               premiere_date       = COALESCE($5, premiere_date),
+               death_date          = COALESCE($6, death_date),
+               production_year     = COALESCE($7, production_year),
+               place_of_birth      = COALESCE($8, place_of_birth),
+               homepage_url        = COALESCE($9, homepage_url),
+               sort_name           = COALESCE($10, sort_name),
+               metadata_synced_at  = now(),
+               updated_at          = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(person_id)
+    .bind(overview)
+    .bind(external_url)
+    .bind(provider_ids)
+    .bind(premiere_date)
+    .bind(death_date)
+    .bind(production_year)
+    .bind(place_of_birth)
+    .bind(homepage_url)
+    .bind(sort_name)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -2656,7 +2688,8 @@ pub async fn create_library(
 pub async fn list_libraries(pool: &sqlx::PgPool) -> Result<Vec<DbLibrary>, AppError> {
     Ok(sqlx::query_as::<_, DbLibrary>(
         r#"
-        SELECT id, name, collection_type, path, library_options, created_at
+        SELECT id, name, collection_type, path, library_options, created_at,
+               primary_image_path, primary_image_tag
         FROM libraries
         ORDER BY name
         "#,
@@ -2668,7 +2701,8 @@ pub async fn list_libraries(pool: &sqlx::PgPool) -> Result<Vec<DbLibrary>, AppEr
 pub async fn get_library(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbLibrary>, AppError> {
     Ok(sqlx::query_as::<_, DbLibrary>(
         r#"
-        SELECT id, name, collection_type, path, library_options, created_at
+        SELECT id, name, collection_type, path, library_options, created_at,
+               primary_image_path, primary_image_tag
         FROM libraries
         WHERE id = $1
         "#,
@@ -2931,7 +2965,8 @@ pub async fn get_library_for_media_item(
 ) -> Result<Option<DbLibrary>, AppError> {
     Ok(sqlx::query_as::<_, DbLibrary>(
         r#"
-        SELECT l.id, l.name, l.collection_type, l.path, l.library_options, l.created_at
+        SELECT l.id, l.name, l.collection_type, l.path, l.library_options, l.created_at,
+               l.primary_image_path, l.primary_image_tag
         FROM media_items mi
         INNER JOIN libraries l ON l.id = mi.library_id
         WHERE mi.id = $1
@@ -2949,7 +2984,8 @@ pub async fn get_library_by_name(
 ) -> Result<Option<DbLibrary>, AppError> {
     Ok(sqlx::query_as::<_, DbLibrary>(
         r#"
-        SELECT id, name, collection_type, path, library_options, created_at
+        SELECT id, name, collection_type, path, library_options, created_at,
+               primary_image_path, primary_image_tag
         FROM libraries
         WHERE lower(name) = lower($1)
         "#,
@@ -2957,6 +2993,58 @@ pub async fn get_library_by_name(
     .bind(name.trim())
     .fetch_optional(pool)
     .await?)
+}
+
+pub async fn update_library_image_path(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    image_path: Option<&str>,
+) -> Result<(), AppError> {
+    let now = Utc::now();
+    let new_tag = image_path.map(|_| now.timestamp().to_string());
+    let result = sqlx::query(
+        r#"
+        UPDATE libraries
+        SET primary_image_path = $2,
+            primary_image_tag  = $3,
+            date_modified      = $4
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(image_path)
+    .bind(new_tag)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("媒体库不存在".to_string()));
+    }
+    Ok(())
+}
+
+pub async fn first_library_child_image(
+    pool: &sqlx::PgPool,
+    library_id: Uuid,
+) -> Result<Option<(Uuid, String, DateTime<Utc>)>, AppError> {
+    let row: Option<(Uuid, String, DateTime<Utc>)> = sqlx::query_as(
+        r#"
+        SELECT id, image_primary_path, date_modified
+        FROM media_items
+        WHERE library_id = $1
+          AND image_primary_path IS NOT NULL
+          AND length(trim(image_primary_path)) > 0
+          AND (image_primary_path NOT LIKE 'http://%' AND image_primary_path NOT LIKE 'https://%')
+        ORDER BY
+            CASE WHEN item_type IN ('Movie','Series') THEN 0 ELSE 1 END,
+            sort_name
+        LIMIT 1
+        "#,
+    )
+    .bind(library_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(id, path, modified)| (id, path, modified)))
 }
 
 pub async fn delete_library(pool: &sqlx::PgPool, id: Uuid) -> Result<(), AppError> {
@@ -5711,6 +5799,31 @@ pub async fn get_media_item(
     .await?)
 }
 
+pub async fn list_media_item_children(
+    pool: &sqlx::PgPool,
+    parent_id: Uuid,
+) -> Result<Vec<DbMediaItem>, AppError> {
+    Ok(sqlx::query_as::<_, DbMediaItem>(
+        r#"
+        SELECT
+            id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
+            overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
+            premiere_date, status, end_date, air_days, air_time, series_name, season_name,
+            index_number, index_number_end, parent_index_number, provider_ids, genres,
+            studios, tags, production_locations,
+            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
+            date_created, date_modified, image_blur_hashes
+        FROM media_items
+        WHERE parent_id = $1
+        ORDER BY index_number, sort_name
+        "#,
+    )
+    .bind(parent_id)
+    .fetch_all(pool)
+    .await?)
+}
+
 pub async fn find_items_for_external_person_credit(
     pool: &sqlx::PgPool,
     credit: &ExternalPersonCredit,
@@ -6941,6 +7054,32 @@ pub async fn library_to_item_dto(
     let series_count = count_library_items_by_type(pool, library.id, "Series").await?;
     let locations = library_paths(library);
 
+    let mut image_tags: BTreeMap<String, String> = BTreeMap::new();
+    let mut self_primary_tag: Option<String> = None;
+    let mut child_primary_item_id: Option<String> = None;
+
+    if let Some(path) = library.primary_image_path.as_ref() {
+        if !path.trim().is_empty() {
+            let tag = library
+                .primary_image_tag
+                .clone()
+                .unwrap_or_else(|| library.created_at.timestamp().to_string());
+            image_tags.insert("Primary".to_string(), tag.clone());
+            self_primary_tag = Some(tag);
+        }
+    }
+
+    if self_primary_tag.is_none() {
+        if let Some((child_id, _path, child_modified)) =
+            first_library_child_image(pool, library.id).await?
+        {
+            let tag = child_modified.timestamp().to_string();
+            image_tags.insert("Primary".to_string(), tag.clone());
+            self_primary_tag = Some(tag);
+            child_primary_item_id = Some(uuid_to_emby_guid(&child_id));
+        }
+    }
+
     Ok(BaseItemDto {
         name: library.name.clone(),
         original_title: None,
@@ -6959,7 +7098,7 @@ pub async fn library_to_item_dto(
         is_folder: true,
         sort_name: Some(library.name.to_lowercase()),
         forced_sort_name: Some(library.name.to_lowercase()),
-        primary_image_tag: None,
+        primary_image_tag: self_primary_tag.clone(),
         collection_type: Some(library.collection_type.clone()),
         media_type: None,
         container: None,
@@ -7024,7 +7163,7 @@ pub async fn library_to_item_dto(
         index_number: None,
         index_number_end: None,
         parent_index_number: None,
-        image_tags: BTreeMap::new(),
+        image_tags,
         image_blur_hashes: None,
         backdrop_image_tags: Vec::new(),
         parent_logo_item_id: None,
@@ -7035,7 +7174,8 @@ pub async fn library_to_item_dto(
         parent_thumb_image_tag: None,
         thumb_image_tag: None,
         series_primary_image_tag: None,
-        primary_image_item_id: None,
+        primary_image_item_id: child_primary_item_id
+            .or_else(|| self_primary_tag.as_ref().map(|_| uuid_to_emby_guid(&library.id))),
         series_studio: None,
         user_data: {
             let mut value = empty_user_data();
@@ -9203,7 +9343,10 @@ async fn get_item_people(pool: &sqlx::PgPool, item_id: Uuid) -> Result<Vec<Perso
                 overview: row.overview,
                 external_url,
                 premiere_date: row.premiere_date.map(|value| value.to_rfc3339()),
+                end_date: None,
                 production_year: row.production_year,
+                production_locations: None,
+                homepage_url: None,
                 image_tags,
                 provider_ids,
                 favorite: Some(row.favorite_count > 0),

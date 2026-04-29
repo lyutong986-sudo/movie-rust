@@ -3,15 +3,16 @@ use crate::{
     error::AppError,
     media_analyzer,
     metadata::{
+        nfo_writer,
         person_service::PersonService,
         provider::{MetadataProvider, MetadataProviderManager},
         tmdb::TmdbProvider,
     },
     models::{
-        emby_id_to_uuid, uuid_to_emby_guid, BaseItemDto, ContentSectionDto, GetSimilarItems,
-        ItemCountsDto, ItemsQuery, LibraryOptionsDto, PlaybackInfoDto, PlaybackInfoResponse,
-        QueryResult, TranscodingInfoDto, UpdateUserItemDataRequest, UserItemDataDto,
-        UserItemDataQuery,
+        emby_id_to_uuid, uuid_to_emby_guid, BaseItemDto, ContentSectionDto, DbMediaItem,
+        GetSimilarItems, ItemCountsDto, ItemsQuery, LibraryOptionsDto, PlaybackInfoDto,
+        PlaybackInfoResponse, QueryResult, TranscodingInfoDto, UpdateUserItemDataRequest,
+        UserItemDataDto, UserItemDataQuery,
     },
     naming, remote_emby,
     repository::{self, ItemListOptions, UpdateUserDataInput},
@@ -3283,7 +3284,7 @@ async fn refresh_item_metadata(
         return Ok(StatusCode::NO_CONTENT);
     }
 
-    do_refresh_item_metadata(&state, item_id).await?;
+    do_refresh_item_metadata_with(&state, item_id, params.replace_all_images).await?;
 
     if params.recursive {
         let child_ids: Vec<(Uuid,)> = sqlx::query_as(
@@ -3295,7 +3296,9 @@ async fn refresh_item_metadata(
         .unwrap_or_default();
 
         for (child_id,) in child_ids {
-            if let Err(e) = do_refresh_item_metadata(&state, child_id).await {
+            if let Err(e) =
+                do_refresh_item_metadata_with(&state, child_id, params.replace_all_images).await
+            {
                 tracing::warn!(child_id = %child_id, ?e, "递归刷新子条目失败");
             }
         }
@@ -3306,20 +3309,34 @@ async fn refresh_item_metadata(
 
 /// 真正执行单个条目的远程元数据重抓流程。
 ///
-/// 当条目非 Movie/Series、缺少 TMDb provider id 或未配置 TMDb
+/// 当条目非 Movie/Series/Season/Episode、缺少 TMDb provider id 或未配置 TMDb
 /// 提供者时，本函数会记录日志并直接返回成功，保证调用方的批处理
-/// 可以按“尽力而为”的语义继续跑完剩余条目。
+/// 可以按"尽力而为"的语义继续跑完剩余条目。
 pub(crate) async fn do_refresh_item_metadata(
     state: &AppState,
     item_id: Uuid,
+) -> Result<(), AppError> {
+    do_refresh_item_metadata_with(state, item_id, false).await
+}
+
+/// 与 [`do_refresh_item_metadata`] 等价，但允许显式传入 `replace_images=true`
+/// 时强制覆盖已有图片（用于 `ReplaceAllImages=true` 或切换 SaveLocalMetadata 后
+/// 需要把图片搬到目标位置的场景）。
+pub(crate) async fn do_refresh_item_metadata_with(
+    state: &AppState,
+    item_id: Uuid,
+    replace_images: bool,
 ) -> Result<(), AppError> {
     let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
         return Err(AppError::NotFound("媒体条目不存在".to_string()));
     };
 
-    if !item.item_type.eq_ignore_ascii_case("Series")
-        && !item.item_type.eq_ignore_ascii_case("Movie")
-    {
+    let kind = item.item_type.as_str();
+    let is_movie = kind.eq_ignore_ascii_case("Movie");
+    let is_series = kind.eq_ignore_ascii_case("Series");
+    let is_season = kind.eq_ignore_ascii_case("Season");
+    let is_episode = kind.eq_ignore_ascii_case("Episode");
+    if !is_movie && !is_series && !is_season && !is_episode {
         return Ok(());
     }
     work_limiter_config(state).await?;
@@ -3344,22 +3361,38 @@ pub(crate) async fn do_refresh_item_metadata(
         return Ok(());
     };
 
-    let tmdb_id = match tmdb_id_from_provider_ids(&item.provider_ids) {
+    // Season/Episode 的 TMDB id 不在自身，需要回溯到父 Series。
+    let tmdb_lookup_item = if is_season || is_episode {
+        match resolve_series_for_child(&state.pool, &item).await? {
+            Some(series) => series,
+            None => {
+                tracing::debug!(
+                    item_id = %item.id,
+                    "Season/Episode 找不到父 Series，跳过刷新"
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        item.clone()
+    };
+
+    let tmdb_id = match tmdb_id_from_provider_ids(&tmdb_lookup_item.provider_ids) {
         Some(id) => id,
         None => {
             tracing::info!(
-                item_id = %item.id,
-                name = %item.name,
+                item_id = %tmdb_lookup_item.id,
+                name = %tmdb_lookup_item.name,
                 "条目缺少 TMDb provider id，尝试按名称搜索"
             );
-            let search_result = if item.item_type.eq_ignore_ascii_case("Movie") {
+            let search_result = if tmdb_lookup_item.item_type.eq_ignore_ascii_case("Movie") {
                 provider
-                    .search_movie(&item.name, item.production_year)
+                    .search_movie(&tmdb_lookup_item.name, tmdb_lookup_item.production_year)
                     .await
                     .ok()
-            } else if item.item_type.eq_ignore_ascii_case("Series") {
+            } else if tmdb_lookup_item.item_type.eq_ignore_ascii_case("Series") {
                 provider
-                    .search_series(&item.name, item.production_year)
+                    .search_series(&tmdb_lookup_item.name, tmdb_lookup_item.production_year)
                     .await
                     .ok()
             } else {
@@ -3372,7 +3405,7 @@ pub(crate) async fn do_refresh_item_metadata(
             match found_id {
                 Some(id) => {
                     tracing::info!(
-                        item_id = %item.id,
+                        item_id = %tmdb_lookup_item.id,
                         tmdb_id = %id,
                         "按名称搜索找到 TMDb ID"
                     );
@@ -3380,8 +3413,8 @@ pub(crate) async fn do_refresh_item_metadata(
                 }
                 None => {
                     tracing::debug!(
-                        item_id = %item.id,
-                        name = %item.name,
+                        item_id = %tmdb_lookup_item.id,
+                        name = %tmdb_lookup_item.name,
                         "按名称搜索未找到 TMDb 结果，跳过刷新"
                     );
                     return Ok(());
@@ -3393,7 +3426,7 @@ pub(crate) async fn do_refresh_item_metadata(
     let tmdb_id = resolve_tmdb_id_with_fallback(
         &*provider,
         state,
-        &item,
+        &tmdb_lookup_item,
         tmdb_id,
     )
     .await;
@@ -3402,15 +3435,15 @@ pub(crate) async fn do_refresh_item_metadata(
         Some(id) => id,
         None => {
             tracing::warn!(
-                item_id = %item.id,
-                name = %item.name,
+                item_id = %tmdb_lookup_item.id,
+                name = %tmdb_lookup_item.name,
                 "TMDB ID 无效且名称搜索未找到结果，跳过刷新"
             );
             return Ok(());
         }
     };
 
-    if item.item_type.eq_ignore_ascii_case("Series") {
+    if is_series {
         let _tmdb_permit = state
             .work_limiters
             .acquire(WorkLimiterKind::TmdbMetadata)
@@ -3425,7 +3458,7 @@ pub(crate) async fn do_refresh_item_metadata(
         let catalog = provider.get_series_episode_catalog(&tmdb_id).await?;
         drop(_tmdb_permit);
         repository::replace_series_episode_catalog(&state.pool, item.id, &catalog).await?;
-    } else if item.item_type.eq_ignore_ascii_case("Movie") {
+    } else if is_movie {
         let _tmdb_permit = state
             .work_limiters
             .acquire(WorkLimiterKind::TmdbMetadata)
@@ -3435,64 +3468,160 @@ pub(crate) async fn do_refresh_item_metadata(
         repository::update_media_item_movie_metadata(&state.pool, item.id, &metadata).await?;
     }
 
-    let media_type = if item.item_type.eq_ignore_ascii_case("Series") {
-        "tv"
-    } else {
-        "movie"
-    };
-    let _tmdb_permit = state
-        .work_limiters
-        .acquire(WorkLimiterKind::TmdbMetadata)
-        .await;
-    let people = provider.get_item_people(media_type, &tmdb_id).await?;
-    drop(_tmdb_permit);
-    let tmdb_person_ids = people
-        .iter()
-        .filter_map(|person| {
-            person
-                .provider_ids
-                .get("Tmdb")
-                .or_else(|| person.provider_ids.get("TMDb"))
-                .or_else(|| person.provider_ids.get("tmdb"))
-                .cloned()
-        })
-        .collect::<Vec<_>>();
-    repository::delete_tmdb_person_roles_except(&state.pool, item.id, &tmdb_person_ids).await?;
-    let person_service = PersonService::new(state.pool.clone(), metadata_manager.clone());
-    for person in people {
-        person_service.upsert_item_person(item.id, person).await?;
+    // 人员仅对 Movie/Series 有意义；Season/Episode 跳过。
+    if is_movie || is_series {
+        let media_type = if is_series { "tv" } else { "movie" };
+        let _tmdb_permit = state
+            .work_limiters
+            .acquire(WorkLimiterKind::TmdbMetadata)
+            .await;
+        let people = provider.get_item_people(media_type, &tmdb_id).await?;
+        drop(_tmdb_permit);
+        let tmdb_person_ids = people
+            .iter()
+            .filter_map(|person| {
+                person
+                    .provider_ids
+                    .get("Tmdb")
+                    .or_else(|| person.provider_ids.get("TMDb"))
+                    .or_else(|| person.provider_ids.get("tmdb"))
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        repository::delete_tmdb_person_roles_except(&state.pool, item.id, &tmdb_person_ids).await?;
+        let person_service = PersonService::new(state.pool.clone(), metadata_manager.clone());
+        for person in people {
+            person_service.upsert_item_person(item.id, person).await?;
+        }
+
+        // 人物简介 + 头像级联：对前 20 个 cast/crew 调 TMDB `/person/{id}` 拉 biography 与
+        // profile_path，并把头像下载到 `<static_dir>/person-images/{uuid}-primary.<ext>`。
+        // 失败仅记录 warn，不阻断 Series/Movie 自身的刷新。
+        if let Err(err) = person_service
+            .refresh_persons_for_item(item.id, &state.config.static_dir, 20, replace_images)
+            .await
+        {
+            tracing::warn!(item_id = %item.id, ?err, "刷新人物简介/头像时出错");
+        }
     }
 
-    // --- 同步获取全部图像 (Primary / Backdrop / Logo) ---
-    let _tmdb_permit = state
+    // --- 自身图像下载 ---
+    if let Err(e) = download_remote_images_for_item(
+        state,
+        &*provider,
+        &item,
+        &tmdb_id,
+        &library_options,
+        replace_images,
+    )
+    .await
+    {
+        tracing::warn!(item_id = %item.id, ?e, "下载本条目图像时出错");
+    }
+
+    // --- Series 级联：为每个 Season、Episode 拉海报/缩略图 ---
+    if is_series {
+        if let Err(e) = cascade_download_series_children(
+            state,
+            &*provider,
+            &item,
+            &tmdb_id,
+            &library_options,
+            replace_images,
+        )
+        .await
+        {
+            tracing::warn!(item_id = %item.id, ?e, "刷新 Series 时级联下载子项图片失败");
+        }
+    }
+
+    // --- NFO 写入（受 LibraryOptions.save_local_metadata 控制）---
+    if library_options.save_local_metadata {
+        if let Err(e) = write_nfo_for_refresh(state, &item, is_series).await {
+            tracing::warn!(item_id = %item.id, ?e, "写入 NFO 失败");
+        }
+    }
+
+    Ok(())
+}
+
+/// 根据 Season/Episode 回溯到所属 Series。
+async fn resolve_series_for_child(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+) -> Result<Option<DbMediaItem>, AppError> {
+    let mut current = item.clone();
+    for _ in 0..3 {
+        if current.item_type.eq_ignore_ascii_case("Series") {
+            return Ok(Some(current));
+        }
+        let Some(parent_id) = current.parent_id else {
+            return Ok(None);
+        };
+        match repository::get_media_item(pool, parent_id).await? {
+            Some(parent) => current = parent,
+            None => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// 为单个条目（Movie/Series/Season/Episode）下载远程图片到磁盘。
+///
+/// - Movie/Series 走 `get_remote_images`，下载 Primary/Backdrop/Logo
+/// - Season 走 `get_remote_images_for_child`，下载 Primary
+/// - Episode 走 `get_remote_images_for_child`，下载 Primary 与 Thumb
+/// - `force` 为 true 时即使已存在本地图也会覆盖；默认 false 仅补缺
+async fn download_remote_images_for_item(
+    state: &AppState,
+    provider: &dyn MetadataProvider,
+    item: &DbMediaItem,
+    tmdb_id: &str,
+    library_options: &LibraryOptionsDto,
+    force: bool,
+) -> Result<(), AppError> {
+    let kind = item.item_type.as_str();
+    let (media_type, season_no, episode_no, types_to_download): (&str, Option<i32>, Option<i32>, &[&str]) =
+        if kind.eq_ignore_ascii_case("Series") {
+            ("tv", None, None, &["Primary", "Backdrop", "Logo"])
+        } else if kind.eq_ignore_ascii_case("Movie") {
+            ("movie", None, None, &["Primary", "Backdrop", "Logo"])
+        } else if kind.eq_ignore_ascii_case("Season") {
+            ("season", item.index_number, None, &["Primary"])
+        } else if kind.eq_ignore_ascii_case("Episode") {
+            (
+                "episode",
+                item.parent_index_number,
+                item.index_number,
+                &["Primary", "Thumb"],
+            )
+        } else {
+            return Ok(());
+        };
+
+    let _permit = state
         .work_limiters
         .acquire(WorkLimiterKind::TmdbMetadata)
         .await;
-    let remote_images = provider
-        .get_remote_images(media_type, &tmdb_id)
-        .await
-        .unwrap_or_default();
-    drop(_tmdb_permit);
+    let remote_images = if season_no.is_some() || episode_no.is_some() {
+        provider
+            .get_remote_images_for_child(media_type, tmdb_id, season_no, episode_no)
+            .await
+            .unwrap_or_default()
+    } else {
+        provider
+            .get_remote_images(media_type, tmdb_id)
+            .await
+            .unwrap_or_default()
+    };
+    drop(_permit);
 
     let item_fresh = repository::get_media_item(&state.pool, item.id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
-    let image_types_to_download: &[&str] = &["Primary", "Backdrop", "Logo"];
-    for &img_type in image_types_to_download {
-        let already_has = match img_type {
-            "Primary" => item_fresh.image_primary_path.as_ref().map_or(false, |p| {
-                !p.is_empty() && !p.starts_with("http://") && !p.starts_with("https://")
-            }),
-            "Backdrop" => item_fresh.backdrop_path.as_ref().map_or(false, |p| {
-                !p.is_empty() && !p.starts_with("http://") && !p.starts_with("https://")
-            }),
-            "Logo" => item_fresh.logo_path.as_ref().map_or(false, |p| {
-                !p.is_empty() && !p.starts_with("http://") && !p.starts_with("https://")
-            }),
-            _ => false,
-        };
-        if already_has {
+    for &img_type in types_to_download {
+        if !force && local_image_exists(&item_fresh, img_type) {
             continue;
         }
         let best = remote_images
@@ -3513,7 +3642,7 @@ pub(crate) async fn do_refresh_item_metadata(
             if let Err(e) = download_and_save_image(
                 state,
                 &item_fresh,
-                &library_options,
+                library_options,
                 img_type,
                 &img.url,
                 None,
@@ -3530,6 +3659,107 @@ pub(crate) async fn do_refresh_item_metadata(
         }
     }
 
+    Ok(())
+}
+
+fn local_image_exists(item: &DbMediaItem, img_type: &str) -> bool {
+    let path = match img_type {
+        "Primary" => item.image_primary_path.as_deref(),
+        "Backdrop" => item.backdrop_path.as_deref(),
+        "Logo" => item.logo_path.as_deref(),
+        "Thumb" => item.thumb_path.as_deref(),
+        "Banner" => item.banner_path.as_deref(),
+        "Disc" => item.disc_path.as_deref(),
+        "Art" => item.art_path.as_deref(),
+        _ => None,
+    };
+    match path {
+        Some(p) => !p.trim().is_empty() && !p.starts_with("http://") && !p.starts_with("https://"),
+        None => false,
+    }
+}
+
+/// 刷新 Series 时，遍历该 Series 的全部 Season，再级联到每个 Season 的全部 Episode，
+/// 为它们下载海报与缩略图。`replace_images=true` 会覆盖已有图（用于切换 SaveLocalMetadata
+/// 后把图搬到目标位置）。
+async fn cascade_download_series_children(
+    state: &AppState,
+    provider: &dyn MetadataProvider,
+    series_item: &DbMediaItem,
+    tmdb_id: &str,
+    library_options: &LibraryOptionsDto,
+    replace_images: bool,
+) -> Result<(), AppError> {
+    let seasons = repository::list_media_item_children(&state.pool, series_item.id).await?;
+    for season in seasons {
+        if !season.item_type.eq_ignore_ascii_case("Season") {
+            continue;
+        }
+        if let Err(e) = download_remote_images_for_item(
+            state,
+            provider,
+            &season,
+            tmdb_id,
+            library_options,
+            replace_images,
+        )
+        .await
+        {
+            tracing::warn!(season_id = %season.id, ?e, "下载 Season 海报失败");
+        }
+
+        let episodes = repository::list_media_item_children(&state.pool, season.id).await?;
+        for episode in episodes {
+            if !episode.item_type.eq_ignore_ascii_case("Episode") {
+                continue;
+            }
+            if let Err(e) = download_remote_images_for_item(
+                state,
+                provider,
+                &episode,
+                tmdb_id,
+                library_options,
+                replace_images,
+            )
+            .await
+            {
+                tracing::warn!(episode_id = %episode.id, ?e, "下载 Episode 缩略图失败");
+            }
+
+            if library_options.save_local_metadata {
+                let pool = state.pool.clone();
+                let ep_clone = episode.clone();
+                if let Err(e) = nfo_writer::write_episode_nfo(&pool, &ep_clone).await {
+                    tracing::warn!(episode_id = %episode.id, ?e, "写入 episode.nfo 失败");
+                }
+            }
+        }
+
+        if library_options.save_local_metadata {
+            if let Err(e) = nfo_writer::write_season_nfo(&state.pool, &season).await {
+                tracing::warn!(season_id = %season.id, ?e, "写入 season.nfo 失败");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 根据条目类型写对应 NFO（不递归）。Series 在调用方已经在 cascade 中处理了 Season/Episode。
+async fn write_nfo_for_refresh(
+    state: &AppState,
+    item: &DbMediaItem,
+    _is_series: bool,
+) -> Result<(), AppError> {
+    let kind = item.item_type.as_str();
+    if kind.eq_ignore_ascii_case("Movie") {
+        nfo_writer::write_movie_nfo(&state.pool, item).await?;
+    } else if kind.eq_ignore_ascii_case("Series") {
+        nfo_writer::write_series_nfo(&state.pool, item).await?;
+    } else if kind.eq_ignore_ascii_case("Season") {
+        nfo_writer::write_season_nfo(&state.pool, item).await?;
+    } else if kind.eq_ignore_ascii_case("Episode") {
+        nfo_writer::write_episode_nfo(&state.pool, item).await?;
+    }
     Ok(())
 }
 

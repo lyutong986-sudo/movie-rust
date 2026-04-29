@@ -11,6 +11,8 @@ const router = useRouter();
 
 const loading = ref(true);
 const error = ref('');
+const refreshing = ref(false);
+const refreshMessage = ref('');
 const person = ref<BaseItemDto | null>(null);
 const items = ref<BaseItemDto[]>([]);
 
@@ -21,17 +23,46 @@ const personImageUrl = computed(() => {
   return api.personImageUrl(person.value);
 });
 
+function formatDate(value?: string | null) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+const birthInfo = computed(() => {
+  if (!person.value) return '';
+  const date = formatDate(person.value.PremiereDate);
+  if (date) return date;
+  if (person.value.ProductionYear) return String(person.value.ProductionYear);
+  return '';
+});
+
+const deathDate = computed(() => formatDate(person.value?.EndDate as string | undefined));
+
+const birthplace = computed(() => {
+  const locations = person.value?.ProductionLocations;
+  if (Array.isArray(locations) && locations.length) return locations.join(' · ');
+  return '';
+});
+
 const externalLinks = computed(() => {
   const links: { name: string; url: string; icon: string }[] = [];
   const ids = person.value?.ProviderIds;
-  if (!ids) return links;
-  if (ids.Tmdb) links.push({ name: 'TMDB', url: `https://www.themoviedb.org/person/${ids.Tmdb}`, icon: 'i-lucide-film' });
-  if (ids.Imdb) links.push({ name: 'IMDb', url: `https://www.imdb.com/name/${ids.Imdb}`, icon: 'i-lucide-star' });
-  if (ids.Douban) links.push({ name: '豆瓣', url: `https://movie.douban.com/celebrity/${ids.Douban}/`, icon: 'i-lucide-book-open' });
+  if (ids) {
+    if (ids.Tmdb) links.push({ name: 'TMDB', url: `https://www.themoviedb.org/person/${ids.Tmdb}`, icon: 'i-lucide-film' });
+    if (ids.Imdb) links.push({ name: 'IMDb', url: `https://www.imdb.com/name/${ids.Imdb}`, icon: 'i-lucide-star' });
+    if (ids.Douban) links.push({ name: '豆瓣', url: `https://movie.douban.com/celebrity/${ids.Douban}/`, icon: 'i-lucide-book-open' });
+  }
+  for (const url of person.value?.ExternalUrls || []) {
+    if (!url?.Url) continue;
+    if (links.some(item => item.url === url.Url)) continue;
+    if (/Homepage/i.test(url.Name || '')) {
+      links.push({ name: '主页', url: url.Url, icon: 'i-lucide-globe' });
+    }
+  }
   return links;
 });
-
-const birthYear = computed(() => person.value?.ProductionYear);
 
 watch(
   () => route.params.id,
@@ -68,6 +99,21 @@ async function openItem(item: BaseItemDto) {
 
 async function playItem(item: BaseItemDto) {
   await router.push(playbackRoute(item));
+}
+
+async function refreshFromTmdb() {
+  if (!personId.value) return;
+  refreshing.value = true;
+  refreshMessage.value = '';
+  try {
+    await api.refreshPerson(personId.value, { replaceAllImages: true });
+    refreshMessage.value = '已从 TMDB 同步最新简介与头像';
+    await loadPerson();
+  } catch (e) {
+    refreshMessage.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    refreshing.value = false;
+  }
 }
 </script>
 
@@ -124,19 +170,54 @@ async function playItem(item: BaseItemDto) {
         </div>
 
         <div class="flex min-w-0 flex-1 flex-col gap-4">
-          <div>
-            <h1 class="text-highlighted text-2xl font-bold sm:text-3xl">{{ person.Name }}</h1>
-            <div class="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted">
-              <span v-if="birthYear">出生年份: {{ birthYear }}</span>
-              <span v-if="items.length">· {{ items.length }} 部作品</span>
+          <div class="flex flex-col gap-2">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <h1 class="text-highlighted text-2xl font-bold sm:text-3xl">{{ person.Name }}</h1>
+              <UButton
+                color="primary"
+                variant="soft"
+                size="sm"
+                icon="i-lucide-refresh-cw"
+                :loading="refreshing"
+                @click="refreshFromTmdb"
+              >
+                从 TMDB 刷新
+              </UButton>
             </div>
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted">
+              <span v-if="birthInfo" class="inline-flex items-center gap-1">
+                <UIcon name="i-lucide-cake" class="size-4" />出生于 {{ birthInfo }}
+              </span>
+              <span v-if="deathDate" class="inline-flex items-center gap-1">
+                <UIcon name="i-lucide-flower" class="size-4" />逝世于 {{ deathDate }}
+              </span>
+              <span v-if="birthplace" class="inline-flex items-center gap-1">
+                <UIcon name="i-lucide-map-pin" class="size-4" />{{ birthplace }}
+              </span>
+              <span v-if="items.length" class="inline-flex items-center gap-1">
+                <UIcon name="i-lucide-clapperboard" class="size-4" />{{ items.length }} 部作品
+              </span>
+            </div>
+            <p
+              v-if="refreshMessage"
+              class="text-xs"
+              :class="refreshMessage.includes('已从') ? 'text-primary' : 'text-error'"
+            >
+              {{ refreshMessage }}
+            </p>
           </div>
 
           <p
             v-if="person.Overview"
-            class="text-dimmed max-w-3xl text-sm leading-relaxed"
+            class="text-dimmed max-w-3xl whitespace-pre-line text-sm leading-relaxed"
           >
             {{ person.Overview }}
+          </p>
+          <p
+            v-else
+            class="text-muted max-w-3xl text-sm italic"
+          >
+            尚未同步该演员的简介，点击右上角"从 TMDB 刷新"以补全。
           </p>
 
           <div v-if="externalLinks.length" class="flex flex-wrap gap-2">

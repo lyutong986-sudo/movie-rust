@@ -250,8 +250,10 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         // -------------------------------------------------------------------
         r#"
         ALTER TABLE libraries
-            ADD COLUMN IF NOT EXISTS library_options JSONB       NOT NULL DEFAULT '{}'::jsonb,
-            ADD COLUMN IF NOT EXISTS date_modified   TIMESTAMPTZ NOT NULL DEFAULT now()
+            ADD COLUMN IF NOT EXISTS library_options    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS date_modified      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            ADD COLUMN IF NOT EXISTS primary_image_path TEXT,
+            ADD COLUMN IF NOT EXISTS primary_image_tag  TEXT
         "#,
         r#"
         DO $$
@@ -562,6 +564,16 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         "#,
         r#"CREATE INDEX IF NOT EXISTS idx_series_episode_catalog_series_id   ON series_episode_catalog(series_id)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_series_episode_catalog_series_date ON series_episode_catalog(series_id, premiere_date)"#,
+        // -------------------------------------------------------------------
+        // persons：人物简介/出生地/外链 — 与 0001_schema.sql 保持同源。
+        // -------------------------------------------------------------------
+        r#"
+        ALTER TABLE persons
+            ADD COLUMN IF NOT EXISTS death_date         TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS place_of_birth     TEXT,
+            ADD COLUMN IF NOT EXISTS homepage_url       TEXT,
+            ADD COLUMN IF NOT EXISTS metadata_synced_at TIMESTAMPTZ
+        "#,
         // -------------------------------------------------------------------
         // session_commands：老库只有 0018 建表但没 consumed_at。
         // -------------------------------------------------------------------

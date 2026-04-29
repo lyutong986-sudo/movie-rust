@@ -133,6 +133,13 @@ pub struct ExternalItemPerson {
     pub image_url: Option<String>,
     pub external_url: Option<String>,
     pub provider_ids: HashMap<String, String>,
+    /// 可选：人物简介（biography）。Series/Movie credits 自身不带，需要后续 `get_person_details` 补；保留字段用于
+    /// 个人详情刷新流水线一次性 upsert。
+    pub overview: Option<String>,
+    pub birth_date: Option<NaiveDate>,
+    pub death_date: Option<NaiveDate>,
+    pub place_of_birth: Option<String>,
+    pub homepage_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -97,8 +97,10 @@ CREATE TABLE IF NOT EXISTS libraries (
 );
 
 ALTER TABLE libraries
-    ADD COLUMN IF NOT EXISTS library_options jsonb       NOT NULL DEFAULT '{}'::jsonb,
-    ADD COLUMN IF NOT EXISTS date_modified   timestamptz NOT NULL DEFAULT now();
+    ADD COLUMN IF NOT EXISTS library_options       jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS date_modified         timestamptz NOT NULL DEFAULT now(),
+    ADD COLUMN IF NOT EXISTS primary_image_path    text,
+    ADD COLUMN IF NOT EXISTS primary_image_tag     text;
 
 -- 小写名字唯一索引：避免"Movies" / "movies" 重复建库。
 DO $$
@@ -600,6 +602,12 @@ CREATE TABLE IF NOT EXISTS persons (
     updated_at          timestamptz DEFAULT now(),
     UNIQUE (name, sort_name)
 );
+
+ALTER TABLE persons
+    ADD COLUMN IF NOT EXISTS death_date     timestamptz,
+    ADD COLUMN IF NOT EXISTS place_of_birth text,
+    ADD COLUMN IF NOT EXISTS homepage_url   text,
+    ADD COLUMN IF NOT EXISTS metadata_synced_at timestamptz;
 
 CREATE INDEX IF NOT EXISTS idx_persons_name            ON persons(name);
 CREATE INDEX IF NOT EXISTS idx_persons_sort_name       ON persons(sort_name);

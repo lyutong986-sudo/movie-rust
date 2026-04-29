@@ -129,6 +129,12 @@ impl ExternalPerson {
             favorite_count: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            death_date: self.death_date.map(|d| {
+                d.and_hms_opt(0, 0, 0).unwrap_or_default().and_utc()
+            }),
+            place_of_birth: self.place_of_birth.clone(),
+            homepage_url: self.homepage_url.clone(),
+            metadata_synced_at: Some(Utc::now()),
         }
     }
 }

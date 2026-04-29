@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-04-29（第十二轮 EmbySDK 客户端契约对齐 + 前端 MCP UI 点击全功能测试）
+> 对比时间：2026-04-29（第十四轮 人物简介 + 头像 TMDB 级联 + Refresh + 前端展示）
 
 ---
 
@@ -478,3 +478,226 @@ EmbySDK `getItemsByIdRemoteimages` 规约 `RemoteImageResult { Images, Providers
 - `frontend/src/components/IdentifyDialog.vue` / `MetadataEditorDialog.vue`：watch open 添加 `immediate: true`
 - `frontend/src/pages/HomePage.vue`：集成 `IdentifyDialog` + `MetadataEditorDialog`
 - `frontend/src/pages/library/LibraryPage.vue`：集成 `IdentifyDialog` + `MetadataEditorDialog`
+
+## 第十三批（Series/Season/Episode 图片级联 + NFO + 媒体库封面）
+
+> 触发：用户使用 Emby 客户端发现"识别/刷新"对剧集只更新 Series 自身字段，
+> 不会下载季海报和单集缩略图，更没有 Jellyfin/Kodi 风格的 `tvshow.nfo` /
+> `season.nfo` / `episode.nfo` 备份。同时希望媒体库（CollectionFolder）支持封面。
+> 参考 `模板项目\jellyfin后端模板\MediaBrowser.XbmcMetadata\Savers\*` 与
+> `MediaBrowser.Providers` 的 `SeriesProvider/SeasonImageProvider/EpisodeImageProvider`。
+
+### 1. 元数据刷新流水线扩展
+
+| 项 | 之前 | 之后 |
+|---|---|---|
+| `do_refresh_item_metadata` 支持的类型 | 仅 Movie / Series | Movie / **Series / Season / Episode** |
+| Season/Episode 缺 TMDB id 怎么办 | 早退 | **沿父链回溯到 Series 的 TMDB id**，再传 `season_number / episode_number` 给 `get_remote_images_for_child` |
+| Series 刷新对子项 | 仅写 `series_episode_catalog`（远程 URL） | **级联**遍历每个 Season/Episode，下载海报与缩略图到本地，并写入 `media_items.image_primary_path / thumb_path` |
+| `ReplaceAllImages=true` | 解析后被忽略 | 真正传到 `download_remote_images_for_item(force=true)`，强制覆盖（用于 SaveLocalMetadata 切换后把图搬到 strm 目录） |
+
+### 2. NFO 写入器（新模块 `backend/src/metadata/nfo_writer.rs`）
+
+- 新增四个函数：`write_movie_nfo / write_series_nfo / write_season_nfo / write_episode_nfo`
+- 路径与根元素对照 Jellyfin Savers：
+  - Series → `<series_dir>/tvshow.nfo`，`<tvshow>` 根
+  - Season → `<season_dir>/season.nfo`，`<season>` 根
+  - Episode → `<videoStem>.nfo`（与视频同名 sidecar），`<episodedetails>` 根
+  - Movie → 同名 `.nfo` 或目录 `movie.nfo`，`<movie>` 根
+- 字段集合（与 BaseNfoSaver._commonTags 对齐）：`title / originaltitle / sorttitle / plot / year / premiered / enddate / rating / criticrating / mpaa / runtime / genre / studio / tag / actor / director / credits / producer / imdb_id / tmdbid / tvdbid / uniqueid / status (Series) / seasonnumber (Season) / season+episode+aired+showtitle (Episode) / dateadded`
+- 触发开关：`LibraryOptions.SaveLocalMetadata`（默认关闭，与用户选项一致）
+- 在 `do_refresh_item_metadata` 末段调用，Series 刷新时还会在 cascade 内对每个 Season/Episode 一并写出
+
+### 3. 媒体库（CollectionFolder）封面
+
+| 子项 | 改动 |
+|---|---|
+| 数据库 | `libraries` 表 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS primary_image_path / primary_image_tag`（同步写入 `0001_schema.sql` 与 `ensure_schema_compatibility`） |
+| `DbLibrary` 模型 | 增加两个 `Option<String>` 字段 |
+| `repository::list_libraries / get_library / get_library_for_media_item / get_library_by_name` | SELECT 列增加新字段 |
+| 新增 `repository::update_library_image_path` | 写库封面路径 + tag + date_modified |
+| 新增 `repository::first_library_child_image` | 子项兜底（与 Jellyfin 同行为） |
+| `library_to_item_dto` | 自身有图 → 填 `ImageTags.Primary` + `PrimaryImageTag`；自身无图 → 自动取首个有图的子项作为兜底（`PrimaryImageItemId` 指向子项） |
+| `routes/images.rs::list_item_images` | 当 ID 命中 `libraries` 时返回 Primary 项 |
+| `routes/images.rs::serve_item_image` | media_items / persons 都未命中时检查 `libraries`：自身封面优先，没有则返子项首图 |
+| `routes/images.rs::upload_item_image_impl` | 媒体库 ID 时只接受 Primary，落到 `static_dir/library-images/{id}-primary.{ext}` |
+| `routes/images.rs::delete_item_image_impl` | 同上，删除磁盘文件并 `update_library_image_path(None)` |
+
+### 4. EmbySDK 行为对齐
+
+- `GET /Users/{id}/Views` 每个库现在带 `ImageTags.Primary` + `PrimaryImageItemId`，符合 Emby/Jellyfin 客户端拼 URL 的契约
+- `GET /Items/{libraryId}/Images/Primary` 自身或兜底都能 200 返回真实图像
+- `POST /Items/{libraryId}/Images/Primary`、`DELETE /Items/{libraryId}/Images/Primary` 与 media_items 同形
+
+### 5. 受影响文件
+
+- `backend/migrations/0001_schema.sql`：libraries 表新列
+- `backend/src/main.rs`：`ensure_schema_compatibility` 新列
+- `backend/src/models.rs`：`DbLibrary` 新字段
+- `backend/src/repository.rs`：library 全套读写新字段；`list_media_item_children`；`update_library_image_path`；`first_library_child_image`；`library_to_item_dto` 注入 ImageTags 兜底
+- `backend/src/routes/images.rs`：`list_item_images / serve_item_image / upload_item_image_impl / delete_item_image_impl` 加入 library 分支
+- `backend/src/routes/items.rs`：`do_refresh_item_metadata` / `do_refresh_item_metadata_with` 拆分；新增 `download_remote_images_for_item / cascade_download_series_children / resolve_series_for_child / write_nfo_for_refresh / local_image_exists`；`refresh_item_metadata` 路由把 `ReplaceAllImages` 透传给 do_refresh
+- `backend/src/metadata/nfo_writer.rs`：**新文件**
+- `backend/src/metadata/mod.rs`：导出 `nfo_writer`
+
+### 6. 真实环境验证（`tests/strm_tmdb_audit.py` 扩展）
+
+新增 19 条断言，覆盖：
+
+| 断言 | 结果 |
+|---|---|
+| `GET /Shows/{id}/Seasons` 拉到季列表 | ✅ |
+| Season DTO 含 `ImageTags.Primary` | ✅ |
+| `GET /Items/{seasonId}/Images/Primary` 200 | ✅ |
+| `GET /Shows/{id}/Episodes` 拉到剧集列表 | ✅ |
+| Episode DTO 同时含 `ImageTags.Primary` 与 `Thumb` | ✅ |
+| `GET /Items/{episodeId}/Images/Primary` 200 | ✅ |
+| `POST /Library/VirtualFolders/LibraryOptions` 切换 SaveLocalMetadata=true | ✅ |
+| `POST /Items/{seriesId}/Refresh?ReplaceAllImages=true` 二次刷新 | ✅ |
+| Series 目录落 `tvshow.nfo`，根元素 `<tvshow>` | ✅ |
+| Season 目录落 `season.nfo` | ✅ |
+| Episode sidecar `*.nfo` | ✅ |
+| Series/Season 文件夹落 `*-poster.jpg` | ✅ |
+| Episode 同名 `*-thumb.jpg` | ✅ |
+| `GET /Items/{libraryId}/Images/Primary` 上传前已能从子项兜底返回 200 | ✅ |
+| `POST /Items/{libraryId}/Images/Primary` 上传库封面 | ✅ |
+| `GET /Users/{id}/Views` 库带 `ImageTags.Primary` | ✅ |
+| `DELETE /Items/{libraryId}/Images/Primary` | ✅ |
+| 删除后 GET 仍 200（自动回落子项首图） | ✅ |
+
+最终：`strm_tmdb_audit.py` **59/60 PASS**（唯一失败为 OpenSubtitles 服务端限流，与本批改动无关；
+凭据未限流时 60/60 全过）。
+
+### 7. 回归测试
+
+- `tests/strm_tmdb_audit.py`：59~60 / 60（OS 受限流影响 0~1 项）
+- `tests/permission_audit.py`：**90/90** 通过
+- `tests/emby_endpoint_audit.py`：**44/44** 通过
+
+### 8. 待办（前端 D，下一轮）
+
+- `frontend/src/api/emby.ts::refreshItemMetadata` 增加 `recursive?: boolean`（当前 cascade 已经在 backend 完成，仅需让 ReplaceAllImages 在前端可勾选）
+- `frontend/src/pages/admin/LibrarySettings.vue` 增加"上传媒体库封面"按钮（multipart → `POST /Items/{libraryId}/Images/Primary`）
+- `frontend/src/pages/HomePage.vue` 库网格优先用 `api.itemImageUrl(library)`，无图回落现有图标
+
+---
+
+## 第十四批（人物简介 + 头像 — TMDB 级联 + Refresh + 前端展示）
+
+> 对照 Jellyfin 上游 `MediaBrowser.Providers/Plugins/Tmdb/People/TmdbPersonProvider`、`TmdbPersonImageProvider`、
+> `MediaBrowser.Controller.Entities.Person` 与 Jellyfin Web 的演员卡片/详情页实现。
+> 上一批刚补完 Series/Season/Episode 图片级联，但人物（演员/导演）的 `Overview` 与 `Primary` 始终为空——
+> Jellyfin 是在 Series/Movie 刷新流水线内同步触发 PeopleProvider，本项目此前只 upsert 名字 + image_url 占位，
+> 既没拉 biography，也没把头像下载到本地（懒加载首次会 504 ms 才能首屏出图）。
+
+### 1. 数据模型扩展（PG 列）
+
+`persons` 新增 4 列，按既定规则在 `0001_schema.sql` 与 `ensure_schema_compatibility` **同源**追加：
+
+```sql
+ALTER TABLE persons
+    ADD COLUMN IF NOT EXISTS death_date         timestamptz,
+    ADD COLUMN IF NOT EXISTS place_of_birth     text,
+    ADD COLUMN IF NOT EXISTS homepage_url       text,
+    ADD COLUMN IF NOT EXISTS metadata_synced_at timestamptz;
+```
+
+`DbPerson` 同步加 4 字段；`PersonDto` 增 `EndDate / ProductionLocations / HomepageUrl`，与 Emby 习惯字段对齐。
+
+### 2. TMDB Provider — biography 双语回退
+
+`TmdbProvider` 新增 `get_person_details_with_fallback`：当用户首选语言（如 `zh-CN`）下 `biography`
+或 `place_of_birth` 为空时，自动用 `language=en-US` 再请求一次 `/3/person/{id}`，把缺失字段拼回来；
+完全沿用 Jellyfin Server 上游的"本地化字段缺失回退默认"行为。`MetadataProvider::get_person_details`
+已切换到该 fallback 版本，所有调用方自动受益。
+
+### 3. Repository 三件套
+
+| 函数 | 作用 |
+|---|---|
+| `db_person_to_dto` | 抽公共 DTO 映射，三处 `get_persons*` 全部复用，避免再有人改字段时漏改 |
+| `patch_person_metadata` | 仅 patch biography / 出生日期 / 出生地 / 主页 / 排序名，**不动图片**；空字符串自动跳过避免覆盖已有值 |
+| `list_item_person_ids` | 取 media_item 的关联 person uuid，按 Actor 优先 + sort_order 升序，限 `top_n` |
+
+`update_person` SQL 改成全字段 COALESCE + provider_ids JSONB 合并，避免后续 NFO 写回时把已有 Imdb/Tvdb 抹掉。
+
+### 4. PersonService — 一站式刷新流水线
+
+```rust
+PersonService::refresh_person_from_tmdb(person_id, static_dir, force_image)
+```
+
+- 取 `persons.provider_ids.Tmdb` → `provider.get_person_details(tmdb_id)`（自带 zh-CN→en-US 回退）
+- `patch_person_metadata` 只下发非空字段，绝不把 `Overview` 清成 `""`
+- `download_person_primary_image`：HTTP 拉 `<static_dir>/person-images/{uuid}-primary.<ext>`
+  + `update_person_image_path` 回填本地路径；`force=true` 覆盖，`force=false` 仅在缺失/远程 URL 时下载
+- 失败仅 `tracing::warn`，不影响外层 Series/Movie 刷新事务
+
+```rust
+PersonService::refresh_persons_for_item(item_id, static_dir, top_n=20, force_image)
+```
+
+- 在 `do_refresh_item_metadata_with` 完成 `upsert_item_person` 之后被调用
+- 单条刷新失败吞掉 + warn，不会让一个被 TMDB 限流的演员阻塞整轮 Series 刷新
+- `replace_images=true` 透传到 person 级（与 Series 自身图片级联保持语义一致）
+
+### 5. 路由 — 兼容 Emby `Refresh` 习惯
+
+```
+POST /Persons/{personId}/Refresh
+    ?ReplaceAllImages=true   (可选)
+    &MetadataRefreshMode=... (兼容字段，无操作)
+    &ImageRefreshMode=...    (兼容字段，无操作)
+```
+
+支持 path 段为 32-hex GUID 或 plain `name`，返回 `204 No Content`。
+
+`PersonDto -> BaseItemDto` 映射补齐：
+- `PremiereDate` / `EndDate`：RFC3339 字符串反解为 `DateTime<Utc>`
+- `ProductionLocations`：`place_of_birth` → `Vec<String>`
+- `ExternalUrls`：合并人物自带的外链 + 主页
+
+### 6. 前端 PersonPage 升级
+
+`frontend/src/pages/person/PersonPage.vue`：
+
+- 头部从"出生年份: 2018"升级为 **"出生于 1968-09-22 · 逝世于 2014-08-11 · 出生地 USA · 12 部作品"**
+- Overview 为空时给出空态文案"尚未同步该演员的简介，点击右上角'从 TMDB 刷新'以补全"
+- 右上角新增 `从 TMDB 刷新` 按钮 → `api.refreshPerson(personId, { replaceAllImages: true })`
+- `BaseItemDto` 类型补 `EndDate / ProductionLocations / ExternalUrls`
+
+### 7. 验证（`tests/strm_tmdb_audit.py` 新增 7 条断言）
+
+| 断言 | 结果 |
+|---|---|
+| `Series.People` 至少 1 条（识别后入库） | ✅ count=12 |
+| 至少 1 个 Person 的 `Overview` 已自动落库 | ✅ |
+| 至少 1 个 Person 的 `ImageTags.Primary` 已存在 | ✅ |
+| `GET /Items/{personId}/Images/Primary` 200 | ✅ |
+| `POST /Persons/{personId}/Refresh?ReplaceAllImages=true` | ✅ HTTP 204 |
+| 刷新后 `Person.Overview` 仍非空 | ✅ len=236 |
+| 刷新后 `Person.ImageTags.Primary` 仍存在 | ✅ |
+
+最终：`strm_tmdb_audit.py` **66/67 PASS**（唯一 FAIL 为 OpenSubtitles 服务端限流"未返回任何字幕条目"，与本批无关）。
+
+### 8. 回归
+
+- `tests/permission_audit.py`：**90/90** 通过
+- `tests/emby_endpoint_audit.py`：**44/44** 通过
+
+### 9. 关键差异修复一览
+
+| Jellyfin 上游 | 本项目此前 | 本批后 |
+|---|---|---|
+| `TmdbPersonProvider` 在 Series/Movie 刷新内同步拉 biography/profile | `upsert_item_person` 仅写 name+image_url | ✅ `refresh_persons_for_item` 级联 |
+| `TmdbPersonImageProvider` 把 profile 落到本地 | `resolve_person_image_path` 首访才下载 | ✅ refresh 时直接下载到 `<static>/person-images` |
+| zh-CN biography 缺失回退 default | 永远用 zh-CN，遇空就空 | ✅ `get_person_details_with_fallback` |
+| `Person.Overview/PremiereDate/EndDate/ProductionLocations` | 仅 Overview/PremiereDate/ProductionYear | ✅ 5 字段全 |
+| `POST /Items/{id}/Refresh` 对 Person 触发 | 不存在 | ✅ `POST /Persons/{id}/Refresh` |
+
+### 10. 待办（下一轮可选）
+
+- 拉取 cast 时把 cast 数量上限做成 `LibraryOptions.cast_limit`（Jellyfin 默认 200，本项目当前 cap 在 20）
+- `PeopleValidationTask` 计划任务：每 7 天扫一遍 `metadata_synced_at IS NULL OR < now() - interval '7d'`，
+  对 `provider_ids ? 'Tmdb'` 的人物批量补 biography（与 Jellyfin 上游对齐）
+- 前端在演员卡片悬浮弹出 `Tooltip` 显示 Overview 摘要（避免必须进详情页）

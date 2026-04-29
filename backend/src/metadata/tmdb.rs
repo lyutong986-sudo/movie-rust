@@ -142,6 +142,71 @@ impl TmdbProvider {
         Ok(person_details)
     }
 
+    /// 取人物详情时，若用户首选语言（如 zh-CN）下 biography 为空字符串，
+    /// 再用 en-US 请求一次把 biography / place_of_birth 拼回去。
+    /// Jellyfin 上游 TmdbPersonProvider 有等价行为：本地化字段缺失时会回退 default。
+    async fn get_person_details_with_fallback(
+        &self,
+        person_id: &str,
+    ) -> Result<TmdbPersonDetails, AppError> {
+        let mut details = self.get_person_details_internal(person_id).await?;
+        let biography_empty = details.biography.trim().is_empty();
+        let place_empty = details
+            .place_of_birth
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        if !biography_empty && !place_empty {
+            return Ok(details);
+        }
+        if self.config.language.eq_ignore_ascii_case("en-US") {
+            return Ok(details);
+        }
+
+        let mut params = HashMap::new();
+        if !self.is_bearer_token() {
+            params.insert("api_key".to_string(), self.config.api_key.clone());
+        }
+        params.insert("language".to_string(), "en-US".to_string());
+        let url = self.build_url(&format!("/person/{}", person_id));
+        let response = match self.auth_get(&url).query(&params).send().await {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::debug!(person_id, ?err, "fallback en-US 人物详情请求失败");
+                return Ok(details);
+            }
+        };
+        let response = match response.error_for_status() {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::debug!(person_id, ?err, "fallback en-US 人物详情非 2xx");
+                return Ok(details);
+            }
+        };
+        let en_details: TmdbPersonDetails = match response.json().await {
+            Ok(d) => d,
+            Err(err) => {
+                tracing::debug!(person_id, ?err, "fallback en-US 人物详情 JSON 解析失败");
+                return Ok(details);
+            }
+        };
+
+        if biography_empty && !en_details.biography.trim().is_empty() {
+            details.biography = en_details.biography;
+        }
+        if place_empty {
+            if let Some(p) = en_details.place_of_birth {
+                if !p.trim().is_empty() {
+                    details.place_of_birth = Some(p);
+                }
+            }
+        }
+        if details.homepage.is_none() {
+            details.homepage = en_details.homepage;
+        }
+        Ok(details)
+    }
+
     /// 获取人物作品
     async fn get_person_credits_internal(
         &self,
@@ -433,7 +498,7 @@ impl MetadataProvider for TmdbProvider {
     }
 
     async fn get_person_details(&self, provider_id: &str) -> Result<ExternalPerson, AppError> {
-        let person_details = self.get_person_details_internal(provider_id).await?;
+        let person_details = self.get_person_details_with_fallback(provider_id).await?;
 
         let mut provider_ids = HashMap::new();
         provider_ids.insert("Tmdb".to_string(), person_details.id.to_string());
@@ -726,6 +791,11 @@ impl MetadataProvider for TmdbProvider {
                     .map(|path| format!("{}/original{}", self.config.image_base_url, path)),
                 external_url: Some(format!("https://www.themoviedb.org/person/{}", cast.id)),
                 provider_ids,
+                overview: None,
+                birth_date: None,
+                death_date: None,
+                place_of_birth: None,
+                homepage_url: None,
             });
         }
 
@@ -754,6 +824,11 @@ impl MetadataProvider for TmdbProvider {
                     .map(|path| format!("{}/original{}", self.config.image_base_url, path)),
                 external_url: Some(format!("https://www.themoviedb.org/person/{}", crew.id)),
                 provider_ids,
+                overview: None,
+                birth_date: None,
+                death_date: None,
+                place_of_birth: None,
+                homepage_url: None,
             });
         }
 
