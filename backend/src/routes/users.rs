@@ -542,10 +542,22 @@ async fn update_password(
         return Err(AppError::Forbidden);
     }
 
+    let user = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+
+    // Emby/Sakura 风格的"清密码"两阶段流程：先 `{ResetPassword:true}` → 再 `{NewPw:"..."}`。
+    // 仅 admin（含 API Key）能直接重置；用户改自己密码必须沿正常路径提供新密码。
     if payload.reset_password.unwrap_or(false) {
-        return Err(AppError::BadRequest(
-            "当前版本暂不支持无密码重置，请直接设置新密码".to_string(),
-        ));
+        if !session.is_admin {
+            return Err(AppError::Forbidden);
+        }
+        // 写一个 32 字节随机 Argon2 占位 hash（永远不可登录），同时清掉 legacy 字段。
+        let placeholder = Uuid::new_v4().to_string();
+        let placeholder_hash = security::hash_password(&placeholder)?;
+        repository::set_user_password_hash(&state.pool, user_id, &placeholder_hash).await?;
+        repository::delete_sessions_for_user(&state.pool, user_id).await?;
+        return Ok(StatusCode::NO_CONTENT);
     }
 
     let new_password = payload
@@ -555,10 +567,6 @@ async fn update_password(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::BadRequest("缺少新密码".to_string()))?;
-
-    let user = repository::get_user_by_id(&state.pool, user_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
 
     if session.user_id == user_id && !session.is_admin {
         let current_password = payload
@@ -651,6 +659,74 @@ async fn update_user_policy(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 把 incoming policy patch 里 `EnabledFolders / BlockedMediaFolders` 中的库名字符串
+/// 翻译成 GUID。
+///
+/// 第三方管理脚本（如 `Sakura_embyboss`）经常直接把中文库名塞进
+/// `BlockedMediaFolders=['播放列表', ...]`；本项目的标准契约是 GUID 列表。
+/// 这里在 deserialize 之前先做一次 lookup：
+/// - 字符串能解析为标准 UUID 或 emby 32-hex GUID → 原样保留
+/// - 否则到 `libraries` 表里按 `lower(name)` 匹配 → 用对应 id 的 32-hex GUID 替换
+/// - 找不到的字符串保持原值（lossy deserializer 会在下一步丢弃，等同 emby
+///   服务端面对未知库名的行为）
+async fn resolve_folder_names_in_policy(
+    state: &AppState,
+    mut payload: Value,
+) -> Result<Value, AppError> {
+    let Some(obj) = payload.as_object_mut() else {
+        return Ok(payload);
+    };
+    let needs_lookup = ["EnabledFolders", "BlockedMediaFolders"].iter().any(|k| {
+        obj.get(*k).and_then(Value::as_array).is_some_and(|arr| {
+            arr.iter().any(|v| {
+                v.as_str()
+                    .map(|s| Uuid::parse_str(s).is_err() && crate::models::emby_id_to_uuid(s).is_err())
+                    .unwrap_or(false)
+            })
+        })
+    });
+    if !needs_lookup {
+        return Ok(payload);
+    }
+
+    let libraries = repository::list_libraries(&state.pool).await?;
+    let by_name: std::collections::HashMap<String, Uuid> = libraries
+        .iter()
+        .map(|lib| (lib.name.to_ascii_lowercase(), lib.id))
+        .collect();
+
+    for key in ["EnabledFolders", "BlockedMediaFolders"] {
+        if let Some(arr) = obj.get_mut(key).and_then(Value::as_array_mut) {
+            for v in arr.iter_mut() {
+                let resolved = match v.as_str() {
+                    Some(s) => {
+                        if Uuid::parse_str(s).is_ok() || crate::models::emby_id_to_uuid(s).is_ok()
+                        {
+                            None
+                        } else {
+                            by_name.get(&s.to_ascii_lowercase()).map(|id| {
+                                let guid = crate::models::uuid_to_emby_guid(id);
+                                tracing::debug!(
+                                    original = s,
+                                    resolved = %id,
+                                    "policy.{} 用库名匹配到 GUID",
+                                    key
+                                );
+                                guid
+                            })
+                        }
+                    }
+                    None => None,
+                };
+                if let Some(guid) = resolved {
+                    *v = Value::String(guid);
+                }
+            }
+        }
+    }
+    Ok(payload)
+}
+
 /// 带安全约束的策略写入：保留 `update_user_policy` 与 `update_user` 复用。
 ///
 /// 约束：
@@ -665,6 +741,8 @@ async fn apply_user_policy_update(
     let user = repository::get_user_by_id(&state.pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+
+    let payload = resolve_folder_names_in_policy(state, payload).await?;
 
     let mut merged_policy = if user.policy.is_null() {
         serde_json::to_value(UserPolicyDto::default())?

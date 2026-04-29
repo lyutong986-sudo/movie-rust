@@ -478,17 +478,34 @@ pub struct UserPolicyDto {
     pub allowed_tags: Vec<String>,
     pub block_unrated_items: Vec<String>,
     pub access_schedules: Vec<AccessScheduleDto>,
+    #[serde(deserialize_with = "deserialize_uuid_list_lossy")]
     pub enabled_folders: Vec<Uuid>,
     pub enable_all_folders: bool,
+    #[serde(deserialize_with = "deserialize_uuid_list_lossy")]
     pub enabled_channels: Vec<Uuid>,
     pub enable_all_channels: bool,
     pub enabled_devices: Vec<String>,
     pub enable_all_devices: bool,
+    #[serde(deserialize_with = "deserialize_uuid_list_lossy")]
     pub blocked_media_folders: Vec<Uuid>,
+    #[serde(deserialize_with = "deserialize_uuid_list_lossy")]
     pub blocked_channels: Vec<Uuid>,
     pub authentication_provider_id: String,
     pub password_reset_provider_id: String,
     pub sync_play_access: String,
+    /// Sakura_embyboss 等老 emby 控制脚本用 `IsHiddenRemotely` 表示
+    /// "登录页 + 远程会话也隐藏"。本项目把它视为 `is_hidden` 的镜像保留写入，
+    /// 实际语义并入 `is_hidden`。
+    #[serde(default)]
+    pub is_hidden_remotely: bool,
+    /// emby 4.x 的"允许设备相机上传"开关。本项目目前不实现 CameraUpload，
+    /// 仅保留契约字段以避免 400。
+    #[serde(default)]
+    pub allow_camera_upload: bool,
+    /// emby 老字段：允许下载字幕。本项目用 `enable_subtitle_management`，
+    /// 这里保留契约字段。
+    #[serde(default)]
+    pub enable_subtitle_downloading: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -545,8 +562,43 @@ impl Default for UserPolicyDto {
             authentication_provider_id: "Default".to_string(),
             password_reset_provider_id: "Default".to_string(),
             sync_play_access: "CreateAndJoinGroups".to_string(),
+            is_hidden_remotely: false,
+            allow_camera_upload: false,
+            enable_subtitle_downloading: false,
         }
     }
+}
+
+/// 把 `Vec<Value>`（JSON 数组）反序列化成 `Vec<Uuid>`，单条无法解析为 Uuid 时不报错而是丢弃。
+///
+/// 设计动机：
+/// - Emby SDK 对 `EnabledFolders / BlockedMediaFolders` 等字段约定为 GUID 列表，但
+///   类似 `Sakura_embyboss` 的第三方管理脚本会**直接把库名（中文/英文字符串）**塞进
+///   `BlockedMediaFolders`，再交给 emby 服务端做名字→GUID 的本地映射。
+/// - 严格 `Vec<Uuid>` 反序列化会让这类客户端 400，本项目允许"无法 parse 即丢弃"，
+///   同时由 `apply_user_policy_update` 的库名映射层负责将字符串名翻译为 GUID 注入回来。
+/// - 接受标准 8-4-4-4-12 UUID、emby 32-hex GUID 两种格式。
+fn deserialize_uuid_list_lossy<'de, D>(d: D) -> Result<Vec<Uuid>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<serde_json::Value> = serde::Deserialize::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| {
+            let s = match v {
+                serde_json::Value::String(s) => s,
+                other => other.as_str().map(ToOwned::to_owned).unwrap_or_default(),
+            };
+            let s = s.trim();
+            if s.is_empty() {
+                return None;
+            }
+            Uuid::parse_str(s)
+                .ok()
+                .or_else(|| emby_id_to_uuid(s).ok())
+        })
+        .collect())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2018,6 +2070,10 @@ pub struct VirtualFolderInfoDto {
     pub name: String,
     pub collection_type: String,
     pub item_id: String,
+    /// Emby 服务端老版本 (≤4.7) 在 `VirtualFolders` 列表里同时返回 `ItemId` 与
+    /// `Guid`，第三方管理工具（如 `Sakura_embyboss`）只读 `Guid`。本项目把它视为
+    /// `ItemId` 的别名一同输出，保证两类客户端都能取到库标识。
+    pub guid: String,
     pub locations: Vec<String>,
     pub library_options: LibraryOptionsDto,
 }

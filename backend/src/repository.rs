@@ -1718,6 +1718,34 @@ pub async fn change_user_password(
     Ok(())
 }
 
+/// 直接覆盖 `password_hash`（不做长度/格式校验，调用方自己保证传的是
+/// `security::hash_password` 的输出）。
+///
+/// 用于"管理员重置密码"等流程：
+/// - 写一个永远无法登录的占位 Argon2 hash 作为"清密码"语义；
+/// - 同时清掉 legacy 字段，避免老 SHA1 仍然可用。
+pub async fn set_user_password_hash(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    new_hash: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE users
+           SET password_hash = $1,
+               legacy_password_format = NULL,
+               legacy_password_hash = NULL,
+               date_modified = now()
+         WHERE id = $2
+        "#,
+    )
+    .bind(new_hash)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// 写入或清除某用户的 legacy 密码（外部用户库导入用）。
 ///
 /// - `format=Some/hash=Some`：覆盖
@@ -3445,10 +3473,12 @@ pub fn library_to_virtual_folder_dto(library: &DbLibrary) -> VirtualFolderInfoDt
         .map(|path| path.path.clone())
         .collect::<Vec<_>>();
 
+    let item_id = uuid_to_emby_guid(&library.id);
     VirtualFolderInfoDto {
         name: library.name.clone(),
         collection_type: library.collection_type.clone(),
-        item_id: uuid_to_emby_guid(&library.id),
+        guid: item_id.clone(),
+        item_id,
         locations,
         library_options: options,
     }

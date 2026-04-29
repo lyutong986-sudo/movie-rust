@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-04-29（第十五轮 Emby SQLite 用户库迁移 - sql.js 浏览器解析 + SHA1 兼容登录 + Argon2 自动升级）
+> 对比时间：2026-04-29（第十六轮 Sakura_embyboss 第三方 Telegram 管理工具契约对齐）
 
 ---
 
@@ -835,3 +835,149 @@ upgrade_legacy_password(user_id, pw)    // 写 Argon2 + 清空 legacy
 - 给 `import-emby` 增加可选的 `RoleMap`：emby `Configuration.Policy.IsAdministrator` → 本项目 `IsAdministrator`，自动设管理员
 - 前端给已上传的"原 admin"用户**默认勾选"管理员"模板**，避免管理员被批量降级
 - 把"批量改权限"功能搬到 `UsersSettings.vue`：列表多选 + 顶部弹出 `policy/bulk` 表单
+
+---
+
+## 第十六批（Sakura_embyboss Telegram 管理工具契约对齐）
+
+### 1. 调研对象
+
+第三方 emby 管理工具 `C:\Users\11797\Desktop\Sakura_embyboss-master`，定位是
+**Telegram bot + 用户开通/续期/封禁面板**。所有 emby 调用集中在
+`bot/func_helper/emby.py`（aiohttp 异步实现），认证方式：
+**全局 `EMBY_API_KEY` + `X-Emby-Token` header**（路径前缀 `/emby/...`）。
+
+### 2. 抽离的 emby 调用清单（共 16 个端点）
+
+| # | 方法 | 路径 | Sakura 用途 |
+|---|---|---|---|
+| 1 | GET | `/emby/Users` | 拉全体用户做 TG 面板列表 |
+| 2 | GET | `/emby/Users/{id}` | 用户详情 + Policy |
+| 3 | GET | `/emby/Users/Query?NameStartsWithOrGreater=` | TG 命令搜用户 |
+| 4 | POST | `/emby/Users/AuthenticateByName` | 帮 TG 用户在 emby 验账号 |
+| 5 | POST | `/emby/Users/New` | 开通账户（仅传 `Name`） |
+| 6 | POST | `/emby/Users/{id}/Password` | 两阶段改密：`{ResetPassword:true}` → `{NewPw:"..."}` |
+| 7 | POST | `/emby/Users/{id}/Policy` | 写 Sakura 风格 Policy |
+| 8 | DELETE | `/emby/Users/{id}` | 删账户 |
+| 9 | GET | `/emby/Library/VirtualFolders` | 取库列表（**用 `lib['Guid']`**） |
+| 10 | GET | `/emby/Sessions` | 当前在线 |
+| 11 | GET | `/emby/Devices/Info?Id=...` | 设备指纹 |
+| 12 | GET | `/emby/Items/Counts` | 全库统计 |
+| 13 | POST | `/emby/Users/{id}/FavoriteItems/{itemId}` | 加收藏 |
+| 14 | GET | `/emby/Users/{id}/Items?Filters=IsFavorite&Recursive=true&IncludeItemTypes=Movie,Series,Episode,Person` | 查收藏 |
+| 15 | GET | `/emby/Items?Ids=&Fields=People` | 批查 Items |
+| 16 | GET | `/emby/Items/{id}/Images/Primary` | 海报代理 |
+
+### 3. 发现的 3 个契约缺口（未修复前 18/18 失败 3 项）
+
+| 缺口 | Sakura 期望 | 本项目此前 |
+|---|---|---|
+| `POST /Users/{id}/Password` 第一阶段 `{ResetPassword:true}` | 200/204 清密码 | **400** "暂不支持无密码重置" |
+| `POST /Users/{id}/Policy` 多发 `IsHiddenRemotely / AllowCameraUpload / EnableSubtitleDownloading`，且 `BlockedMediaFolders=['播放列表']` 用**库名字符串** | 200/204 + 名字→GUID | **400** unknown field / type error |
+| `GET /Library/VirtualFolders[].Guid` | Sakura 直接读 `Guid` | 仅返回 `ItemId`，没有 `Guid` 字段 |
+
+### 4. 修复
+
+#### 4.1 `update_password` 接受 `ResetPassword=true`（仅 admin）
+
+`backend/src/routes/users.rs::update_password`：
+
+```text
+if reset_password && session.is_admin
+  → security::hash_password(uuid_v4_random)         // 永远无法登录的 placeholder
+  → repository::set_user_password_hash(user_id, hash)  // 同时清 legacy 字段
+  → delete_sessions_for_user(user_id)
+  → 204
+```
+
+新增 `repository::set_user_password_hash` 直接覆写 `password_hash`，不做长度限制（与 `change_user_password` 4 字符下限解耦），并清空 `legacy_password_format / legacy_password_hash`。
+
+#### 4.2 `UserPolicyDto` 字段补全 + lossy 反序列化
+
+`backend/src/models.rs::UserPolicyDto`：
+
+- 新增字段 `is_hidden_remotely / allow_camera_upload / enable_subtitle_downloading`（默认 false）
+- `enabled_folders / blocked_media_folders / enabled_channels / blocked_channels` 加 `#[serde(deserialize_with = "deserialize_uuid_list_lossy")]`：单条无法解析为 Uuid 时丢弃，不再让整个请求 400
+- 接受标准 8-4-4-4-12 UUID + emby 32-hex GUID 两种格式
+
+#### 4.3 库名 → GUID 自动解析（`apply_user_policy_update`）
+
+新 helper `resolve_folder_names_in_policy(state, payload)` 在 `merge_json + serde::from_value` 之前先扫描 `payload.EnabledFolders / BlockedMediaFolders`，对每条非 UUID 字符串去 `libraries` 表按 `lower(name)` 反查 GUID 注入回去：
+
+```text
+['UI测试库']  →  ['8d8505da-8ed9-427e-bd17-ac350b301b68']
+['播放列表']  →  （无同名库 → lossy 阶段丢弃，行为同 emby 服务端面对未知库名）
+```
+
+测试结果直接 SQL 复读 `Policy.BlockedMediaFolders`：
+```
+['8d8505da-8ed9-427e-bd17-ac350b301b68']  ✅ 真实生效
+```
+
+#### 4.4 `VirtualFolderInfoDto` 加 `Guid` 字段
+
+`backend/src/models.rs` + `backend/src/repository.rs::library_to_virtual_folder_dto`：
+`Guid = ItemId`（同值同时输出，新老客户端都能拿到）。
+
+```json
+{
+  "Name": "UI测试库",
+  "CollectionType": "tvshows",
+  "ItemId": "8D8505DA8ED9427EBD17AC350B301B68",
+  "Guid":   "8D8505DA8ED9427EBD17AC350B301B68",
+  "Locations": [...],
+  "LibraryOptions": {...}
+}
+```
+
+### 5. 验证（`tests/sakura_compat_audit.py`，**19/19 PASS**）
+
+| # | 断言 | 结果 |
+|---|---|---|
+| 1 | `GET /emby/Users` 返回列表含 Id/Name/Policy | ✅ |
+| 2 | `GET /emby/Users/{id}` 单用户含 Policy | ✅ |
+| 3 | `Users/Query?NameStartsWithOrGreater=` 命中 admin | ✅ |
+| 4 | `Users/AuthenticateByName` 普通登录 | ✅ |
+| 5 | `Users/New` 仅传 `{Name:"..."}` 创建 | ✅ |
+| 6 | `Users/{id}/Password` 两阶段改密（reset → newPw） | ✅ phase1=204 phase2=204 |
+| 7 | `Users/{id}/Policy` 写 Sakura 25 字段 + camera_upload | ✅ 204 |
+| **7b** | **`BlockedMediaFolders=['UI测试库']` 自动解析为 GUID** | **✅ ['8d8505da-8ed9-427e-bd17-ac350b301b68']** |
+| 8 | `DELETE /Users/{id}` | ✅ 204 |
+| 9a | `Library/VirtualFolders` 200 | ✅ |
+| 9b | 响应含 `Guid` 字段 | ✅ |
+| 9c | 响应含 `ItemId` 字段 | ✅ |
+| 10 | `Sessions` 在线列表 | ✅ |
+| 11 | `Devices/Info?Id=` | ✅ |
+| 12 | `Items/Counts` 含 `MovieCount/SeriesCount/...` | ✅ |
+| 13 | `Users/{id}/FavoriteItems/{itemId}` | ✅ |
+| 14 | `Users/{id}/Items?Filters=IsFavorite&Recursive=true` | ✅ |
+| 15 | `Items?Ids=&Fields=People` | ✅ |
+| 16 | `Items/{id}/Images/Primary` | ✅ |
+
+### 6. 回归
+
+- `tests/permission_audit.py`：**90/90** 通过
+- `tests/emby_endpoint_audit.py`：**44/44** 通过
+- `tests/emby_user_import_audit.py`：**13/13** 通过（顺手补幂等清理）
+- `tests/sakura_compat_audit.py`（新增）：**19/19** 通过
+
+### 7. 部署提示
+
+要让 Sakura_embyboss（或任何"持永久 API Key 的第三方 emby 管理工具"）连本项目：
+
+1. 启动容器时设环境变量 **`EMBY_API_KEY=<32+ 位随机字符串>`**
+2. 在 Sakura `config.json` 中：
+   - `url = http://<host>:<port>`（本项目实例地址，**不带** `/emby` 后缀）
+   - `api_key = <上面那串>`
+3. Sakura 调用走 `<url>/emby/...`，本项目通过 `routes::router().nest("/emby", api)` 自动接住
+4. **未实现**的 Sakura 模块（Sakura 自带 TG bot / 支付订单 / 海报榜单 / Webhook 转发）跟流媒体本身无关，留 Sakura 进程继续承担即可
+
+### 8. 关键差异修复一览
+
+| 第三方期望 | 本项目此前 | 本批后 |
+|---|---|---|
+| `Password` 两阶段改密的 `{ResetPassword:true}` | 400 拒绝 | ✅ admin 直接清成 placeholder Argon2 |
+| `Policy.IsHiddenRemotely / AllowCameraUpload / EnableSubtitleDownloading` | unknown field 400 | ✅ DTO 已扩展，默认 false |
+| `BlockedMediaFolders=['库名字符串']` | type error 400 | ✅ 自动 lookup → GUID |
+| `VirtualFolders[].Guid` | 缺失 | ✅ 与 `ItemId` 同值返回 |
+| `EnabledFolders=['未知字符串', uuid]` | 整体 400 | ✅ lossy 反序列化，丢弃未知项保留有效 GUID |
