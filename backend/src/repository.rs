@@ -2491,28 +2491,55 @@ pub async fn list_server_logs(log_dir: &Path) -> Result<Vec<LogFileDto>, AppErro
 pub async fn list_activity_logs(
     pool: &sqlx::PgPool,
     limit: i64,
+    user_id: Option<uuid::Uuid>,
 ) -> Result<Vec<ActivityLogEntryDto>, AppError> {
-    let rows = sqlx::query_as::<_, ActivityLogRow>(
-        r#"
-        SELECT
-            e.id,
-            e.event_type,
-            e.position_ticks,
-            e.is_paused,
-            e.played_to_completion,
-            e.created_at,
-            u.name AS user_name,
-            m.name AS item_name
-        FROM playback_events e
-        INNER JOIN users u ON u.id = e.user_id
-        LEFT JOIN media_items m ON m.id = e.item_id
-        ORDER BY e.created_at DESC
-        LIMIT $1
-        "#,
-    )
-    .bind(limit.clamp(1, 200))
-    .fetch_all(pool)
-    .await?;
+    let rows = if let Some(uid) = user_id {
+        sqlx::query_as::<_, ActivityLogRow>(
+            r#"
+            SELECT
+                e.id,
+                e.event_type,
+                e.position_ticks,
+                e.is_paused,
+                e.played_to_completion,
+                e.created_at,
+                u.name AS user_name,
+                m.name AS item_name
+            FROM playback_events e
+            INNER JOIN users u ON u.id = e.user_id
+            LEFT JOIN media_items m ON m.id = e.item_id
+            WHERE e.user_id = $1
+            ORDER BY e.created_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(uid)
+        .bind(limit.clamp(1, 200))
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, ActivityLogRow>(
+            r#"
+            SELECT
+                e.id,
+                e.event_type,
+                e.position_ticks,
+                e.is_paused,
+                e.played_to_completion,
+                e.created_at,
+                u.name AS user_name,
+                m.name AS item_name
+            FROM playback_events e
+            INNER JOIN users u ON u.id = e.user_id
+            LEFT JOIN media_items m ON m.id = e.item_id
+            ORDER BY e.created_at DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit.clamp(1, 200))
+        .fetch_all(pool)
+        .await?
+    };
 
     Ok(rows
         .into_iter()

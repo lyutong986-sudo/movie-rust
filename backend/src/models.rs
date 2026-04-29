@@ -2074,6 +2074,8 @@ pub struct ImageInfoDto {
 pub struct ActivityLogQuery {
     #[serde(default)]
     pub limit: Option<i64>,
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

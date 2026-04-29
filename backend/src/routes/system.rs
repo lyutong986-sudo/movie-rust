@@ -446,19 +446,21 @@ async fn update_media_encoder_path(
 }
 
 async fn server_logs(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<LogFileDto>>, crate::error::AppError> {
+    require_admin(&session)?;
     Ok(Json(
         repository::list_server_logs(&state.config.log_dir).await?,
     ))
 }
 
 async fn server_logs_query(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Query(query): Query<LogQuery>,
 ) -> Result<Json<QueryResult<LogFileDto>>, crate::error::AppError> {
+    require_admin(&session)?;
     let logs = repository::list_server_logs(&state.config.log_dir).await?;
     let search_term = query
         .search_term
@@ -489,21 +491,23 @@ async fn server_logs_query(
 }
 
 async fn server_log_content(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, crate::error::AppError> {
+    require_admin(&session)?;
     let path = log_file_path(&state.config.log_dir, &name)?;
     let content = tokio::fs::read_to_string(path).await?;
     Ok(([(CONTENT_TYPE, "text/plain; charset=utf-8")], content))
 }
 
 async fn server_log_lines(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<LogQuery>,
 ) -> Result<Json<QueryResult<String>>, crate::error::AppError> {
+    require_admin(&session)?;
     let path = log_file_path(&state.config.log_dir, &name)?;
     let content = tokio::fs::read_to_string(path).await?;
     let search_term = query
@@ -536,11 +540,14 @@ async fn server_log_lines(
 }
 
 async fn activity_log_entries(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Query(query): Query<ActivityLogQuery>,
 ) -> Result<Json<QueryResult<crate::models::ActivityLogEntryDto>>, crate::error::AppError> {
-    let items = repository::list_activity_logs(&state.pool, query.limit.unwrap_or(50)).await?;
+    require_admin(&session)?;
+    let user_uuid = query.user_id.as_deref()
+        .and_then(|id| crate::models::emby_id_to_uuid(id).ok());
+    let items = repository::list_activity_logs(&state.pool, query.limit.unwrap_or(50), user_uuid).await?;
     Ok(Json(QueryResult {
         total_record_count: items.len() as i64,
         start_index: Some(0),

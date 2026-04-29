@@ -22,8 +22,8 @@ pub fn router() -> Router<AppState> {
         .route("/scheduledtasks", get(list_tasks))
         .route("/ScheduledTasks/{task_id}", get(get_task))
         .route("/scheduledtasks/{task_id}", get(get_task))
-        .route("/ScheduledTasks/{task_id}/Triggers", post(update_triggers))
-        .route("/scheduledtasks/{task_id}/triggers", post(update_triggers))
+        .route("/ScheduledTasks/{task_id}/Triggers", post(update_triggers).put(update_triggers))
+        .route("/scheduledtasks/{task_id}/triggers", post(update_triggers).put(update_triggers))
         .route("/ScheduledTasks/Running/{task_id}", post(start_task))
         .route("/scheduledtasks/running/{task_id}", post(start_task))
         .route(

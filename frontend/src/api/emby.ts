@@ -1654,6 +1654,18 @@ export class EmbyApi {
     return `${this.baseUrl}/Items/${person.Id}/Images/Primary?api_key=${encodeURIComponent(this.token)}&tag=${encodeURIComponent(person.PrimaryImageTag)}`;
   }
 
+  async getPerson(personId: string): Promise<BaseItemDto> {
+    return this.request<BaseItemDto>(`/Persons/${personId}`);
+  }
+
+  async getPersonItems(personId: string, opts?: { limit?: number; startIndex?: number }): Promise<BaseItemDto[]> {
+    const params = new URLSearchParams();
+    if (opts?.limit) params.set('Limit', String(opts.limit));
+    if (opts?.startIndex) params.set('StartIndex', String(opts.startIndex));
+    const qs = params.toString();
+    return this.request<BaseItemDto[]>(`/Persons/${personId}/Items${qs ? '?' + qs : ''}`);
+  }
+
   async similar(itemId: string, limit?: number): Promise<QueryResult<BaseItemDto>>;
   async similar(itemId: string, options: SimilarQueryOptions): Promise<QueryResult<BaseItemDto>>;
   async similar(itemId: string, limitOrOptions: number | SimilarQueryOptions = 24) {

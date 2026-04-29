@@ -40,6 +40,12 @@ export const router = createRouter({
       meta: { title: '类型', section: 'home' }
     },
     {
+      path: '/person/:id',
+      name: 'person',
+      component: () => import('../pages/person/PersonPage.vue'),
+      meta: { title: '演员', section: 'home' }
+    },
+    {
       path: '/playback/video',
       name: 'playback-video',
       component: () => import('../pages/playback/VideoPlaybackPage.vue'),

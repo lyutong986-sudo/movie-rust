@@ -47,6 +47,7 @@ export interface HomeSectionItem {
 
 const DEFAULT_HOME_SECTIONS: HomeSectionItem[] = [
   { id: 'resume', name: '继续观看', enabled: true },
+  { id: 'nextUp', name: '下一集', enabled: true },
   { id: 'playQueue', name: '播放队列', enabled: true },
   { id: 'watchLater', name: '稍后观看', enabled: true },
   { id: 'favorites', name: '收藏', enabled: true },
@@ -165,6 +166,7 @@ export const latestByLibrary = ref<Record<string, BaseItemDto[]>>({});
 export const systemInfo = ref<SystemInfo | null>(null);
 export const selectedItem = ref<BaseItemDto | null>(null);
 export const parentStack = ref<BaseItemDto[]>([]);
+export const nextUpItems = ref<BaseItemDto[]>([]);
 export const scanOperation = ref<ScanOperation | null>(null);
 
 export const selectedItems = reactive(new Set<string>());
@@ -565,7 +567,16 @@ async function loadLibraryHomeItems(library: BaseItemDto) {
 }
 
 async function loadHomeDashboardData() {
-  await Promise.all([loadHome(), loadHomeLibraryCollections()]);
+  await Promise.all([loadHome(), loadHomeLibraryCollections(), loadNextUpItems()]);
+}
+
+async function loadNextUpItems() {
+  try {
+    const result = await api.nextUp({ limit: 12 });
+    nextUpItems.value = itemsFromQuery(result);
+  } catch {
+    nextUpItems.value = [];
+  }
 }
 
 async function loadHomeLibraryCollections() {
@@ -979,6 +990,7 @@ function clearClientState(keepInitialized: boolean) {
   libraryRawFetchedCount = 0;
   libraryQueryToken = 0;
   homeItems.value = [];
+  nextUpItems.value = [];
   recentlyAddedTitles.value = [];
   latestByLibrary.value = {};
   adminUsers.value = [];

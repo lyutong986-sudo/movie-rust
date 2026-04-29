@@ -365,6 +365,12 @@ function handleCardClick(e: MouseEvent) {
         <UIcon name="i-lucide-check" class="size-4" />
       </span>
       <span
+        v-else-if="props.item.UserData?.UnplayedItemCount"
+        class="bg-primary text-primary-contrast absolute right-2 top-2 inline-flex min-w-6 items-center justify-center rounded-full px-1.5 py-0.5 text-[10px] font-bold"
+      >
+        {{ props.item.UserData.UnplayedItemCount }}
+      </span>
+      <span
         v-else-if="props.item.UserData?.IsFavorite"
         class="bg-error absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full text-xs text-white"
       >

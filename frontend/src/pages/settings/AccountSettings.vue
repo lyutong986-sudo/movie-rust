@@ -171,36 +171,36 @@ async function savePreferences() {
 
       <UCard>
         <template #header>
-          <h3 class="text-highlighted text-sm font-semibold">个人偏好</h3>
+          <h3 class="text-highlighted text-sm font-semibold">音频与字幕</h3>
         </template>
-
         <div class="grid gap-4 sm:grid-cols-2">
-          <UFormField label="字幕模式">
+          <UFormField label="字幕模式" hint="控制何时自动加载字幕">
             <USelect v-model="preferences.SubtitleMode" :items="subtitleModeOptions" class="w-full" />
           </UFormField>
-          <UFormField label="音频语言偏好">
+          <UFormField label="音频语言偏好" hint="逗号分隔的语言代码，如 zho,eng">
             <UInput v-model="preferences.AudioLanguagePreference" placeholder="zho,chi,eng" class="w-full" />
           </UFormField>
-          <UFormField label="字幕语言偏好">
+          <UFormField label="字幕语言偏好" hint="逗号分隔的语言代码">
             <UInput v-model="preferences.SubtitleLanguagePreference" placeholder="zho,chi,eng" class="w-full" />
           </UFormField>
         </div>
-
-        <div class="mt-6 grid gap-3 sm:grid-cols-2">
-          <USwitch v-model="preferences.PlayDefaultAudioTrack" label="默认选择音轨" />
-          <USwitch v-model="preferences.PlayDefaultSubtitleTrack" label="默认选择字幕" />
-          <USwitch v-model="preferences.DisplayMissingEpisodes" label="显示缺失剧集" />
-          <USwitch v-model="preferences.DisplayUnairedEpisodes" label="显示未播出剧集" />
-          <USwitch v-model="preferences.HidePlayedInLatest" label="最新内容中隐藏已播放" />
+        <div class="mt-4 grid gap-3 sm:grid-cols-2">
+          <USwitch v-model="preferences.PlayDefaultAudioTrack" label="自动选择默认音轨" />
+          <USwitch v-model="preferences.PlayDefaultSubtitleTrack" label="自动选择默认字幕" />
           <USwitch v-model="preferences.RememberAudioSelections" label="记住音轨选择" />
           <USwitch v-model="preferences.RememberSubtitleSelections" label="记住字幕选择" />
+        </div>
+      </UCard>
+
+      <UCard>
+        <template #header>
+          <h3 class="text-highlighted text-sm font-semibold">播放行为</h3>
+        </template>
+        <div class="grid gap-3 sm:grid-cols-2">
           <USwitch v-model="preferences.EnableNextEpisodeAutoPlay" label="自动连播下一集" />
-          <USwitch v-model="preferences.EnableBackdrops" label="启用背景图" />
-          <USwitch v-model="preferences.EnableThemeSongs" label="启用主题曲" />
           <USwitch v-model="preferences.EnableCinemaMode" label="启用放映模式（片头/Trailer）" />
         </div>
-
-        <div class="mt-6 grid gap-4 sm:grid-cols-2">
+        <div class="mt-4 grid gap-4 sm:grid-cols-2">
           <UFormField label="最大串流码率" hint="控制客户端选择的最大视频码率">
             <USelect
               v-model.number="preferences.MaxStreamingBitrate"
@@ -218,7 +218,19 @@ async function savePreferences() {
             />
           </UFormField>
         </div>
+      </UCard>
 
+      <UCard>
+        <template #header>
+          <h3 class="text-highlighted text-sm font-semibold">显示偏好</h3>
+        </template>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <USwitch v-model="preferences.DisplayMissingEpisodes" label="显示缺失剧集" />
+          <USwitch v-model="preferences.DisplayUnairedEpisodes" label="显示未播出剧集" />
+          <USwitch v-model="preferences.HidePlayedInLatest" label="最新内容中隐藏已播放" />
+          <USwitch v-model="preferences.EnableBackdrops" label="启用背景图" />
+          <USwitch v-model="preferences.EnableThemeSongs" label="启用主题曲" />
+        </div>
         <template #footer>
           <div class="flex justify-end">
             <UButton :loading="state.busy" @click="savePreferences">保存个人偏好</UButton>

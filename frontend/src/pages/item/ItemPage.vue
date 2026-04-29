@@ -102,12 +102,17 @@ const playable = computed(
 );
 const metaChips = computed(() => {
   if (!item.value) return [];
-  return [
+  const chips = [
     item.value.Type,
     item.value.ProductionYear ? String(item.value.ProductionYear) : '',
     runtimeText(item.value),
     item.value.OfficialRating || ''
-  ].filter(Boolean);
+  ];
+  if (item.value.PremiereDate) {
+    const d = new Date(item.value.PremiereDate);
+    if (!isNaN(d.getTime())) chips.push(d.toLocaleDateString('zh-CN'));
+  }
+  return chips.filter(Boolean);
 });
 
 const episodeTag = computed(() => {
@@ -367,6 +372,20 @@ async function copyPath() {
   }
 }
 
+function downloadFile() {
+  if (!item.value || item.value.IsFolder) return;
+  const url = api.streamUrl(item.value);
+  if (!url) { toast.error('无法获取下载地址'); return; }
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = item.value.Name || 'download';
+  a.target = '_blank';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
 function enqueueCurrent(position: 'next' | 'last') {
   if (!item.value) return;
   enqueue(item.value, position);
@@ -573,6 +592,28 @@ async function downloadSubtitle(sub: RemoteSubtitleInfo) {
   }
 }
 
+const externalLinks = computed(() => {
+  const ids = item.value?.ProviderIds;
+  if (!ids) return [];
+  const links: Array<{ name: string; url: string; icon: string }> = [];
+  if (ids.Tmdb) {
+    const type = item.value?.Type === 'Series' ? 'tv' : item.value?.Type === 'Episode' ? 'tv' : 'movie';
+    links.push({ name: 'TMDB', url: `https://www.themoviedb.org/${type}/${ids.Tmdb}`, icon: 'i-lucide-database' });
+  }
+  if (ids.Imdb) {
+    links.push({ name: 'IMDb', url: `https://www.imdb.com/title/${ids.Imdb}`, icon: 'i-lucide-star' });
+  }
+  if (ids.Douban) {
+    links.push({ name: '豆瓣', url: `https://movie.douban.com/subject/${ids.Douban}`, icon: 'i-lucide-book-open' });
+  }
+  if (ids.Tvdb) {
+    links.push({ name: 'TheTVDB', url: `https://thetvdb.com/dereferrer/series/${ids.Tvdb}`, icon: 'i-lucide-tv' });
+  }
+  return links;
+});
+
+const hasExternalLinks = computed(() => externalLinks.value.length > 0);
+
 const tocTabs = computed(() => {
   const tabs: Array<{ label: string; value: string }> = [];
   if (chapters.value.length) tabs.push({ label: '章节', value: 'chapters' });
@@ -766,6 +807,7 @@ watch(
                   { label: '加入播放列表', icon: 'i-lucide-list-music', onSelect: openPlaylistPicker }
                 ],
                 [
+                  { label: '下载文件', icon: 'i-lucide-download', onSelect: downloadFile, disabled: item.IsFolder },
                   { label: '复制文件路径', icon: 'i-lucide-clipboard-copy', onSelect: copyPath, disabled: !item.Path }
                 ]
               ]"
@@ -912,10 +954,12 @@ watch(
                [&::-webkit-scrollbar-thumb]:rounded-full
                [&::-webkit-scrollbar-thumb]:bg-default"
       >
-        <div
+        <button
           v-for="(person, index) in item.People"
           :key="`${person.Id || person.Name}-${index}`"
-          class="border-default bg-elevated/20 flex w-28 shrink-0 snap-start flex-col items-center gap-2 rounded-lg border p-3 text-center"
+          type="button"
+          class="border-default bg-elevated/20 hover:bg-elevated/40 hover:ring-primary/40 flex w-28 shrink-0 snap-start cursor-pointer flex-col items-center gap-2 rounded-lg border p-3 text-center transition hover:ring-1"
+          @click="router.push(person.Id ? `/person/${person.Id}` : `/search?q=${encodeURIComponent(person.Name)}`)"
         >
           <UAvatar
             :alt="person.Name"
@@ -935,7 +979,7 @@ watch(
               {{ person.Role || person.Type }}
             </p>
           </div>
-        </div>
+        </button>
       </div>
     </section>
 
@@ -952,6 +996,42 @@ watch(
         >
           {{ tag }}
         </UBadge>
+      </div>
+    </section>
+
+    <!-- 外部链接 -->
+    <section v-if="hasExternalLinks" class="space-y-3">
+      <h3 class="text-highlighted text-sm font-semibold">外部链接</h3>
+      <div class="flex flex-wrap gap-2">
+        <a
+          v-for="link in externalLinks"
+          :key="link.name"
+          :href="link.url"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex items-center gap-1.5 rounded-lg border border-default bg-elevated/30 px-3 py-1.5 text-sm text-highlighted transition hover:bg-elevated/60 hover:text-primary"
+        >
+          <UIcon :name="link.icon" class="size-4" />
+          {{ link.name }}
+          <UIcon name="i-lucide-external-link" class="size-3 text-muted" />
+        </a>
+      </div>
+    </section>
+
+    <!-- 制片工作室 -->
+    <section v-if="item.Studios?.length" class="space-y-3">
+      <h3 class="text-highlighted text-sm font-semibold">制片工作室</h3>
+      <div class="flex flex-wrap gap-2">
+        <UButton
+          v-for="studio in item.Studios"
+          :key="studio.Name"
+          color="neutral"
+          variant="outline"
+          size="sm"
+          @click="router.push(`/search?q=${encodeURIComponent(studio.Name)}`)"
+        >
+          {{ studio.Name }}
+        </UButton>
       </div>
     </section>
 

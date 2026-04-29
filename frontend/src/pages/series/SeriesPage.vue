@@ -66,12 +66,14 @@ const startEpisode = computed(
 );
 const metaChips = computed(() => {
   if (!series.value) return [];
+  const s = series.value;
   return [
     '剧集',
-    series.value.ProductionYear ? String(series.value.ProductionYear) : '',
+    s.ProductionYear ? String(s.ProductionYear) : '',
     seasons.value.length ? `${seasons.value.length} 季` : '',
     activeSeason.value?.totalRecordCount ? `${activeSeason.value.totalRecordCount} 集` : '',
-    series.value.OfficialRating || ''
+    s.OfficialRating || '',
+    s.Status === 'Ended' ? '已完结' : s.Status === 'Continuing' ? '连载中' : ''
   ].filter(Boolean);
 });
 
@@ -316,6 +318,36 @@ function runtimeText(item: BaseItemDto) {
 function episodeThumb(episode: BaseItemDto) {
   return api.itemImageUrl(episode) || api.backdropUrl(episode);
 }
+
+function episodeProgress(episode: BaseItemDto): number {
+  const ticks = episode.UserData?.PlaybackPositionTicks ?? 0;
+  const total = episode.RunTimeTicks ?? 0;
+  if (!ticks || !total) return 0;
+  return Math.min(100, Math.round((ticks / total) * 100));
+}
+
+const nextUpEl = ref<HTMLElement | null>(null);
+
+const externalLinks = computed(() => {
+  const ids = series.value?.ProviderIds;
+  if (!ids) return [];
+  const links: Array<{ name: string; url: string; icon: string }> = [];
+  if (ids.Tmdb) {
+    links.push({ name: 'TMDB', url: `https://www.themoviedb.org/tv/${ids.Tmdb}`, icon: 'i-lucide-database' });
+  }
+  if (ids.Imdb) {
+    links.push({ name: 'IMDb', url: `https://www.imdb.com/title/${ids.Imdb}`, icon: 'i-lucide-star' });
+  }
+  if (ids.Douban) {
+    links.push({ name: '豆瓣', url: `https://movie.douban.com/subject/${ids.Douban}`, icon: 'i-lucide-book-open' });
+  }
+  if (ids.Tvdb) {
+    links.push({ name: 'TheTVDB', url: `https://thetvdb.com/dereferrer/series/${ids.Tvdb}`, icon: 'i-lucide-tv' });
+  }
+  return links;
+});
+
+const hasExternalLinks = computed(() => externalLinks.value.length > 0);
 
 const refreshing = ref(false);
 const metadataEditorOpen = ref(false);
@@ -634,6 +666,42 @@ function seriesImageUrl(imageType: string, index?: number) {
       </div>
     </section>
 
+    <!-- 外部链接 -->
+    <section v-if="hasExternalLinks" class="space-y-3">
+      <h3 class="text-highlighted text-sm font-semibold">外部链接</h3>
+      <div class="flex flex-wrap gap-2">
+        <a
+          v-for="link in externalLinks"
+          :key="link.name"
+          :href="link.url"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex items-center gap-1.5 rounded-lg border border-default bg-elevated/30 px-3 py-1.5 text-sm text-highlighted transition hover:bg-elevated/60 hover:text-primary"
+        >
+          <UIcon :name="link.icon" class="size-4" />
+          {{ link.name }}
+          <UIcon name="i-lucide-external-link" class="size-3 text-muted" />
+        </a>
+      </div>
+    </section>
+
+    <!-- 制片工作室 -->
+    <section v-if="series.Studios?.length" class="space-y-3">
+      <h3 class="text-highlighted text-sm font-semibold">制片工作室</h3>
+      <div class="flex flex-wrap gap-2">
+        <UButton
+          v-for="studio in series.Studios"
+          :key="studio.Name"
+          color="neutral"
+          variant="outline"
+          size="sm"
+          @click="router.push(`/search?q=${encodeURIComponent(studio.Name)}`)"
+        >
+          {{ studio.Name }}
+        </UButton>
+      </div>
+    </section>
+
     <!-- 季 + 分集 -->
     <section v-if="seasons.length" class="space-y-3">
       <div class="flex items-baseline justify-between">
@@ -658,7 +726,9 @@ function seriesImageUrl(imageType: string, index?: number) {
         <article
           v-for="episode in activeSeason.episodes"
           :key="episode.Id"
-          class="group flex flex-col gap-3 rounded-xl border border-default bg-elevated/20 p-3 transition hover:bg-elevated/40 sm:flex-row"
+          :ref="(el) => { if (episode.Id === nextUpEpisode?.Id) nextUpEl = el as HTMLElement | null; }"
+          class="group flex flex-col gap-3 rounded-xl border p-3 transition sm:flex-row"
+          :class="episode.Id === nextUpEpisode?.Id ? 'border-primary/50 bg-primary/5 ring-1 ring-primary/20' : 'border-default bg-elevated/20 hover:bg-elevated/40'"
         >
           <button
             type="button"
@@ -684,14 +754,20 @@ function seriesImageUrl(imageType: string, index?: number) {
                 <UIcon name="i-lucide-play" class="size-5" />
               </span>
             </div>
+            <!-- 进度条 -->
+            <div v-if="episodeProgress(episode) > 0" class="absolute inset-x-0 bottom-0 h-1 bg-black/40">
+              <div class="bg-primary h-full transition-[width]" :style="{ width: `${episodeProgress(episode)}%` }" />
+            </div>
           </button>
 
           <div class="flex min-w-0 flex-1 flex-col gap-2">
-            <div class="flex flex-wrap items-baseline gap-2">
+            <div class="flex flex-wrap items-center gap-2">
               <span class="text-primary font-mono text-sm">
                 {{ episode.IndexNumber ? String(episode.IndexNumber).padStart(2, '0') : '—' }}
               </span>
               <strong class="text-highlighted text-sm">{{ episode.Name }}</strong>
+              <UIcon v-if="episode.UserData?.Played" name="i-lucide-check-circle" class="size-4 text-green-500" title="已观看" />
+              <span v-if="episode.Id === nextUpEpisode?.Id" class="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">下一集</span>
               <span v-if="episode.RunTimeTicks" class="text-muted ms-auto text-xs">
                 {{ runtimeText(episode) }}
               </span>
@@ -740,10 +816,12 @@ function seriesImageUrl(imageType: string, index?: number) {
                [&::-webkit-scrollbar-thumb]:rounded-full
                [&::-webkit-scrollbar-thumb]:bg-default"
       >
-        <div
+        <button
           v-for="(person, index) in series.People"
           :key="`${person.Id || person.Name}-${index}`"
-          class="flex w-28 shrink-0 snap-start flex-col items-center gap-2 rounded-lg border border-default bg-elevated/20 p-3 text-center"
+          type="button"
+          class="flex w-28 shrink-0 snap-start cursor-pointer flex-col items-center gap-2 rounded-lg border border-default bg-elevated/20 p-3 text-center transition hover:bg-elevated/40 hover:ring-1 hover:ring-primary/40"
+          @click="router.push(person.Id ? `/person/${person.Id}` : `/search?q=${encodeURIComponent(person.Name)}`)"
         >
           <UAvatar
             :alt="person.Name"
@@ -759,7 +837,7 @@ function seriesImageUrl(imageType: string, index?: number) {
               {{ person.Role || person.Type }}
             </p>
           </div>
-        </div>
+        </button>
       </div>
     </section>
 

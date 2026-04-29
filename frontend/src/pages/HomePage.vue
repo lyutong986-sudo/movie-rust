@@ -15,6 +15,7 @@ import {
   latest,
   latestByLibrary,
   libraries,
+  nextUpItems,
   playQueue,
   state,
   watchLater
@@ -128,6 +129,16 @@ async function playItem(item: BaseItemDto) {
           title="继续观看"
           icon="i-lucide-play-circle"
           :items="continueWatching"
+          thumb
+          @play="playItem"
+          @select="openItem"
+        />
+
+        <MediaRow
+          v-if="sid === 'nextUp' && nextUpItems.length"
+          title="下一集"
+          icon="i-lucide-fast-forward"
+          :items="nextUpItems"
           thumb
           @play="playItem"
           @select="openItem"

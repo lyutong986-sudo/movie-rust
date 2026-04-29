@@ -45,6 +45,13 @@ const resolution = computed(() => {
   if (vs.Width && vs.Height) return `${vs.Width}×${vs.Height}`;
   return '';
 });
+
+const progress = computed(() => {
+  const ticks = props.item.UserData?.PlaybackPositionTicks ?? 0;
+  const total = props.item.RunTimeTicks ?? 0;
+  if (!ticks || !total) return 0;
+  return Math.min(100, Math.round((ticks / total) * 100));
+});
 </script>
 
 <template>
@@ -54,7 +61,7 @@ const resolution = computed(() => {
     @contextmenu.prevent
   >
     <div
-      class="bg-elevated flex-shrink-0 overflow-hidden rounded"
+      class="bg-elevated relative flex-shrink-0 overflow-hidden rounded"
       :class="detailed ? 'h-28 w-20' : 'h-18 w-12'"
     >
       <img
@@ -72,6 +79,9 @@ const resolution = computed(() => {
       >
         {{ (item.Name || '').slice(0, 1).toUpperCase() || '?' }}
       </div>
+      <div v-if="progress > 0" class="absolute inset-x-0 bottom-0 h-0.5 bg-black/40">
+        <div class="bg-primary h-full" :style="{ width: `${progress}%` }" />
+      </div>
     </div>
 
     <div class="min-w-0 flex-1">
@@ -82,6 +92,8 @@ const resolution = computed(() => {
         >
           {{ item.Name }}
         </h3>
+        <UIcon v-if="item.UserData?.Played" name="i-lucide-check-circle" class="size-3.5 flex-shrink-0 text-green-500" title="已观看" />
+        <UIcon v-else-if="item.UserData?.IsFavorite" name="i-lucide-heart" class="size-3.5 flex-shrink-0 text-red-500" title="收藏" />
         <span v-if="item.ProductionYear" class="text-muted flex-shrink-0 text-xs">
           {{ item.ProductionYear }}
         </span>
