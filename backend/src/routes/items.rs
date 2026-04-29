@@ -1072,6 +1072,7 @@ fn item_list_options_from_query(
         start_index: query.start_index.unwrap_or(0),
         limit: query.limit.unwrap_or(100),
         group_items_into_collections: query.group_items_into_collections.unwrap_or(true),
+        enable_total_record_count: query.enable_total_record_count.unwrap_or(true),
         ..ItemListOptions::default()
     }
 }
@@ -1157,14 +1158,11 @@ async fn media_items_to_dto_result(
             season_count: season_counts.get(&item.id).copied(),
         };
         let dto = repository::media_item_to_dto_for_list(
-            &state.pool,
             &item,
-            Some(user_id),
             state.config.server_id,
             prefetched_user,
             counts,
-        )
-        .await?;
+        );
         items.push(apply_item_response_shape(dto, query));
     }
 

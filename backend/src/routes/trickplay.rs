@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     extract::{Path, State},
     http::{header, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
     routing::get,
     Json, Router,
 };
@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::{
-    auth::{self, AuthSession},
+    auth::AuthSession,
     error::AppError,
     models::emby_id_to_uuid,
     state::AppState,

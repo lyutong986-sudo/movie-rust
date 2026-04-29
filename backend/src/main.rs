@@ -391,6 +391,14 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_sort     ON media_items(sort_name)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_series   ON media_items(series_id)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_premiere ON media_items(premiere_date)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_date_created ON media_items(date_created DESC)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_community_rating ON media_items(community_rating DESC NULLS LAST)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_type_sort ON media_items(item_type, sort_name)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_type_date ON media_items(item_type, date_created DESC)"#,
+        // pg_trgm 全文搜索加速
+        r#"DO $$ BEGIN CREATE EXTENSION IF NOT EXISTS pg_trgm; EXCEPTION WHEN OTHERS THEN NULL; END $$"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_name_trgm ON media_items USING gin (name gin_trgm_ops)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_sort_trgm ON media_items USING gin (sort_name gin_trgm_ops)"#,
         // -------------------------------------------------------------------
         // user_item_data：Emby UserItemDataDto 预留列。
         // -------------------------------------------------------------------

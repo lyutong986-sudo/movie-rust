@@ -342,6 +342,17 @@ CREATE INDEX IF NOT EXISTS idx_media_items_type      ON media_items(item_type);
 CREATE INDEX IF NOT EXISTS idx_media_items_sort      ON media_items(sort_name);
 CREATE INDEX IF NOT EXISTS idx_media_items_series    ON media_items(series_id);
 CREATE INDEX IF NOT EXISTS idx_media_items_premiere  ON media_items(premiere_date);
+CREATE INDEX IF NOT EXISTS idx_media_items_date_created ON media_items(date_created DESC);
+CREATE INDEX IF NOT EXISTS idx_media_items_community_rating ON media_items(community_rating DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_media_items_type_sort ON media_items(item_type, sort_name);
+CREATE INDEX IF NOT EXISTS idx_media_items_type_date ON media_items(item_type, date_created DESC);
+
+-- pg_trgm 全文搜索加速（ILIKE '%xxx%'）
+DO $$ BEGIN
+    CREATE EXTENSION IF NOT EXISTS pg_trgm;
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+CREATE INDEX IF NOT EXISTS idx_media_items_name_trgm ON media_items USING gin (name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_media_items_sort_trgm ON media_items USING gin (sort_name gin_trgm_ops);
 
 -- ---------------------------------------------------------------------------
 -- user_item_data：每个用户对每个条目的播放/收藏状态（Emby UserItemDataDto）

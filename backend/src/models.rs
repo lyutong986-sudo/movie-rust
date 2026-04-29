@@ -1747,6 +1747,12 @@ pub struct ItemsQuery {
         alias = "groupItemsIntoCollections"
     )]
     pub group_items_into_collections: Option<bool>,
+    #[serde(
+        default,
+        alias = "EnableTotalRecordCount",
+        alias = "enableTotalRecordCount"
+    )]
+    pub enable_total_record_count: Option<bool>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
 }
