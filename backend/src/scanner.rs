@@ -413,6 +413,73 @@ async fn scan_libraries(
     if let Some(p) = &progress {
         p.set_phase("PostProcessing");
         p.set_current_library(None);
+    }
+
+    // Trickplay + MediaSegments 后台生成
+    let pool_post = pool.clone();
+    let ffmpeg = config.ffmpeg_path.clone();
+    tokio::spawn(async move {
+        // Trickplay: 查找没有 trickplay 的视频项
+        let items_without_trickplay: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+            r#"SELECT mi.id, mi.path FROM media_items mi
+               WHERE mi.item_type IN ('Movie', 'Episode')
+                 AND mi.path != ''
+                 AND NOT EXISTS (SELECT 1 FROM trickplay_info ti WHERE ti.item_id = mi.id)
+               LIMIT 50"#,
+        )
+        .fetch_all(&pool_post)
+        .await
+        .unwrap_or_default();
+
+        for (item_id, path) in &items_without_trickplay {
+            if path.starts_with("http://") || path.starts_with("https://") || path.ends_with(".strm") {
+                continue;
+            }
+            if let Err(e) = crate::routes::trickplay::generate_trickplay(
+                &pool_post, *item_id, path, &ffmpeg,
+            ).await {
+                tracing::warn!("Trickplay 生成失败 ({}): {e}", item_id);
+            }
+        }
+
+        // MediaSegments: 检测没有分段的剧集片头/片尾
+        let items_without_segments: Vec<(uuid::Uuid, String, Option<i64>)> = sqlx::query_as(
+            r#"SELECT mi.id, mi.path, mi.runtime_ticks FROM media_items mi
+               WHERE mi.item_type = 'Episode'
+                 AND mi.path != ''
+                 AND mi.runtime_ticks IS NOT NULL
+                 AND NOT EXISTS (SELECT 1 FROM media_segments ms WHERE ms.item_id = mi.id)
+               LIMIT 50"#,
+        )
+        .fetch_all(&pool_post)
+        .await
+        .unwrap_or_default();
+
+        for (item_id, path, runtime) in items_without_segments {
+            if path.starts_with("http://") || path.starts_with("https://") || path.ends_with(".strm") {
+                continue;
+            }
+            let Some(runtime_ticks) = runtime else { continue };
+            if let Some(segments) = crate::routes::media_segments::detect_segments(
+                &ffmpeg, &path, runtime_ticks,
+            ).await {
+                for (seg_type, start, end) in segments {
+                    let _ = sqlx::query(
+                        r#"INSERT INTO media_segments (item_id, segment_type, start_ticks, end_ticks)
+                           VALUES ($1, $2, $3, $4)"#,
+                    )
+                    .bind(item_id)
+                    .bind(&seg_type)
+                    .bind(start)
+                    .bind(end)
+                    .execute(&pool_post)
+                    .await;
+                }
+            }
+        }
+    });
+
+    if let Some(p) = &progress {
         p.mark_post_scan(1.0);
     }
 

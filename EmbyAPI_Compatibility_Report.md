@@ -1678,3 +1678,86 @@ async fn media_items_to_dto_result(
 - cargo test: 58 passed, 0 failed
 - vue-tsc -b: 0 error
 - npm run build: 构建成功
+
+---
+
+## 三十九、第三十九轮：Jellyfin 对标功能实现（2026-04-29）
+
+> 范围：实现审计报告 G 节所列 5 项未实现但可选功能（排除 QuickConnect 扫码登录）。
+
+### A. Trickplay 进度缩略图
+
+| 组件 | 改动 |
+|------|------|
+| **DB Schema** | 新建 `trickplay_info` 表（item_id + width 复合主键、tile 尺寸/帧数/间隔）和 `trickplay_tiles` 表（瓦片 JPEG 二进制数据） |
+| **ensure_schema_compatibility** | 同步添加 CREATE TABLE IF NOT EXISTS |
+| **routes/trickplay.rs** | 新增路由模块：`GET /Items/{itemId}/Trickplay`（返回各分辨率元信息）、`GET /Videos/{itemId}/Trickplay/{width}/{tileFile}`（返回瓦片 JPEG） |
+| **trickplay::generate_trickplay()** | FFmpeg 每 10s 抽帧 → `image` crate 拼成 10×10 瓦片 JPEG → 写入 DB |
+| **scanner.rs** | 后扫描阶段异步批量生成无 Trickplay 的 Movie/Episode（跳过 STRM/远程） |
+| **misc.rs** | `SupportsTrickplay` 标记改为 `true` |
+| **前端 VideoPlaybackPage.vue** | 加载 Trickplay 元信息 → 悬浮进度条时以 CSS `background-position` 从瓦片图裁切缩略帧 |
+| **前端 api/emby.ts** | 新增 `getTrickplayInfo()` / `trickplayTileUrl()` 公共方法 |
+
+### B. MediaSegments 片头/片尾
+
+| 组件 | 改动 |
+|------|------|
+| **DB Schema** | 新建 `media_segments` 表（item_id、segment_type、start_ticks、end_ticks） |
+| **ensure_schema_compatibility** | 同步添加 CREATE TABLE + INDEX |
+| **routes/media_segments.rs** | 新增路由模块：`GET /MediaSegments/{itemId}`、`POST /MediaSegments/{itemId}`（管理员覆盖写入）、`DELETE /MediaSegments/{itemId}/{segmentId}` |
+| **detect_segments()** | FFmpeg `blackdetect` 滤镜启发式检测：前 5 分钟黑帧 → Intro，后 5 分钟黑帧 → Outro |
+| **scanner.rs** | 后扫描阶段异步检测无分段的 Episode |
+| **前端 VideoPlaybackPage.vue** | `activeSkipSegment` 计算属性：当前播放位置命中分段时显示跳过按钮（"跳过片头"/"跳过片尾"/"跳过回顾"），按钮 label 动态化 |
+| **前端 api/emby.ts** | 新增 `getMediaSegments()` 公共方法 |
+
+### C. Blurhash 图片占位
+
+| 组件 | 改动 |
+|------|------|
+| **DB Schema** | `media_items` 表新增 `image_blur_hashes JSONB` 列 |
+| **ensure_schema_compatibility** | 同步添加 ALTER TABLE |
+| **Cargo.toml** | 新增 `blurhash` + `image` 依赖 |
+| **models.rs** | `DbMediaItem` / `MediaItemRow` 新增 `image_blur_hashes: Value` 字段；`BaseItemDto` 新增 `image_blur_hashes: Option<BTreeMap<String, BTreeMap<String, String>>>` |
+| **repository.rs** | `parse_blur_hashes()` 工具函数；所有 DTO 构造点填充该字段；`update_media_item_image_path()` 写图后异步 spawn `update_blurhash_for_image()`（32×32 缩图 → blurhash 4×3 编码 → JSONB 写回 DB） |
+| **前端 MediaCard.vue** | 动态 import `blurhash` → Canvas 解码 → 图片未加载时显示模糊色彩占位 |
+| **前端 package.json** | 新增 `blurhash` 依赖 |
+
+### D. 前端大库虚拟滚动优化
+
+| 组件 | 改动 |
+|------|------|
+| **MediaCard.vue** | 添加 CSS `content-visibility: auto` + `contain-intrinsic-size`，浏览器原生跳过屏幕外卡片的布局/绘制，实现零 JS 开销的虚拟化效果 |
+
+### E. BackupRestore 真实 pg_dump
+
+| 组件 | 改动 |
+|------|------|
+| **routes/misc.rs** | `backup_restore_trigger()`：调用系统 `pg_dump --clean --if-exists --no-owner -f` 异步导出 SQL 文件，记录状态到 settings 表 |
+| | `backup_restore_data()`：调用系统 `psql -f` 执行 SQL 还原，校验文件存在 |
+| | 新增 `run_pg_dump()` / `run_pg_restore()` 辅助函数 |
+
+### F. 新增依赖
+
+| 包 | 用途 |
+|----|------|
+| `blurhash` 0.2 (Rust) | 后端 Blurhash 编码 |
+| `image` 0.25 (Rust) | 图片解码/编码/缩放 |
+| `tempfile` 3.27 (Rust) | Trickplay FFmpeg 临时目录 |
+| `blurhash` (npm) | 前端 Blurhash 解码 |
+
+### G. 新增 API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/Items/{id}/Trickplay` | 返回各分辨率 Trickplay 元信息 |
+| GET | `/Videos/{id}/Trickplay/{width}/{tile}.jpg` | 返回瓦片 JPEG 图片 |
+| GET | `/MediaSegments/{id}` | 返回媒体时间段（Intro/Outro 等） |
+| POST | `/MediaSegments/{id}` | 管理员批量设置时间段 |
+| DELETE | `/MediaSegments/{id}/{segId}` | 删除单个时间段 |
+
+### H. 校验
+
+- cargo check: 0 error
+- cargo test: 58 passed, 0 failed
+- vue-tsc -b: 0 error
+- npm run build: 构建成功

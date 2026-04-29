@@ -1672,6 +1672,23 @@ export class EmbyApi {
     return `${this.baseUrl}${deliveryUrl}${joiner}api_key=${encodeURIComponent(this.token)}`;
   }
 
+  async getMediaSegments(itemId: string) {
+    return this.request<{ Items: Array<{
+      Id: string; Type: string; StartTicks: number; EndTicks: number;
+    }>; TotalRecordCount: number }>(`/MediaSegments/${itemId}`);
+  }
+
+  async getTrickplayInfo(itemId: string) {
+    return this.request<{ Resolutions: Record<string, {
+      Width: number; Height: number; TileWidth: number; TileHeight: number;
+      TileCount: number; Interval: number; Bandwidth: number;
+    }> }>(`/Items/${itemId}/Trickplay`);
+  }
+
+  trickplayTileUrl(itemId: string, width: number, tileIndex: number) {
+    return `${this.baseUrl}/Videos/${itemId}/Trickplay/${width}/${tileIndex}.jpg`;
+  }
+
   private requireUserId() {
     if (!this.user) {
       throw new Error('未登录');

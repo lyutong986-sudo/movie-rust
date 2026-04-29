@@ -105,6 +105,7 @@ pub struct DbMediaItem {
     pub remote_trailers: Vec<String>,
     pub date_created: DateTime<Utc>,
     pub date_modified: DateTime<Utc>,
+    pub image_blur_hashes: Value,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -242,6 +243,7 @@ pub struct MediaItemRow {
     pub remote_trailers: Vec<String>,
     pub date_created: DateTime<Utc>,
     pub date_modified: DateTime<Utc>,
+    pub image_blur_hashes: Value,
     pub total_count: i64,
 }
 
@@ -294,6 +296,7 @@ impl From<MediaItemRow> for DbMediaItem {
             remote_trailers: value.remote_trailers,
             date_created: value.date_created,
             date_modified: value.date_modified,
+            image_blur_hashes: value.image_blur_hashes,
         }
     }
 }
@@ -1143,6 +1146,8 @@ pub struct BaseItemDto {
     pub parent_index_number: Option<i32>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub image_tags: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_blur_hashes: Option<BTreeMap<String, BTreeMap<String, String>>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub backdrop_image_tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

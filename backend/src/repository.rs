@@ -2387,7 +2387,69 @@ pub async fn update_media_item_image_path(
             .await?;
         }
     }
+    if let Some(image_path) = path {
+        tokio::spawn(update_blurhash_for_image(
+            pool.clone(),
+            item_id,
+            image_type.to_string(),
+            image_path.to_string(),
+        ));
+    }
+
     Ok(())
+}
+
+async fn update_blurhash_for_image(pool: sqlx::PgPool, item_id: Uuid, image_type: String, image_path: String) {
+    let hash = match tokio::task::spawn_blocking(move || generate_blurhash_from_path(&image_path))
+        .await
+    {
+        Ok(Some(hash)) => hash,
+        _ => return,
+    };
+    let image_type_pascal = match image_type.to_ascii_lowercase().as_str() {
+        "primary" | "" => "Primary",
+        "backdrop" => "Backdrop",
+        "logo" => "Logo",
+        "thumb" => "Thumb",
+        "banner" => "Banner",
+        "disc" => "Disc",
+        "art" => "Art",
+        "box" => "Box",
+        "menu" => "Menu",
+        _ => "Primary",
+    };
+    let tag = chrono::Utc::now().timestamp().to_string();
+    let _ = sqlx::query(
+        r#"UPDATE media_items
+           SET image_blur_hashes = jsonb_set(
+               image_blur_hashes,
+               ARRAY[$1::text],
+               jsonb_build_object($2::text, $3::text),
+               true
+           )
+           WHERE id = $4"#,
+    )
+    .bind(image_type_pascal)
+    .bind(&tag)
+    .bind(&hash)
+    .bind(item_id)
+    .execute(&pool)
+    .await;
+}
+
+fn generate_blurhash_from_path(path: &str) -> Option<String> {
+    let img = if path.starts_with("http://") || path.starts_with("https://") {
+        return None;
+    } else {
+        image::open(path).ok()?
+    };
+    let small = img.thumbnail(32, 32);
+    let (w, h) = (small.width(), small.height());
+    let rgba = small.to_rgba8();
+    let pixels: Vec<[u8; 4]> = rgba.pixels().map(|p| p.0).collect();
+    let flat: Vec<u8> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
+    let hash = blurhash::encode(4, 3, w, h, &flat).ok()?;
+    Some(hash)
 }
 
 pub async fn list_server_logs(log_dir: &Path) -> Result<Vec<LogFileDto>, AppError> {
@@ -4923,6 +4985,7 @@ pub async fn get_boxsets_for_item_ids(
             index_number_end: None,
             parent_index_number: None,
             image_tags,
+            image_blur_hashes: parse_blur_hashes(&item.image_blur_hashes),
             backdrop_image_tags: item
                 .backdrop_path
                 .as_ref()
@@ -6496,6 +6559,7 @@ pub async fn library_to_item_dto(
         index_number_end: None,
         parent_index_number: None,
         image_tags: BTreeMap::new(),
+        image_blur_hashes: None,
         backdrop_image_tags: Vec::new(),
         parent_logo_item_id: None,
         parent_logo_image_tag: None,
@@ -6524,6 +6588,15 @@ pub async fn library_to_item_dto(
         tags: Vec::new(),
         extra_fields: BTreeMap::new(),
     })
+}
+
+fn parse_blur_hashes(
+    value: &serde_json::Value,
+) -> Option<BTreeMap<String, BTreeMap<String, String>>> {
+    if value.is_null() || value.as_object().map_or(true, |o| o.is_empty()) {
+        return None;
+    }
+    serde_json::from_value(value.clone()).ok()
 }
 
 pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
@@ -6608,6 +6681,7 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         index_number_end: None,
         parent_index_number: None,
         image_tags: BTreeMap::new(),
+        image_blur_hashes: None,
         backdrop_image_tags: Vec::new(),
         parent_logo_item_id: None,
         parent_logo_image_tag: None,
@@ -7021,6 +7095,7 @@ async fn media_item_to_dto_inner(
         index_number_end: item.index_number_end,
         parent_index_number: item.parent_index_number,
         image_tags,
+        image_blur_hashes: parse_blur_hashes(&item.image_blur_hashes),
         backdrop_image_tags,
         parent_logo_item_id,
         parent_logo_image_tag,
@@ -7402,6 +7477,7 @@ where
         index_number_end: row.episode_number_end,
         parent_index_number: Some(row.season_number),
         image_tags,
+        image_blur_hashes: None,
         backdrop_image_tags,
         parent_logo_item_id,
         parent_logo_image_tag,

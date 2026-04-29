@@ -214,6 +214,7 @@ CREATE TABLE IF NOT EXISTS media_items (
     parent_thumb_image_tag   text,
     series_primary_image_tag text,
     series_studio            text,
+    image_blur_hashes        jsonb NOT NULL DEFAULT '{}'::jsonb,
 
     -- 计数/聚合（Emby 用来表现文件夹汇总）
     child_count              integer,
@@ -310,6 +311,7 @@ ALTER TABLE media_items
     ADD COLUMN IF NOT EXISTS parent_thumb_image_tag     text,
     ADD COLUMN IF NOT EXISTS series_primary_image_tag   text,
     ADD COLUMN IF NOT EXISTS series_studio              text,
+    ADD COLUMN IF NOT EXISTS image_blur_hashes          jsonb NOT NULL DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS child_count                integer,
     ADD COLUMN IF NOT EXISTS recursive_item_count       bigint,
     ADD COLUMN IF NOT EXISTS season_count               integer,
@@ -775,3 +777,43 @@ CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist
     ON playlist_items(playlist_id, sort_index);
 CREATE INDEX IF NOT EXISTS idx_playlist_items_media_item
     ON playlist_items(media_item_id);
+
+-- ---------------------------------------------------------------------------
+-- trickplay: 进度缩略图 (BIF/瓦片图)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS trickplay_info (
+    item_id        uuid NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+    width          integer NOT NULL,
+    height         integer NOT NULL,
+    tile_width     integer NOT NULL DEFAULT 10,
+    tile_height    integer NOT NULL DEFAULT 10,
+    thumb_count    integer NOT NULL DEFAULT 0,
+    interval_ms    integer NOT NULL DEFAULT 10000,
+    bandwidth      integer NOT NULL DEFAULT 0,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (item_id, width)
+);
+
+CREATE TABLE IF NOT EXISTS trickplay_tiles (
+    item_id    uuid NOT NULL,
+    width      integer NOT NULL,
+    tile_index integer NOT NULL,
+    data       bytea NOT NULL,
+    PRIMARY KEY (item_id, width, tile_index),
+    FOREIGN KEY (item_id, width) REFERENCES trickplay_info(item_id, width) ON DELETE CASCADE
+);
+
+-- ---------------------------------------------------------------------------
+-- media_segments: 片头/片尾/预告等时间段标记
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS media_segments (
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    item_id         uuid NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+    segment_type    text NOT NULL,  -- Intro / Outro / Preview / Recap / Commercial
+    start_ticks     bigint NOT NULL,
+    end_ticks       bigint NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_segments_item
+    ON media_segments(item_id, segment_type);

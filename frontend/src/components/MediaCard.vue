@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, ref, watch, onMounted } from 'vue';
 import type { BaseItemDto } from '../api/emby';
 import {
   api,
@@ -24,13 +24,57 @@ const emit = defineEmits<{
 }>();
 
 const imageError = ref(false);
+const blurhashUrl = ref('');
+
+function extractBlurhash(item: BaseItemDto): string | null {
+  const hashes = item.ImageBlurHashes;
+  if (!hashes) return null;
+  for (const type of ['Primary', 'Backdrop', 'Thumb']) {
+    const bucket = hashes[type];
+    if (bucket) {
+      const first = Object.values(bucket)[0];
+      if (first) return first;
+    }
+  }
+  return null;
+}
+
+async function decodeBlurhash(hash: string): Promise<string> {
+  const { decode } = await import('blurhash');
+  const w = 32, h = 32;
+  const pixels = decode(hash, w, h);
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  const imageData = ctx.createImageData(w, h);
+  imageData.data.set(pixels);
+  ctx.putImageData(imageData, 0, 0);
+  return canvas.toDataURL();
+}
+
+async function updateBlurhash() {
+  const hash = extractBlurhash(props.item);
+  if (hash) {
+    try {
+      blurhashUrl.value = await decodeBlurhash(hash);
+    } catch {
+      blurhashUrl.value = '';
+    }
+  } else {
+    blurhashUrl.value = '';
+  }
+}
 
 watch(
   () => props.item.Id,
   () => {
     imageError.value = false;
+    updateBlurhash();
   }
 );
+
+onMounted(updateBlurhash);
 
 const imageUrl = computed(() => {
   if (props.thumb) {
@@ -114,7 +158,7 @@ function openMenu(e: MouseEvent) {
 
 <template>
   <article
-    class="group relative flex cursor-pointer flex-col gap-2 transition"
+    class="media-card group relative flex cursor-pointer flex-col gap-2 transition"
     @click="emit('select', props.item)"
     @contextmenu="openMenu"
   >
@@ -122,6 +166,12 @@ function openMenu(e: MouseEvent) {
       class="bg-elevated ring-default group-hover:ring-primary/60 relative overflow-hidden rounded-lg ring-1 transition-all group-hover:-translate-y-0.5 group-hover:shadow-xl"
       :class="props.thumb ? 'aspect-video' : 'aspect-[2/3]'"
     >
+      <img
+        v-if="blurhashUrl && !showImage"
+        :src="blurhashUrl"
+        :alt="props.item.Name"
+        class="absolute inset-0 h-full w-full object-cover"
+      />
       <img
         v-if="showImage"
         :src="imageUrl"
@@ -132,7 +182,7 @@ function openMenu(e: MouseEvent) {
         @error="imageError = true"
       />
       <div
-        v-else
+        v-else-if="!blurhashUrl"
         class="from-primary/20 to-primary/5 text-primary flex h-full w-full items-center justify-center bg-gradient-to-br text-2xl font-bold"
       >
         {{ fallbackLabel }}
@@ -214,3 +264,10 @@ function openMenu(e: MouseEvent) {
     </div>
   </article>
 </template>
+
+<style scoped>
+.media-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 0 auto 280px;
+}
+</style>

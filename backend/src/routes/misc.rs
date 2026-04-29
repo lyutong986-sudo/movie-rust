@@ -98,7 +98,7 @@ async fn server_features(_session: OptionalAuthSession) -> Json<Value> {
         "SupportsSync": false,
         "SupportsContentUploading": false,
         "SupportsHardwareEncoding": true,
-        "SupportsTrickplay": false,
+        "SupportsTrickplay": true,
         "SupportsLiveTv": false,
         "SupportsDlna": false,
         "SupportsPlugins": false,
@@ -430,19 +430,78 @@ async fn backup_restore_trigger(
 ) -> Result<Json<Value>, AppError> {
     require_admin(&session)?;
     let mode = payload.mode.as_deref().unwrap_or("Database").to_string();
-    // 目前没有真正的 pg_dump 封装，记录请求并返回 Accepted，
-    // 便于前端感知"已提交"。后续接入 PG 工具链后填充真实逻辑。
     let now = chrono::Utc::now().to_rfc3339();
-    repository::set_setting_value(&state.pool, "backup:last_at", json!(now)).await?;
-    repository::set_setting_value(&state.pool, "backup:last_status", json!("queued")).await?;
-    if let Some(path) = payload.path.as_deref() {
-        repository::set_setting_value(&state.pool, "backup:last_path", json!(path)).await?;
-    }
+
+    let backup_dir = state.config.log_dir.parent().unwrap_or(&state.config.log_dir).join("backups");
+    std::fs::create_dir_all(&backup_dir).map_err(AppError::Io)?;
+    let filename = format!("movie_rust_backup_{}.sql", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+    let backup_path = payload
+        .path
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| backup_dir.join(&filename));
+
+    let db_url = state.config.database_url.clone();
+    let pool = state.pool.clone();
+    let backup_path_str = backup_path.to_string_lossy().to_string();
+    let backup_path_display = backup_path_str.clone();
+
+    repository::set_setting_value(&pool, "backup:last_at", json!(now)).await?;
+    repository::set_setting_value(&pool, "backup:last_status", json!("running")).await?;
+    repository::set_setting_value(&pool, "backup:last_path", json!(&backup_path_str)).await?;
+
+    tokio::spawn(async move {
+        let result = run_pg_dump(&db_url, &backup_path).await;
+        let status = if result.is_ok() { "success" } else { "failed" };
+        let _ = repository::set_setting_value(&pool, "backup:last_status", json!(status)).await;
+        if let Err(e) = result {
+            tracing::error!("pg_dump 失败: {e}");
+        } else {
+            tracing::info!("数据库备份完成: {backup_path_str}");
+        }
+    });
+
     Ok(Json(json!({
-        "Status": "queued",
+        "Status": "running",
         "Mode": mode,
         "RequestedAt": now,
+        "BackupPath": backup_path_display,
     })))
+}
+
+async fn run_pg_dump(db_url: &str, output_path: &std::path::Path) -> Result<(), AppError> {
+    let output = tokio::process::Command::new("pg_dump")
+        .arg("--clean")
+        .arg("--if-exists")
+        .arg("--no-owner")
+        .arg("--no-privileges")
+        .arg("-f")
+        .arg(output_path.as_os_str())
+        .arg(db_url)
+        .output()
+        .await
+        .map_err(|e| AppError::Internal(format!("无法执行 pg_dump: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::Internal(format!("pg_dump 退出码 {}: {stderr}", output.status)));
+    }
+    Ok(())
+}
+
+async fn run_pg_restore(db_url: &str, input_path: &std::path::Path) -> Result<(), AppError> {
+    let output = tokio::process::Command::new("psql")
+        .arg("-f")
+        .arg(input_path.as_os_str())
+        .arg(db_url)
+        .output()
+        .await
+        .map_err(|e| AppError::Internal(format!("无法执行 psql: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::Internal(format!("psql 退出码 {}: {stderr}", output.status)));
+    }
+    Ok(())
 }
 
 async fn backup_restore_data(
@@ -452,13 +511,38 @@ async fn backup_restore_data(
 ) -> Result<Json<Value>, AppError> {
     require_admin(&session)?;
     let now = chrono::Utc::now().to_rfc3339();
-    repository::set_setting_value(&state.pool, "restore:last_at", json!(now)).await?;
-    repository::set_setting_value(&state.pool, "restore:last_status", json!("queued")).await?;
-    if let Some(path) = payload.path.as_deref() {
-        repository::set_setting_value(&state.pool, "restore:last_path", json!(path)).await?;
+
+    let restore_path = payload
+        .path
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("缺少 path 参数".to_string()))?;
+    let restore_file = std::path::PathBuf::from(restore_path);
+    if !restore_file.exists() {
+        return Err(AppError::NotFound(format!("备份文件不存在: {restore_path}")));
     }
+
+    let db_url = state.config.database_url.clone();
+    let pool = state.pool.clone();
+    let restore_path_owned = restore_path.to_string();
+
+    repository::set_setting_value(&pool, "restore:last_at", json!(now)).await?;
+    repository::set_setting_value(&pool, "restore:last_status", json!("running")).await?;
+    repository::set_setting_value(&pool, "restore:last_path", json!(&restore_path_owned)).await?;
+
+    tokio::spawn(async move {
+        let result = run_pg_restore(&db_url, &std::path::PathBuf::from(&restore_path_owned)).await;
+        let status = if result.is_ok() { "success" } else { "failed" };
+        let _ = repository::set_setting_value(&pool, "restore:last_status", json!(status)).await;
+        if let Err(e) = result {
+            tracing::error!("数据库还原失败: {e}");
+        } else {
+            tracing::info!("数据库还原完成: {restore_path_owned}");
+        }
+    });
+
     Ok(Json(json!({
-        "Status": "queued",
+        "Status": "running",
         "Mode": payload.mode.unwrap_or_else(|| "Database".to_string()),
         "RequestedAt": now,
     })))

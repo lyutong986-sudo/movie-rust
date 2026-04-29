@@ -360,6 +360,7 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             ADD COLUMN IF NOT EXISTS parent_thumb_image_tag     TEXT,
             ADD COLUMN IF NOT EXISTS series_primary_image_tag   TEXT,
             ADD COLUMN IF NOT EXISTS series_studio              TEXT,
+            ADD COLUMN IF NOT EXISTS image_blur_hashes          JSONB NOT NULL DEFAULT '{}'::jsonb,
             ADD COLUMN IF NOT EXISTS child_count                INTEGER,
             ADD COLUMN IF NOT EXISTS recursive_item_count       BIGINT,
             ADD COLUMN IF NOT EXISTS season_count               INTEGER,
@@ -574,6 +575,37 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         "#,
         r#"CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist    ON playlist_items(playlist_id, sort_index)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_playlist_items_media_item  ON playlist_items(media_item_id)"#,
+        // trickplay
+        r#"CREATE TABLE IF NOT EXISTS trickplay_info (
+            item_id        UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            width          INTEGER NOT NULL,
+            height         INTEGER NOT NULL,
+            tile_width     INTEGER NOT NULL DEFAULT 10,
+            tile_height    INTEGER NOT NULL DEFAULT 10,
+            thumb_count    INTEGER NOT NULL DEFAULT 0,
+            interval_ms    INTEGER NOT NULL DEFAULT 10000,
+            bandwidth      INTEGER NOT NULL DEFAULT 0,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (item_id, width)
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS trickplay_tiles (
+            item_id    UUID NOT NULL,
+            width      INTEGER NOT NULL,
+            tile_index INTEGER NOT NULL,
+            data       BYTEA NOT NULL,
+            PRIMARY KEY (item_id, width, tile_index),
+            FOREIGN KEY (item_id, width) REFERENCES trickplay_info(item_id, width) ON DELETE CASCADE
+        )"#,
+        // media_segments
+        r#"CREATE TABLE IF NOT EXISTS media_segments (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            item_id         UUID NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            segment_type    TEXT NOT NULL,
+            start_ticks     BIGINT NOT NULL,
+            end_ticks       BIGINT NOT NULL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        )"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_segments_item ON media_segments(item_id, segment_type)"#,
     ];
 
     for statement in compatibility_sql {

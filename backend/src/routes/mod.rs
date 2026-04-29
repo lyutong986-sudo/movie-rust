@@ -10,6 +10,7 @@ pub mod genres;
 pub mod images;
 pub mod items;
 pub mod live_streams;
+pub mod media_segments;
 pub mod metadata_routes;
 pub mod misc;
 pub mod persons;
@@ -20,6 +21,7 @@ pub mod sessions;
 pub mod shows;
 pub mod startup;
 pub mod system;
+pub mod trickplay;
 pub mod users;
 pub mod videos;
 pub mod websocket;
@@ -60,6 +62,8 @@ fn api_router() -> Router<AppState> {
         .merge(collections::router())
         .merge(live_streams::router())
         .merge(playlists::router())
+        .merge(trickplay::router())
+        .merge(media_segments::router())
         .merge(remote_emby::router())
 }
 

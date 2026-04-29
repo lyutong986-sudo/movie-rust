@@ -48,6 +48,64 @@ const activeSourceCandidate = ref(0);
 const nextUpEpisode = ref<BaseItemDto | null>(null);
 const seekPreview = ref<{ x: number; time: number } | null>(null);
 
+interface TrickplayInfo {
+  Width: number;
+  Height: number;
+  TileWidth: number;
+  TileHeight: number;
+  TileCount: number;
+  Interval: number;
+}
+
+interface MediaSegment {
+  Id: string;
+  Type: string;
+  StartTicks: number;
+  EndTicks: number;
+}
+const mediaSegments = ref<MediaSegment[]>([]);
+const activeSkipSegment = computed(() => {
+  if (!mediaSegments.value.length) return null;
+  const posTicks = currentTime.value * 10_000_000;
+  return mediaSegments.value.find(
+    s => posTicks >= s.StartTicks && posTicks < s.EndTicks
+  ) ?? null;
+});
+const skipLabel = computed(() => {
+  const seg = activeSkipSegment.value;
+  if (!seg) return '';
+  if (seg.Type === 'Intro') return '跳过片头';
+  if (seg.Type === 'Outro') return '跳过片尾';
+  if (seg.Type === 'Recap') return '跳过回顾';
+  if (seg.Type === 'Preview') return '跳过预告';
+  return '跳过';
+});
+function skipSegment() {
+  const seg = activeSkipSegment.value;
+  if (!seg) return;
+  seekTo(seg.EndTicks / 10_000_000);
+}
+const trickplayInfo = ref<TrickplayInfo | null>(null);
+const trickplayThumbUrl = computed(() => {
+  if (!seekPreview.value || !trickplayInfo.value || !item.value) return null;
+  const tp = trickplayInfo.value;
+  const thumbIndex = Math.floor(seekPreview.value.time / (tp.Interval / 1000));
+  const thumbsPerTile = tp.TileWidth * tp.TileHeight;
+  const tileIndex = Math.floor(thumbIndex / thumbsPerTile);
+  const posInTile = thumbIndex % thumbsPerTile;
+  const col = posInTile % tp.TileWidth;
+  const row = Math.floor(posInTile / tp.TileWidth);
+  return {
+    url: api.trickplayTileUrl(item.value.Id, tp.Width, tileIndex),
+    bgX: -(col * tp.Width),
+    bgY: -(row * tp.Height),
+    bgW: tp.TileWidth * tp.Width,
+    bgH: tp.TileHeight * tp.Height,
+    w: tp.Width,
+    h: tp.Height,
+  };
+});
+
 let overlayTimer = 0;
 let hasStarted = false;
 let hasStopped = false;
@@ -109,8 +167,16 @@ const chapterMarkers = computed(() => {
   }));
 });
 
-// Intro skip：简单启发 — 若存在名为 "Intro"/"片头"/"Opening" 的 chapter，且当前时间在其范围内，出现 skip。
+// Intro/Outro skip：优先使用 MediaSegments API，回退到 chapter 启发式。
 const introChapter = computed(() => {
+  // 优先 MediaSegments
+  if (activeSkipSegment.value) {
+    return {
+      start: activeSkipSegment.value.StartTicks / 10_000_000,
+      end: activeSkipSegment.value.EndTicks / 10_000_000,
+      label: skipLabel.value,
+    };
+  }
   const markers = chapterMarkers.value;
   if (!markers.length) return null;
   for (let i = 0; i < markers.length; i += 1) {
@@ -118,7 +184,7 @@ const introChapter = computed(() => {
     if (/intro|opening|片头|op$/i.test(name)) {
       const start = markers[i].seconds;
       const end = markers[i + 1]?.seconds ?? start + 90;
-      return { start, end };
+      return { start, end, label: '跳过片头' };
     }
   }
   return null;
@@ -312,6 +378,26 @@ async function loadPlayback(nextItemId: string) {
       }
     } else if (playQueue.value[playQueueIndex.value + 1]) {
       nextUpEpisode.value = playQueue.value[playQueueIndex.value + 1];
+    }
+
+    // 加载 MediaSegments (片头/片尾)
+    mediaSegments.value = [];
+    try {
+      const segRes = await api.getMediaSegments(nextItemId);
+      mediaSegments.value = (segRes.Items ?? []) as MediaSegment[];
+    } catch {
+      // no segments
+    }
+
+    trickplayInfo.value = null;
+    try {
+      const tpRes = await api.getTrickplayInfo(nextItemId);
+      const widths = Object.keys(tpRes.Resolutions || {}).sort((a, b) => +a - +b);
+      if (widths.length > 0) {
+        trickplayInfo.value = tpRes.Resolutions[widths[0]] as TrickplayInfo;
+      }
+    } catch {
+      // trickplay not available
     }
 
     touchOverlay();
@@ -780,7 +866,7 @@ const rateMenu = computed(() =>
         @click="skipIntro"
       >
         <UIcon name="i-lucide-skip-forward" class="size-4" />
-        跳过片头
+        {{ introChapter?.label || '跳过片头' }}
       </button>
     </transition>
 
@@ -863,13 +949,26 @@ const rateMenu = computed(() =>
               class="absolute top-1/2 size-3.5 -translate-y-1/2 rounded-full bg-white opacity-0 shadow transition-opacity group-hover:opacity-100"
               :style="{ left: `calc(${progressPercent}% - 7px)` }"
             />
-            <!-- 悬浮时间提示 -->
+            <!-- 悬浮时间提示 + Trickplay 缩略图 -->
             <div
               v-if="seekPreview"
-              class="pointer-events-none absolute bottom-5 -translate-x-1/2 rounded bg-black/80 px-2 py-1 text-xs text-white shadow"
+              class="pointer-events-none absolute bottom-5 -translate-x-1/2 flex flex-col items-center gap-1"
               :style="{ left: `${seekPreview.x}px` }"
             >
-              {{ fmt(seekPreview.time) }}
+              <div
+                v-if="trickplayThumbUrl"
+                class="overflow-hidden rounded shadow-lg"
+                :style="{
+                  width: `${trickplayThumbUrl.w}px`,
+                  height: `${trickplayThumbUrl.h}px`,
+                  backgroundImage: `url(${trickplayThumbUrl.url})`,
+                  backgroundPosition: `${trickplayThumbUrl.bgX}px ${trickplayThumbUrl.bgY}px`,
+                  backgroundSize: `${trickplayThumbUrl.bgW}px ${trickplayThumbUrl.bgH}px`,
+                }"
+              />
+              <span class="rounded bg-black/80 px-2 py-1 text-xs text-white shadow">
+                {{ fmt(seekPreview.time) }}
+              </span>
             </div>
           </div>
 
