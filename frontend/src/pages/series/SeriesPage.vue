@@ -695,7 +695,7 @@ function seriesImageUrl(imageType: string, index?: number) {
           color="neutral"
           variant="outline"
           size="sm"
-          @click="router.push(`/search?q=${encodeURIComponent(studio.Name)}`)"
+          @click="router.push(`/studio/${encodeURIComponent(studio.Name)}`)"
         >
           {{ studio.Name }}
         </UButton>

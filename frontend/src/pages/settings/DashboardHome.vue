@@ -6,6 +6,10 @@ import type { SystemInfo, SessionInfo, ScheduledTaskInfo, ActivityLogEntry } fro
 
 const loading = ref(true);
 const error = ref('');
+const restarting = ref(false);
+const shuttingDown = ref(false);
+const confirmRestart = ref(false);
+const confirmShutdown = ref(false);
 
 const sysInfo = ref<SystemInfo | null>(null);
 const sessions = ref<SessionInfo[]>([]);
@@ -33,6 +37,22 @@ function severityColor(severity: string) {
   if (severity === 'Warn' || severity === 'Warning') return 'warning';
   if (severity === 'Information' || severity === 'Info') return 'info';
   return 'neutral';
+}
+
+async function doRestart() {
+  restarting.value = true;
+  confirmRestart.value = false;
+  try {
+    await api.restartServer();
+  } catch { /* server will drop connection */ }
+}
+
+async function doShutdown() {
+  shuttingDown.value = true;
+  confirmShutdown.value = false;
+  try {
+    await api.shutdownServer();
+  } catch { /* server will drop connection */ }
 }
 
 onMounted(async () => {
@@ -90,6 +110,58 @@ onMounted(async () => {
           <p class="text-highlighted mt-1 text-base font-semibold">{{ sysInfo?.OperatingSystem || '—' }}</p>
         </UCard>
       </div>
+
+      <!-- 服务器控制 -->
+      <div class="flex flex-wrap gap-2">
+        <UButton
+          color="warning"
+          variant="soft"
+          icon="i-lucide-refresh-cw"
+          :loading="restarting"
+          :disabled="shuttingDown"
+          @click="confirmRestart = true"
+        >
+          重启服务器
+        </UButton>
+        <UButton
+          color="error"
+          variant="soft"
+          icon="i-lucide-power"
+          :loading="shuttingDown"
+          :disabled="restarting"
+          @click="confirmShutdown = true"
+        >
+          关闭服务器
+        </UButton>
+      </div>
+
+      <!-- 重启确认 -->
+      <UModal v-model:open="confirmRestart">
+        <template #content>
+          <div class="p-6 space-y-4">
+            <h3 class="text-highlighted text-lg font-semibold">确认重启</h3>
+            <p class="text-muted text-sm">即将重启服务器，所有活跃会话将被中断。确定继续吗？</p>
+            <div class="flex justify-end gap-2">
+              <UButton color="neutral" variant="outline" @click="confirmRestart = false">取消</UButton>
+              <UButton color="warning" @click="doRestart">确认重启</UButton>
+            </div>
+          </div>
+        </template>
+      </UModal>
+
+      <!-- 关机确认 -->
+      <UModal v-model:open="confirmShutdown">
+        <template #content>
+          <div class="p-6 space-y-4">
+            <h3 class="text-highlighted text-lg font-semibold">确认关机</h3>
+            <p class="text-muted text-sm">即将关闭服务器，关机后需要手动重新启动。确定继续吗？</p>
+            <div class="flex justify-end gap-2">
+              <UButton color="neutral" variant="outline" @click="confirmShutdown = false">取消</UButton>
+              <UButton color="error" @click="doShutdown">确认关机</UButton>
+            </div>
+          </div>
+        </template>
+      </UModal>
 
       <div class="grid gap-6 lg:grid-cols-2">
         <!-- 活跃会话 -->

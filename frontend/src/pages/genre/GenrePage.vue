@@ -52,7 +52,7 @@ async function loadGenre() {
       sortOrder: 'Ascending',
       limit: 240
     });
-    items.value = response.Items;
+    items.value = response.Items ?? [];
   } catch (loadError) {
     error.value = loadError instanceof Error ? loadError.message : String(loadError);
     items.value = [];

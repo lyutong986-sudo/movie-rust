@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { onMounted, reactive } from 'vue';
+import { onMounted, reactive, ref } from 'vue';
 import type { UserConfiguration } from '../../api/emby';
 import SettingsLayout from '../../layouts/SettingsLayout.vue';
-import { api, state, user } from '../../store/app';
+import { api, state, user, skipSteps, setSkipSteps } from '../../store/app';
 
 const form = reactive({
   currentPassword: '',
@@ -52,6 +52,8 @@ const subtitleModeOptions = [
   { label: 'Smart', value: 'Smart' }
 ];
 
+const loadError = ref('');
+
 onMounted(async () => {
   if (!user.value) {
     return;
@@ -61,8 +63,8 @@ onMounted(async () => {
     user.value = me;
     const settings = await api.userSettings(me.Id);
     Object.assign(preferences, settings.Configuration || {});
-  } catch {
-    // no-op
+  } catch (e) {
+    loadError.value = e instanceof Error ? e.message : String(e);
   }
 });
 
@@ -143,7 +145,8 @@ async function savePreferences() {
         </div>
       </UCard>
 
-      <UAlert v-if="state.error" color="error" icon="i-lucide-triangle-alert" :description="state.error" />
+      <UAlert v-if="loadError" color="error" icon="i-lucide-triangle-alert" title="加载偏好失败" :description="loadError" />
+      <UAlert v-else-if="state.error" color="error" icon="i-lucide-triangle-alert" :description="state.error" />
       <UAlert v-else-if="state.message" color="success" icon="i-lucide-check" :description="state.message" />
 
       <UCard>
@@ -215,6 +218,48 @@ async function savePreferences() {
               :items="bitrateOptions"
               value-key="value"
               class="w-full"
+            />
+          </UFormField>
+        </div>
+        <div class="mt-4 grid gap-4 sm:grid-cols-2">
+          <UFormField label="快退步长（秒）" hint="按 ← 键后退的秒数">
+            <UInput
+              :model-value="skipSteps.back"
+              type="number"
+              :min="1"
+              :max="300"
+              class="w-full"
+              @update:model-value="setSkipSteps({ back: Number($event) || 10 })"
+            />
+          </UFormField>
+          <UFormField label="快进步长（秒）" hint="按 → 键前进的秒数">
+            <UInput
+              :model-value="skipSteps.forward"
+              type="number"
+              :min="1"
+              :max="300"
+              class="w-full"
+              @update:model-value="setSkipSteps({ forward: Number($event) || 10 })"
+            />
+          </UFormField>
+          <UFormField label="Shift+快退步长（秒）" hint="按 Shift+← 后退的秒数">
+            <UInput
+              :model-value="skipSteps.shiftBack"
+              type="number"
+              :min="1"
+              :max="600"
+              class="w-full"
+              @update:model-value="setSkipSteps({ shiftBack: Number($event) || 30 })"
+            />
+          </UFormField>
+          <UFormField label="Shift+快进步长（秒）" hint="按 Shift+→ 前进的秒数">
+            <UInput
+              :model-value="skipSteps.shiftForward"
+              type="number"
+              :min="1"
+              :max="600"
+              class="w-full"
+              @update:model-value="setSkipSteps({ shiftForward: Number($event) || 30 })"
             />
           </UFormField>
         </div>

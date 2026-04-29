@@ -31,6 +31,7 @@ const error = ref('');
 const item = ref<BaseItemDto | null>(null);
 const childItems = ref<BaseItemDto[]>([]);
 const relatedItems = ref<BaseItemDto[]>([]);
+const specialFeatures = ref<BaseItemDto[]>([]);
 const similarItems = ref<BaseItemDto[]>([]);
 const similarLoading = ref(false);
 const currentSourceIndex = ref(0);
@@ -199,6 +200,7 @@ async function loadItem(itemId: string) {
   loading.value = true;
   error.value = '';
   similarItems.value = [];
+  specialFeatures.value = [];
   similarLoading.value = false;
 
   try {
@@ -248,15 +250,21 @@ async function loadItem(itemId: string) {
           .catch(() => [] as BaseItemDto[])
       : Promise.resolve([] as BaseItemDto[]);
 
-    const [children, related] = await Promise.all([
+    const specialPromise = (currentItem.SpecialFeatureCount && currentItem.SpecialFeatureCount > 0)
+      ? api.getSpecialFeatures(currentItem.Id).catch(() => [] as BaseItemDto[])
+      : Promise.resolve([] as BaseItemDto[]);
+
+    const [children, related, specials] = await Promise.all([
       childPromise,
-      relatedPromise
+      relatedPromise,
+      specialPromise
     ]);
     if (requestToken !== itemRequestToken) {
       return;
     }
     childItems.value = children;
     relatedItems.value = related;
+    specialFeatures.value = specials;
     void loadSimilarItems(currentItem, requestToken);
   } catch (loadError) {
     if (requestToken === itemRequestToken) {
@@ -265,6 +273,7 @@ async function loadItem(itemId: string) {
     item.value = null;
     childItems.value = [];
     relatedItems.value = [];
+    specialFeatures.value = [];
   } finally {
     if (requestToken === itemRequestToken) {
       loading.value = false;
@@ -887,6 +896,25 @@ watch(
       </div>
     </section>
 
+    <!-- 花絮 / 特别内容 -->
+    <section v-if="specialFeatures.length" class="space-y-3">
+      <div class="flex items-baseline justify-between">
+        <h3 class="text-highlighted text-base font-semibold">花絮 / 特别内容</h3>
+        <span class="text-muted text-sm">{{ specialFeatures.length }} 项</span>
+      </div>
+      <div
+        class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-7"
+      >
+        <MediaCard
+          v-for="sf in specialFeatures"
+          :key="sf.Id"
+          :item="sf"
+          @play="playItem"
+          @select="openChild"
+        />
+      </div>
+    </section>
+
     <!-- 媒体源 / 流 折叠 -->
     <UCard v-if="currentStreams.length" variant="soft" :ui="{ body: 'p-4 sm:p-5' }">
       <div class="mb-3 flex items-center justify-between">
@@ -1028,7 +1056,7 @@ watch(
           color="neutral"
           variant="outline"
           size="sm"
-          @click="router.push(`/search?q=${encodeURIComponent(studio.Name)}`)"
+          @click="router.push(`/studio/${encodeURIComponent(studio.Name)}`)"
         >
           {{ studio.Name }}
         </UButton>

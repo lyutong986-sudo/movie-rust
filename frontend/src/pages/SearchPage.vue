@@ -93,7 +93,7 @@ watch(
         sortOrder: 'Ascending',
         limit: 200
       });
-      results.value = response.Items;
+      results.value = response.Items ?? [];
       const firstNonEmpty = groupedResults.value.findIndex((group) => group.items.length);
       if (firstNonEmpty >= 0) {
         tab.value = String(firstNonEmpty);

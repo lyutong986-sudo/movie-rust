@@ -802,6 +802,14 @@ export class EmbyApi {
     return this.request<SystemInfo>('/System/Info');
   }
 
+  async restartServer() {
+    return this.request<void>('/System/Restart', { method: 'POST' });
+  }
+
+  async shutdownServer() {
+    return this.request<void>('/System/Shutdown', { method: 'POST' });
+  }
+
   async encodingConfiguration() {
     return this.request<EncodingOptions>('/System/Configuration/encoding');
   }
@@ -1656,6 +1664,23 @@ export class EmbyApi {
 
   async getPerson(personId: string): Promise<BaseItemDto> {
     return this.request<BaseItemDto>(`/Persons/${personId}`);
+  }
+
+  async getStudio(name: string): Promise<BaseItemDto> {
+    return this.request<BaseItemDto>(`/Studios/${encodeURIComponent(name)}`);
+  }
+
+  async getStudioItems(name: string, opts?: { limit?: number; startIndex?: number }): Promise<BaseItemDto[]> {
+    const params = new URLSearchParams();
+    if (opts?.limit) params.set('Limit', String(opts.limit));
+    if (opts?.startIndex) params.set('StartIndex', String(opts.startIndex));
+    const qs = params.toString();
+    return this.request<BaseItemDto[]>(`/Studios/${encodeURIComponent(name)}/Items${qs ? '?' + qs : ''}`);
+  }
+
+  async getSpecialFeatures(itemId: string): Promise<BaseItemDto[]> {
+    const userId = this.requireUserId();
+    return this.request<BaseItemDto[]>(`/Users/${userId}/Items/${itemId}/SpecialFeatures`);
   }
 
   async getPersonItems(personId: string, opts?: { limit?: number; startIndex?: number }): Promise<BaseItemDto[]> {

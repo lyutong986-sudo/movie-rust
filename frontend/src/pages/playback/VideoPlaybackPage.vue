@@ -20,7 +20,8 @@ import {
   unregisterPlaybackCallbacks,
   clearPlaybackState,
   streamLabel,
-  streamText
+  streamText,
+  skipSteps
 } from '../../store/app';
 import { itemRoute, playbackRoute } from '../../utils/navigation';
 import UpNextDialog from '../../components/UpNextDialog.vue';
@@ -750,12 +751,12 @@ function onKeyDown(e: KeyboardEvent) {
       break;
     case 'ArrowLeft':
       e.preventDefault();
-      skip(e.shiftKey ? -30 : -10);
+      skip(e.shiftKey ? -skipSteps.value.shiftBack : -skipSteps.value.back);
       touchOverlay();
       break;
     case 'ArrowRight':
       e.preventDefault();
-      skip(e.shiftKey ? 30 : 10);
+      skip(e.shiftKey ? skipSteps.value.shiftForward : skipSteps.value.forward);
       touchOverlay();
       break;
     case 'ArrowUp':
@@ -1039,16 +1040,16 @@ const rateMenu = computed(() =>
                 variant="ghost"
                 icon="i-lucide-rewind"
                 class="!text-white"
-                @click="skip(-10)"
-                aria-label="后退 10 秒"
+                @click="skip(-skipSteps.back)"
+                :aria-label="`后退 ${skipSteps.back} 秒`"
               />
               <UButton
                 color="neutral"
                 variant="ghost"
                 icon="i-lucide-fast-forward"
                 class="!text-white"
-                @click="skip(10)"
-                aria-label="前进 10 秒"
+                @click="skip(skipSteps.forward)"
+                :aria-label="`前进 ${skipSteps.forward} 秒`"
               />
               <UButton
                 v-if="nextUpEpisode"

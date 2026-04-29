@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-04-29（第四轮全模板审计更新）
+> 对比时间：2026-04-29（第六轮功能优化更新）
 
 ---
 
@@ -30,8 +30,9 @@
 | 下一集高亮 | ✅ | ✅ 边框高亮 + "下一集" badge | 完整 |
 | 剧集状态（连载中/已完结） | ✅ | ✅ metaChips 显示 | 完整 |
 | 外部链接（TMDB/IMDB/豆瓣/TVDB） | ✅ | ✅ externalLinks 可点击链接 | 完整 |
-| 制片工作室 | ✅ | ✅ Studios 区块 | 完整 |
+| **制片工作室详情页** | ✅ Studios 实体页 | ✅ **/studio/:name StudioPage**（工作室信息+作品列表） | **完整** |
 | **演员详情页** | ✅ | ✅ **/person/:id PersonPage**（演员信息+参演作品） | **完整** |
+| **花絮/特别内容** | ✅ renderSpecials | ✅ **specialFeatures 区块**（SpecialFeatureCount + getSpecialFeatures） | **完整** |
 | 首映日期显示 | ✅ | ✅ metaChips 含 PremiereDate | 完整 |
 | 相似推荐 | ✅ similar | ✅ similar | 完整 |
 | 章节标记（详情页+播放器） | ✅ chapters | ✅ chapters | 完整 |
@@ -62,6 +63,8 @@
 | NowPlayingBar 底部播放条 | ✅ nowPlayingBar | ✅ MiniPlayer（进度条/控制/封面/音量） | 完整 |
 | 播放速率选择 | ✅ | ✅ rateMenu dropdown | 完整 |
 | 画中画 | ✅ | ✅ togglePip | 完整 |
+| **可配置快进快退步长** | ✅ skipBackLength/skipForwardLength | ✅ **skipSteps store + AccountSettings 配置** | **完整** |
+| **服务器重启/关机** | ✅ restartServer/shutdownServer | ✅ **DashboardHome 重启/关机按钮 + 确认弹窗** | **完整** |
 | 向导 | ✅ /wizard/* | ✅ /wizard | 完整 |
 | 登录/多服务器 | ✅ login/selectserver | ✅ login/select/add | 完整 |
 | 忘记密码 | ✅ forgotpassword | ✅ /server/forgot-password | 完整 |
@@ -71,7 +74,7 @@
 | 设置：媒体库管理 | ✅ /dashboard/libraries | ✅ /settings/libraries | 完整 |
 | 设置：用户管理 | ✅ /dashboard/users | ✅ /settings/users | 完整 |
 | 设置：单个用户详情 | ✅ /dashboard/users/:id | ✅ /settings/users/:userId（个人资料/权限/活动Tab） | 完整 |
-| 设置：Dashboard 管理面板 | ✅ /dashboard | ✅ /settings/dashboard（服务器/会话/库/任务/活动） | 完整 |
+| 设置：Dashboard 管理面板 | ✅ /dashboard | ✅ /settings/dashboard（服务器/会话/库/任务/活动+重启/关机） | 完整 |
 | 设置：转码 | ✅ /dashboard/transcoding | ✅ /settings/transcoding | 完整 |
 | 设置：网络 | ✅ /dashboard/networking | ✅ /settings/network | 完整 |
 | 设置：设备/会话 | ✅ /dashboard/devices | ✅ /settings/devices | 完整 |
@@ -122,6 +125,9 @@
 | ActivityLog userId 筛选 | `GET /System/ActivityLog/Entries?UserId=` 支持按用户筛选活动日志 | ✅ 已修复 |
 | ScheduledTasks PUT 路由 | `PUT /ScheduledTasks/{id}/Triggers` 与 POST 并行注册，兼容 Emby 客户端 | ✅ 已修复 |
 | 日志/活动端点 admin 权限 | `server_logs`、`server_log_content`、`server_log_lines`、`activity_log_entries` 添加 `require_admin` | ✅ 已修复 |
+| `thumb_image_tag` 字段 | BaseItemDto 添加 ThumbImageTag，播放器缩略图兼容 | ✅ 已修复 |
+| `MediaSourceId` serde 重命名 | PlaybackReport/LegacyPlaybackQuery 的 MediaSourceId 正确反序列化 | ✅ 已修复 |
+| PlaybackReport 扩展字段 | 添加 `can_seek`、`event_name` 兼容播放器上报 | ✅ 已修复 |
 
 ---
 
@@ -138,7 +144,9 @@
 | 🟢 低 | **Trickplay 配置页** | `/dashboard/trickplay` | 管理员配置 trickplay 生成参数 |
 | 🟢 低 | **备份管理** | `/dashboard/backups` | 服务器备份创建/恢复 |
 | 🟢 低 | **亮度/手势控制** | `touchHelper` | 移动端滑动调节音量/亮度 |
-| 🟢 低 | **可配置快进快退步长** | `skipBackLength/skipForwardLength` | 当前固定 ±10s/±30s，Jellyfin 可在用户设置中配置 |
+| 🟢 低 | **WebSocket 实时推送** | `serverNotifications.js` | UserDataChanged 等事件推送免手动刷新 |
+| 🟢 低 | **用户头像上传** | `userprofile.tsx` | 头像上传/删除 |
+| 🟢 低 | **每库视图偏好** | `getSettingsKey + viewSettings` | 按媒体库/文件夹保存视图+排序+筛选偏好 |
 
 ### B. UI 细节优化（可选）
 
@@ -201,7 +209,20 @@
 29. ✅ 演员详情页 PersonPage — `/person/:id` 显示演员信息+参演作品列表
 30. ✅ 演员点击跳转升级 — ItemPage/SeriesPage 演员卡片点击跳转到 PersonPage
 
+### 第六批（功能优化）— ✅ 全部完成
+31. ✅ 播放列表播放修复 — PlaylistDetailPage 修正 `query.id` → `playbackRoute(item)`
+32. ✅ 服务器重启/关机 — DashboardHome 添加重启/关机按钮 + 确认弹窗 + restartServer/shutdownServer API
+33. ✅ 花絮/特别内容 — ItemPage 添加 specialFeatures 区块（SpecialFeatureCount + getSpecialFeatures API）
+34. ✅ 制片工作室详情页 — `/studio/:name` StudioPage（工作室信息+作品列表） + getStudio/getStudioItems API
+35. ✅ 工作室链接升级 — ItemPage/SeriesPage 工作室按钮跳转到 StudioPage 而非搜索
+36. ✅ GenrePage/SearchPage 防御性修复 — `Items ?? []` 防空响应崩溃
+37. ✅ AccountSettings 加载错误提示 — 偏好加载失败时显示错误告警而非静默失败
+38. ✅ 可配置快进快退步长 — skipSteps store + AccountSettings 配置面板 + VideoPlaybackPage 使用
+
 ### 后端修复 — ✅ 全部完成
-31. ✅ ActivityLog userId 筛选 — 支持按用户过滤活动日志
-32. ✅ ScheduledTasks PUT 路由 — Emby 客户端 PUT 兼容
-33. ✅ 日志/活动端点 admin 权限 — 防止非管理员访问敏感信息
+39. ✅ ActivityLog userId 筛选 — 支持按用户过滤活动日志
+40. ✅ ScheduledTasks PUT 路由 — Emby 客户端 PUT 兼容
+41. ✅ 日志/活动端点 admin 权限 — 防止非管理员访问敏感信息
+42. ✅ thumb_image_tag — BaseItemDto 添加 ThumbImageTag 字段
+43. ✅ MediaSourceId serde — PlaybackReport/LegacyPlaybackQuery 正确反序列化
+44. ✅ PlaybackReport 扩展 — 添加 can_seek/event_name 字段

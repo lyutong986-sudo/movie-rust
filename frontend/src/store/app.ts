@@ -37,6 +37,7 @@ const SERVERS_KEY = 'movie-rust-servers';
 const CURRENT_SERVER_KEY = 'movie-rust-current-server';
 const LIBRARY_LAYOUT_KEY = 'libraryLayout';
 const HOME_SECTIONS_KEY = 'homeSections';
+const SKIP_STEPS_KEY = 'skipSteps';
 const LIBRARY_PAGE_SIZE = 72;
 
 export interface HomeSectionItem {
@@ -64,6 +65,30 @@ export const libraryLayout = ref<LibraryLayout>(
 export function setLibraryLayout(layout: LibraryLayout) {
   libraryLayout.value = layout;
   localStorage.setItem(LIBRARY_LAYOUT_KEY, layout);
+}
+
+export interface SkipSteps {
+  back: number;
+  forward: number;
+  shiftBack: number;
+  shiftForward: number;
+}
+
+const DEFAULT_SKIP_STEPS: SkipSteps = { back: 10, forward: 10, shiftBack: 30, shiftForward: 30 };
+
+function loadSkipSteps(): SkipSteps {
+  try {
+    const raw = localStorage.getItem(SKIP_STEPS_KEY);
+    if (raw) return { ...DEFAULT_SKIP_STEPS, ...JSON.parse(raw) };
+  } catch { /* use defaults */ }
+  return { ...DEFAULT_SKIP_STEPS };
+}
+
+export const skipSteps = ref<SkipSteps>(loadSkipSteps());
+
+export function setSkipSteps(steps: Partial<SkipSteps>) {
+  Object.assign(skipSteps.value, steps);
+  localStorage.setItem(SKIP_STEPS_KEY, JSON.stringify(skipSteps.value));
 }
 
 function loadHomeSections(): HomeSectionItem[] {

@@ -46,6 +46,12 @@ export const router = createRouter({
       meta: { title: '演员', section: 'home' }
     },
     {
+      path: '/studio/:id',
+      name: 'studio',
+      component: () => import('../pages/studio/StudioPage.vue'),
+      meta: { title: '制片工作室', section: 'home' }
+    },
+    {
       path: '/playback/video',
       name: 'playback-video',
       component: () => import('../pages/playback/VideoPlaybackPage.vue'),

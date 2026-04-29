@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { BaseItemDto, PlaylistInfo } from '../api/emby';
 import { api } from '../store/app';
+import { playbackRoute } from '../utils/navigation';
 import EmptyState from '../components/EmptyState.vue';
 
 const route = useRoute();
@@ -90,7 +91,7 @@ function openItem(item: BaseItemDto) {
 }
 
 function playItem(item: BaseItemDto) {
-  router.push({ path: `/playback/video`, query: { id: item.Id } });
+  router.push(playbackRoute(item));
 }
 
 async function removePlaylistEntirely() {

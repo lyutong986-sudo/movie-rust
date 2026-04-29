@@ -1168,6 +1168,8 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_thumb_image_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumb_image_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub series_primary_image_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_image_item_id: Option<String>,
@@ -1807,14 +1809,18 @@ pub struct PlaybackReport {
     pub session_id: Option<String>,
     #[serde(default)]
     pub play_session_id: Option<String>,
-    #[serde(default)]
-    pub _media_source_id: Option<String>,
+    #[serde(default, rename = "MediaSourceId")]
+    pub media_source_id: Option<String>,
     #[serde(default)]
     pub position_ticks: Option<i64>,
     #[serde(default)]
     pub is_paused: Option<bool>,
     #[serde(default)]
     pub played_to_completion: Option<bool>,
+    #[serde(default)]
+    pub can_seek: Option<bool>,
+    #[serde(default)]
+    pub event_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1824,8 +1830,8 @@ pub struct LegacyPlaybackQuery {
     pub position_ticks: Option<i64>,
     #[serde(default)]
     pub play_session_id: Option<String>,
-    #[serde(default)]
-    pub _media_source_id: Option<String>,
+    #[serde(default, rename = "MediaSourceId")]
+    pub media_source_id: Option<String>,
     #[serde(default)]
     pub is_paused: Option<bool>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
