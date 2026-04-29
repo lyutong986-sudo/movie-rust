@@ -36,37 +36,34 @@ pub async fn emby_websocket_handler(
         .as_deref()
         .or(query.api_key.as_deref())
         .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .filter(|value| !value.is_empty())
+        .ok_or(AppError::Unauthorized)?;
 
     let mut access_token = None;
-    let user_id = if let Some(token) = token {
-        if state
-            .config
-            .api_key
-            .as_ref()
-            .is_some_and(|api_key| api_key == token)
-        {
-            Some(state.config.server_id)
-        } else {
-            let auth_session = crate::repository::get_session(&state.pool, token).await?;
-            if auth_session
-                .as_ref()
-                .is_some_and(|session| session.session_type.eq_ignore_ascii_case("ApiKey"))
-            {
-                return Err(AppError::Forbidden);
-            }
-            if auth_session.is_some() {
-                access_token = Some(token.to_string());
-            }
-            auth_session.map(|session| session.user_id)
-        }
+    let user_id = if state
+        .config
+        .api_key
+        .as_ref()
+        .is_some_and(|api_key| api_key == token)
+    {
+        // 服务端配置的 X-Emby-Token API Key：允许 WS 连接，但仅限管理员场景；
+        // 这里把 user_id 标成 server_id 以便 list_session_commands 能匹配。
+        state.config.server_id
     } else {
-        None
+        let auth_session = crate::repository::get_session(&state.pool, token)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        if auth_session.session_type.eq_ignore_ascii_case("ApiKey") {
+            // Emby 官方语义：API Key 不属于"交互式"会话，禁止建立 WebSocket。
+            return Err(AppError::Forbidden);
+        }
+        access_token = Some(token.to_string());
+        auth_session.user_id
     };
 
     let session = WebSocketSession {
         id: Uuid::new_v4(),
-        user_id,
+        user_id: Some(user_id),
         device_id: query.device_id,
         access_token,
     };

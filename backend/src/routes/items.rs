@@ -271,7 +271,15 @@ async fn item_counts(
         ));
     }
 
-    Ok(Json(repository::item_counts(&state.pool).await?))
+    // Emby 客户端在不带 UserId 时期望返回"当前登录用户能看到的"统计；
+    // 管理员调用时回退到全库统计，普通用户回退到自己 EnabledFolders 的可见统计。
+    if session.is_admin {
+        Ok(Json(repository::item_counts(&state.pool).await?))
+    } else {
+        Ok(Json(
+            repository::item_counts_for_user(&state.pool, session.user_id).await?,
+        ))
+    }
 }
 
 async fn user_item_counts(
@@ -2058,21 +2066,10 @@ async fn remote_search_subtitles_by_language(
     } else {
         sub_config.open_subtitles_api_key.clone()
     };
-    let mut provider =
+    // OpenSubtitles 的 search 端点只需要 Api-Key，不需要 user token；
+    // 提前 login 反而会触发 "1 req/sec per IP" 限制，导致随后的 apply 登录被拒。
+    let provider =
         crate::metadata::opensubtitles::OpenSubtitlesProvider::new(&api_key);
-    if !sub_config.open_subtitles_username.is_empty()
-        && !sub_config.open_subtitles_password.is_empty()
-    {
-        if let Err(e) = provider
-            .login(
-                &sub_config.open_subtitles_username,
-                &sub_config.open_subtitles_password,
-            )
-            .await
-        {
-            tracing::warn!("OpenSubtitles 登录失败（搜索仍可继续）: {e}");
-        }
-    }
 
     let provider_ids = crate::repository::provider_ids_to_map(&item.provider_ids);
     let imdb_id = provider_ids.get("Imdb").map(|s| s.as_str());
@@ -2089,7 +2086,10 @@ async fn remote_search_subtitles_by_language(
         .map(|r| {
             json!({
                 "ThreeLetterISOLanguageName": r.language,
-                "Id": format!("{}_{}", r.id, r.file_id),
+                // Emby 字幕 ID 必须能在 apply 阶段还原 language；这里编码为
+                // `{language}_{file_id}`，与 apply 端 parts.first()/last() 的
+                // 解析约定一致，保证下载文件命名为 `*.<lang>.srt`。
+                "Id": format!("{}_{}", r.language, r.file_id),
                 "ProviderName": r.provider_name,
                 "Name": r.name,
                 "Format": r.format,

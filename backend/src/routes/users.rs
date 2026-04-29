@@ -616,7 +616,7 @@ async fn update_user_policy(
     Json(payload): Json<Value>,
 ) -> Result<StatusCode, AppError> {
     if !session.is_admin {
-        return Err(AppError::Unauthorized);
+        return Err(AppError::Forbidden);
     }
     apply_user_policy_update(&state, user_id, payload).await?;
     Ok(StatusCode::NO_CONTENT)

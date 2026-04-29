@@ -110,6 +110,37 @@ pub async fn visible_library_ids_for_user(
         .collect())
 }
 
+/// 计算某个用户在 list_media_items 类查询里需要叠加的 library 白名单。
+///
+/// - 管理员、`EnableAllFolders=true` 用户：返回 `None`（无需收紧，沿用原逻辑）。
+/// - 其他用户：返回 `Some(allowed_ids)`，调用方应在 SQL 上追加
+///   `AND library_id = ANY(allowed_ids)`；当列表为空时调用方应直接返回空集。
+///
+/// 这样普通用户在被管理员限定 `EnabledFolders` 后，所有列表型接口（包括
+/// `/Items`、`/Genres`、`/Persons`、`/Items/Counts`、Latest/Resume 等）
+/// 都能强制裁剪到他可见的库；与 Emby 官方 BaseItemQueryService 行为对齐。
+pub async fn effective_library_filter_for_user(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<Option<Vec<Uuid>>, AppError> {
+    let Some(user) = get_user_by_id(pool, user_id).await? else {
+        return Ok(Some(Vec::new()));
+    };
+    let policy = user_policy_from_value(&user.policy);
+    if user.is_admin || policy.enable_all_folders {
+        return Ok(None);
+    }
+    let allowed_set: std::collections::BTreeSet<Uuid> =
+        policy.enabled_folders.into_iter().collect();
+    let libraries = list_libraries(pool).await?;
+    let allowed: Vec<Uuid> = libraries
+        .into_iter()
+        .filter(|library| allowed_set.contains(&library.id))
+        .map(|library| library.id)
+        .collect();
+    Ok(Some(allowed))
+}
+
 pub async fn item_library_id(pool: &sqlx::PgPool, item_id: Uuid) -> Result<Option<Uuid>, AppError> {
     Ok(
         sqlx::query_scalar("SELECT library_id FROM media_items WHERE id = $1")
@@ -3477,6 +3508,10 @@ pub struct ItemListOptions {
     pub limit: i64,
     pub group_items_into_collections: bool,
     pub enable_total_record_count: bool,
+    /// 由 list_media_items 入口自动注入：当请求来自普通用户且其 `EnableAllFolders=false`
+    /// 时，这里会被填成"该用户允许访问的 library_id 白名单"；为空表示用户什么都看不到，
+    /// 应当直接返回 0 行。`None` 表示无需叠加白名单（admin / 全可见）。
+    pub allowed_library_ids: Option<Vec<Uuid>>,
 }
 
 impl Default for ItemListOptions {
@@ -3552,6 +3587,39 @@ impl Default for ItemListOptions {
             limit: 100,
             group_items_into_collections: true,
             enable_total_record_count: true,
+            allowed_library_ids: None,
+        }
+    }
+}
+
+/// 把"是否需要直接短路返回空集"判断与"白名单 ANY 子句"封装在一处。
+fn check_allowed_library_short_circuit(options: &ItemListOptions) -> bool {
+    let Some(allowed) = options.allowed_library_ids.as_ref() else {
+        return false;
+    };
+    if allowed.is_empty() {
+        return true;
+    }
+    if let Some(library_id) = options.library_id {
+        if !allowed.contains(&library_id) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 在 `WHERE 1 = 1` 之后追加 `AND library_id = ANY(allowed_library_ids)`。
+/// 调用方需保证 `options.allowed_library_ids` 是 `Some` 且非空，否则直接 no-op。
+fn push_allowed_library_filter<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    options: &ItemListOptions,
+) {
+    if let Some(allowed) = options.allowed_library_ids.as_ref() {
+        if !allowed.is_empty() && options.library_id.is_none() {
+            builder
+                .push(" AND library_id = ANY(")
+                .push_bind(allowed.clone())
+                .push(")");
         }
     }
 }
@@ -3560,6 +3628,15 @@ async fn fast_count_media_items(
     pool: &sqlx::PgPool,
     options: &ItemListOptions,
 ) -> Result<i64, AppError> {
+    if check_allowed_library_short_circuit(options) {
+        return Ok(0);
+    }
+
+    let has_user_library_filter = options
+        .allowed_library_ids
+        .as_ref()
+        .is_some_and(|list| !list.is_empty() && options.library_id.is_none());
+
     let has_type_filter = !options.include_types.is_empty();
     let has_no_conditions = options.library_id.is_none()
         && options.parent_id.is_none()
@@ -3592,7 +3669,8 @@ async fn fast_count_media_items(
         && options.is_folder.is_none()
         && options.is_hd.is_none()
         && options.filters.is_none()
-        && options.any_provider_id_equals.is_empty();
+        && options.any_provider_id_equals.is_empty()
+        && !has_user_library_filter;
 
     if has_no_conditions && options.recursive {
         let est: Option<f32> = sqlx::query_scalar(
@@ -3626,7 +3704,8 @@ async fn fast_count_media_items(
         && options.has_tmdb_id.is_none()
         && options.has_imdb_id.is_none()
         && options.series_status.is_empty()
-        && options.filters.is_none();
+        && options.filters.is_none()
+        && !has_user_library_filter;
 
     if simple_filter && options.parent_id.is_none() {
         if let Some(library_id) = options.library_id {
@@ -3662,7 +3741,7 @@ async fn fast_count_media_items(
     }
 
     let has_search = options.search_term.as_ref().map_or(false, |s| !s.trim().is_empty());
-    if has_search {
+    if has_search && !has_user_library_filter {
         let search_term = options.search_term.as_ref().unwrap().trim();
         let pattern = format!("%{}%", search_term);
         let count: i64 = sqlx::query_scalar(
@@ -3678,6 +3757,7 @@ async fn fast_count_media_items(
         "SELECT COUNT(*) FROM media_items WHERE 1 = 1"
     );
     apply_item_where_conditions(&mut builder, options);
+    push_allowed_library_filter(&mut builder, options);
     let count: i64 = builder.build_query_scalar().fetch_one(pool).await?;
     Ok(count)
 }
@@ -3829,8 +3909,26 @@ fn apply_item_where_conditions(
 
 pub async fn list_media_items(
     pool: &sqlx::PgPool,
-    options: ItemListOptions,
+    mut options: ItemListOptions,
 ) -> Result<QueryResult<DbMediaItem>, AppError> {
+    if options.allowed_library_ids.is_none() {
+        if let Some(user_id) = options.user_id {
+            options.allowed_library_ids = effective_library_filter_for_user(pool, user_id).await?;
+        }
+    }
+
+    if check_allowed_library_short_circuit(&options) {
+        return Ok(QueryResult {
+            items: Vec::new(),
+            total_record_count: 0,
+            start_index: Some(options.start_index),
+        });
+    }
+
+    // 部分 push_bind 后续会 move 走 options 字段，这里先克隆一份兜底用作 SQL 末端追加。
+    let outer_allowed_libs = options.allowed_library_ids.clone();
+    let outer_library_id = options.library_id;
+
     let total_record_count = if options.enable_total_record_count {
         fast_count_media_items(pool, &options).await?
     } else {
@@ -4388,6 +4486,15 @@ pub async fn list_media_items(
             .push(" AND lower(COALESCE(sort_name, name)) < lower(")
             .push_bind(upper_bound.trim().to_string())
             .push(")");
+    }
+
+    if let Some(allowed) = outer_allowed_libs.as_ref() {
+        if !allowed.is_empty() && outer_library_id.is_none() {
+            builder
+                .push(" AND library_id = ANY(")
+                .push_bind(allowed.clone())
+                .push(")");
+        }
     }
 
     let sort_keys: Vec<&str> = options

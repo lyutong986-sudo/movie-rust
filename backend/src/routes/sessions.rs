@@ -168,7 +168,7 @@ async fn list_auth_keys(
     Query(query): Query<PagingQuery>,
 ) -> Result<Json<QueryResult<Value>>, AppError> {
     if !session.is_admin {
-        return Err(AppError::Unauthorized);
+        return Err(AppError::Forbidden);
     }
 
     let all_sessions = repository::list_api_key_sessions(&state.pool).await?;
@@ -209,7 +209,7 @@ async fn create_auth_key(
     Query(query): Query<CreateAuthKeyQuery>,
 ) -> Result<Json<Value>, AppError> {
     if !session.is_admin {
-        return Err(AppError::Unauthorized);
+        return Err(AppError::Forbidden);
     }
     let app = query.app.unwrap_or_else(|| "Api Key".to_string());
     let app_version = query.app_version.unwrap_or_else(|| "0.1.0".to_string());
@@ -249,7 +249,7 @@ async fn delete_auth_key(
     Path(key): Path<String>,
 ) -> Result<StatusCode, AppError> {
     if !session.is_admin {
-        return Err(AppError::Unauthorized);
+        return Err(AppError::Forbidden);
     }
     let existing = repository::get_api_key_session(&state.pool, &key).await?;
     if existing.is_none() {

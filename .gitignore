@@ -6,6 +6,9 @@ dist/
 *.log
 postgres-data/
 模板项目/
+strm/
+tests/
+strm-test/
 
 # Runtime output dirs
 log/

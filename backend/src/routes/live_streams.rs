@@ -8,7 +8,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
-    auth::AuthSession, error::AppError, models::emby_id_to_uuid, repository, state::AppState,
+    auth::{self, AuthSession, MediaAccessKind},
+    error::AppError,
+    models::emby_id_to_uuid,
+    repository,
+    state::AppState,
 };
 
 pub fn router() -> Router<AppState> {
@@ -92,6 +96,10 @@ async fn open_live_stream(
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+
+    // 复用 /Items/{id}/PlaybackInfo 同款的策略链路：UserPolicy.EnableMediaPlayback +
+    // EnabledFolders 必须命中，否则返回 403。
+    auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
 
     // 复用现有聚合逻辑
     let mut sources =

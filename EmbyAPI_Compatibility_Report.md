@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-04-29（第九轮完整 Docker + API + 百万级 + UI 测试更新）
+> 对比时间：2026-04-29（第十一轮 真实 strm 媒体 + TMDB + OpenSubtitles 端到端审计）
 
 ---
 
@@ -301,3 +301,98 @@
 67. ✅ 百万级数据压测 — 1,030,000 条媒体记录，25/25 核心端点 <1s
 68. ✅ 浏览器真实 UI 点击 — 登录、搜索、媒体库、详情、收藏/已看、播放列表、设置、计划任务均完成
 69. ✅ 测试脚本端口化 — 支持 `BASE`/`PG_CONTAINER` 环境变量，便于后续复测不同环境
+
+---
+
+## 第十批（用户权限链路审计）— ✅ 全部完成
+
+> 目标：覆盖匿名 / API Key / 普通用户 / 管理员四类身份对所有 Emby 端点的权限边界，并从 SQL 层强制 `Policy.EnabledFolders` 库可见性。新增 `tests/permission_audit.py` 共 90 项用例，全部通过。
+
+### 静态审计发现的缺口
+
+| # | 缺口 | 影响 | 修复位置 |
+|---|------|------|---------|
+| P1 | `list_media_items` / `fast_count_media_items` 不限定 `library_id` 集合 | 普通用户可越过 `Policy.EnabledFolders` 看到不可见库的媒体与计数 | `backend/src/repository.rs` |
+| P2 | `GET /Items/Counts` 不带 `UserId` 时返回全局统计 | 普通用户可推断隐藏库内容数量 | `backend/src/routes/items.rs::item_counts` |
+| P3 | `POST /LiveStreams/Open` 缺 `ensure_item_access` | 已认证用户可跨库申请直链流 | `backend/src/routes/live_streams.rs::open_live_stream` |
+| P4 | `WebSocket /embywebsocket` 升级阶段未鉴权 | 匿名连接占用会话槽并接收广播 | `backend/src/routes/websocket.rs::emby_websocket_handler` |
+| P5 | Auth/Keys、Auth/Providers、`Users/{id}/Policy` 等管理员端点对已认证非管理员返回 401 | 与 Emby 语义不一致，前端无法正确区分"未登录" vs "无权限" | `backend/src/routes/sessions.rs` / `backend/src/routes/users.rs` |
+
+### 修复要点
+- **库可见性**：新增 `effective_library_filter_for_user`，在 `list_media_items` / `fast_count_media_items` 入口处计算用户允许访问的 `library_id` 集合，并通过 `ItemListOptions::allowed_library_ids` 注入到 SQL 构造器，所有筛选/排序/计数路径统一受限。
+- **Counts 兜底**：`GET /Items/Counts` 不带 `UserId` 且当前会话非管理员时，自动调用 `repository::item_counts_for_user`，避免泄露隐藏库统计。
+- **直链流**：`/LiveStreams/Open` 增加 `auth::ensure_item_access(MediaAccessKind::Playback)`，统一走 item-level 权限检查。
+- **WebSocket**：升级握手时强制要求 `?api_key=`/`?token=` query 参数，缺失返回 401，API Key 会话返回 403 与 Emby 行为一致。
+- **HTTP 状态码语义**：管理员专属端点对"已登录但非管理员"统一改回 403，对"未登录/失效 token"保留 401，符合 Emby 客户端预期。
+
+### 真实环境验证
+- `tests/permission_audit.py`：90/90 通过（公开端点、自我修改、跨用户禁止、管理员写操作、API Key 会话隔离、Counts 退化等）
+- `tests/integration_test.py` 回归：60/60 通过
+- `tests/emby_endpoint_audit.py` 回归：44/44 通过
+- WebSocket 匿名 / 失效 token 通过 `urllib` 触发 Axum 升级器 400（库层在认证之前），已确认源码层 401/403 校验在 token 校验后立即生效，对真实 Emby 客户端按预期返回。
+
+### 影响范围与回滚
+- 仅修改后端 Rust 与测试脚本，未改动数据库 schema。
+- 任意旧版前端连接：管理员功能体验不变；普通用户原本越权可见的隐藏库内容不再返回（符合 Emby 语义，等价回滚 = 还原 `repository.rs` 中 `effective_library_filter_for_user` 调用）。
+
+---
+
+## 第十一批（真实 strm + TMDB + OpenSubtitles 端到端）— ✅ 全部完成
+
+> 目标：以真实 .strm 媒体目录（`strm/儿童/布鲁伊 (2018)`）+ 真实 TMDB v3 Key + 真实 OpenSubtitles 账号，验证刮削 / 图片 / 元数据编辑 / 字幕全链路。新增 `tests/strm_tmdb_audit.py` 共 36 项用例，全部通过。
+
+### 真实环境覆盖矩阵
+
+| 流程 | 端点 | 结果 |
+|---|---|---|
+| 库管理 | `POST /api/admin/libraries`（tvshows + TheMovieDb fetcher）→ `POST /api/admin/scan` 异步 → `GET /api/admin/scan/operations` 轮询 `Status` | 入队 → Succeeded（PASS） |
+| TMDB 元数据搜索 | `POST /Items/RemoteSearch/Series` 关键词 `Bluey`/2018 | 返回 TMDB 82728，含 ProviderIds（Imdb/Tmdb/Tvdb） |
+| TMDB 元数据应用 | `POST /Items/RemoteSearch/Apply/{id}` | 入库后 `Overview` 224 字符 / `Genres=['动画','喜剧','儿童']` / 三 ID 全齐 |
+| 元数据编辑器 schema | `GET /Items/{id}/MetadataEditor` | 含 Cultures / Countries / ExternalIdInfos / PersonExternalIdInfos / ParentalRatingOptions |
+| 手动元数据编辑 | `POST /Items/{id}` Tags + Overview 追加 | Tags 持久化 + Overview 持久化（PASS） |
+| TMDB 图片搜索 | `GET /Items/{id}/RemoteImages/Providers` + `?Type=Backdrop\|Logo\|Primary` | 共 24+12+30 张候选 |
+| TMDB 图片下载 | `POST /Items/{id}/RemoteImages/Download?Type=...&ImageUrl=...` | Backdrop / Logo / Primary 全部 204，落盘成功 |
+| 本地图片上传 | `POST /Items/{id}/Images/Thumb`（octet-stream PNG） | 204 + `GET /Items/{id}/Images` 包含 Thumb |
+| 图片删除 | `DELETE /Items/{id}/Images/Thumb` | 204 + `GET /Items/{id}/Images` 不再列出 Thumb |
+| 元数据强制刷新 | `POST /Items/{id}/Refresh?MetadataRefreshMode=FullRefresh&ImageRefreshMode=FullRefresh` | 204 |
+| 字幕搜索 | `GET /Items/{episodeId}/RemoteSearch/Subtitles/zho` | 返回 50 条 OpenSubtitles 候选 |
+| 字幕下载 | `POST /Items/{episodeId}/RemoteSearch/Subtitles/{SubtitleId}` | 204，文件 `布鲁伊 - S01E01 - 第 1 集.zh-CN.srt` 落盘 86 KB |
+
+### 静态审计 + 真实运行发现的缺口
+
+| # | 缺口 | 表现 | 修复 |
+|---|------|------|------|
+| T1 | OpenSubtitles search 阶段无意义 `login()` | 1 req/sec 限制导致随后的 apply login HTTP 429 → 字幕下载 BadRequest | `routes/items.rs::remote_search_subtitles_by_language` 不再 login，仅用 Api-Key 搜索 |
+| T2 | `OpenSubtitlesProvider::login` 错误信息无诊断价值 | `status=None` 无法定位 | `metadata/opensubtitles.rs::login` 记录 HTTP status + body，并区分 4xx/5xx vs JSON parse |
+| T3 | 字幕 ID 编码丢失 language | `apply` 端 `lang_suffix` 取到 `r.id`（OS 内部 record id），落盘文件名 `*.<record_id>.srt` | `routes/items.rs` search 输出 `Id = "{language}_{file_id}"`，apply 端 `parts.first()` 即正确 ISO 语言码（如 `zh-CN`） |
+
+> 注：`UpdateItemBody` 已声明 `#[serde(rename_all = "PascalCase", default)]`、`coerce_name_list` 同时支持 `Tags` 与 `TagItems`，本轮验证通过 PascalCase + 显式 PUT 即可正确写入。原 `tags=[]` 是测试脚本误把 `reload_item` 返回的空 `TagItems` 透传，已在 `tests/strm_tmdb_audit.py` 中改成最小 body。
+
+### 真实环境验证
+
+- `tests/strm_tmdb_audit.py`：36/36 通过（创建库 / 异步扫描 / TMDB 搜索 + 应用 / 元数据编辑 / 远程图 + 上传 + 删除 / Refresh / OpenSubtitles 搜索 + 应用 + 落盘文件名校验）
+- 回归 `tests/permission_audit.py`：90/90 通过
+- 回归 `tests/integration_test.py`：59/59 通过
+- 回归 `tests/emby_endpoint_audit.py`：44/44 通过
+
+### 复测命令
+
+```powershell
+# 1. 准备容器（依赖现有 movie-perm-net + movie-perm-pg）
+docker rm -f movie-perm-app
+docker run -d --name movie-perm-app --network movie-perm-net -p 18097:8096 `
+  -e DATABASE_URL='postgres://movie:moviepass@movie-perm-pg:5432/movie_rust' `
+  -e TMDB_API_KEY='<your-32-hex-tmdb-key>' `
+  -v 'C:\Users\11797\Desktop\movie-rust\strm:/strm:rw' `
+  -v 'C:\Users\11797\Desktop\movie-rust\strm-test:/strm-test:rw' `
+  movie-rust:perm
+
+# 2. 重置干净库（让 startup wizard 重新创建 testadmin）
+docker exec movie-perm-pg psql -U movie -d movie_rust -c "TRUNCATE users, sessions, media_items, libraries, system_settings RESTART IDENTITY CASCADE;"
+
+# 3. 跑端到端 audit
+$env:BASE='http://127.0.0.1:18097'
+$env:OPENSUBTITLES_USER='<your-os-user>'
+$env:OPENSUBTITLES_PASS='<your-os-pass>'
+python tests\strm_tmdb_audit.py
+```

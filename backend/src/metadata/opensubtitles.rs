@@ -146,24 +146,46 @@ impl OpenSubtitlesProvider {
             .post(format!("{API_BASE}/login"))
             .header("Api-Key", &self.api_key)
             .header("User-Agent", USER_AGENT)
+            .header("Accept", "application/json")
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
             .await
             .map_err(|e| format!("OpenSubtitles login request failed: {e}"))?;
 
-        let login: LoginResponse = resp
-            .json()
+        let status = resp.status();
+        let raw = resp
+            .text()
             .await
-            .map_err(|e| format!("OpenSubtitles login parse failed: {e}"))?;
+            .map_err(|e| format!("OpenSubtitles login read failed: {e}"))?;
+
+        if !status.is_success() {
+            tracing::warn!(?status, body = %raw, "OpenSubtitles login HTTP 非 2xx");
+            return Err(format!(
+                "OpenSubtitles login HTTP {}: {}",
+                status,
+                raw.chars().take(300).collect::<String>()
+            ));
+        }
+
+        let login: LoginResponse = serde_json::from_str(&raw).map_err(|e| {
+            tracing::warn!(error = %e, body = %raw, "OpenSubtitles login JSON 解析失败");
+            format!(
+                "OpenSubtitles login parse failed: {} body={}",
+                e,
+                raw.chars().take(200).collect::<String>()
+            )
+        })?;
 
         if let Some(token) = login.token {
             self.token = Some(token);
             Ok(())
         } else {
+            tracing::warn!(body = %raw, status = ?login.status, "OpenSubtitles 登录响应缺少 token");
             Err(format!(
-                "OpenSubtitles login failed: status={:?}",
-                login.status
+                "OpenSubtitles login failed: status={:?} body={}",
+                login.status,
+                raw.chars().take(300).collect::<String>()
             ))
         }
     }
