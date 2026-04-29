@@ -661,6 +661,17 @@ async fn add_virtual_folder(
     }
 
     repository::create_library(&state.pool, name, collection_type, &paths, options).await?;
+    crate::webhooks::dispatch(
+        &state,
+        crate::webhooks::events::LIBRARY_NEW,
+        serde_json::json!({
+            "Library": {
+                "Name":           name,
+                "CollectionType": collection_type,
+                "Locations":      paths,
+            }
+        }),
+    );
     if refresh_library {
         let _ = enqueue_library_scan(&state, "add_virtual_folder", None).await?;
     }

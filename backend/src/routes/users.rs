@@ -480,6 +480,16 @@ async fn authenticate(
         };
         if !legacy_ok {
             repository::record_failed_login(&state.pool, &user).await?;
+            crate::webhooks::dispatch(
+                state,
+                crate::webhooks::events::USER_AUTH_FAILED,
+                serde_json::json!({
+                    "User": {
+                        "Id":   crate::models::uuid_to_emby_guid(&user.id),
+                        "Name": user.name,
+                    }
+                }),
+            );
             return Err(AppError::Unauthorized);
         }
         if let Err(err) =
@@ -523,6 +533,26 @@ async fn authenticate(
     let now = chrono::Utc::now();
     user_dto.last_login_date = Some(now);
     user_dto.last_activity_date = Some(now);
+
+    // 出向 webhook：登录成功 + 新会话
+    let session_payload = serde_json::json!({
+        "User": {
+            "Id":   crate::models::uuid_to_emby_guid(&user.id),
+            "Name": user.name.clone(),
+        },
+        "Session": {
+            "Id":         session.access_token.clone(),
+            "Client":     session.client.clone(),
+            "DeviceName": session.device_name.clone(),
+            "DeviceId":   session.device_id.clone(),
+        }
+    });
+    crate::webhooks::dispatch(
+        state,
+        crate::webhooks::events::USER_AUTHENTICATED,
+        session_payload.clone(),
+    );
+    crate::webhooks::dispatch(state, crate::webhooks::events::SESSION_START, session_payload);
 
     Ok(Json(AuthenticationResult {
         user: user_dto,

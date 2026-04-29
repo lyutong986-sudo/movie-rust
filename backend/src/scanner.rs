@@ -32,6 +32,39 @@ use walkdir::WalkDir;
 
 const TICKS_PER_SECOND: i64 = 10_000_000;
 
+/// scanner 入库后通知 `item.added` webhook。
+///
+/// scanner 流程从 `Movie / Series / Season / Episode` 任意一种新建条目时调用。
+/// `was_new=false`（ON CONFLICT UPDATE）的情况会**跳过**——只有真正第一次入库才推送，
+/// 避免增量扫描刷库时把"已有 item"也广播一遍。
+fn notify_item_added(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    item_id: uuid::Uuid,
+    was_new: bool,
+    item_type: &str,
+    name: &str,
+    series_name: Option<&str>,
+) {
+    if !was_new {
+        return;
+    }
+    crate::webhooks::dispatch_raw(
+        pool.clone(),
+        config.server_id,
+        config.server_name.clone(),
+        crate::webhooks::events::ITEM_ADDED.to_owned(),
+        json!({
+            "Item": {
+                "Id":         crate::models::uuid_to_emby_guid(&item_id),
+                "Name":       name,
+                "Type":       item_type,
+                "SeriesName": series_name.unwrap_or_default(),
+            }
+        }),
+    );
+}
+
 /// 扫描进度快照，用于前端实时展示
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -587,7 +620,7 @@ async fn import_movie_file(
     let name = nfo.title.as_deref().unwrap_or(&parsed.title);
     let provider_ids = merge_provider_ids(nfo.provider_ids.clone(), provider_ids_from_path(file));
 
-    let movie_id = repository::upsert_media_item(
+    let (movie_id, movie_was_new) = repository::upsert_media_item(
         pool,
         UpsertMediaItem {
             library_id: library.id,
@@ -635,6 +668,7 @@ async fn import_movie_file(
         },
     )
     .await?;
+    notify_item_added(pool, config, movie_id, movie_was_new, "Movie", name, None);
     sync_nfo_people(pool, movie_id, &nfo.people).await?;
     refresh_remote_people(
         pool,
@@ -870,7 +904,7 @@ async fn import_tv_file(
         .or_else(|| season_folder_imgs.art.clone())
         .or_else(|| series_art.clone());
 
-    let series_id = repository::upsert_media_item(
+    let (series_id, series_was_new) = repository::upsert_media_item(
         pool,
         UpsertMediaItem {
             library_id: library.id,
@@ -918,6 +952,15 @@ async fn import_tv_file(
         },
     )
     .await?;
+    notify_item_added(
+        pool,
+        config,
+        series_id,
+        series_was_new,
+        "Series",
+        &series_name,
+        Some(&series_name),
+    );
     sync_nfo_people(pool, series_id, &series_nfo.people).await?;
     refresh_remote_people(
         pool,
@@ -965,7 +1008,7 @@ async fn import_tv_file(
         .await;
     }
 
-    let season_id = repository::upsert_media_item(
+    let (season_id, season_was_new) = repository::upsert_media_item(
         pool,
         UpsertMediaItem {
             library_id: library.id,
@@ -1046,6 +1089,15 @@ async fn import_tv_file(
         },
     )
     .await?;
+    notify_item_added(
+        pool,
+        config,
+        season_id,
+        season_was_new,
+        "Season",
+        &season_name,
+        Some(&series_name),
+    );
     if library_options.download_images_in_advance {
         cache_remote_images_for_item(
             pool,
@@ -1123,7 +1175,7 @@ async fn import_tv_file(
         .or(parsed.episode_number)
         .or_else(|| episode_number_from_file(file));
 
-    let episode_id = repository::upsert_media_item(
+    let (episode_id, episode_was_new) = repository::upsert_media_item(
         pool,
         UpsertMediaItem {
             library_id: library.id,
@@ -1213,6 +1265,15 @@ async fn import_tv_file(
         },
     )
     .await?;
+    notify_item_added(
+        pool,
+        config,
+        episode_id,
+        episode_was_new,
+        "Episode",
+        episode_name,
+        Some(&series_name),
+    );
     if library_options.download_images_in_advance {
         cache_remote_images_for_item(
             pool,

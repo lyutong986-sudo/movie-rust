@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-04-29（第十六轮 Sakura_embyboss 第三方 Telegram 管理工具契约对齐）
+> 对比时间：2026-04-30（第十七轮 出向 Webhooks + playback_reporting 兼容层 — 完成 Sakura 全部缺失功能）
 
 ---
 
@@ -981,3 +981,161 @@ if reset_password && session.is_admin
 | `BlockedMediaFolders=['库名字符串']` | type error 400 | ✅ 自动 lookup → GUID |
 | `VirtualFolders[].Guid` | 缺失 | ✅ 与 `ItemId` 同值返回 |
 | `EnabledFolders=['未知字符串', uuid]` | 整体 400 | ✅ lossy 反序列化，丢弃未知项保留有效 GUID |
+
+---
+
+## 第十七批（2026-04-30）：补全 Sakura_embyboss 之前缺失的两块功能
+
+第十六轮审计发现 Sakura 仍有 **2 个核心能力**项目还未实现（详见上方"信息主动发送"小节）：
+
+1. **累计播放时长统计** —— Sakura 依赖 emby `playback_reporting` 第三方插件的
+   `POST /emby/user_usage_stats/submit_custom_query` 端点。
+2. **出向 Webhook** —— Sakura 期望 `item.added` / `playback.*` / `user.authenticated` 等
+   服务器主动 push 到它配置的回调地址。
+
+本批一次性补齐两者，并把 `tests/webhooks_usage_stats_audit.py` 的 27 个断言全部跑绿。
+
+### 1. 出向 Webhook（emby Webhooks plugin 协议）
+
+#### 1.1 数据库
+
+`backend/migrations/0001_schema.sql` + `backend/src/main.rs::ensure_schema_compatibility`
+同源新增 `webhooks` 表：
+
+| 列 | 类型 | 说明 |
+|---|---|---|
+| `id` | uuid | 主键 |
+| `name` / `url` / `enabled` | text/text/bool | 基础属性 |
+| `events` | text[] | 订阅事件名（空数组 = 订阅全部） |
+| `content_type` | text | `application/json` 或 `application/x-www-form-urlencoded` |
+| `secret` | text | 可选，用于 HMAC-SHA256 签名 |
+| `headers_json` | jsonb | 自定义 header（如 `X-Trace-Id`） |
+| `last_status` / `last_error` / `last_triggered_at` | int/text/timestamptz | 健康观测 |
+
+同步在 `sessions` 表新增 `remote_address text` 列，让 `playback_reporting` 兼容层
+能按 IP 反查（CDN/反代入站时由 Forwarded/X-Real-IP 填充）。
+
+#### 1.2 Dispatcher（`backend/src/webhooks.rs`）
+
+- `dispatch(state, event, payload)` → fanout 给所有订阅 `event` 的启用 webhook，**完全异步**，
+  不阻塞调用方。
+- `dispatch_raw(pool, server_id, server_name, event, payload)` 给 scanner 等没有完整
+  `AppState` 的环境调用。
+- `dispatch_to_hook(...)` 单点送达（绕过订阅过滤）—— `/Webhooks/{id}/Test` 用，
+  让用户配置好但还没勾选事件的 webhook 也能立刻验证联通性。
+- payload 自动包裹成 emby Webhooks plugin 标准格式：
+  ```json
+  { "Event": "...", "Date": "...", "Server": {"Id":"...","Name":"..."}, "User": {...}, "Item": {...}, "Session": {...} }
+  ```
+- 失败重试 3 次（指数 1s/3s/9s），超时 15s；最终失败仅写 `last_error` 不传染上层。
+- HMAC：当 `secret` 非空时附 `X-Webhook-Signature: sha256=<hex>` 头。
+- 公开事件常量 `webhooks::events::ALL` —— 单点维护事件名，避免两侧 typo 漂移。
+
+#### 1.3 路由（`backend/src/routes/webhooks.rs`）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/Webhooks` | 列出全部 |
+| POST | `/Webhooks` | 新建（201 Created） |
+| GET | `/Webhooks/{id}` | 详情，`Secret` 不回显但有 `HasSecret` 标志 |
+| POST | `/Webhooks/{id}` | 覆盖更新；`Secret=""` 表示不改 |
+| DELETE | `/Webhooks/{id}` | 删除（204） |
+| POST | `/Webhooks/{id}/Test` | 立刻送一条 `webhook.test`（绕过订阅过滤） |
+| GET | `/Notifications/Services` | emby 内置 GUI 兼容；列出 "webhook" 服务 |
+| GET | `/Notifications/Types` | emby 内置 GUI 兼容；列出 10 种事件类型 |
+| GET | `/Webhook/Configuration` | jellyfin Webhook plugin 风格读取配置 |
+
+全部需要 admin 权限。新建/更新做了基础校验（name 非空、url 必须 http(s):// 开头）。
+
+#### 1.4 事件钩子（hook 点）
+
+| 事件名 | 触发位置 | payload 关键字段 |
+|---|---|---|
+| `user.authenticated` | `users::authenticate` 成功路径 | `User`, `Session` |
+| `user.authenticationfailed` | `users::authenticate` 密码错误（含 legacy SHA1 失败） | `User` |
+| `session.start` | 同 `authenticate` | `Session.{Id,Client,DeviceName,DeviceId}` |
+| `playback.start` | `POST /Sessions/Playing` | `User`, `Item`, `Session`, `PlaybackInfo` |
+| `playback.progress` | `POST /Sessions/Playing/Progress` | 同上 |
+| `playback.stop` | `POST /Sessions/Playing/Stopped` | 同上，含 `PlayedToCompletion` |
+| `item.favorited` / `item.unfavorited` | `POST/DELETE /Users/{id}/FavoriteItems/{itemId}` 及 `/UserFavoriteItems/{id}` | `User`, `Item.UserData.IsFavorite` |
+| `library.new` | `POST /Library/VirtualFolders` 创建虚拟库 | `Library.{Name,CollectionType,Locations}` |
+| `item.added` | scanner 的 4 处 `upsert_media_item` （Movie/Series/Season/Episode），**仅在 INSERT 时**触发；ON CONFLICT UPDATE 不触发 | `Item.{Id,Name,Type,SeriesName}` |
+
+`upsert_media_item` 返回类型由 `Result<Uuid>` 改成 `Result<(Uuid, bool)>`，第二个布尔通过
+PG 的 `xmax = 0` 技巧判断本次是否新插入。同源改了 5 个 caller：
+- `scanner.rs` 4 处 movie/series/season/episode → 真正 dispatch `item.added`
+- `remote_emby.rs` 5 处镜像入库 → 丢弃 bool（远端已经 push 过，本地不重发）
+
+### 2. playback_reporting 兼容层
+
+#### 2.1 路由 `POST /user_usage_stats/submit_custom_query`
+
+- 路由在 `backend/src/routes/usage_stats.rs`。
+- 请求体兼容 emby 插件原格式：
+  ```json
+  { "CustomQueryString": "<sqlite SQL>", "ReplaceUserId": false }
+  ```
+- 响应保持 emby 原拼写错误 `colums`（注意是 *col-um-s*），`results` 是数组的数组：
+  ```json
+  { "colums": ["UserId","WatchTime"], "results": [["uid", 1234]], "message": "ok" }
+  ```
+- 不识别的 SQL 一律返回 `200 + colums:[] + message:"unsupported pattern"`，
+  与 emby plugin 的"无结果"一致，避免 Sakura 4xx/5xx crash。
+
+#### 2.2 已识别的 8 种 SQL pattern（即 Sakura 全部用法）
+
+| # | Sakura 函数 | 判别特征 | 翻译为 PG 聚合 | 返回 colums |
+|---|---|---|---|---|
+| 1 | `emby_cust_commit('sp')` | `SUM(PlayDuration-PauseDuration)` + `GROUP BY UserId` | 按 user_id 聚合 session 时长 | `[UserId, WatchTime]` |
+| 2 | `emby_cust_commit(else)` | `MAX(DateCreated)` + `WHERE UserId=...` | 单用户最近活跃 + 累计分钟 | `[LastLogin, WatchTime]` |
+| 3 | `get_emby_userip` | `SELECT DeviceName, ClientName, RemoteAddress` | DISTINCT 拼 sessions | `[DeviceName, ClientName, RemoteAddress]` |
+| 4 | `get_emby_report(Movie/Episode)` | `ItemType='...'` + `count(1) as play_count` | JOIN `media_items` 按 item 聚合 | `[UserId, ItemId, ItemType, name, play_count, total_duarion]` |
+| 5 | `get_users_by_ip` | `WHERE RemoteAddress=...` + DISTINCT | JOIN sessions 按 IP 反查 | `[UserId, DeviceName, ClientName, RemoteAddress, LastActivity, ActivityCount]` |
+| 6 | `get_users_by_device_name` | `WHERE DeviceName LIKE '%...%'` | 同上，模糊 ILIKE | 同上 |
+| 7 | `get_users_by_client_name` | `WHERE ClientName LIKE '%...%'` | 同上 | 同上 |
+| 8 | `get_emby_user_devices` | `COUNT(DISTINCT DeviceName||...)` + `GROUP BY UserId` | 按 user 聚合设备/IP 计数 | `[UserId, device_count, ip_count]` |
+
+实现细节：
+- `regex` 匹配 SQL 关键短语 + 抓 `WHERE`/`LIMIT`/`OFFSET`/`DateCreated >=/<=` 字面量。
+- `ReplaceUserId=true` 时把 UserId 列替换为 `users.name`（用 LEFT JOIN 实现，
+  规避了"在 async 里 block_on"导致 tokio panic 的陷阱）。
+- 禁止任意 SQL 直接执行（防注入）—— 只翻译已知模式，未识别返回空。
+
+### 3. 测试验证
+
+新建 `tests/webhooks_usage_stats_audit.py` 端到端覆盖 27 个断言：
+
+```
+─── 0. /Notifications/* 兼容路由 ───
+  PASS 0a. /Notifications/Services 返回 webhook service
+  PASS 0b. /Notifications/Types 暴露 10 种事件
+─── 1. /Webhooks CRUD ───
+  PASS 1a-1d  POST/GET 列表/详情/更新
+─── 2. webhook.test fanout ───
+  PASS 2a-2c  /Test 触发 + HMAC X-Webhook-Signature 校验 + Event 字段正确
+─── 3-6. 真实事件链路 ───
+  PASS 3a-6c  user.authenticated/session.start/user.authenticationfailed/
+              item.favorited/item.unfavorited/playback.start/progress/stop
+              全部能被本地 HTTP receiver 正确收到
+─── 7. /user_usage_stats/submit_custom_query ───
+  PASS 7a-7h  Sakura 8 种 SQL pattern 全部返回正确 colums + 200
+  PASS 7i     不识别 SQL 返回 200 + colums=[] + message='unsupported pattern'
+─── 8. cleanup ───
+  PASS 8a     DELETE /Webhooks/{id}
+
+== 总计 27/27 通过 ==
+```
+
+`tests/sakura_features_audit.py` 同步从 22/27 → **27/27**（含 9f `/Webhook/Configuration`
+jellyfin 风格端点也加 alias）。
+
+### 4. 关键差异修复一览（本批）
+
+| Sakura 期望 | 本项目此前 | 本批后 |
+|---|---|---|
+| `POST /user_usage_stats/submit_custom_query` | 405 Method Not Allowed | ✅ 8 种 SQL pattern 翻译 + `colums/results` 兼容输出 |
+| 服务器主动 push 媒体上线 | 无机制 | ✅ scanner 4 处 hook，`xmax=0` 区分新增/更新 |
+| 服务器主动 push 播放/登录 | 无机制 | ✅ 6 个事件源全部接 dispatcher |
+| 出向 webhook 配置 API | SPA 兜底 200 text/html | ✅ `/Webhooks` CRUD + `/Notifications/Services\|Types` + `/Webhook/Configuration` 全 JSON |
+| `webhook.test` 测试推送 | — | ✅ 立即 fanout，签名一致 |
+| 失败重试 / 状态观测 | — | ✅ 1s/3s/9s 重试，`last_status`/`last_error`/`last_triggered_at` 入库 |

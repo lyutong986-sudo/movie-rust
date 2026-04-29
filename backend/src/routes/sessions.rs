@@ -557,21 +557,87 @@ async fn record_report(
             return Err(AppError::NotFound("媒体条目不存在".to_string()));
         }
     }
+    let session_id_for_event = report
+        .session_id
+        .as_deref()
+        .or(Some(session.access_token.as_str()))
+        .map(ToOwned::to_owned);
     repository::record_playback_event(
         &state.pool,
         user_id,
         report.item_id,
-        report
-            .session_id
-            .as_deref()
-            .or(Some(session.access_token.as_str())),
+        session_id_for_event.as_deref(),
         event_type,
         report.position_ticks,
         report.is_paused,
         report.played_to_completion,
     )
     .await?;
+
+    // 出向 webhook：playback.start / playback.progress / playback.stop
+    let event_name = match event_type {
+        "Started" => Some(crate::webhooks::events::PLAYBACK_START),
+        "Progress" => Some(crate::webhooks::events::PLAYBACK_PROGRESS),
+        "Stopped" => Some(crate::webhooks::events::PLAYBACK_STOP),
+        _ => None,
+    };
+    if let Some(event) = event_name {
+        let payload = build_playback_payload(
+            state,
+            user_id,
+            report.item_id,
+            session_id_for_event.as_deref(),
+            report.position_ticks,
+            report.is_paused.unwrap_or(false),
+            report.played_to_completion.unwrap_or(false),
+        )
+        .await;
+        crate::webhooks::dispatch(state, event, payload);
+    }
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn build_playback_payload(
+    state: &AppState,
+    user_id: Uuid,
+    item_id: Option<Uuid>,
+    session_id: Option<&str>,
+    position_ticks: Option<i64>,
+    is_paused: bool,
+    played_to_completion: bool,
+) -> serde_json::Value {
+    let user = repository::get_user_by_id(&state.pool, user_id).await.ok().flatten();
+    let user_obj = serde_json::json!({
+        "Id":   crate::models::uuid_to_emby_guid(&user_id),
+        "Name": user.as_ref().map(|u| u.name.clone()).unwrap_or_default(),
+    });
+    let item_obj = if let Some(iid) = item_id {
+        let item = repository::get_media_item(&state.pool, iid).await.ok().flatten();
+        serde_json::json!({
+            "Id":   crate::models::uuid_to_emby_guid(&iid),
+            "Name": item.as_ref().map(|m| m.name.clone()).unwrap_or_default(),
+            "Type": item.as_ref().map(|m| m.item_type.clone()).unwrap_or_default(),
+            "SeriesName": item.as_ref().and_then(|m| m.series_name.clone()).unwrap_or_default(),
+        })
+    } else {
+        serde_json::Value::Null
+    };
+    let session_obj = if let Some(sid) = session_id {
+        serde_json::json!({ "Id": sid })
+    } else {
+        serde_json::Value::Null
+    };
+    serde_json::json!({
+        "User":    user_obj,
+        "Item":    item_obj,
+        "Session": session_obj,
+        "PlaybackInfo": {
+            "PositionTicks":      position_ticks,
+            "IsPaused":           is_paused,
+            "PlayedToCompletion": played_to_completion,
+        }
+    })
 }
 
 fn ensure_user_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppError> {

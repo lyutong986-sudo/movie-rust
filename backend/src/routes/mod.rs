@@ -22,8 +22,10 @@ pub mod shows;
 pub mod startup;
 pub mod system;
 pub mod trickplay;
+pub mod usage_stats;
 pub mod users;
 pub mod videos;
+pub mod webhooks;
 pub mod websocket;
 
 pub fn router(state: AppState) -> Router {
@@ -65,6 +67,8 @@ fn api_router() -> Router<AppState> {
         .merge(trickplay::router())
         .merge(media_segments::router())
         .merge(remote_emby::router())
+        .merge(webhooks::router())
+        .merge(usage_stats::router())
 }
 
 #[cfg(test)]

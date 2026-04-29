@@ -1142,6 +1142,7 @@ async fn upsert_virtual_root_item(
         },
     )
     .await
+    .map(|(id, _was_new)| id)
 }
 
 async fn ensure_virtual_view_folder(
@@ -1158,7 +1159,7 @@ async fn ensure_virtual_view_folder(
     let path = build_virtual_view_path(source.id, view_id);
     let path_ref = Path::new(path.as_str());
     let empty = Vec::<String>::new();
-    let item_id = repository::upsert_media_item(
+    let (item_id, _was_new) = repository::upsert_media_item(
         pool,
         repository::UpsertMediaItem {
             library_id: source.target_library_id,
@@ -1232,7 +1233,7 @@ async fn ensure_virtual_series_folder(
     let path = build_virtual_series_path(source.id, view_scope, series_name.as_str());
     let path_ref = Path::new(path.as_str());
     let empty = Vec::<String>::new();
-    let item_id = repository::upsert_media_item(
+    let (item_id, _was_new) = repository::upsert_media_item(
         pool,
         repository::UpsertMediaItem {
             library_id: source.target_library_id,
@@ -1311,7 +1312,7 @@ async fn ensure_virtual_season_folder(
         .clone()
         .unwrap_or_else(|| format!("Season {season_number:02}"));
     let empty = Vec::<String>::new();
-    let item_id = repository::upsert_media_item(
+    let (item_id, _was_new) = repository::upsert_media_item(
         pool,
         repository::UpsertMediaItem {
             library_id: source.target_library_id,
@@ -1463,6 +1464,7 @@ async fn upsert_virtual_media_item(
         },
     )
     .await
+    .map(|(id, _was_new)| id)
 }
 
 #[allow(dead_code)]

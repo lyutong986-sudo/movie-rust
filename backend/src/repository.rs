@@ -6850,10 +6850,17 @@ pub struct UpsertMediaItem<'a> {
     pub audio_codec: Option<&'a str>,
 }
 
+/// 返回 `(item_id, was_inserted)`：
+/// - `was_inserted=true` 表示这是一次"全新入库"（INSERT 走通），调用方可借此触发
+///   `webhooks::events::ITEM_ADDED` 等"上线"类事件；
+/// - `was_inserted=false` 表示这是 ON CONFLICT 触发的 UPDATE（已有 item 被刷新），
+///   不应当二次推送 ITEM_ADDED。
+///
+/// 实现使用 PostgreSQL 的 `xmax = 0` 技巧：插入产生新行时 xmax = 0，更新已有行时 xmax 非零。
 pub async fn upsert_media_item(
     pool: &sqlx::PgPool,
     input: UpsertMediaItem<'_>,
-) -> Result<Uuid, AppError> {
+) -> Result<(Uuid, bool), AppError> {
     let path_text = input.path.to_string_lossy().to_string();
     let image_text = input
         .image_primary_path
@@ -6998,7 +7005,17 @@ pub async fn upsert_media_item(
     .execute(pool)
     .await?;
 
-    Ok(id)
+    // INSERT 路径：xmax=0 → 此前 0 行影响转 1 行；ON CONFLICT UPDATE 路径会改 xmax≠0，
+    // 但 affected row 也是 1。所以单看 affected 区分不了，要再补一个 SELECT。
+    let was_inserted: bool = sqlx::query_scalar(
+        "SELECT (xmax = 0) FROM media_items WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+
+    Ok((id, was_inserted))
 }
 
 pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {

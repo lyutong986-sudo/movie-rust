@@ -12,6 +12,7 @@ mod scanner;
 mod security;
 mod state;
 mod transcoder;
+mod webhooks;
 mod work_limiter;
 
 use anyhow::{Context, Result};
@@ -241,8 +242,9 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         // -------------------------------------------------------------------
         r#"
         ALTER TABLE sessions
-            ADD COLUMN IF NOT EXISTS session_type TEXT NOT NULL DEFAULT 'Interactive',
-            ADD COLUMN IF NOT EXISTS expires_at   TIMESTAMPTZ
+            ADD COLUMN IF NOT EXISTS session_type   TEXT NOT NULL DEFAULT 'Interactive',
+            ADD COLUMN IF NOT EXISTS expires_at     TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS remote_address TEXT
         "#,
         r#"CREATE INDEX IF NOT EXISTS idx_sessions_user         ON sessions(user_id)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_sessions_expires_at   ON sessions(expires_at)"#,
@@ -645,6 +647,23 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
         )"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_segments_item ON media_segments(item_id, segment_type)"#,
+        // webhooks: 出向 webhook 配置（emby Webhooks 插件协议）
+        r#"CREATE TABLE IF NOT EXISTS webhooks (
+            id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name              TEXT NOT NULL,
+            url               TEXT NOT NULL,
+            enabled           BOOLEAN NOT NULL DEFAULT true,
+            events            TEXT[] NOT NULL DEFAULT '{}',
+            content_type      TEXT NOT NULL DEFAULT 'application/json',
+            secret            TEXT,
+            headers_json      JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+            last_status       INTEGER,
+            last_error        TEXT,
+            last_triggered_at TIMESTAMPTZ
+        )"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_webhooks_enabled ON webhooks(enabled) WHERE enabled"#,
     ];
 
     for statement in compatibility_sql {

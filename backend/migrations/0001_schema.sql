@@ -79,8 +79,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 ALTER TABLE sessions
-    ADD COLUMN IF NOT EXISTS session_type text NOT NULL DEFAULT 'Interactive',
-    ADD COLUMN IF NOT EXISTS expires_at   timestamptz;
+    ADD COLUMN IF NOT EXISTS session_type   text NOT NULL DEFAULT 'Interactive',
+    ADD COLUMN IF NOT EXISTS expires_at     timestamptz,
+    -- 让 playback_reporting 兼容层（usage_stats 路由）能按 IP 反查；登录时由 reverse-proxy
+    -- header（X-Forwarded-For / X-Real-IP）填充。
+    ADD COLUMN IF NOT EXISTS remote_address text;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user         ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at   ON sessions(expires_at);
@@ -842,3 +845,29 @@ CREATE TABLE IF NOT EXISTS media_segments (
 
 CREATE INDEX IF NOT EXISTS idx_media_segments_item
     ON media_segments(item_id, segment_type);
+
+-- ---------------------------------------------------------------------------
+-- webhooks: 出向 webhook 配置（emby Webhooks 插件协议）
+--
+-- 用于第三方管理工具（Sakura_embyboss / Telegram bot / Bark / 钉钉 等）
+-- 通过订阅事件来接收媒体上线、播放进度、登录、收藏变更等回调推送。
+-- 存储格式与 emby Webhooks plugin 类似，但用 events 数组而非位掩码。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS webhooks (
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            text NOT NULL,
+    url             text NOT NULL,
+    enabled         boolean NOT NULL DEFAULT true,
+    events          text[] NOT NULL DEFAULT '{}',    -- 订阅的事件名（item.added/playback.start/...）
+    content_type    text NOT NULL DEFAULT 'application/json',  -- application/json | application/x-www-form-urlencoded
+    secret          text,                                       -- 可选 HMAC 密钥（X-Webhook-Signature）
+    headers_json    jsonb NOT NULL DEFAULT '{}'::jsonb,        -- 自定义 header
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    last_status     integer,                                    -- 最后一次推送 HTTP 状态码
+    last_error      text,                                       -- 最后一次失败的简短描述
+    last_triggered_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhooks_enabled
+    ON webhooks(enabled) WHERE enabled;

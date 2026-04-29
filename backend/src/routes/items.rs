@@ -1351,9 +1351,33 @@ async fn set_favorite_for_user(
 ) -> Result<Json<UserItemDataDto>, AppError> {
     ensure_user_access(session, user_id)?;
     ensure_media_item_exists(state, item_id).await?;
-    Ok(Json(
-        repository::set_user_favorite(&state.pool, user_id, item_id, is_favorite).await?,
-    ))
+    let dto = repository::set_user_favorite(&state.pool, user_id, item_id, is_favorite).await?;
+
+    let user = repository::get_user_by_id(&state.pool, user_id).await.ok().flatten();
+    let item = repository::get_media_item(&state.pool, item_id).await.ok().flatten();
+    let event = if is_favorite {
+        crate::webhooks::events::ITEM_FAVORITED
+    } else {
+        crate::webhooks::events::ITEM_UNFAVORITED
+    };
+    crate::webhooks::dispatch(
+        state,
+        event,
+        serde_json::json!({
+            "User": {
+                "Id":   crate::models::uuid_to_emby_guid(&user_id),
+                "Name": user.as_ref().map(|u| u.name.clone()).unwrap_or_default(),
+            },
+            "Item": {
+                "Id":   crate::models::uuid_to_emby_guid(&item_id),
+                "Name": item.as_ref().map(|m| m.name.clone()).unwrap_or_default(),
+                "Type": item.as_ref().map(|m| m.item_type.clone()).unwrap_or_default(),
+                "SeriesName": item.as_ref().and_then(|m| m.series_name.clone()).unwrap_or_default(),
+                "UserData": { "IsFavorite": is_favorite },
+            }
+        }),
+    );
+    Ok(Json(dto))
 }
 
 async fn set_played_for_user(
