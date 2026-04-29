@@ -9,6 +9,8 @@ postgres-data/
 strm/
 tests/
 strm-test/
+docs/
+backend/target_audit_run/debug
 
 # Runtime output dirs
 log/
@@ -21,3 +23,6 @@ components.d.ts
 
 # Temporary agent helper scripts
 .scripts/
+
+# 上游 Jellyfin 插件浅克隆（用于 API 路由对照，可随时删后重拉）
+docs/_vendor/

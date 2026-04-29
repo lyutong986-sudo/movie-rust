@@ -205,8 +205,9 @@ async fn user_watchtime_ranking(
         })
         .collect();
 
+    let user_col = if replace_user_id { "UserName" } else { "UserId" };
     Ok(json!({
-        "colums":  ["UserId", "WatchTime"],
+        "colums":  [user_col, "WatchTime"],
         "results": results,
         "message": "ok"
     }))
@@ -505,8 +506,9 @@ async fn user_devices_ranking(
             json!([user_id, dc, ic])
         })
         .collect();
+    let user_col = if replace_user_id { "UserName" } else { "UserId" };
     Ok(json!({
-        "colums":  ["UserId", "device_count", "ip_count"],
+        "colums":  [user_col, "device_count", "ip_count"],
         "results": results,
         "message": "ok"
     }))

@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-04-30（第十七轮 出向 Webhooks + playback_reporting 兼容层 — 完成 Sakura 全部缺失功能）
+> 对比时间：2026-04-30（第十八批 Jellyfin 插件源码路由对照 + Sakura 迁移核对 + `ReplaceUserId` 列名与 Jellyfin 一致）
 
 ---
 
@@ -1139,3 +1139,60 @@ jellyfin 风格端点也加 alias）。
 | 出向 webhook 配置 API | SPA 兜底 200 text/html | ✅ `/Webhooks` CRUD + `/Notifications/Services\|Types` + `/Webhook/Configuration` 全 JSON |
 | `webhook.test` 测试推送 | — | ✅ 立即 fanout，签名一致 |
 | 失败重试 / 状态观测 | — | ✅ 1s/3s/9s 重试，`last_status`/`last_error`/`last_triggered_at` 入库 |
+
+---
+
+## 第十八批（2026-04-30）：Jellyfin 插件源码端点对照 + Sakura 迁移核对清单
+
+> 对照用源码：浅克隆于 `jellyfin/jellyfin-plugin-playbackreporting` 与 `jellyfin/jellyfin-plugin-opensubtitles`（本地路径 `docs/_vendor/`，已写入 `.gitignore`，可 `git clone --depth 1` 再生）。
+
+### 1. `jellyfin-plugin-playbackreporting`：`PlaybackReportingActivityController`
+
+Jellyfin 路由前缀：**`[Route("user_usage_stats")]`**（与 Emby 挂载到根 API 时即 `POST /user_usage_stats/submit_custom_query`；本项目 **`/emby` 前缀**下为 **`/emby/user_usage_stats/...`**，与 Sakura 一致）。
+
+| 方法 | Jellyfin 插件子路径 | movie-rust | 说明 |
+|------|-------------------|------------|------|
+| GET | `type_filter_list` | 未实现 | Jellyfin Dashboard 过滤器 |
+| GET | `user_activity` | 未实现 | 按小时活动摘要 |
+| GET | `user_manage/prune` / `add` / `remove` | 未实现 | 插件用户修剪 |
+| GET | `user_list` | 未实现 | 插件用户列表 |
+| GET | `{userId}/{date}/GetItems` | 未实现 | 单日用户明细条目 |
+| GET | `load_backup` / `save_backup` | 未实现 | 插件 SQLite 备份 |
+| GET | `PlayActivity` | 未实现 | 多日播放活动曲线数据 |
+| GET | `HourlyReport` | 未实现 | 按小时柱状 |
+| GET | `{breakdownType}/BreakdownReport` | 未实现 | 维度拆分报表 |
+| GET | `DurationHistogramReport` | 未实现 | 时长直方图 |
+| GET | `GetTvShowsReport` / `MoviesReport` | 未实现 | 影视分类报表 |
+| **POST** | **`submit_custom_query`** | ✅ [`usage_stats.rs`](backend/src/routes/usage_stats.rs) | **Sakura 唯一依赖**：8 种 SQL → PG；**不按 SQLite 执行任意语句**。**`ReplaceUserId=true` 时** `colums` 首列与 Jellyfin 一致：**`UserName`**（原为 `UserId`）；pattern#1（时长榜）同理在 `ReplaceUserId` 时为 `UserName`+`WatchTime` |
+
+结论：替换 **完整 Jellyfin 插件管理/UI** 非项目目标；**与 Sakura + Emby playback_reporting SQL 契约**已对齐（含 Jellyfin `colums` 拼写与列名替换行为）。
+
+### 2. `jellyfin-plugin-opensubtitles`：`OpenSubtitlesController`
+
+| 方法 | Jellyfin 路径 | movie-rust |
+|------|----------------|------------|
+| POST | **`Jellyfin.Plugin.OpenSubtitles/ValidateLoginInfo`**（`SubtitleManagement` 策略） | **无同名路径**；等价能力为 **服务端配置中的 Open Subtitles 凭据** + **[`opensubtitles.rs`](backend/src/metadata/opensubtitles.rs)** 直连 OS REST + Emby 风格 **`RemoteSearch/Subtitles`/下载**（见第十一批 strm 审计） |
+
+结论：目标为 **Emby API + SDK**，不提供 Jellyfin 插件专属校验 URL；播放器/前端走 Emby 字幕端点即可。
+
+### 3. EmbySDK / 端到端脚本（本批执行记录）
+
+| 脚本 | 环境 | 结果 |
+|------|------|------|
+| [`tests/webhooks_usage_stats_audit.py`](tests/webhooks_usage_stats_audit.py) | `BASE=http://127.0.0.1:18097`，`EMBY_API_KEY` 与本机后端一致，`Startup/Complete` 已完成 | **23/23 通过**（含 7h `ReplaceUserId`→`UserName` 列名） |
+| [`tests/sakura_compat_audit.py`](tests/sakura_compat_audit.py) | 同上（**空媒体库**：无预设「UI测试库」） | **13/16**：7b/9b/9c 因「库名屏蔽」断言与 **VirtualFolders 空列表**跳过/失败（有库或与第十六批相同种子数据后可全绿） |
+| [`tests/sakura_features_audit.py`](tests/sakura_features_audit.py) | 同上 | **23/25**：3a/3b 因 **VirtualFolders 为空**（无测试库条目） |
+
+**部署测试后端注意：** 清空 `postgres-data` 后需依次：`POST /Startup/User` → `POST /Users/AuthenticateByName` → **`POST /Startup/Complete`（须带管理员 `X-Emby-Token`）**，否则向导在首用户创建后 **`user_count>0`** 会要求管理员会话才能完成（与 [`startup.rs`](backend/src/routes/startup.rs) 中 `startup_wizard_open` 逻辑一致）。
+
+### 4. Sakura_embyboss：迁移后无缝衔接核对清单（运维）
+
+| 项 | 做法 |
+|----|------|
+| **服务端 API Key** | 进程环境 **`EMBY_API_KEY`** = Sakura `config.json` **`emby_api`**（请求头 **`X-Emby-Token`**） |
+| **Base URL** | **`emby_url`** = `http(s)://host:port`**，不要**带末尾 `/emby`**（Sakura `bot/func_helper/emby.py` 自己会拼 **`/emby/...`**） |
+| **用户 Id 连续性** | Emby **`import-emby`/LocalUsersv2** 迁移若 **保留 GUID**，Sakura MySQL 里 **`embyid`** 无需改；若 Id 变了需 **批量更新 Sakura 库或让用户重绑** |
+| **客户端过滤** | 检查 Sakura **`blocked_clients`**：**`.*python.*`** 会与 **Sakura 自身 aiohttp（Python）** 冲突，可能导致机器人无法调 Emby——需删除该项或为管理端 UA **单独放行** |
+| **独立于流媒体的模块** | TG 机器人、支付、MoviePilot、MySQL 等业务仍在 **Sakura 进程**；movie-rust 只承担 **Emby 兼容 HTTP** |
+
+---
