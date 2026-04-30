@@ -728,9 +728,16 @@ async fn subtitle_descriptor(
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
+    let streams = repository::get_media_streams(&state.pool, item_id).await?;
+    let ext = streams
+        .iter()
+        .find(|s| s.index == path.index)
+        .and_then(|s| s.codec.as_deref())
+        .unwrap_or("vtt");
+    let item_emby_id = crate::models::uuid_to_emby_guid(&item_id);
+    let media_source_id = format!("mediasource_{item_emby_id}");
     let stream_url = format!(
-        "/Videos/{}/Subtitles/{}/Stream.vtt",
-        crate::models::uuid_to_emby_guid(&item_id),
+        "/Videos/{item_emby_id}/{media_source_id}/Subtitles/{}/Stream.{ext}",
         path.index
     );
     Ok(axum::Json(serde_json::json!({

@@ -1351,7 +1351,7 @@ async fn serve_item_image(
         if let Err(AppError::NotFound(_)) = &result {
             if !path.starts_with("http://") && !path.starts_with("https://") {
                 if let Some(fallback_url) =
-                    find_tmdb_image_fallback(&state.pool, &item, &normalized).await
+                    find_tmdb_image_fallback(&state.pool, &item, &normalized, state.config.tmdb_api_key.as_deref()).await
                 {
                     tracing::debug!(
                         item_id = %item.id,
@@ -1369,7 +1369,7 @@ async fn serve_item_image(
         return result;
     }
 
-    if let Some(fallback_url) = find_tmdb_image_fallback(&state.pool, &item, &normalized).await {
+    if let Some(fallback_url) = find_tmdb_image_fallback(&state.pool, &item, &normalized, state.config.tmdb_api_key.as_deref()).await {
         tracing::debug!(
             item_id = %item.id,
             image_type = %normalized,
@@ -1390,6 +1390,7 @@ async fn find_tmdb_image_fallback(
     pool: &sqlx::PgPool,
     item: &crate::models::DbMediaItem,
     image_type: &str,
+    tmdb_api_key: Option<&str>,
 ) -> Option<String> {
     let kind = item.item_type.as_str();
 
@@ -1433,8 +1434,9 @@ async fn find_tmdb_image_fallback(
         .ok()?;
         let series_providers = row?.0;
         let tmdb_id = series_providers.get("Tmdb")?.as_str()?;
+        let key = tmdb_api_key?;
         let api_url = format!(
-            "https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_no}?api_key=abd3e7934eb6563b06b34934e7fa31c6"
+            "https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_no}?api_key={key}"
         );
         let resp = SHARED_HTTP_CLIENT.get(&api_url).send().await.ok()?;
         if !resp.status().is_success() {
@@ -1447,9 +1449,10 @@ async fn find_tmdb_image_fallback(
 
     if kind.eq_ignore_ascii_case("Series") || kind.eq_ignore_ascii_case("Movie") {
         let tmdb_id = item.provider_ids.get("Tmdb")?.as_str()?;
+        let key = tmdb_api_key?;
         let media_type = if kind.eq_ignore_ascii_case("Series") { "tv" } else { "movie" };
         let api_url = format!(
-            "https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key=abd3e7934eb6563b06b34934e7fa31c6"
+            "https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={key}"
         );
         let resp = SHARED_HTTP_CLIENT.get(&api_url).send().await.ok()?;
         if !resp.status().is_success() {

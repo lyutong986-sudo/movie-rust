@@ -1226,7 +1226,7 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bitrate: Option<i32>,
+    pub bitrate: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub official_rating: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1418,7 +1418,7 @@ pub struct MediaSourceDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub e_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bitrate: Option<i32>,
+    pub bitrate: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_audio_stream_index: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1598,11 +1598,11 @@ pub struct TranscodingInfoDto {
     pub is_video_direct: bool,
     pub is_audio_direct: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bitrate: Option<i32>,
+    pub bitrate: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_bitrate: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub video_bitrate: Option<i32>,
+    pub video_bitrate: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub framerate: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

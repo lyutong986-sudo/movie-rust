@@ -41,7 +41,7 @@ pub async fn get_persons(
     State(state): State<AppState>,
     Query(query): Query<GetPersonsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    let persons = repository::get_persons(
+    let (persons, total) = repository::get_persons(
         &state.pool,
         query.start_index,
         query.limit,
@@ -54,7 +54,7 @@ pub async fn get_persons(
         .collect();
 
     Ok(Json(QueryResult {
-        total_record_count: items.len() as i64,
+        total_record_count: total,
         items,
         start_index: Some(query.start_index.unwrap_or(0).max(0) as i64),
     }))

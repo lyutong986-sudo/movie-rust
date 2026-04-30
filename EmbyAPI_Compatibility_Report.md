@@ -1799,3 +1799,25 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | R106 | item_size strm 估算保留 | `repository.rs` | `item_size()` 对 strm 文件仍保留 `estimated_media_size` 估算用于库列表展示，但不影响 PlaybackInfo |
 
 ---
+
+## 第十七轮修复：响应质量全面审计修复（11 项）
+
+**审计方法：** 系统扫描 DTO 构建、PlaybackInfo、流媒体端点、会话响应中的数值溢出、类型截断、格式不一致等问题。
+
+**修复内容：**
+
+| # | 优先级 | 修复 | 文件 | 说明 |
+|---|--------|------|------|------|
+| R107 | 高 | Bitrate i64 贯通 | `models.rs` + `repository.rs` + `items.rs` | `MediaSourceDto.bitrate`、`BaseItemDto.bitrate`、`TranscodingInfoDto.bitrate/video_bitrate` 从 `i32` 改为 `i64`，消除 `i32::try_from` 静默丢失码率的风险（>2.1Gbps 码率不再丢失） |
+| R108 | 高 | Container 逗号规范化 | `repository.rs` | 新增 `first_container()` 函数，`effective_container_from_target` 对 CSV 格式容器（如 `mkv,mp4`）取首项，避免 `direct_stream_url` 生成 `stream.mkv,mp4` 等非法路径 |
+| R109 | 高 | max_bitrate 比较修复 | `items.rs` | 设备配置文件码率比较从 `max_bitrate as i32` 改为直接 `i64` 比较，防止截断导致转码判断错误 |
+| R110 | 高 | completion_percentage 上限 | `repository.rs` | 两处 DTO 构建的 `completion_percentage` 加 `.min(100.0)` 上限保护，防止脏数据导致进度条溢出 |
+| R111 | 高 | Session PlayMethod 动态推导 | `repository.rs` | `session_runtime_state` 中 `PlayMethod` 从硬编码 `DirectPlay` 改为根据 MediaSource 状态动态推导（Transcode/DirectStream/DirectPlay） |
+| R112 | 高 | Persons TotalRecordCount | `repository.rs` + `persons.rs` | `get_persons` 返回 `(Vec<PersonDto>, i64)` 带总数，路由使用真实 COUNT 而非 `items.len()` |
+| R113 | 高 | TMDB 回退使用配置 API Key | `images.rs` | `find_tmdb_image_fallback` 新增 `tmdb_api_key` 参数，移除两处硬编码 API Key，无配置时优雅跳过 |
+| R114 | 中 | subtitle_descriptor 按 codec 生成扩展名 | `videos.rs` | 字幕描述符不再写死 `Stream.vtt`，改为查询 `media_streams` 表获取实际 codec 作为扩展名 |
+| R115 | 中 | formats 字段一致 | `repository.rs` | `media_source_for_item` 的 `formats` 从 `Vec::new()` 改为 `vec![container.clone()]`，与 `get_media_source_with_streams` 保持一致 |
+| R116 | 中 | WebSocket KeepAlive 标准化 | `websocket.rs` | KeepAlive 响应从原始文本回显改为解析 `MessageType` 后返回标准 `{"MessageType":"KeepAlive"}` |
+| R117 | 中 | UserItemData.PlayedPercentage | `repository.rs` | 新增 `user_item_data_to_dto_with_runtime` 函数，在两处主要 DTO 构建路径传入 `runtime_ticks` 计算百分比（含 100% 上限），嵌套 UserData 不再始终 None |
+
+---

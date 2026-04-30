@@ -92,18 +92,24 @@ async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: 
                 match msg {
                     Ok(Some(Ok(message))) => match message {
                         axum::extract::ws::Message::Text(text) => {
-                            tracing::trace!(session_id = %session_id, "received WebSocket message");
-                            let payload = format!(
-                                r#"{{"MessageType":"KeepAlive","Data":{}}}"#,
-                                serde_json::to_string(&*text).unwrap_or_else(|_| "null".to_string())
-                            );
-                            if socket
-                                .send(axum::extract::ws::Message::Text(payload.into()))
-                                .await
-                                .is_err()
-                            {
-                                close_reason = Some("send failed".to_string());
-                                break;
+                            tracing::trace!(session_id = %session_id, "received WebSocket message: {}", &*text);
+                            if let Ok(msg_json) = serde_json::from_str::<serde_json::Value>(&*text) {
+                                let msg_type = msg_json.get("MessageType")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if msg_type == "KeepAlive" {
+                                    let reply = r#"{"MessageType":"KeepAlive"}"#;
+                                    if socket.send(axum::extract::ws::Message::Text(reply.into())).await.is_err() {
+                                        close_reason = Some("send failed".to_string());
+                                        break;
+                                    }
+                                }
+                            } else {
+                                let reply = r#"{"MessageType":"KeepAlive"}"#;
+                                if socket.send(axum::extract::ws::Message::Text(reply.into())).await.is_err() {
+                                    close_reason = Some("send failed".to_string());
+                                    break;
+                                }
                             }
                         }
                         axum::extract::ws::Message::Ping(bytes) => {

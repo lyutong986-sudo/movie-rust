@@ -1256,13 +1256,19 @@ pub async fn get_persons(
     start_index: Option<i32>,
     limit: Option<i32>,
     name_starts_with: Option<String>,
-) -> Result<Vec<PersonDto>, AppError> {
+) -> Result<(Vec<PersonDto>, i64), AppError> {
     let start_index = start_index.unwrap_or(0);
-    let limit = limit.unwrap_or(100).min(200); // 限制最大返回200条
+    let limit = limit.unwrap_or(100).min(200);
 
-    let persons = if let Some(name_prefix) = name_starts_with {
+    let (persons, total) = if let Some(name_prefix) = &name_starts_with {
         let name_pattern = format!("{}%", name_prefix);
-        sqlx::query_as::<_, DbPerson>(
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM persons WHERE name ILIKE $1",
+        )
+        .bind(&name_pattern)
+        .fetch_one(pool)
+        .await?;
+        let rows = sqlx::query_as::<_, DbPerson>(
             r#"
             SELECT *
             FROM persons
@@ -1271,13 +1277,17 @@ pub async fn get_persons(
             LIMIT $2 OFFSET $3
             "#,
         )
-        .bind(name_pattern)
+        .bind(&name_pattern)
         .bind(limit as i64)
         .bind(start_index as i64)
         .fetch_all(pool)
-        .await?
+        .await?;
+        (rows, total)
     } else {
-        sqlx::query_as::<_, DbPerson>(
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM persons")
+            .fetch_one(pool)
+            .await?;
+        let rows = sqlx::query_as::<_, DbPerson>(
             r#"
             SELECT *
             FROM persons
@@ -1288,12 +1298,13 @@ pub async fn get_persons(
         .bind(limit as i64)
         .bind(start_index as i64)
         .fetch_all(pool)
-        .await?
+        .await?;
+        (rows, total)
     };
 
     let person_dtos = persons.into_iter().map(db_person_to_dto).collect();
 
-    Ok(person_dtos)
+    Ok((person_dtos, total))
 }
 
 pub async fn get_person_by_uuid(
@@ -6843,6 +6854,19 @@ pub async fn session_runtime_state(
         .first()
         .map(|source| source.id.clone())
         .unwrap_or_else(|| format!("mediasource_{}", dto.id));
+    let play_method = dto
+        .media_sources
+        .first()
+        .map(|source| {
+            if source.transcoding_url.is_some() {
+                "Transcode"
+            } else if source.is_remote {
+                "DirectStream"
+            } else {
+                "DirectPlay"
+            }
+        })
+        .unwrap_or("DirectPlay");
 
     Ok(Some(SessionRuntimeState {
         now_playing_item: dto,
@@ -6851,7 +6875,7 @@ pub async fn session_runtime_state(
             "CanSeek": true,
             "IsPaused": is_paused.unwrap_or(false),
             "IsMuted": false,
-            "PlayMethod": "DirectPlay",
+            "PlayMethod": play_method,
             "RepeatMode": "RepeatNone",
             "MediaSourceId": media_source_id,
             "State": play_state.unwrap_or_else(|| "Playing".to_string())
@@ -8047,7 +8071,13 @@ pub fn media_item_to_dto_for_list(
     let backdrop_image_tags: Vec<String> = vec![backdrop_tag.clone(); backdrop_count];
 
     let mut user_data = match prefetched_user_data {
-        Some(Some(data)) => user_item_data_to_dto_for_item(data, item.id),
+        Some(Some(data)) => {
+            let mut dto = user_item_data_to_dto_with_runtime(data, item.runtime_ticks);
+            let emby_id = uuid_to_emby_guid(&item.id);
+            dto.key = Some(emby_id.clone());
+            dto.item_id = Some(emby_id);
+            dto
+        }
         _ => empty_user_data_for_item(item.id),
     };
     user_data.server_id = Some(uuid_to_emby_guid(&server_id));
@@ -8074,7 +8104,7 @@ pub fn media_item_to_dto_for_list(
     } else {
         match (item.runtime_ticks, user_data.playback_position_ticks) {
             (Some(runtime_ticks), position) if runtime_ticks > 0 && position > 0 => {
-                Some((position as f64 / runtime_ticks as f64) * 100.0)
+                Some(((position as f64 / runtime_ticks as f64) * 100.0).min(100.0))
             }
             _ => user_data.played_percentage,
         }
@@ -8240,11 +8270,23 @@ async fn media_item_to_dto_inner(
     let backdrop_image_tags: Vec<String> = vec![backdrop_tag.clone(); backdrop_count];
 
     let mut user_data = match (user_id, prefetched_user_data) {
-        (_, Some(Some(data))) => user_item_data_to_dto_for_item(data, item.id),
+        (_, Some(Some(data))) => {
+            let mut dto = user_item_data_to_dto_with_runtime(data, item.runtime_ticks);
+            let emby_id = uuid_to_emby_guid(&item.id);
+            dto.key = Some(emby_id.clone());
+            dto.item_id = Some(emby_id);
+            dto
+        }
         (_, Some(None)) => empty_user_data_for_item(item.id),
         (Some(user_id), None) => get_user_item_data(pool, user_id, item.id)
             .await?
-            .map(|data| user_item_data_to_dto_for_item(data, item.id))
+            .map(|data| {
+                let mut dto = user_item_data_to_dto_with_runtime(data, item.runtime_ticks);
+                let emby_id = uuid_to_emby_guid(&item.id);
+                dto.key = Some(emby_id.clone());
+                dto.item_id = Some(emby_id);
+                dto
+            })
             .unwrap_or_else(|| empty_user_data_for_item(item.id)),
         (None, None) => empty_user_data_for_item(item.id),
     };
@@ -8413,7 +8455,7 @@ async fn media_item_to_dto_inner(
     } else {
         match (item.runtime_ticks, user_data.playback_position_ticks) {
             (Some(runtime_ticks), position) if runtime_ticks > 0 && position > 0 => {
-                Some((position as f64 / runtime_ticks as f64) * 100.0)
+                Some(((position as f64 / runtime_ticks as f64) * 100.0).min(100.0))
             }
             _ => user_data.played_percentage,
         }
@@ -8466,7 +8508,7 @@ async fn media_item_to_dto_inner(
         production_locations: item.production_locations.clone(),
         size: Some(item_size(item, is_folder)),
         file_name: item_file_name(item),
-        bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
+        bitrate: item.bit_rate,
         official_rating: item.official_rating.clone(),
         community_rating: item.community_rating,
         critic_rating: item.critic_rating,
@@ -9043,10 +9085,10 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
             "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
             item_emby_id, container, media_source_id, media_source_id
         )),
-        formats: Vec::new(),
+        formats: vec![container.clone()],
         size,
         e_tag: Some(item.date_modified.timestamp().to_string()),
-        bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
+        bitrate: item.bit_rate,
         default_audio_stream_index: None,
         default_subtitle_stream_index: None,
         run_time_ticks: item.runtime_ticks,
@@ -10032,7 +10074,7 @@ fn estimated_media_size(item: &DbMediaItem) -> Option<i64> {
 
 fn media_source_size(item: &DbMediaItem, is_remote: bool) -> Option<i64> {
     if is_remote {
-        return None;
+        return estimated_media_size(item).or(Some(0));
     }
 
     std::fs::metadata(&item.path)
@@ -10053,7 +10095,7 @@ fn effective_container(item: &DbMediaItem) -> Option<String> {
 
 fn effective_container_from_target(item: &DbMediaItem, strm_target: Option<&str>) -> String {
     let local_path = Path::new(&item.path);
-    strm_target
+    let raw = strm_target
         .and_then(naming::extension_from_url)
         .or_else(|| {
             item.container
@@ -10065,7 +10107,17 @@ fn effective_container_from_target(item: &DbMediaItem, strm_target: Option<&str>
                 .extension()
                 .map(|ext| ext.to_string_lossy().to_string())
         })
-        .unwrap_or_else(|| "mp4".to_string())
+        .unwrap_or_else(|| "mp4".to_string());
+    first_container(&raw)
+}
+
+fn first_container(value: &str) -> String {
+    value
+        .split([',', '|', ';'])
+        .next()
+        .unwrap_or("mp4")
+        .trim()
+        .to_string()
 }
 
 fn media_source_name(item: &DbMediaItem, strm_target: Option<&str>) -> String {
@@ -10133,9 +10185,19 @@ fn remote_trailers_from_urls(urls: &[String]) -> Vec<Value> {
 }
 
 fn user_item_data_to_dto(data: DbUserItemData) -> UserItemDataDto {
+    user_item_data_to_dto_with_runtime(data, None)
+}
+
+fn user_item_data_to_dto_with_runtime(
+    data: DbUserItemData,
+    runtime_ticks: Option<i64>,
+) -> UserItemDataDto {
+    let played_percentage = runtime_ticks
+        .filter(|&rt| rt > 0 && data.playback_position_ticks > 0)
+        .map(|rt| ((data.playback_position_ticks as f64 / rt as f64) * 100.0).min(100.0));
     UserItemDataDto {
         rating: None,
-        played_percentage: None,
+        played_percentage,
         unplayed_item_count: None,
         playback_position_ticks: data.playback_position_ticks,
         play_count: data.play_count,
@@ -10658,7 +10720,7 @@ pub async fn get_media_source_with_streams(
         formats: vec![container.clone()],
         size,
         e_tag: Some(item.date_modified.timestamp().to_string()),
-        bitrate: item.bit_rate.and_then(|br| i32::try_from(br).ok()),
+        bitrate: item.bit_rate,
         default_audio_stream_index: media_streams
             .iter()
             .find(|s| s.stream_type == "Audio" && s.is_default)

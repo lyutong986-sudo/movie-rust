@@ -4771,6 +4771,9 @@ async fn playback_info(
         media_source.required_http_headers.retain(|key, _| {
             key.eq_ignore_ascii_case("Accept-Ranges") || key.eq_ignore_ascii_case("Range")
         });
+        if media_source.is_remote {
+            media_source.size = None;
+        }
     }
 
     // 设备配置文件处理
@@ -4779,7 +4782,7 @@ async fn playback_info(
             // 根据最大流比特率决定是否支持转码
             if let Some(max_bitrate) = device_profile.max_streaming_bitrate {
                 if let Some(media_bitrate) = media_source.bitrate {
-                    if media_bitrate > max_bitrate as i32 {
+                    if media_bitrate > max_bitrate {
                         media_source.supports_transcoding = true;
                     }
                 }
@@ -4939,7 +4942,7 @@ fn build_transcoding_info(
         .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"));
     let source_bitrate = source.bitrate;
     let video_bitrate = video_stream
-        .and_then(|stream| stream.bit_rate)
+        .and_then(|stream| stream.bit_rate.map(i64::from))
         .or(source_bitrate);
     let audio_bitrate = audio_stream.and_then(|stream| stream.bit_rate);
     let start_ticks = info.start_time_ticks.filter(|value| *value > 0);
@@ -5179,9 +5182,9 @@ fn profile_property_value(
             .and_then(|stream| stream.height)
             .map(|value| ProfileValue::Number(f64::from(value))),
         "videobitrate" | "bitrate" => stream
-            .and_then(|stream| stream.bit_rate)
+            .and_then(|stream| stream.bit_rate.map(i64::from))
             .or_else(|| source.and_then(|source| source.bitrate))
-            .map(|value| ProfileValue::Number(f64::from(value))),
+            .map(|value| ProfileValue::Number(value as f64)),
         "videobitdepth" | "bitdepth" => stream
             .and_then(|stream| stream.bit_depth)
             .map(|value| ProfileValue::Number(f64::from(value))),
@@ -5420,9 +5423,7 @@ fn transcoding_reasons(
         push_reason(&mut reasons, "SubtitleCodecNotSupported");
     }
 
-    if let (Some(max_bitrate), Some(media_bitrate)) =
-        (effective_max_bitrate, media_source.bitrate.map(i64::from))
-    {
+    if let (Some(max_bitrate), Some(media_bitrate)) = (effective_max_bitrate, media_source.bitrate) {
         if media_bitrate > max_bitrate && matches!(info.enable_transcoding, Some(true) | None) {
             push_reason(&mut reasons, "ContainerBitrateExceedsLimit");
         }
