@@ -4778,11 +4778,13 @@ async fn playback_info(
                     .find(|stream| stream.stream_type.eq_ignore_ascii_case("Audio"))
                     .map(|stream| stream.index)
             });
-        media_source.required_http_headers.retain(|key, _| {
-            key.eq_ignore_ascii_case("Accept-Ranges") || key.eq_ignore_ascii_case("Range")
-        });
         if media_source.is_remote && media_source.protocol.eq_ignore_ascii_case("Http") {
             media_source.supports_direct_play = false;
+            media_source.required_http_headers.clear();
+        } else {
+            media_source.required_http_headers.retain(|key, _| {
+                key.eq_ignore_ascii_case("Accept-Ranges") || key.eq_ignore_ascii_case("Range")
+            });
         }
     }
 

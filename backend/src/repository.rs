@@ -11565,7 +11565,11 @@ pub async fn get_media_source_with_streams(
         ignore_dts: false,
         ignore_index: false,
         gen_pts_input: false,
-        required_http_headers: BTreeMap::from([("Accept-Ranges".to_string(), "bytes".to_string())]),
+        required_http_headers: if is_remote {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([("Accept-Ranges".to_string(), "bytes".to_string())])
+        },
         add_api_key_to_direct_stream_url: Some(false),
         transcoding_url: None,
         transcoding_sub_protocol: None,
