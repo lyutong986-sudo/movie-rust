@@ -23,6 +23,14 @@ pub fn router() -> Router<AppState> {
         .route("/Collections", post(create_collection))
         .route("/collections", post(create_collection))
         .route(
+            "/Collections/{id}",
+            axum::routing::delete(delete_collection),
+        )
+        .route(
+            "/collections/{id}",
+            axum::routing::delete(delete_collection),
+        )
+        .route(
             "/Collections/{id}/Items",
             post(add_collection_items).delete(remove_collection_items),
         )
@@ -107,6 +115,18 @@ async fn create_collection(
         "IsFolder": true,
         "ChildCount": ids.len(),
     })))
+}
+
+async fn delete_collection(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    require_admin(&session)?;
+    let id = emby_id_to_uuid(&id).map_err(|_| AppError::BadRequest("无效合集 Id".to_string()))?;
+    let key = collection_key(id);
+    repository::delete_setting_value(&state.pool, &key).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn add_collection_items(

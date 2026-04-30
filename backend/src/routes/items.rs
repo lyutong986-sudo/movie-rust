@@ -178,6 +178,8 @@ pub fn router() -> Router<AppState> {
         .route("/Shows/{item_id}/Similar", get(get_similar_items))
         .route("/Trailers/{item_id}/Similar", get(get_similar_items))
         .route("/Trailers", get(trailers))
+        .route("/Search/Hints", get(search_hints))
+        .route("/search/hints", get(search_hints))
         .route("/Movies/Recommendations", get(movies_recommendations))
         .route("/movies/recommendations", get(movies_recommendations))
         .route(
@@ -5534,6 +5536,112 @@ async fn get_user_similar_items(
     ensure_user_access(&session, user_id)?;
     query.user_id = Some(user_id);
     get_similar_items(session, State(state), Path(item_id_str), Query(query)).await
+}
+
+/// `/Search/Hints` — Emby 搜索提示 API，返回 SearchHints 数组。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct SearchHintsQuery {
+    #[serde(default, alias = "searchTerm", alias = "SearchTerm")]
+    search_term: Option<String>,
+    #[serde(default, alias = "userId", alias = "UserId")]
+    user_id: Option<String>,
+    #[serde(default, alias = "limit", alias = "Limit")]
+    limit: Option<i64>,
+    #[serde(default, alias = "startIndex", alias = "StartIndex")]
+    start_index: Option<i64>,
+    #[serde(
+        default,
+        alias = "includeItemTypes",
+        alias = "IncludeItemTypes"
+    )]
+    include_item_types: Option<String>,
+}
+
+async fn search_hints(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(query): Query<SearchHintsQuery>,
+) -> Result<Json<Value>, AppError> {
+    let user_id = query
+        .user_id
+        .as_deref()
+        .and_then(|s| crate::models::emby_id_to_uuid(s).ok())
+        .unwrap_or(session.user_id);
+
+    let search_term = query
+        .search_term
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let limit = query.limit.unwrap_or(20).min(100);
+
+    let mut include_types: Vec<String> = query
+        .include_item_types
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if include_types.is_empty() {
+        include_types = vec![
+            "Movie".to_string(),
+            "Series".to_string(),
+            "Episode".to_string(),
+        ];
+    }
+
+    let options = crate::repository::ItemListOptions {
+        user_id: Some(user_id),
+        recursive: true,
+        search_term: if search_term.is_empty() {
+            None
+        } else {
+            Some(search_term)
+        },
+        limit,
+        include_types: include_types,
+        enable_total_record_count: true,
+        ..Default::default()
+    };
+
+    let result = crate::repository::list_media_items(&state.pool, options).await?;
+
+    let hints: Vec<Value> = result
+        .items
+        .into_iter()
+        .map(|item| {
+            let id_str = crate::models::uuid_to_emby_guid(&item.id);
+            let is_folder = matches!(item.item_type.as_str(), "Series" | "Season" | "BoxSet" | "Folder" | "CollectionFolder");
+            serde_json::json!({
+                "Id": id_str,
+                "Name": item.name,
+                "Type": item.item_type,
+                "ProductionYear": item.production_year,
+                "RunTimeTicks": item.runtime_ticks,
+                "ChannelId": null,
+                "MediaType": item.media_type,
+                "StartDate": null,
+                "EndDate": null,
+                "Series": item.series_name,
+                "Status": null,
+                "Album": null,
+                "AlbumId": null,
+                "AlbumArtist": null,
+                "Artists": [],
+                "SongCount": 0,
+                "IsFolder": is_folder,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "SearchHints": hints,
+        "TotalRecordCount": result.total_record_count,
+    })))
 }
 
 /// `/Trailers` — 返回所有带远程预告片的媒体条目，或类型为 Trailer 的本地条目。

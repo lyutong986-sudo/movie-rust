@@ -1348,3 +1348,100 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 - `tests/sakura_full_simulation.py`：新增全覆盖测试脚本
 
 ---
+
+## 第三轮：完整审计 + 百万级片源性能测试 + 前端全功能 UI 模拟
+
+**测试日期：2026-04-30**
+
+### 1. 百万级片源生成
+
+| 数据类型 | 数量 | 方式 |
+|---------|------|------|
+| STRM 电影文件（容器内） | 45,000 | Docker 容器内 shell 脚本生成，Emby 标准命名 |
+| STRM 剧集文件（容器内） | 5,000（50 部×10季×10集） | Docker 容器内 shell 脚本生成 |
+| DB 注入电影记录 | 500,004（18 类型×27,778） | PostgreSQL `generate_series` 批量 INSERT |
+| DB 注入剧集记录 | 5,001 Series + 25,001 Season + 500,003 Episode | PostgreSQL `generate_series` 批量 INSERT |
+| **总计** | **1,030,009** | |
+
+- Emby 标准命名: `Movies/{genre}/Film_{genre}_{i} ({year})/Film_{genre}_{i} ({year}).strm`
+- 剧集命名: `TV Shows/Series_{i} ({year})/Season XX/Series_{i} SXXEXX Episode X.strm`
+- 每个 `.strm` 文件含虚拟 CDN URL: `https://fake-cdn.example.com/media/{hash}.mp4`
+
+### 2. 全管理员 API 审计结果 (111/111 PASS)
+
+| 模块 | 测试项 | 通过 |
+|------|--------|------|
+| A. 系统与启动 | 8 | 8/8 ✅ |
+| B. 媒体库管理 | 5 | 5/5 ✅ |
+| C. 用户管理 | 10 | 10/10 ✅ |
+| D. TMDB 元数据 | 5 | 5/5 ✅ |
+| E. 字幕 (OpenSubtitles) | 3 | 3/3 ✅ |
+| F. 会话与设备 | 5 | 5/5 ✅ |
+| G. 播放上报与统计 | 7 | 7/7 ✅ |
+| H. 配置管理 (GET+POST 对) | 13 | 13/13 ✅ |
+| I. 日志与活动 | 5 | 5/5 ✅ |
+| J. 计划任务 | 5 | 5/5 ✅ |
+| K. API Key | 3 | 3/3 ✅ |
+| L. 媒体操作 | 20 | 20/20 ✅ |
+| M. 播放列表/合集 | 7 | 7/7 ✅ |
+| N. Webhook | 6 | 6/6 ✅ |
+| O. 杂项与兼容 | 9 | 9/9 ✅ |
+| **总计** | **111** | **111/111** |
+
+### 3. 百万级数据性能指标
+
+| 端点 | 数据量 | 响应时间 | 阈值 | 状态 |
+|------|--------|---------|------|------|
+| `GET /Items/Counts` | 1,030,009 | 0.08s | < 1s | ✅ |
+| `GET /Users/{id}/Items` (分页 Limit=20) | 500,004 Movies | 0.47s | < 2s | ✅ |
+| `GET /Search/Hints` | 1,030,009 | 0.01s | < 2s | ✅ |
+| `GET /Genres` | 1,030,009 | 0.21s | < 2s | ✅ |
+| `GET /Persons` | 全量 | 0.01s | < 2s | ✅ |
+| `GET /Shows/NextUp` | 5,001 Series | 即时 | < 2s | ✅ |
+
+### 4. Chrome DevTools MCP 前端 UI 模拟结果
+
+共模拟 19 个管理页面/功能，所有页面正常加载，0 个 console.error，0 个 5xx 网络请求。
+
+| # | 页面 | 截图 | 状态 |
+|---|------|------|------|
+| 1 | 登录页面 | `01_login_page.png` | ✅ 用户列表可见 |
+| 2 | 登录→首页 | `02_home_page.png` | ✅ Hero/最近添加/下一集/媒体库 |
+| 3 | 媒体库浏览 | `03_library_browse.png` | ✅ 筛选/排序/字母跳转/加载更多 |
+| 4 | 剧集详情页 | `04_series_detail.png` | ✅ 5季/20集/TMDB链接/类似剧集 |
+| 5 | 仪表盘 | `05_dashboard.png` | ✅ 75活跃会话/1,030,009条目/任务/活动 |
+| 6 | 服务器设置 | `06_server_settings.png` | ✅ 服务器名/语言/TMDB Key |
+| 7 | 媒体库管理 | `07_libraries.png` | ✅ 添加/扫描/编辑/删除 |
+| 8 | 用户管理 | `08_users.png` | ✅ 新建/策略/改密/删除/Emby导入 |
+| 9 | API Key | `09_apikeys.png` | ✅ 颁发/列表/撤销 |
+| 10 | 转码 | `10_transcoding.png` | ✅ 开关/加速/FFmpeg/编码质量 |
+| 11 | 网络 | `11_network.png` | ✅ 端口/HTTPS/远程 |
+| 12 | 字幕下载 | `12_subtitles.png` | ✅ OpenSubtitles配置 |
+| 13 | 计划任务 | `13_tasks.png` | ✅ 任务列表/运行/取消/触发器 |
+| 14 | 日志与活动 | `14_logs.png` | ✅ 日志文件/活动记录 |
+| 15 | 品牌化 | `15_branding.png` | ✅ CSS/免责声明 |
+| 16 | 设备 | `16_devices.png` | ✅ 设备列表 |
+| 17 | 报表 | `17_reports.png` | ✅ 活动报表 |
+| 18 | 媒体库显示 | `18_library_display.png` | ✅ 合集/显示设置 |
+| 19 | 播放设置 | `19_playback.png` | ✅ 恢复/转码偏好 |
+
+### 5. 本轮新增功能修复
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R1 | `GET /Search/Hints` 端点 | `backend/src/routes/items.rs` | 新增 Emby 搜索提示 API，返回 `SearchHints` + `TotalRecordCount` |
+| R2 | `DELETE /Collections/{id}` 端点 | `backend/src/routes/collections.rs` | 新增合集删除路由 |
+
+### 6. 测试脚本清单
+
+| 文件 | 用途 |
+|------|------|
+| `tests/million_strm_generator.py` | 百万 STRM 文件生成器（容器内+DB注入） |
+| `tests/million_inject.sql` | PostgreSQL 百万级数据注入脚本 |
+| `tests/full_admin_audit.py` | API 全功能端到端测试（111 项） |
+| `tests/ui_admin_simulation.py` | Chrome MCP 前端 UI 模拟步骤定义 |
+| `tests/screenshots/*.png` | 19 张 UI 测试截图 |
+| `tests/results/full_audit_report.json` | 测试结果 JSON 报告 |
+| `tests/sakura_full_simulation.py` | Sakura_embyboss 全功能模拟（57 项） |
+
+---
