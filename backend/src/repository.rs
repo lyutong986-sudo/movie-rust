@@ -2415,6 +2415,30 @@ pub async fn patch_person_metadata(
     Ok(())
 }
 
+/// 判断人物元数据是否过时（从未同步或距上次同步 ≥3 天）。
+pub async fn is_person_metadata_stale(pool: &sqlx::PgPool, person_id: Uuid) -> Result<bool, AppError> {
+    let synced_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT metadata_synced_at FROM persons WHERE id = $1",
+    )
+    .bind(person_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+
+    Ok(match synced_at {
+        None => true,
+        Some(ts) => (Utc::now() - ts).num_days() >= 3,
+    })
+}
+
+/// 标记人物的 metadata_synced_at 为当前时间（即使无 TMDB ID 也标记，避免重复请求）。
+pub async fn mark_person_metadata_synced(pool: &sqlx::PgPool, person_id: Uuid) {
+    let _ = sqlx::query("UPDATE persons SET metadata_synced_at = now() WHERE id = $1")
+        .bind(person_id)
+        .execute(pool)
+        .await;
+}
+
 pub async fn create_session(
     pool: &sqlx::PgPool,
     user_id: Uuid,

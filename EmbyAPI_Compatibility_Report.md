@@ -1731,3 +1731,30 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | R89 | person_to_base_item 设置 PrimaryImageItemId | `routes/persons.rs` | 设置 `primary_image_item_id` 使客户端能正确定位图片所属条目 |
 
 ---
+
+## 第十四轮修复：用户访问时同步触发元数据拉取（On-Demand Metadata Refresh）
+
+**问题现象：**
+用户首次访问人物详情页或媒体详情页时，如果人物简介、头像、媒体 overview/图片尚未由后台扫描补全，
+客户端显示为空白。Emby/Jellyfin 的行为是在 `GET /Users/{userId}/Items/{itemId}` 时对 **Person**
+类型条目执行 `RefreshItemOnDemandIfNeeded`，在返回 DTO 之前同步从 TMDB 拉取缺失的元数据和图片。
+
+**参考实现：**
+- `Emby模板/MediaBrowser.Api/UserLibrary/UserLibraryService.cs` (383–417行)
+- `jellyfin后端模板/Jellyfin.Api/Controllers/UserLibraryController.cs` (633–652行)
+
+**修复内容：**
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R90 | Person 按需元数据刷新 | `routes/items.rs` | 在 `item_dto` 中，当 Person 的 `overview` 为空或 `primary_image_tag` 为 None 时，调用 `refresh_person_on_demand` 同步从 TMDB 拉取简介和头像 |
+| R91 | Person 刷新节流（3天） | `repository.rs` | 新增 `is_person_metadata_stale` 函数，仅当 `metadata_synced_at` 为 NULL 或距今 ≥3 天时才触发刷新 |
+| R92 | 无 TMDB ID 时标记已同步 | `repository.rs` | 新增 `mark_person_metadata_synced` 函数，对没有 TMDB ID 的人物标记 `metadata_synced_at=now()` 避免每次请求重复尝试 |
+| R93 | 媒体条目按需元数据刷新 | `routes/items.rs` | 新增 `refresh_media_item_on_demand_if_needed`：当 Movie/Series/Season/Episode 的 overview 和 primary image 同时缺失，且从未被刷新过（date_modified ≈ date_created），同步触发 `do_refresh_item_metadata` 补全元数据、人物、图片 |
+
+**行为逻辑（与 Emby/Jellyfin 一致）：**
+1. Person：`overview` 为空 OR `primary_image` 缺失 → 检查 `metadata_synced_at` 是否 ≥3天 → 若是则调用 `PersonService::refresh_person_from_tmdb`
+2. Media Item：`overview` 为空 AND `image_primary_path` 缺失 AND 未曾被刷新 → 调用 `do_refresh_item_metadata` 完整刷新（含人员、图片级联）
+3. 失败静默：刷新失败不影响接口返回，返回当前已有数据
+
+---

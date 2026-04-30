@@ -3337,7 +3337,17 @@ async fn item_dto(
     let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
         // AfuseKt / Hills 等在「参演人员」等界面用 `/Users/.../Items/{id}` 拉人物详情；
         // ID 指向 `persons` 而非 `media_items`，与官方 Emby 行为一致。
-        if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
+        if let Some(mut person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
+            // Emby/Jellyfin: RefreshItemOnDemandIfNeeded — 人物缺 Overview 或 Primary 图时同步拉取
+            let needs_refresh = person.overview.as_deref().unwrap_or("").trim().is_empty()
+                || person.primary_image_tag.is_none();
+            if needs_refresh {
+                if let Some(refreshed) =
+                    refresh_person_on_demand(state, item_id).await
+                {
+                    person = refreshed;
+                }
+            }
             return Ok(Json(crate::routes::persons::person_to_base_item(
                 person,
                 state.config.server_id,
@@ -3350,10 +3360,98 @@ async fn item_dto(
         return Err(AppError::NotFound("媒体条目不存在".to_string()));
     }
 
+    // 媒体条目按需元数据刷新：如果 overview/图片/人物缺失且从未刷新过，同步触发 TMDB
+    let item = refresh_media_item_on_demand_if_needed(state, item).await;
+
     Ok(Json(
         repository::media_item_to_dto(&state.pool, &item, Some(user_id), state.config.server_id)
             .await?,
     ))
+}
+
+/// 媒体条目按需元数据刷新：仅当 overview 和 primary image 都缺失时触发（首次访问补全）。
+/// 避免对已有元数据的条目重复触发，使用 date_modified 判断是否已刷新过。
+async fn refresh_media_item_on_demand_if_needed(
+    state: &AppState,
+    item: crate::models::DbMediaItem,
+) -> crate::models::DbMediaItem {
+    let kind = item.item_type.as_str();
+    let is_refreshable = kind.eq_ignore_ascii_case("Movie")
+        || kind.eq_ignore_ascii_case("Series")
+        || kind.eq_ignore_ascii_case("Season")
+        || kind.eq_ignore_ascii_case("Episode");
+    if !is_refreshable {
+        return item;
+    }
+
+    let overview_missing = item.overview.as_deref().unwrap_or("").trim().is_empty();
+    let image_missing = item.image_primary_path.is_none();
+    if !overview_missing && !image_missing {
+        return item;
+    }
+
+    // 避免频繁刷新：如果 date_modified 与 date_created 相差 >5 分钟说明已经被刷新过
+    let already_refreshed = (item.date_modified - item.date_created).num_minutes() > 5;
+    if already_refreshed {
+        return item;
+    }
+
+    if state.metadata_manager.is_none() {
+        return item;
+    }
+
+    tracing::info!(
+        item_id = %item.id,
+        name = %item.name,
+        "按需触发媒体元数据刷新（overview/image 缺失）"
+    );
+
+    if let Err(err) = do_refresh_item_metadata(state, item.id).await {
+        tracing::warn!(item_id = %item.id, ?err, "按需媒体元数据刷新失败");
+        return item;
+    }
+
+    // Re-fetch the updated item
+    match repository::get_media_item(&state.pool, item.id).await {
+        Ok(Some(updated)) => updated,
+        _ => item,
+    }
+}
+
+/// Emby/Jellyfin `RefreshItemOnDemandIfNeeded` — 人物缺少简介或头像时，同步触发 TMDB 拉取。
+/// 条件：距上次同步 ≥3 天（避免频繁请求 TMDB）。
+async fn refresh_person_on_demand(
+    state: &AppState,
+    person_id: Uuid,
+) -> Option<crate::models::PersonDto> {
+    let stale = repository::is_person_metadata_stale(&state.pool, person_id)
+        .await
+        .unwrap_or(true);
+    if !stale {
+        return None;
+    }
+
+    let metadata_manager = state.metadata_manager.as_ref()?;
+    let service = PersonService::new(state.pool.clone(), metadata_manager.clone());
+    match service
+        .refresh_person_from_tmdb(person_id, &state.config.static_dir, false)
+        .await
+    {
+        Ok(Some(_report)) => {
+            repository::get_person_by_uuid(&state.pool, person_id)
+                .await
+                .ok()
+                .flatten()
+        }
+        Ok(None) => {
+            repository::mark_person_metadata_synced(&state.pool, person_id).await;
+            None
+        }
+        Err(err) => {
+            tracing::warn!(person_id = %person_id, ?err, "按需刷新人物元数据失败");
+            None
+        }
+    }
 }
 
 /// Emby SDK `POST /Items/{Id}/Refresh` 的 query 参数。
