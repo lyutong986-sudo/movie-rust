@@ -10004,9 +10004,7 @@ fn item_size(item: &DbMediaItem, is_folder: bool) -> i64 {
     }
 
     if naming::is_strm(Path::new(&item.path)) {
-        if let Some(size) = estimated_media_size(item) {
-            return size;
-        }
+        return estimated_media_size(item).unwrap_or(0);
     }
 
     std::fs::metadata(&item.path)
@@ -10034,7 +10032,7 @@ fn estimated_media_size(item: &DbMediaItem) -> Option<i64> {
 
 fn media_source_size(item: &DbMediaItem, is_remote: bool) -> Option<i64> {
     if is_remote {
-        return estimated_media_size(item).or(Some(0));
+        return None;
     }
 
     std::fs::metadata(&item.path)
