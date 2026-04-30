@@ -3377,7 +3377,7 @@ pub async fn list_remote_emby_sources(
             id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
-            view_library_map,
+            view_library_map, proxy_mode,
             created_at, updated_at
         FROM remote_emby_sources
         ORDER BY name
@@ -3423,7 +3423,7 @@ pub async fn get_remote_emby_source(
             id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
-            view_library_map,
+            view_library_map, proxy_mode,
             created_at, updated_at
         FROM remote_emby_sources
         WHERE id = $1
