@@ -12,18 +12,16 @@ use axum::{
     response::Response,
 };
 use chrono::{NaiveDate, Utc};
-use regex::Regex;
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use walkdir::WalkDir;
 
 const REMOTE_PAGE_SIZE: i64 = 200;
 const PLAYBACK_INFO_CACHE_TTL_SECS: u64 = 300;
@@ -720,6 +718,11 @@ async fn sync_source_inner(
             ));
         }
     }
+
+    // 增量同步：有 last_sync_at 则仅同步变更条目；否则全量同步
+    let incremental_since = source.last_sync_at;
+    let is_incremental = incremental_since.is_some();
+
     let mut total_items = 0u64;
     for view in &views {
         let view_count = fetch_remote_items_total_count_for_view(
@@ -727,6 +730,7 @@ async fn sync_source_inner(
             source,
             user_id.as_str(),
             view.id.as_str(),
+            incremental_since,
         )
         .await?;
         total_items = total_items.saturating_add(view_count);
@@ -741,25 +745,70 @@ async fn sync_source_inner(
         .clone();
 
     let strm_workspace = strm_workspace_for_source(source);
-    if let Some(ref workspace) = strm_workspace {
-        let _ = tokio::fs::remove_dir_all(workspace).await.ok();
-        tokio::fs::create_dir_all(workspace)
-            .await
-            .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
+
+    if is_incremental {
+        // ── 增量模式 ─────────────────────────────────────────────────────
+        // STRM 工作区保持现有内容，不整体清空
+        if let Some(ref workspace) = strm_workspace {
+            // 确保工作区目录存在（首次增量时可能还不存在）
+            tokio::fs::create_dir_all(workspace)
+                .await
+                .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
+        }
+
+        if let Some(handle) = &progress {
+            handle.set_phase("FetchingRemoteIndex", 4.0);
+        }
+        // 1. 获取远端全量 ID 集合，检测已删除条目
+        let remote_id_set = fetch_all_remote_item_ids(
+            &state.pool,
+            source,
+            user_id.as_str(),
+            &views,
+        )
+        .await?;
+
+        if let Some(handle) = &progress {
+            handle.set_phase("PruningStaleItems", 5.0);
+        }
+        // 2. 从 DB 中删除远端已不存在的条目
+        let deleted = delete_stale_items_for_source(
+            &state.pool,
+            source.id,
+            source.target_library_id,
+            &remote_id_set,
+            strm_workspace.as_deref(),
+        )
+        .await?;
+        if deleted > 0 {
+            tracing::info!(
+                source_id = %source.id,
+                deleted,
+                "增量同步：清理过时条目"
+            );
+        }
+    } else {
+        // ── 全量模式 ─────────────────────────────────────────────────────
+        // 清空 STRM 工作区（如已配置）并清理 DB 中旧条目
+        if let Some(ref workspace) = strm_workspace {
+            let _ = tokio::fs::remove_dir_all(workspace).await.ok();
+            tokio::fs::create_dir_all(workspace)
+                .await
+                .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
+        }
+        if let Some(handle) = &progress {
+            handle.set_phase("PreparingTargetLibrary", 5.0);
+        }
+        cleanup_remote_source_items(
+            &state.pool,
+            source.target_library_id,
+            source.id,
+            source_root.as_path(),
+        )
+        .await?;
     }
+
     let mut tvshow_roots_written: HashSet<PathBuf> = HashSet::new();
-
-    if let Some(handle) = &progress {
-        handle.set_phase("PreparingTargetLibrary", 5.0);
-    }
-    cleanup_remote_source_items(
-        &state.pool,
-        source.target_library_id,
-        source.id,
-        source_root.as_path(),
-    )
-    .await?;
-
     let display_mode = normalize_display_mode(source.display_mode.as_str());
     let root_item_id = if display_mode == REMOTE_DISPLAY_MODE_SEPARATE {
         Some(upsert_virtual_root_item(&state.pool, source).await?)
@@ -785,6 +834,7 @@ async fn sync_source_inner(
                 view.id.as_str(),
                 start_index,
                 REMOTE_PAGE_SIZE,
+                incremental_since,
             )
             .await?;
             if page.items.is_empty() {
@@ -855,6 +905,7 @@ async fn sync_source_inner(
                 let strm_bundle = match &strm_workspace {
                     Some(workspace) => {
                         match write_remote_strm_bundle(
+                            state,
                             source,
                             workspace.as_path(),
                             playback_token.as_str(),
@@ -916,6 +967,15 @@ async fn sync_source_inner(
             }
         }
     }
+
+    let mode_label = if is_incremental { "增量" } else { "全量" };
+    tracing::info!(
+        source_id = %source.id,
+        mode = mode_label,
+        fetched = fetched_count,
+        written = written_files,
+        "远端 Emby 同步完成"
+    );
 
     let scan_summary = ScanSummary {
         libraries: 1,
@@ -1660,6 +1720,7 @@ async fn fetch_all_remote_items(
             source,
             user_id.as_str(),
             view.id.as_str(),
+            None,
         )
         .await?;
         total_count = total_count.saturating_add(view_count);
@@ -1677,6 +1738,7 @@ async fn fetch_all_remote_items(
                 view.id.as_str(),
                 start_index,
                 REMOTE_PAGE_SIZE,
+                None,
             )
             .await?;
 
@@ -1737,8 +1799,9 @@ async fn fetch_remote_items_total_count_for_view(
     source: &mut DbRemoteEmbySource,
     user_id: &str,
     view_id: &str,
+    min_date_last_saved: Option<chrono::DateTime<Utc>>,
 ) -> Result<u64, AppError> {
-    let page = fetch_remote_items_page_for_view(pool, source, user_id, view_id, 0, 1).await?;
+    let page = fetch_remote_items_page_for_view(pool, source, user_id, view_id, 0, 1, min_date_last_saved).await?;
     Ok(page.total_record_count.max(0) as u64)
 }
 
@@ -1749,10 +1812,11 @@ async fn fetch_remote_items_page_for_view(
     view_id: &str,
     start_index: i64,
     limit: i64,
+    min_date_last_saved: Option<chrono::DateTime<Utc>>,
 ) -> Result<RemoteItemsResult, AppError> {
     let server_url = normalize_server_url(&source.server_url);
     let endpoint = format!("{server_url}/Users/{user_id}/Items");
-    let query = vec![
+    let mut query = vec![
         ("Recursive".to_string(), "true".to_string()),
         ("ParentId".to_string(), view_id.to_string()),
         ("IncludeItemTypes".to_string(), "Movie,Episode".to_string()),
@@ -1766,7 +1830,167 @@ async fn fetch_remote_items_page_for_view(
         ("StartIndex".to_string(), start_index.to_string()),
         ("Limit".to_string(), limit.to_string()),
     ];
+    if let Some(since) = min_date_last_saved {
+        query.push(("MinDateLastSaved".to_string(), since.to_rfc3339()));
+    }
     get_json_with_retry(pool, source, &endpoint, &query).await
+}
+
+/// 仅拉取远端条目的 Id 列表（用于增量刷新中的删除检测）
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteItemIdEntry {
+    id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteItemIdsResult {
+    #[serde(default)]
+    items: Vec<RemoteItemIdEntry>,
+    total_record_count: i64,
+}
+
+const REMOTE_ID_PAGE_SIZE: i64 = 1000;
+
+async fn fetch_remote_item_ids_page(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    user_id: &str,
+    view_id: &str,
+    start_index: i64,
+    limit: i64,
+) -> Result<RemoteItemIdsResult, AppError> {
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let query = vec![
+        ("Recursive".to_string(), "true".to_string()),
+        ("ParentId".to_string(), view_id.to_string()),
+        ("IncludeItemTypes".to_string(), "Movie,Episode".to_string()),
+        ("Fields".to_string(), "Id".to_string()),
+        ("EnableTotalRecordCount".to_string(), "true".to_string()),
+        ("StartIndex".to_string(), start_index.to_string()),
+        ("Limit".to_string(), limit.to_string()),
+    ];
+    get_json_with_retry(pool, source, &endpoint, &query).await
+}
+
+/// 拉取所有视图下的远端条目 ID 集合，用于增量同步时检测已删除的条目
+async fn fetch_all_remote_item_ids(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    user_id: &str,
+    views: &[RemoteLibraryView],
+) -> Result<HashSet<String>, AppError> {
+    let mut all_ids = HashSet::new();
+    for view in views {
+        let mut start_index = 0i64;
+        loop {
+            let page = fetch_remote_item_ids_page(
+                pool,
+                source,
+                user_id,
+                &view.id,
+                start_index,
+                REMOTE_ID_PAGE_SIZE,
+            )
+            .await?;
+            for entry in &page.items {
+                all_ids.insert(entry.id.clone());
+            }
+            start_index += REMOTE_ID_PAGE_SIZE;
+            if page.items.is_empty() || start_index >= page.total_record_count {
+                break;
+            }
+        }
+    }
+    Ok(all_ids)
+}
+
+/// 删除本地 DB 中不再存在于远端的条目，并清理对应的 STRM 文件
+async fn delete_stale_items_for_source(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    library_id: Uuid,
+    remote_id_set: &HashSet<String>,
+    strm_workspace: Option<&Path>,
+) -> Result<u64, AppError> {
+    let source_id_str = source_id.to_string();
+    struct StaleRow {
+        id: Uuid,
+        path: Option<String>,
+        remote_id: Option<String>,
+    }
+    let rows: Vec<StaleRow> = sqlx::query(
+        r#"
+        SELECT id, path, provider_ids->>'RemoteEmbyItemId' AS remote_id
+        FROM media_items
+        WHERE library_id = $1
+          AND provider_ids->>'RemoteEmbySourceId' = $2
+          AND provider_ids->>'RemoteEmbyItemId' IS NOT NULL
+        "#,
+    )
+    .bind(library_id)
+    .bind(&source_id_str)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| {
+        use sqlx::Row;
+        StaleRow {
+            id: row.get("id"),
+            path: row.get("path"),
+            remote_id: row.get("remote_id"),
+        }
+    })
+    .collect();
+
+    let mut deleted = 0u64;
+    for row in rows {
+        let Some(ref remote_id) = row.remote_id else {
+            continue;
+        };
+        if remote_id_set.contains(remote_id.as_str()) {
+            continue;
+        }
+        // 清理 STRM 文件及旁路文件
+        if let Some(workspace) = strm_workspace {
+            if let Some(ref path_str) = row.path {
+                let item_path = Path::new(path_str.as_str());
+                if path_str.ends_with(".strm") && item_path.starts_with(workspace) {
+                    // 删除同目录下同文件名前缀的所有旁路文件
+                    if let Some(parent) = item_path.parent() {
+                        if let Some(stem) = item_path.file_stem().and_then(|s| s.to_str()) {
+                            let stem = stem.to_string();
+                            if let Ok(mut dir_entries) = tokio::fs::read_dir(parent).await {
+                                while let Ok(Some(entry)) = dir_entries.next_entry().await {
+                                    let fname = entry.file_name();
+                                    let fname_str = fname.to_string_lossy();
+                                    if fname_str.starts_with(stem.as_str())
+                                        || fname_str == "poster.jpg"
+                                        || fname_str == "backdrop.jpg"
+                                        || fname_str == "logo.png"
+                                        || fname_str == "movie.nfo"
+                                    {
+                                        let _ = tokio::fs::remove_file(entry.path()).await;
+                                    }
+                                }
+                            }
+                            // 尝试删除父目录（如已空）
+                            let _ = tokio::fs::remove_dir(parent).await;
+                        }
+                    }
+                }
+            }
+        }
+        // 删除 DB 记录
+        sqlx::query("DELETE FROM media_items WHERE id = $1")
+            .bind(row.id)
+            .execute(pool)
+            .await?;
+        deleted += 1;
+    }
+    Ok(deleted)
 }
 
 /// 构造远端 Emby 的 Static 直链 URL，跳过 PlaybackInfo 往返
@@ -2513,49 +2737,6 @@ fn strm_workspace_for_source(source: &DbRemoteEmbySource) -> Option<PathBuf> {
     )
 }
 
-static REMOTE_EMBY_STRM_API_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)api_key=[^&#\s\r\n]+").expect("REMOTE_EMBY_STRM_API_KEY_RE")
-});
-
-fn rewrite_strm_line_api_key(line: &str, access_token: &str) -> String {
-    REMOTE_EMBY_STRM_API_KEY_RE
-        .replace_all(line.trim_end(), format!("api_key={access_token}"))
-        .into_owned()
-}
-
-async fn rewrite_strm_api_keys_under_root(root: &Path, access_token: &str) -> Result<(), AppError> {
-    let exists = tokio::fs::try_exists(root)
-        .await
-        .map_err(|e| AppError::Internal(format!("检查 STRM 目录失败: {e}")))?;
-    if !exists {
-        return Ok(());
-    }
-    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        let is_strm = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
-        if !is_strm {
-            continue;
-        }
-        let raw = tokio::fs::read_to_string(path).await.unwrap_or_default();
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let rewritten = rewrite_strm_line_api_key(line, access_token.trim());
-        if rewritten != line {
-            tokio::fs::write(path, format!("{rewritten}\n"))
-                .await
-                .map_err(|e| AppError::Internal(format!("重写 STRM api_key 失败: {e}")))?;
-        }
-    }
-    Ok(())
-}
 
 fn append_remote_api_key_param(url: &str, token: &str) -> String {
     if url.contains("api_key=") {
@@ -2676,14 +2857,6 @@ fn media_source_row<'a>(
         .map(|ms| (ms.id.as_str(), ms.media_streams.as_slice()))
 }
 
-fn resolve_media_source_id_for_playback<'a>(
-    remote_item_id: &'a str,
-    msid_opt: Option<&'a str>,
-) -> &'a str {
-    msid_opt
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(remote_item_id)
-}
 
 async fn emby_download_bytes(
     source: &DbRemoteEmbySource,
@@ -2712,6 +2885,7 @@ async fn emby_download_bytes(
 }
 
 async fn write_remote_strm_bundle(
+    state: &AppState,
     source: &DbRemoteEmbySource,
     workspace_root: &Path,
     playback_token: &str,
@@ -2732,19 +2906,22 @@ async fn write_remote_strm_bundle(
             .map_err(|e| AppError::Internal(format!("创建 STRM 目录失败: {e}")))?;
     }
 
-    let base = normalize_server_url(&source.server_url);
-    let device_id = format!("movie-rust-{}", source.id.simple());
-    let ms_for_static = resolve_media_source_id_for_playback(item.item.id.as_str(), media_source_id);
-    let stream_line = build_remote_static_stream_url(
-        base.as_str(),
+    // 写入本地代理 URL：所有流量通过本地 Movie Rust 代理后端转发到远端，
+    // 用户不需要能直接访问远端 Emby 服务器。
+    let signature = build_proxy_signature(source.source_secret, item.item.id.as_str(), media_source_id);
+    let stream_line = build_local_proxy_url(
+        &state.config,
+        source.id,
         item.item.id.as_str(),
-        Some(ms_for_static),
-        playback_token.trim(),
-        device_id.as_str(),
+        media_source_id,
+        signature.as_str(),
     );
     tokio::fs::write(&strm_path, format!("{}\n", stream_line.trim()))
         .await
         .map_err(|e| AppError::Internal(format!("写入 STRM 失败: {e}")))?;
+
+    // 下载侧车文件（图片/NFO/字幕）仍需直连远端服务器
+    let base = normalize_server_url(&source.server_url);
 
     let mut local_poster: Option<PathBuf> = None;
     let mut local_backdrop: Option<PathBuf> = None;
@@ -2868,18 +3045,13 @@ async fn write_remote_strm_bundle(
     Ok((strm_path, local_poster, local_backdrop, local_logo))
 }
 
-async fn refresh_single_remote_strm_tokens(
+/// 定期强制刷新远端 Emby 登录令牌，确保代理鉴权不过期。
+/// STRM 文件内存的是本地代理 URL（不含远端 token），无需重写文件内容。
+async fn refresh_single_remote_token(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
-    workspace: &Path,
 ) -> Result<(), AppError> {
     ensure_authenticated(pool, source, true).await?;
-    let token = source
-        .access_token
-        .as_deref()
-        .filter(|t| !t.trim().is_empty())
-        .ok_or_else(|| AppError::Internal("刷新后令牌仍为空".into()))?;
-    rewrite_strm_api_keys_under_root(workspace, token).await?;
     repository::update_remote_emby_source_last_token_refresh(pool, source.id).await?;
     Ok(())
 }
@@ -2895,9 +3067,6 @@ async fn run_remote_emby_token_refresh_pass(pool: &sqlx::PgPool) -> Result<(), A
         if interval_secs <= 0 {
             continue;
         }
-        let Some(workspace) = strm_workspace_for_source(&source) else {
-            continue;
-        };
         let due = match source.last_token_refresh_at {
             None => true,
             Some(ts) => {
@@ -2910,21 +3079,19 @@ async fn run_remote_emby_token_refresh_pass(pool: &sqlx::PgPool) -> Result<(), A
         if !due {
             continue;
         }
-        if let Err(error) =
-            refresh_single_remote_strm_tokens(pool, &mut source, workspace.as_path()).await
-        {
+        if let Err(error) = refresh_single_remote_token(pool, &mut source).await {
             tracing::warn!(
                 source_id = %source.id,
                 source_name = %source.name,
                 error = %error,
-                "远端 STRM api_key 刷新失败"
+                "远端 Emby token 主动刷新失败"
             );
         }
     }
     Ok(())
 }
 
-/// 每分钟扫描配置了 `token_refresh_interval_secs` 且已设置 STRM 输出目录的源，重写工作区内 `.strm` 内的 `api_key`。
+/// 每分钟检查是否需要主动刷新远端 Emby 登录令牌（防止长时间无访问导致 token 失效）。
 pub async fn remote_emby_token_refresh_loop(pool: sqlx::PgPool) {
     let mut ticker = tokio::time::interval(Duration::from_secs(60));
     loop {
