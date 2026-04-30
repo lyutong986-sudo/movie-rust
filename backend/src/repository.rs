@@ -57,6 +57,10 @@ pub async fn user_count(pool: &sqlx::PgPool) -> Result<i64, AppError> {
 }
 
 pub async fn item_counts(pool: &sqlx::PgPool) -> Result<ItemCountsDto, AppError> {
+    crate::repo_cache::cached_item_counts(pool).await
+}
+
+pub async fn item_counts_uncached(pool: &sqlx::PgPool) -> Result<ItemCountsDto, AppError> {
     let rows: Vec<(String, i64)> =
         sqlx::query_as("SELECT item_type, COUNT(*)::bigint FROM media_items GROUP BY item_type")
             .fetch_all(pool)
@@ -166,13 +170,17 @@ pub async fn visible_libraries_for_user(
     pool: &sqlx::PgPool,
     user_id: Uuid,
 ) -> Result<Vec<DbLibrary>, AppError> {
-    let visible_ids = visible_library_ids_for_user(pool, user_id).await?;
-    if visible_ids.is_empty() {
-        return Ok(Vec::new());
-    }
+    let user = get_user_by_id(pool, user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
+    let policy = user_policy_from_value(&user.policy);
 
     let libraries = list_libraries(pool).await?;
-    let visible: std::collections::BTreeSet<Uuid> = visible_ids.into_iter().collect();
+    if user.is_admin || policy.enable_all_folders {
+        return Ok(libraries);
+    }
+
+    let visible: std::collections::BTreeSet<Uuid> = policy.enabled_folders.into_iter().collect();
     Ok(libraries
         .into_iter()
         .filter(|library| visible.contains(&library.id))
@@ -4842,7 +4850,7 @@ pub async fn list_media_items(
         .push(" OFFSET ")
         .push_bind(options.start_index.max(0))
         .push(" LIMIT ")
-        .push_bind(options.limit.clamp(1, 10_000));
+        .push_bind(options.limit.clamp(1, 1_000));
 
     let start_index = options.start_index;
     let rows = builder
@@ -4916,6 +4924,13 @@ pub async fn aggregate_array_values(
     pool: &sqlx::PgPool,
     field: &str,
 ) -> Result<Vec<String>, AppError> {
+    crate::repo_cache::cached_aggregate_array_values(pool, field).await
+}
+
+pub async fn aggregate_array_values_uncached(
+    pool: &sqlx::PgPool,
+    field: &str,
+) -> Result<Vec<String>, AppError> {
     let sql = match field {
         "tags" => {
             r#"
@@ -4923,6 +4938,7 @@ pub async fn aggregate_array_values(
             FROM media_items, unnest(tags) AS value
             WHERE btrim(value) <> ''
             ORDER BY value
+            LIMIT 1000
             "#
         }
         "studios" => {
@@ -4931,6 +4947,7 @@ pub async fn aggregate_array_values(
             FROM media_items, unnest(studios) AS value
             WHERE btrim(value) <> ''
             ORDER BY value
+            LIMIT 1000
             "#
         }
         "genres" => {
@@ -4939,6 +4956,7 @@ pub async fn aggregate_array_values(
             FROM media_items, unnest(genres) AS value
             WHERE btrim(value) <> ''
             ORDER BY value
+            LIMIT 500
             "#
         }
         _ => return Ok(Vec::new()),
@@ -4948,6 +4966,10 @@ pub async fn aggregate_array_values(
 }
 
 pub async fn aggregate_years(pool: &sqlx::PgPool) -> Result<Vec<i32>, AppError> {
+    crate::repo_cache::cached_aggregate_years(pool).await
+}
+
+pub async fn aggregate_years_uncached(pool: &sqlx::PgPool) -> Result<Vec<i32>, AppError> {
     Ok(sqlx::query_scalar::<_, i32>(
         r#"
         SELECT DISTINCT production_year
@@ -7240,6 +7262,65 @@ pub fn session_to_dto(session: &AuthSessionRow, server_id: Uuid) -> SessionInfoD
     }
 }
 
+/// Batch library statistics: one query for all libraries
+pub struct LibraryStats {
+    pub child_count: i64,
+    pub movie_count: i32,
+    pub series_count: i32,
+}
+
+pub async fn batch_library_stats(
+    pool: &sqlx::PgPool,
+    library_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, LibraryStats>, AppError> {
+    if library_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let rows: Vec<(Uuid, Option<String>, i64)> = sqlx::query_as(
+        "SELECT library_id, item_type, COUNT(*)::bigint \
+         FROM media_items WHERE library_id = ANY($1) \
+         GROUP BY library_id, item_type",
+    )
+    .bind(library_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut stats: std::collections::HashMap<Uuid, LibraryStats> = library_ids
+        .iter()
+        .map(|id| (*id, LibraryStats { child_count: 0, movie_count: 0, series_count: 0 }))
+        .collect();
+
+    for (lib_id, item_type, count) in rows {
+        if let Some(s) = stats.get_mut(&lib_id) {
+            s.child_count += count;
+            if item_type.as_deref() == Some("Movie") {
+                s.movie_count = count as i32;
+            } else if item_type.as_deref() == Some("Series") {
+                s.series_count = count as i32;
+            }
+        }
+    }
+    Ok(stats)
+}
+
+pub async fn library_to_item_dto_with_stats(
+    pool: &sqlx::PgPool,
+    library: &DbLibrary,
+    server_id: Uuid,
+    stats: Option<&LibraryStats>,
+) -> Result<BaseItemDto, AppError> {
+    let (child_count, movie_count, series_count) = if let Some(s) = stats {
+        (s.child_count, s.movie_count, s.series_count)
+    } else {
+        let c = count_library_children(pool, library.id).await?;
+        let m = count_library_items_by_type(pool, library.id, "Movie").await?;
+        let s = count_library_items_by_type(pool, library.id, "Series").await?;
+        (c, m, s)
+    };
+
+    library_to_item_dto_inner(pool, library, server_id, child_count, movie_count, series_count).await
+}
+
 pub async fn library_to_item_dto(
     pool: &sqlx::PgPool,
     library: &DbLibrary,
@@ -7248,6 +7329,17 @@ pub async fn library_to_item_dto(
     let child_count = count_library_children(pool, library.id).await?;
     let movie_count = count_library_items_by_type(pool, library.id, "Movie").await?;
     let series_count = count_library_items_by_type(pool, library.id, "Series").await?;
+    library_to_item_dto_inner(pool, library, server_id, child_count, movie_count, series_count).await
+}
+
+async fn library_to_item_dto_inner(
+    pool: &sqlx::PgPool,
+    library: &DbLibrary,
+    server_id: Uuid,
+    child_count: i64,
+    movie_count: i32,
+    series_count: i32,
+) -> Result<BaseItemDto, AppError> {
     let locations = library_paths(library);
 
     let mut image_tags: BTreeMap<String, String> = BTreeMap::new();

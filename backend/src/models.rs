@@ -349,7 +349,7 @@ pub struct QueryResult<T> {
     pub start_index: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemCountsDto {
     pub movie_count: i32,
@@ -418,7 +418,7 @@ pub struct UserDto {
     pub configuration: UserConfigurationDto,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PublicUserDto {
     pub name: String,
@@ -762,7 +762,7 @@ pub struct ConnectAuthenticationExchangeResult {
     pub access_token: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PublicSystemInfo {
     pub local_address: String,

@@ -235,11 +235,20 @@ async fn libraries_as_query_result_for_user(
     user_id: Uuid,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let libraries = repository::visible_libraries_for_user(&state.pool, user_id).await?;
-    let mut items = Vec::with_capacity(libraries.len());
+    let lib_ids: Vec<uuid::Uuid> = libraries.iter().map(|l| l.id).collect();
+    let stats_map = repository::batch_library_stats(&state.pool, &lib_ids).await?;
 
-    for library in libraries {
+    let mut items = Vec::with_capacity(libraries.len());
+    for library in &libraries {
+        let stats = stats_map.get(&library.id);
         items.push(
-            repository::library_to_item_dto(&state.pool, &library, state.config.server_id).await?,
+            repository::library_to_item_dto_with_stats(
+                &state.pool,
+                library,
+                state.config.server_id,
+                stats,
+            )
+            .await?,
         );
     }
 

@@ -3,6 +3,7 @@ mod config;
 mod error;
 pub mod http_client;
 mod media_analyzer;
+pub mod repo_cache;
 mod metadata;
 mod models;
 mod naming;
@@ -39,7 +40,7 @@ use tracing::Level;
 use tracing_appender::rolling;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
@@ -680,6 +681,12 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             last_triggered_at TIMESTAMPTZ
         )"#,
         r#"CREATE INDEX IF NOT EXISTS idx_webhooks_enabled ON webhooks(enabled) WHERE enabled"#,
+        // playback_events 性能索引
+        r#"CREATE INDEX IF NOT EXISTS idx_playback_events_user_created ON playback_events(user_id, created_at DESC)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_playback_events_item ON playback_events(item_id) WHERE item_id IS NOT NULL"#,
+        // studios/tags GIN 索引（对 aggregate_array_values 全表扫描优化）
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_studios_gin ON media_items USING gin (studios)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_tags_gin ON media_items USING gin (tags)"#,
     ];
 
     for statement in compatibility_sql {

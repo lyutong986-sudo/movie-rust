@@ -16,8 +16,16 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use moka::future::Cache;
 use serde_json::{json, Value};
-use std::{net::IpAddr, path::Path as FsPath};
+use std::{net::IpAddr, path::Path as FsPath, sync::LazyLock, time::Duration};
+
+static PUBLIC_INFO_CACHE: LazyLock<Cache<(), PublicSystemInfo>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(1)
+        .time_to_live(Duration::from_secs(5))
+        .build()
+});
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -114,11 +122,15 @@ struct MediaEncoderPathRequest {
 async fn public_info(
     State(state): State<AppState>,
 ) -> Result<Json<PublicSystemInfo>, crate::error::AppError> {
+    if let Some(cached) = PUBLIC_INFO_CACHE.get(&()).await {
+        return Ok(Json(cached));
+    }
+
     let startup_wizard_completed = repository::startup_wizard_completed(&state.pool).await?;
     let startup = repository::startup_configuration(&state.pool, &state.config).await?;
 
     let local_addr = format!("http://{}:{}", state.config.host, state.config.port);
-    Ok(Json(PublicSystemInfo {
+    let info = PublicSystemInfo {
         local_addresses: vec![local_addr.clone()],
         local_address: local_addr.clone(),
         wan_address: state.config.public_url.clone().or_else(|| Some(local_addr.clone())),
@@ -128,7 +140,9 @@ async fn public_info(
         operating_system: std::env::consts::OS.to_string(),
         id: uuid_to_emby_guid(&state.config.server_id),
         startup_wizard_completed,
-    }))
+    };
+    PUBLIC_INFO_CACHE.insert((), info.clone()).await;
+    Ok(Json(info))
 }
 
 async fn system_info(

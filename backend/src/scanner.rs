@@ -1533,7 +1533,7 @@ async fn analyze_imported_media(
 
     let analysis = if naming::is_strm(file) {
         let _permit = runtime.acquire(WorkLimiterKind::MediaAnalysis).await;
-        match std::fs::read_to_string(file) {
+        match tokio::fs::read_to_string(file).await {
             Ok(content) => {
                 let Some(target_url) = naming::strm_target_from_text(&content) else {
                     tracing::debug!(
@@ -2058,9 +2058,9 @@ fn cache_target_path(dir: &Path, stem: &str, image_type: &str, image_url: &str) 
 async fn download_image_to_path(path: &Path, image_url: &str) -> Result<(), AppError> {
     let bytes = crate::http_client::download_image_bytes(image_url).await?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(AppError::Io)?;
+        tokio::fs::create_dir_all(parent).await.map_err(AppError::Io)?;
     }
-    std::fs::write(path, &bytes).map_err(AppError::Io)?;
+    tokio::fs::write(path, &bytes).await.map_err(AppError::Io)?;
     Ok(())
 }
 

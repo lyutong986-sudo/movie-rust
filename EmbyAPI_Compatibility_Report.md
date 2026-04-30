@@ -1573,3 +1573,42 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | bytes | 1 | 图片下载字节传递 |
 
 ---
+
+## 第九轮修复：深度性能审计 (续)
+
+**对比基准**: Jellyfin 后端模板 + PostgreSQL 百万级数据最佳实践
+
+**修复内容：**
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R31 | 媒体库统计批量化 | `repository.rs` + `routes/items.rs` | `library_to_item_dto` 原先每库 3 次 COUNT；新增 `batch_library_stats()` 一次 GROUP BY 获取所有库计数 |
+| R32 | 全表聚合 moka 缓存 | `repo_cache.rs` + `repository.rs` | `item_counts` (30s)、`aggregate_years` (60s)、`aggregate_array_values` (60s) 全部经 moka TTL 缓存，百万级下避免重复全表扫描 |
+| R33 | 聚合查询加 LIMIT | `repository.rs` | `aggregate_array_values` 为 tags/studios 加 `LIMIT 1000`，genres 加 `LIMIT 500` 封顶 |
+| R34 | playback_events 复合索引 | `0001_schema.sql` + `main.rs` | `(user_id, created_at DESC)` 覆盖活动日志排序；`(item_id)` 覆盖 JOIN |
+| R35 | studios/tags GIN 索引 | `main.rs` | 对 `studios`、`tags` 数组列添加 GIN 索引，与 genres 对称 |
+| R36 | /System/Info/Public 缓存 | `routes/system.rs` | moka 5s TTL，高频心跳不再每次查库 |
+| R37 | /Users/Public 缓存 | `routes/users.rs` | moka 5s TTL，避免每次 list_users + DTO 转换 |
+| R38 | Scanner async I/O | `scanner.rs` | STRM `read_to_string` → `tokio::fs`；图片落盘 → `tokio::fs::write`/`create_dir_all` |
+| R39 | visible_libraries 去重 | `repository.rs` | 消除双重 `list_libraries()` 调用，改为单次获取 + 本地过滤 |
+| R40 | 列表 LIMIT 封顶降低 | `repository.rs` | 主列表查询上限从 10000 → 1000，防止单次请求 OOM |
+| R41 | Tokio Runtime 显式配置 | `main.rs` | `#[tokio::main(flavor = "multi_thread")]` 显式声明多线程调度 |
+
+**新增模块：**
+
+| 文件 | 用途 |
+|------|------|
+| `repo_cache.rs` | 仓库层 moka TTL 缓存（聚合查询） |
+
+**性能预期提升（百万级片源）：**
+
+| 接口 | 优化前 | 优化后 |
+|------|--------|--------|
+| `/Users/{id}/Views` (5库) | 15 次 COUNT + 5 次图片查询 | 1 次 GROUP BY + 5 次图片查询 |
+| `/Items/Counts` | 全表 GROUP BY (每次) | 30s 内存缓存命中 |
+| `/System/Info/Public` | 2 次 DB 查询/请求 | 5s 内存缓存 |
+| `/Users/Public` | list_users + DTO/请求 | 5s 内存缓存 |
+| `/Genres` 筛选面板 | DISTINCT unnest 全表 | 60s 缓存 + LIMIT 500 |
+| 活动日志 `ORDER BY created_at` | 全表扫描排序 | 索引覆盖直接取 |
+
+---

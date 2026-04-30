@@ -405,6 +405,8 @@ CREATE TABLE IF NOT EXISTS playback_events (
     played_to_completion boolean,
     created_at           timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_playback_events_user_created ON playback_events(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_playback_events_item ON playback_events(item_id) WHERE item_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- media_streams：视频/音频/字幕等轨道信息。对应 Emby MediaStream。

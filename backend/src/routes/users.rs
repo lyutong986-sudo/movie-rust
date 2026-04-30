@@ -16,8 +16,17 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use moka::future::Cache;
 use serde_json::Value;
+use std::{sync::LazyLock, time::Duration};
 use url::form_urlencoded;
+
+static PUBLIC_USERS_CACHE: LazyLock<Cache<(), Vec<PublicUserDto>>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(1)
+        .time_to_live(Duration::from_secs(5))
+        .build()
+});
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -100,13 +109,16 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn public_users(State(state): State<AppState>) -> Result<Json<Vec<PublicUserDto>>, AppError> {
+    if let Some(cached) = PUBLIC_USERS_CACHE.get(&()).await {
+        return Ok(Json(cached));
+    }
     let users = repository::list_users(&state.pool, true).await?;
-    Ok(Json(
-        users
-            .iter()
-            .map(|user| repository::user_to_public_dto(user, state.config.server_id))
-            .collect(),
-    ))
+    let result: Vec<PublicUserDto> = users
+        .iter()
+        .map(|user| repository::user_to_public_dto(user, state.config.server_id))
+        .collect();
+    PUBLIC_USERS_CACHE.insert((), result.clone()).await;
+    Ok(Json(result))
 }
 
 async fn users(
