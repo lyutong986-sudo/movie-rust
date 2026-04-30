@@ -485,6 +485,30 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_type_series ON media_items(item_type, series_id) WHERE series_id IS NOT NULL"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_genres_gin ON media_items USING gin (genres)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_episode_nextup ON media_items(series_id, parent_index_number, index_number) WHERE item_type = 'Episode'"#,
+        // Backfill series_id for Seasons (parent is Series)
+        r#"
+        UPDATE media_items season
+        SET series_id = season.parent_id
+        WHERE season.item_type = 'Season'
+          AND season.series_id IS NULL
+          AND season.parent_id IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM media_items series
+              WHERE series.id = season.parent_id AND series.item_type = 'Series'
+          )
+        "#,
+        // Backfill series_id for Episodes (parent is Season → grandparent is Series)
+        r#"
+        UPDATE media_items ep
+        SET series_id = parent_season.parent_id
+        FROM media_items parent_season
+        WHERE ep.item_type = 'Episode'
+          AND ep.series_id IS NULL
+          AND ep.parent_id IS NOT NULL
+          AND parent_season.id = ep.parent_id
+          AND parent_season.item_type = 'Season'
+          AND parent_season.parent_id IS NOT NULL
+        "#,
         // pg_trgm 全文搜索加速
         r#"DO $$ BEGIN CREATE EXTENSION IF NOT EXISTS pg_trgm; EXCEPTION WHEN OTHERS THEN NULL; END $$"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_name_trgm ON media_items USING gin (name gin_trgm_ops)"#,

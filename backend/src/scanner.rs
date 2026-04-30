@@ -681,6 +681,7 @@ async fn import_movie_file(
             height: parsed.height,
             video_codec: parsed.video_codec.as_deref(),
             audio_codec: parsed.audio_codec.as_deref(),
+            series_id: None,
         },
     )
     .await?;
@@ -965,6 +966,7 @@ async fn import_tv_file(
             height: None,
             video_codec: None,
             audio_codec: None,
+            series_id: None,
         },
     )
     .await?;
@@ -1102,6 +1104,7 @@ async fn import_tv_file(
             height: None,
             video_codec: None,
             audio_codec: None,
+            series_id: Some(series_id),
         },
     )
     .await?;
@@ -1278,6 +1281,7 @@ async fn import_tv_file(
             height: parsed.height,
             video_codec: parsed.video_codec.as_deref(),
             audio_codec: parsed.audio_codec.as_deref(),
+            series_id: Some(series_id),
         },
     )
     .await?;

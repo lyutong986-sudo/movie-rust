@@ -1138,6 +1138,7 @@ async fn upsert_virtual_root_item(
             height: None,
             video_codec: None,
             audio_codec: None,
+            series_id: None,
         },
     )
     .await
@@ -1203,6 +1204,7 @@ async fn ensure_virtual_view_folder(
             height: None,
             video_codec: None,
             audio_codec: None,
+            series_id: None,
         },
     )
     .await?;
@@ -1277,6 +1279,7 @@ async fn ensure_virtual_series_folder(
             height: None,
             video_codec: None,
             audio_codec: None,
+            series_id: None,
         },
     )
     .await?;
@@ -1356,6 +1359,7 @@ async fn ensure_virtual_season_folder(
             height: None,
             video_codec: None,
             audio_codec: None,
+            series_id: Some(series_parent_id),
         },
     )
     .await?;
@@ -1460,6 +1464,7 @@ async fn upsert_virtual_media_item(
             height: None,
             video_codec,
             audio_codec,
+            series_id: None,
         },
     )
     .await

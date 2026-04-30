@@ -5257,14 +5257,22 @@ pub async fn get_next_up_episodes(
     };
     let allowed_ids_param: Option<Vec<Uuid>> = allowed_library_ids;
 
-    // When a specific SeriesId is provided, use the indexed series_id column
-    // instead of the expensive LEFT JOIN + OR chain across the entire table.
+    // When a specific SeriesId is provided, match via:
+    //  1. mi.series_id (populated by scanner / backfill)
+    //  2. mi.parent_id  (Season whose parent is the Series)
+    //  3. parent→parent chain (Episode→Season→Series) when series_id is NULL
+    //  4. mi.library_id (library-level scope)
     let (scope_sql_fragment, use_series_fast_path) = if parent_id.is_some() {
         (
             r#"AND (
                 mi.series_id = $2
                 OR mi.parent_id = $2
                 OR mi.library_id = $2
+                OR EXISTS (
+                    SELECT 1 FROM media_items season
+                    WHERE season.id = mi.parent_id
+                      AND season.parent_id = $2
+                )
             )"#,
             true,
         )
@@ -5346,6 +5354,7 @@ pub async fn get_next_up_episodes(
                 mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path,
                 mi.backdrop_paths, mi.remote_trailers,
                 mi.date_created, mi.date_modified, mi.image_blur_hashes,
+                mi.series_id,
                 row_number() OVER (
                     PARTITION BY COALESCE(mi.series_id, mi.parent_id, mi.id)
                     ORDER BY
@@ -5369,7 +5378,7 @@ pub async fn get_next_up_episodes(
             genres, studios, tags, production_locations, width, height,
             bit_rate, video_codec, audio_codec, image_primary_path,
             backdrop_path, logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes
+            date_created, date_modified, image_blur_hashes, series_id
         FROM ranked
         WHERE next_rank = 1
         ORDER BY series_name NULLS LAST,
@@ -7217,6 +7226,7 @@ pub struct UpsertMediaItem<'a> {
     pub height: Option<i32>,
     pub video_codec: Option<&'a str>,
     pub audio_codec: Option<&'a str>,
+    pub series_id: Option<Uuid>,
 }
 
 /// 返回 `(item_id, was_inserted)`：
@@ -7268,6 +7278,7 @@ pub async fn upsert_media_item(
                 art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
                 series_name, season_name, index_number,
                 index_number_end, parent_index_number, width, height, video_codec, audio_codec,
+                series_id,
                 date_modified
             )
         VALUES
@@ -7279,6 +7290,7 @@ pub async fn upsert_media_item(
                 $26, $27, $28, $29, $30, $31, $32, $33, $34,
                 $35, $36, $37, $38, $39, $40,
                 $41, $42, $43, $44,
+                $45,
                 now()
             )
         ON CONFLICT (library_id, path)
@@ -7324,6 +7336,7 @@ pub async fn upsert_media_item(
             height = EXCLUDED.height,
             video_codec = EXCLUDED.video_codec,
             audio_codec = EXCLUDED.audio_codec,
+            series_id = COALESCE(EXCLUDED.series_id, media_items.series_id),
             date_modified = now()
         "#,
     )
@@ -7371,6 +7384,7 @@ pub async fn upsert_media_item(
     .bind(input.height)
     .bind(input.video_codec)
     .bind(input.audio_codec)
+    .bind(input.series_id)
     .execute(pool)
     .await?;
 
@@ -7973,7 +7987,8 @@ pub fn media_item_to_dto_for_list(
     let season_count = if item.item_type.eq_ignore_ascii_case("Series") { Some(counts.season_count.unwrap_or(0)) } else { None };
 
     let series_id = match item.item_type.as_str() {
-        "Season" => item.parent_id.map(|id| uuid_to_emby_guid(&id)),
+        "Season" => item.series_id.or(item.parent_id).map(|id| uuid_to_emby_guid(&id)),
+        "Episode" => item.series_id.map(|id| uuid_to_emby_guid(&id)),
         _ => None,
     };
     let season_id = match item.item_type.as_str() {

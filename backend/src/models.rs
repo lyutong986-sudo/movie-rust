@@ -117,6 +117,8 @@ pub struct DbMediaItem {
     pub date_created: DateTime<Utc>,
     pub date_modified: DateTime<Utc>,
     pub image_blur_hashes: Value,
+    #[sqlx(default)]
+    pub series_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -259,6 +261,8 @@ pub struct MediaItemRow {
     pub date_created: DateTime<Utc>,
     pub date_modified: DateTime<Utc>,
     pub image_blur_hashes: Value,
+    #[sqlx(default)]
+    pub series_id: Option<Uuid>,
     pub total_count: i64,
 }
 
@@ -312,6 +316,7 @@ impl From<MediaItemRow> for DbMediaItem {
             date_created: value.date_created,
             date_modified: value.date_modified,
             image_blur_hashes: value.image_blur_hashes,
+            series_id: value.series_id,
         }
     }
 }

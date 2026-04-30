@@ -1705,3 +1705,26 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | HLS playlist 重写 (1000行) | 1000× String alloc + Vec + join | 1× String::with_capacity |
 
 ---
+
+## 第十三轮修复：Shows/NextUp SeriesId 过滤失效
+
+**问题现象：**
+`GET /emby/Shows/NextUp?SeriesId=xxx` 返回空结果（客户端显示 `null null`），因为：
+1. `media_items.series_id` 列从未被 scanner 写入（始终为 NULL）
+2. NextUp 查询的 scope 条件 `mi.series_id = $2 OR mi.parent_id = $2` 对 Episode 无效——Episode 的 `parent_id` 指向 Season 而非 Series
+3. `media_item_to_dto_for_list` 对 Episode 始终返回 `series_id: None`
+
+**修复内容：**
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R79 | NextUp scope 条件增加 parent chain 子查询 | `repository.rs` | 新增 `EXISTS (SELECT 1 FROM media_items season WHERE season.id = mi.parent_id AND season.parent_id = $2)` 兼容 series_id 尚未 backfill 的数据 |
+| R80 | UpsertMediaItem 增加 series_id 字段 | `repository.rs` | INSERT/ON CONFLICT UPDATE 均包含 series_id，`COALESCE(EXCLUDED.series_id, media_items.series_id)` 保留已有值 |
+| R81 | scanner 填充 series_id | `scanner.rs` | Season 和 Episode 的 upsert 传入 `series_id: Some(series_id)` |
+| R82 | remote_emby 填充 series_id | `remote_emby.rs` | 虚拟 Season 传入 `series_id: Some(series_parent_id)` |
+| R83 | 启动 backfill 历史数据 | `main.rs` | `ensure_schema_compatibility` 中 UPDATE Season(parent→Series)、Episode(parent→Season→Series) |
+| R84 | DbMediaItem 增加 series_id 字段 | `models.rs` | `#[sqlx(default)] pub series_id: Option<Uuid>` |
+| R85 | NextUp SELECT 包含 series_id | `repository.rs` | CTE 与外层 SELECT 均输出 series_id 供 DTO 使用 |
+| R86 | media_item_to_dto_for_list 使用 series_id | `repository.rs` | Episode 从 `item.series_id` 获取 SeriesId，Season 优先使用 `item.series_id` 再 fallback 到 `parent_id` |
+
+---
