@@ -74,7 +74,7 @@ pub async fn emby_websocket_handler(
 async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: AppState) {
     let session_id = session.id;
     let sessions = state.websocket_sessions.clone();
-    sessions.write().await.insert(session_id, session.clone());
+    sessions.insert(session_id, session.clone());
 
     tracing::info!(
         session_id = %session_id,
@@ -89,13 +89,10 @@ async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: 
         match tokio::time::timeout(Duration::from_secs(1), socket.recv()).await {
             Ok(Some(Ok(message))) => match message {
                 axum::extract::ws::Message::Text(text) => {
-                    tracing::debug!(session_id = %session_id, message = %text, "received WebSocket message");
-                    let payload = serde_json::json!({
-                        "MessageType": "KeepAlive",
-                        "Data": text.to_string()
-                    });
+                    tracing::trace!(session_id = %session_id, "received WebSocket message");
+                    let payload = format!(r#"{{"MessageType":"KeepAlive","Data":{}}}"#, serde_json::to_string(&*text).unwrap_or_else(|_| "null".to_string()));
                     if socket
-                        .send(axum::extract::ws::Message::Text(payload.to_string().into()))
+                        .send(axum::extract::ws::Message::Text(payload.into()))
                         .await
                         .is_err()
                     {
@@ -183,6 +180,6 @@ async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: 
         }
     }
 
-    sessions.write().await.remove(&session_id);
+    sessions.remove(&session_id);
     tracing::info!(session_id = %session_id, reason = ?close_reason, "WebSocket connection closed");
 }

@@ -1088,26 +1088,25 @@ fn rewrite_hls_playlist(
     is_audio: bool,
 ) -> String {
     let media_prefix = if is_audio { "Audio" } else { "Videos" };
-    playlist
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                return line.to_string();
-            }
-
+    let mut result = String::with_capacity(playlist.len() * 2);
+    for line in playlist.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            result.push_str(line);
+        } else {
             let file_name = StdPath::new(trimmed)
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or(trimmed);
-            append_query_pairs(
+            let rewritten = append_query_pairs(
                 &format!("/{media_prefix}/{item_emby_id}/hls1/{session_id}/{file_name}"),
                 passthrough,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n"
+            );
+            result.push_str(&rewritten);
+        }
+        result.push('\n');
+    }
+    result
 }
 
 async fn proxy_remote_stream(url: &str, request: Request<Body>) -> Result<Response, AppError> {

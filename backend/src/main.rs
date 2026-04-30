@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
         pool,
         config,
         metadata_manager: Some(Arc::new(metadata_manager)),
-        websocket_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        websocket_sessions: Arc::new(dashmap::DashMap::new()),
         transcoder,
         work_limiters,
         task_tokens: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -152,14 +152,14 @@ async fn main() -> Result<()> {
         .on_response(DefaultOnResponse::new().level(Level::INFO))
         .on_failure(DefaultOnFailure::new().level(Level::ERROR));
 
-    // 同时把 API 路由未匹配的兜底也指向 SPA：防止 API 路由前缀被 Vue Router 路径「抢」走后
-    // 返回裸的 Axum 404。例如 `/library/abc` 未命中任何 API，则交由 ServeDir + SPA fallback。
-    let app = routes::router(state.clone())
-        .fallback_service(spa)
+    let api_router = routes::router(state.clone())
         .layer(tower_http::compression::CompressionLayer::new()
             .gzip(true)
             .br(true))
-        .layer(http_trace)
+        .layer(http_trace);
+
+    let app = api_router
+        .fallback_service(spa)
         .layer(build_cors_layer(&state.config));
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
@@ -172,18 +172,32 @@ async fn main() -> Result<()> {
 }
 
 /// 读取 `index.html` 并作为 `200 OK text/html; charset=utf-8` 返回。
-///
-/// - 每次请求都重新读一次，避免热更新 `frontend/dist` 时仍旧命中旧字节。
-/// - 若文件不存在（例如运行目录缺少构建产物），返回 500 并在响应体里写明提示，
-///   方便运维在反向代理后面也能一眼看出部署阶段出问题，而不是一句无上下文的 404。
+/// 使用进程内缓存：首次读入后缓存到内存，后续请求零磁盘 IO。
+/// 若需热更新前端产物，重启后端即可刷新缓存。
 async fn serve_spa_index(index_path: &std::path::Path) -> Response {
-    match tokio::fs::read(index_path).await {
-        Ok(bytes) => Response::builder()
+    use std::sync::OnceLock;
+    static CACHED_INDEX: OnceLock<bytes::Bytes> = OnceLock::new();
+
+    if let Some(cached) = CACHED_INDEX.get() {
+        return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
             .header(header::CACHE_CONTROL, "no-cache")
-            .body(Body::from(bytes))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+            .body(Body::from(cached.clone()))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+
+    match tokio::fs::read(index_path).await {
+        Ok(bytes) => {
+            let b = bytes::Bytes::from(bytes);
+            let _ = CACHED_INDEX.set(b.clone());
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .header(header::CACHE_CONTROL, "no-cache")
+                .body(Body::from(b))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
         Err(err) => {
             tracing::error!(
                 path = %index_path.display(),
@@ -271,6 +285,7 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         r#"CREATE INDEX IF NOT EXISTS idx_sessions_user         ON sessions(user_id)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_sessions_expires_at   ON sessions(expires_at)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_sessions_session_type ON sessions(session_type)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions(last_activity_at DESC)"#,
         // -------------------------------------------------------------------
         // libraries：库选项 JSON + 修改时间。
         // -------------------------------------------------------------------

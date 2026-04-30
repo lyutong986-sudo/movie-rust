@@ -1055,12 +1055,21 @@ pub async fn get_items_by_genre(
     start_index: Option<i32>,
     limit: Option<i32>,
 ) -> Result<Vec<BaseItemDto>, AppError> {
-    let query = "
-        SELECT * FROM media_items
+    let query = r#"
+        SELECT
+            id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
+            overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
+            premiere_date, status, end_date, air_days, air_time, series_name, season_name,
+            index_number, index_number_end, parent_index_number, provider_ids, genres,
+            studios, tags, production_locations,
+            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
+            date_created, date_modified, image_blur_hashes, 0::bigint AS total_count
+        FROM media_items
         WHERE $1 = ANY(genres)
         ORDER BY sort_name
         OFFSET $2 LIMIT $3
-    ";
+    "#;
 
     let items = sqlx::query_as::<_, DbMediaItem>(query)
         .bind(genre_name)
@@ -1085,7 +1094,7 @@ pub(crate) fn db_person_to_dto(person: DbPerson) -> PersonDto {
         if person.provider_ids.is_null() {
             None
         } else {
-            serde_json::from_value(person.provider_ids.clone()).ok()
+            serde_json::from_value(person.provider_ids).ok()
         };
 
     let primary_image_tag = person
@@ -1329,7 +1338,15 @@ pub async fn get_items_by_person(
 
     let rows = sqlx::query_as::<_, DbMediaItem>(
         r#"
-        SELECT mi.*
+        SELECT
+            mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type, mi.media_type, mi.path, mi.container,
+            mi.overview, mi.production_year, mi.official_rating, mi.community_rating, mi.critic_rating, mi.runtime_ticks,
+            mi.premiere_date, mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
+            mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids, mi.genres,
+            mi.studios, mi.tags, mi.production_locations,
+            mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
+            mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
+            mi.date_created, mi.date_modified, mi.image_blur_hashes, 0::bigint AS total_count
         FROM media_items mi
         WHERE mi.id IN (
             SELECT DISTINCT pr.media_item_id
@@ -2030,10 +2047,10 @@ pub async fn list_users(pool: &sqlx::PgPool, public_only: bool) -> Result<Vec<Db
     let users = if public_only {
         sqlx::query_as::<_, DbUser>(
             r#"
-            SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
+            SELECT id, name, ''::text AS password_hash, is_admin, is_hidden, is_disabled, policy,
                    configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified,
-                   easy_password_hash, created_at,
-                   legacy_password_format, legacy_password_hash
+                   ''::text AS easy_password_hash, created_at,
+                   NULL::text AS legacy_password_format, NULL::text AS legacy_password_hash
             FROM users
             WHERE is_hidden = false AND is_disabled = false
             ORDER BY name
@@ -2083,14 +2100,13 @@ pub async fn update_user_image_path(
     image_type: &str,
     path: Option<&str>,
 ) -> Result<(), AppError> {
-    let column = match image_type.to_ascii_lowercase().as_str() {
-        "backdrop" => "backdrop_image_path",
-        "logo" => "logo_image_path",
-        _ => "primary_image_path",
+    let sql = match image_type.to_ascii_lowercase().as_str() {
+        "backdrop" => "UPDATE users SET backdrop_image_path = $1, date_modified = now() WHERE id = $2",
+        "logo" => "UPDATE users SET logo_image_path = $1, date_modified = now() WHERE id = $2",
+        _ => "UPDATE users SET primary_image_path = $1, date_modified = now() WHERE id = $2",
     };
 
-    let query = format!("UPDATE users SET {column} = $1, date_modified = now() WHERE id = $2");
-    sqlx::query(&query)
+    sqlx::query(sql)
         .bind(path)
         .bind(user_id)
         .execute(pool)
@@ -2334,11 +2350,13 @@ pub async fn get_session(
     .fetch_optional(pool)
     .await?;
 
-    if session.is_some() {
-        sqlx::query("UPDATE sessions SET last_activity_at = now() WHERE access_token = $1")
-            .bind(token)
-            .execute(pool)
-            .await?;
+    if let Some(ref s) = session {
+        if (chrono::Utc::now() - s.last_activity_at).num_seconds() > 60 {
+            sqlx::query("UPDATE sessions SET last_activity_at = now() WHERE access_token = $1")
+                .bind(token)
+                .execute(pool)
+                .await?;
+        }
     }
 
     Ok(session)

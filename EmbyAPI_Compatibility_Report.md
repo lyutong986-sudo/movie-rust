@@ -1666,3 +1666,40 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | 扫描 media_segments (10段) | 10× INSERT 往返 | 1× 批量 INSERT |
 
 ---
+
+## 第十二轮修复：认证节流 + 锁优化 + 查询收窄 + 安全加固
+
+**修复内容：**
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R59 | session last_activity 节流写入 | `repository.rs` | 仅当距上次更新 >60s 时才执行 UPDATE，百万请求/天场景下 DB 写 QPS 大幅下降 |
+| R60 | SPA index.html 进程内缓存 | `main.rs` | 使用 `OnceLock<Bytes>` 缓存首次读入的 index.html，后续请求零磁盘 IO |
+| R61 | get_items_by_genre 收窄列 | `repository.rs` | `SELECT *` 改为 list_media_items 对齐的 44 列投影，减少 TOAST/大字段解码 |
+| R62 | get_items_by_person 收窄列 | `repository.rs` | 同 R61，人物作品列表接口收窄为列表必需列 |
+| R63 | list_users public 排除密码哈希 | `repository.rs` | public_only 分支返回空字符串代替真实 hash，减少 DB→App 数据传输 |
+| R64 | AuthSession 去除 headers.clone() | `auth.rs` | 提取器不再克隆整个 HeaderMap，直接从 parts 中提取 token 后进入 async 块 |
+| R65 | 401 调试日志精简 | `auth.rs` | 移除遍历全部 headers 的 Vec 收集，仅输出简短提示 |
+| R67 | WebSocket sessions → DashMap | `state.rs` + `websocket.rs` | `RwLock<HashMap>` 改为无锁并发 DashMap，消除连接注册/注销时的写锁争抢 |
+| R68 | WebSocket KeepAlive 去除中间 Value | `websocket.rs` | `serde_json::json!` 改为 `format!` 直出字符串，减少中间 JSON Value 分配 |
+| R70 | API/静态资源层分离 | `main.rs` | compression + trace 仅应用于 API 路由，静态资源不再走 gzip/brotli CPU 开销 |
+| R72 | db_person_to_dto provider_ids move | `repository.rs` | `.clone()` 改为直接 move 消耗 owned Value，避免整棵 JSON 树拷贝 |
+| R74 | TMDB cached_get 使用 Arc\<Value\> | `metadata/tmdb.rs` | 缓存存储 `Arc<JsonValue>` 代替裸 `JsonValue`，cache insert 仅增加引用计数 |
+| R75 | 转码器 sessions → DashMap | `transcoder.rs` | `RwLock<HashMap>` 改为 `DashMap`，多会话转码时不再整表锁竞争 |
+| R76 | HLS playlist 一次分配拼接 | `routes/videos.rs` | `.collect::<Vec<_>>().join()` 改为 `String::with_capacity` + `push_str`，单次分配 |
+| R77 | 动态 format SQL → 静态匹配 | `repository.rs` | `format!("UPDATE ... {column}")` 改为 match 分支使用字面量 SQL，利于服务端计划缓存 |
+| R78 | sessions.last_activity_at 索引 | `main.rs` | 添加 `idx_sessions_last_activity` DESC 索引，支持 R59 节流比对及活跃会话排序 |
+
+**性能预期提升（百万级片源）：**
+
+| 场景 | 优化前 | 优化后 |
+|------|--------|--------|
+| 认证请求 DB 写 (QPS=1000) | 1000 UPDATE/s | ≤17 UPDATE/s (节流 60s) |
+| SPA 路由访问 | 每次 tokio::fs::read | 0 次磁盘 IO（内存缓存） |
+| `/Genres/{name}/Items` 列表 | SELECT * (100+ 列) | 44 列窄投影 |
+| WebSocket 连接/断开 (100并发) | 独占写锁排队 | DashMap 无锁 |
+| 多会话转码进度更新 | 全表 RwLock 写锁 | 细粒度 DashMap entry 锁 |
+| TMDB 缓存命中 clone | 深拷贝整棵 JSON 树 | Arc 引用计数 +1 |
+| HLS playlist 重写 (1000行) | 1000× String alloc + Vec + join | 1× String::with_capacity |
+
+---

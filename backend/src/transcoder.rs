@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+use dashmap::DashMap;
 use tokio::{
     process::{Child, Command},
     sync::{oneshot, RwLock, Semaphore},
@@ -71,7 +72,7 @@ pub struct Transcoder {
     /// 配置
     config: Arc<Config>,
     /// 转码会话映射表
-    sessions: Arc<RwLock<HashMap<Uuid, TranscodingSession>>>,
+    sessions: Arc<DashMap<Uuid, TranscodingSession>>,
     /// 信号量限制最大转码会话数
     session_semaphore: Arc<Semaphore>,
     cancellation_senders: Arc<RwLock<HashMap<Uuid, oneshot::Sender<()>>>>,
@@ -84,7 +85,7 @@ impl Transcoder {
 
         Self {
             config,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(DashMap::new()),
             session_semaphore: Arc::new(Semaphore::new(max_sessions as usize)),
             cancellation_senders: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -152,10 +153,7 @@ impl Transcoder {
         };
 
         // 存储会话
-        {
-            let mut sessions = self.sessions.write().await;
-            sessions.insert(session_id, session.clone());
-        }
+        self.sessions.insert(session_id, session.clone());
 
         tracing::info!(
             "开始转码会话: session_id={}, media_item_id={}, protocol={}, input={:?}",
@@ -166,12 +164,9 @@ impl Transcoder {
         );
 
         // 更新会话状态为转码中
-        {
-            let mut sessions = self.sessions.write().await;
-            if let Some(session) = sessions.get_mut(&session_id) {
-                session.state = TranscodingSessionState::Transcoding;
-                session.updated_at = Instant::now();
-            }
+        if let Some(mut session) = self.sessions.get_mut(&session_id) {
+            session.state = TranscodingSessionState::Transcoding;
+            session.updated_at = Instant::now();
         }
 
         // 构建 FFmpeg 命令行参数
@@ -205,12 +200,9 @@ impl Transcoder {
         let pid = child.id();
 
         // 更新会话状态，记录进程 ID
-        {
-            let mut sessions = self.sessions.write().await;
-            if let Some(session) = sessions.get_mut(&session_id) {
-                session.ffmpeg_pid = pid;
-                session.updated_at = Instant::now();
-            }
+        if let Some(mut session) = self.sessions.get_mut(&session_id) {
+            session.ffmpeg_pid = pid;
+            session.updated_at = Instant::now();
         }
 
         let (cancel_tx, cancel_rx) = oneshot::channel();
@@ -232,8 +224,7 @@ impl Transcoder {
                 senders.remove(&session_id_clone);
             }
 
-            let mut sessions = sessions_clone.write().await;
-            if let Some(session) = sessions.get_mut(&session_id_clone) {
+            if let Some(mut session) = sessions_clone.get_mut(&session_id_clone) {
                 session.updated_at = Instant::now();
                 session.ffmpeg_pid = None;
 
@@ -272,8 +263,7 @@ impl Transcoder {
 
     /// 获取转码会话
     pub async fn get_session(&self, session_id: Uuid) -> Option<TranscodingSession> {
-        let sessions = self.sessions.read().await;
-        sessions.get(&session_id).cloned()
+        self.sessions.get(&session_id).map(|entry| entry.value().clone())
     }
 
     /// 停止转码会话
@@ -282,8 +272,7 @@ impl Transcoder {
             let _ = sender.send(());
         }
 
-        let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&session_id) {
+        if let Some(mut session) = self.sessions.get_mut(&session_id) {
             session.state = TranscodingSessionState::Cancelled;
             session.updated_at = Instant::now();
             tracing::info!("停止转码会话: {}", session_id);
@@ -298,22 +287,20 @@ impl Transcoder {
         device_id: Option<&str>,
     ) -> usize {
         let device_id = device_id.map(str::trim).filter(|value| !value.is_empty());
-        let session_ids = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .iter()
-                .filter(|(_, session)| {
-                    session.user_id == user_id
-                        && device_id.is_none_or(|device_id| session.device_id == device_id)
-                        && matches!(
-                            session.state,
-                            TranscodingSessionState::Initializing
-                                | TranscodingSessionState::Transcoding
-                        )
-                })
-                .map(|(id, _)| *id)
-                .collect::<Vec<_>>()
-        };
+        let session_ids: Vec<Uuid> = self.sessions
+            .iter()
+            .filter(|entry| {
+                let session = entry.value();
+                session.user_id == user_id
+                    && device_id.is_none_or(|device_id| session.device_id == device_id)
+                    && matches!(
+                        session.state,
+                        TranscodingSessionState::Initializing
+                            | TranscodingSessionState::Transcoding
+                    )
+            })
+            .map(|entry| *entry.key())
+            .collect();
 
         let count = session_ids.len();
         for session_id in session_ids {

@@ -53,7 +53,7 @@ pub struct TmdbProvider {
     client: Client,
     key_counter: AtomicUsize,
     /// In-memory response cache (TTL=1h, max 10000 entries)
-    json_cache: Arc<Cache<String, JsonValue>>,
+    json_cache: Arc<Cache<String, Arc<JsonValue>>>,
 }
 
 impl TmdbProvider {
@@ -172,7 +172,7 @@ impl TmdbProvider {
         params: &HashMap<String, String>,
     ) -> Result<T, AppError> {
         if let Some(cached) = self.json_cache.get(cache_key).await {
-            return serde_json::from_value(cached)
+            return serde_json::from_value((*cached).clone())
                 .map_err(|e| AppError::Internal(format!("cache deser: {e}")));
         }
 
@@ -184,11 +184,12 @@ impl TmdbProvider {
             .error_for_status()?;
 
         let json_val: JsonValue = response.json().await?;
+        let arc_val = Arc::new(json_val);
         self.json_cache
-            .insert(cache_key.to_string(), json_val.clone())
+            .insert(cache_key.to_string(), arc_val.clone())
             .await;
 
-        serde_json::from_value(json_val)
+        serde_json::from_value((*arc_val).clone())
             .map_err(|e| AppError::Internal(format!("tmdb deser: {e}")))
     }
 

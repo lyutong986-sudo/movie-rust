@@ -42,11 +42,42 @@ impl FromRequestParts<AppState> for AuthSession {
         parts: &mut Parts,
         state: &AppState,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        let headers = parts.headers.clone();
-        let query = parts.uri.query().map(ToOwned::to_owned);
+        let token = extract_token(&parts.headers, parts.uri.query());
         let state = state.clone();
 
-        async move { require_auth(&state, &headers, query.as_deref()).await }
+        async move {
+            let token = token.ok_or_else(|| {
+                tracing::debug!("未找到认证令牌");
+                AppError::Unauthorized
+            })?;
+
+            if let Some(api_key) = &state.config.api_key {
+                if token == *api_key {
+                    return Ok(AuthSession {
+                        access_token: token,
+                        user_id: state.config.server_id,
+                        is_admin: true,
+                        is_api_key: false,
+                    });
+                }
+            }
+
+            let session = repository::get_session(&state.pool, &token)
+                .await?
+                .ok_or_else(|| {
+                    tracing::debug!("令牌无效或会话不存在: {}", token);
+                    AppError::Unauthorized
+                })?;
+
+            if let Some(expires_at) = session.expires_at {
+                if expires_at < chrono::Utc::now() {
+                    tracing::debug!("会话已过期: {}", token);
+                    return Err(AppError::Unauthorized);
+                }
+            }
+
+            Ok(session.into())
+        }
     }
 }
 
@@ -56,14 +87,7 @@ pub async fn require_auth(
     query: Option<&str>,
 ) -> Result<AuthSession, AppError> {
     let token = extract_token(headers, query).ok_or_else(|| {
-        tracing::debug!(
-            "未找到认证令牌，headers: {:?}, query: {:?}",
-            headers
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.to_str().unwrap_or("[invalid]")))
-                .collect::<Vec<_>>(),
-            query
-        );
+        tracing::debug!("未找到认证令牌");
         AppError::Unauthorized
     })?;
 
@@ -367,31 +391,29 @@ impl FromRequestParts<AppState> for OptionalAuthSession {
         parts: &mut Parts,
         state: &AppState,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        let headers = parts.headers.clone();
-        let query = parts.uri.query().map(ToOwned::to_owned);
+        let token = extract_token(&parts.headers, parts.uri.query());
         let state = state.clone();
 
         async move {
-            match extract_token(&headers, query.as_deref()) {
-                Some(token) => {
-                    if let Some(api_key) = &state.config.api_key {
-                        if token == *api_key {
-                            return Ok(OptionalAuthSession(Some(AuthSession {
-                                access_token: token,
-                                user_id: state.config.server_id,
-                                is_admin: true,
-                                is_api_key: false,
-                            })));
-                        }
-                    }
+            let Some(token) = token else {
+                return Ok(OptionalAuthSession(None));
+            };
 
-                    match repository::get_session(&state.pool, &token).await {
-                        Ok(Some(session)) => Ok(OptionalAuthSession(Some(session.into()))),
-                        Ok(None) => Ok(OptionalAuthSession(None)),
-                        Err(e) => Err(e.into()),
-                    }
+            if let Some(api_key) = &state.config.api_key {
+                if token == *api_key {
+                    return Ok(OptionalAuthSession(Some(AuthSession {
+                        access_token: token,
+                        user_id: state.config.server_id,
+                        is_admin: true,
+                        is_api_key: false,
+                    })));
                 }
-                None => Ok(OptionalAuthSession(None)),
+            }
+
+            match repository::get_session(&state.pool, &token).await {
+                Ok(Some(session)) => Ok(OptionalAuthSession(Some(session.into()))),
+                Ok(None) => Ok(OptionalAuthSession(None)),
+                Err(e) => Err(e.into()),
             }
         }
     }
