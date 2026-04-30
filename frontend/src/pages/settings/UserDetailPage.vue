@@ -35,6 +35,7 @@ const passwordForm = reactive({
 const policyForm = reactive<UserPolicy>({
   IsAdministrator: false,
   IsHidden: false,
+  IsHiddenRemotely: false,
   IsDisabled: false,
   EnableRemoteAccess: true,
   EnableMediaPlayback: true,
@@ -46,6 +47,12 @@ const policyForm = reactive<UserPolicy>({
   EnablePublicSharing: true,
   EnableContentDownloading: true,
   EnablePlaybackRemuxing: true,
+  EnableSyncTranscoding: true,
+  EnableMediaConversion: false,
+  EnableCollectionManagement: false,
+  EnableSubtitleManagement: true,
+  EnableSubtitleDownloading: true,
+  EnableLyricManagement: false,
   ForceRemoteSourceTranscoding: false,
   EnableUserPreferenceAccess: true,
   EnableAllFolders: true,
@@ -58,13 +65,17 @@ const policyForm = reactive<UserPolicy>({
   EnabledDevices: [],
   MaxParentalRating: null,
   MaxParentalSubRating: null,
-  MaxActiveSessions: 0,
+  SimultaneousStreamLimit: 0,
+  InvalidLoginAttemptCount: 0,
   LoginAttemptsBeforeLockout: -1,
   RemoteClientBitrateLimit: 0,
   BlockedTags: [],
+  AllowedTags: [],
   BlockUnratedItems: [],
   AccessSchedules: [],
-  SyncPlayAccess: 'CreateAndJoinGroups'
+  SyncPlayAccess: 'CreateAndJoinGroups',
+  AuthenticationProviderId: 'Default',
+  PasswordResetProviderId: 'Default'
 });
 
 const userName = ref('');
@@ -93,6 +104,7 @@ function applyUserData(u: UserDto) {
   Object.assign(policyForm, {
     IsAdministrator: Boolean(p?.IsAdministrator),
     IsHidden: Boolean(p?.IsHidden),
+    IsHiddenRemotely: Boolean(p?.IsHiddenRemotely),
     IsDisabled: Boolean(p?.IsDisabled),
     EnableRemoteAccess: p?.EnableRemoteAccess ?? true,
     EnableMediaPlayback: p?.EnableMediaPlayback ?? true,
@@ -104,6 +116,12 @@ function applyUserData(u: UserDto) {
     EnablePublicSharing: p?.EnablePublicSharing ?? true,
     EnableContentDownloading: p?.EnableContentDownloading ?? true,
     EnablePlaybackRemuxing: p?.EnablePlaybackRemuxing ?? true,
+    EnableSyncTranscoding: p?.EnableSyncTranscoding ?? true,
+    EnableMediaConversion: p?.EnableMediaConversion ?? false,
+    EnableCollectionManagement: p?.EnableCollectionManagement ?? false,
+    EnableSubtitleManagement: p?.EnableSubtitleManagement ?? true,
+    EnableSubtitleDownloading: p?.EnableSubtitleDownloading ?? true,
+    EnableLyricManagement: p?.EnableLyricManagement ?? false,
     ForceRemoteSourceTranscoding: p?.ForceRemoteSourceTranscoding ?? false,
     EnableUserPreferenceAccess: p?.EnableUserPreferenceAccess ?? true,
     EnableAllFolders: p?.EnableAllFolders ?? true,
@@ -116,13 +134,17 @@ function applyUserData(u: UserDto) {
     EnabledDevices: [...(p?.EnabledDevices || [])],
     MaxParentalRating: p?.MaxParentalRating ?? null,
     MaxParentalSubRating: p?.MaxParentalSubRating ?? null,
-    MaxActiveSessions: p?.MaxActiveSessions ?? 0,
+    SimultaneousStreamLimit: p?.SimultaneousStreamLimit ?? 0,
+    InvalidLoginAttemptCount: p?.InvalidLoginAttemptCount ?? 0,
     LoginAttemptsBeforeLockout: p?.LoginAttemptsBeforeLockout ?? -1,
     RemoteClientBitrateLimit: p?.RemoteClientBitrateLimit ?? 0,
     BlockedTags: [...(p?.BlockedTags || [])],
+    AllowedTags: [...(p?.AllowedTags || [])],
     BlockUnratedItems: [...(p?.BlockUnratedItems || [])],
     AccessSchedules: [...(p?.AccessSchedules || [])],
-    SyncPlayAccess: p?.SyncPlayAccess || 'CreateAndJoinGroups'
+    SyncPlayAccess: p?.SyncPlayAccess || 'CreateAndJoinGroups',
+    AuthenticationProviderId: p?.AuthenticationProviderId || 'Default',
+    PasswordResetProviderId: p?.PasswordResetProviderId || 'Default'
   });
 }
 
@@ -313,10 +335,17 @@ function goBack() {
             <USwitch v-model="policyForm.EnableMediaPlayback" label="允许播放媒体" />
             <USwitch v-model="policyForm.EnableAudioPlaybackTranscoding" label="允许音频转码" />
             <USwitch v-model="policyForm.EnableVideoPlaybackTranscoding" label="允许视频转码" />
-            <USwitch v-model="policyForm.EnableContentDeletion" label="允许删除内容" />
-            <USwitch v-model="policyForm.EnableRemoteAccess" label="允许远程访问" />
-            <USwitch v-model="policyForm.EnableContentDownloading" label="允许下载内容" />
             <USwitch v-model="policyForm.EnablePlaybackRemuxing" label="允许封装转换" />
+            <USwitch v-model="policyForm.EnableSyncTranscoding" label="允许同步转码" />
+            <USwitch v-model="policyForm.EnableMediaConversion" label="允许媒体转换" />
+            <USwitch v-model="policyForm.EnableContentDeletion" label="允许删除内容" />
+            <USwitch v-model="policyForm.EnableContentDownloading" label="允许下载内容" />
+            <USwitch v-model="policyForm.EnableCollectionManagement" label="允许管理合集" />
+            <USwitch v-model="policyForm.EnableSubtitleManagement" label="允许管理字幕" />
+            <USwitch v-model="policyForm.EnableSubtitleDownloading" label="允许下载字幕" />
+            <USwitch v-model="policyForm.EnableLyricManagement" label="允许管理歌词" />
+            <USwitch v-model="policyForm.ForceRemoteSourceTranscoding" label="强制远程源转码" />
+            <USwitch v-model="policyForm.EnableRemoteAccess" label="允许远程访问" />
             <USwitch v-model="policyForm.IsHidden" label="登录页隐藏" />
             <USwitch v-model="policyForm.IsDisabled" label="禁用用户" />
           </div>
@@ -336,7 +365,7 @@ function goBack() {
               />
             </UFormField>
             <UFormField label="最大活跃会话">
-              <UInput v-model.number="policyForm.MaxActiveSessions" type="number" :min="0" class="w-full" />
+              <UInput v-model.number="policyForm.SimultaneousStreamLimit" type="number" :min="0" class="w-full" />
             </UFormField>
           </div>
         </UCard>

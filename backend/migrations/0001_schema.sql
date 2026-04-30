@@ -264,6 +264,7 @@ ALTER TABLE media_items
     ADD COLUMN IF NOT EXISTS locked_fields              text[] NOT NULL DEFAULT ARRAY[]::text[],
     ADD COLUMN IF NOT EXISTS lock_data                  boolean NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS official_rating            text,
+    ADD COLUMN IF NOT EXISTS parental_rating_value      integer,
     ADD COLUMN IF NOT EXISTS custom_rating              text,
     ADD COLUMN IF NOT EXISTS community_rating           double precision,
     ADD COLUMN IF NOT EXISTS critic_rating              double precision,

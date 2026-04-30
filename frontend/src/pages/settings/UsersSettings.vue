@@ -24,6 +24,7 @@ const usersPerPage = 20;
 const policyForm = reactive<UserPolicy>({
   IsAdministrator: false,
   IsHidden: false,
+  IsHiddenRemotely: false,
   IsDisabled: false,
   EnableRemoteAccess: true,
   EnableRemoteControlOfOtherUsers: false,
@@ -32,6 +33,12 @@ const policyForm = reactive<UserPolicy>({
   EnableMediaPlayback: true,
   EnableContentDownloading: true,
   EnableContentDeletion: false,
+  EnableSyncTranscoding: true,
+  EnableMediaConversion: false,
+  EnableCollectionManagement: false,
+  EnableSubtitleManagement: true,
+  EnableSubtitleDownloading: true,
+  EnableLyricManagement: false,
   EnableAudioPlaybackTranscoding: true,
   EnableVideoPlaybackTranscoding: true,
   EnablePlaybackRemuxing: true,
@@ -47,13 +54,17 @@ const policyForm = reactive<UserPolicy>({
   EnabledDevices: [],
   MaxParentalRating: null,
   MaxParentalSubRating: null,
-  MaxActiveSessions: 0,
+  SimultaneousStreamLimit: 0,
+  InvalidLoginAttemptCount: 0,
   LoginAttemptsBeforeLockout: -1,
   RemoteClientBitrateLimit: 0,
   BlockedTags: [],
+  AllowedTags: [],
   BlockUnratedItems: [],
   AccessSchedules: [],
-  SyncPlayAccess: 'CreateAndJoinGroups'
+  SyncPlayAccess: 'CreateAndJoinGroups',
+  AuthenticationProviderId: 'Default',
+  PasswordResetProviderId: 'Default'
 });
 
 const configurationForm = reactive<UserConfiguration>({
@@ -161,6 +172,7 @@ function normalizePolicy(policy: UserDto['Policy']): UserPolicy {
   return {
     IsAdministrator: Boolean(policy?.IsAdministrator),
     IsHidden: Boolean(policy?.IsHidden),
+    IsHiddenRemotely: Boolean(policy?.IsHiddenRemotely),
     IsDisabled: Boolean(policy?.IsDisabled),
     EnableRemoteAccess: policy?.EnableRemoteAccess ?? true,
     EnableRemoteControlOfOtherUsers: policy?.EnableRemoteControlOfOtherUsers ?? false,
@@ -169,6 +181,12 @@ function normalizePolicy(policy: UserDto['Policy']): UserPolicy {
     EnableMediaPlayback: policy?.EnableMediaPlayback ?? true,
     EnableContentDownloading: policy?.EnableContentDownloading ?? true,
     EnableContentDeletion: policy?.EnableContentDeletion ?? false,
+    EnableSyncTranscoding: policy?.EnableSyncTranscoding ?? true,
+    EnableMediaConversion: policy?.EnableMediaConversion ?? false,
+    EnableCollectionManagement: policy?.EnableCollectionManagement ?? false,
+    EnableSubtitleManagement: policy?.EnableSubtitleManagement ?? true,
+    EnableSubtitleDownloading: policy?.EnableSubtitleDownloading ?? true,
+    EnableLyricManagement: policy?.EnableLyricManagement ?? false,
     EnableAudioPlaybackTranscoding: policy?.EnableAudioPlaybackTranscoding ?? true,
     EnableVideoPlaybackTranscoding: policy?.EnableVideoPlaybackTranscoding ?? true,
     EnablePlaybackRemuxing: policy?.EnablePlaybackRemuxing ?? true,
@@ -186,7 +204,8 @@ function normalizePolicy(policy: UserDto['Policy']): UserPolicy {
     PasswordResetProviderId: policy?.PasswordResetProviderId || 'Default',
     MaxParentalRating: policy?.MaxParentalRating ?? null,
     MaxParentalSubRating: policy?.MaxParentalSubRating ?? null,
-    MaxActiveSessions: policy?.MaxActiveSessions ?? 0,
+    SimultaneousStreamLimit: policy?.SimultaneousStreamLimit ?? 0,
+    InvalidLoginAttemptCount: policy?.InvalidLoginAttemptCount ?? 0,
     LoginAttemptsBeforeLockout: policy?.LoginAttemptsBeforeLockout ?? -1,
     RemoteClientBitrateLimit: policy?.RemoteClientBitrateLimit ?? 0,
     BlockedTags: [...(policy?.BlockedTags || [])],
@@ -550,7 +569,13 @@ function userStatus(account: UserDto) {
               <USwitch v-model="policyForm.EnableVideoPlaybackTranscoding" label="允许视频转码" />
               <USwitch v-model="policyForm.EnableAudioPlaybackTranscoding" label="允许音频转码" />
               <USwitch v-model="policyForm.EnablePlaybackRemuxing" label="允许封装转换" />
+              <USwitch v-model="policyForm.EnableSyncTranscoding" label="允许同步转码" />
+              <USwitch v-model="policyForm.EnableMediaConversion" label="允许媒体转换" />
               <USwitch v-model="policyForm.EnableContentDeletion" label="允许删除媒体" />
+              <USwitch v-model="policyForm.EnableCollectionManagement" label="允许管理合集" />
+              <USwitch v-model="policyForm.EnableSubtitleManagement" label="允许管理字幕" />
+              <USwitch v-model="policyForm.EnableSubtitleDownloading" label="允许下载字幕" />
+              <USwitch v-model="policyForm.EnableLyricManagement" label="允许管理歌词" />
               <USwitch v-model="policyForm.ForceRemoteSourceTranscoding" label="强制远程源转码" />
             </div>
             <div class="mt-4 grid gap-3 sm:grid-cols-3">
@@ -558,7 +583,7 @@ function userStatus(account: UserDto) {
                 <UInput v-model.number="policyForm.RemoteClientBitrateLimit" type="number" :min="0" class="w-full" />
               </UFormField>
               <UFormField label="最大活跃会话">
-                <UInput v-model.number="policyForm.MaxActiveSessions" type="number" :min="0" class="w-full" />
+                <UInput v-model.number="policyForm.SimultaneousStreamLimit" type="number" :min="0" class="w-full" />
               </UFormField>
               <UFormField label="SyncPlay 权限">
                 <USelect v-model="policyForm.SyncPlayAccess" :items="syncPlayOptions" class="w-full" />

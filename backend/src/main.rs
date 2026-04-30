@@ -362,6 +362,7 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             ADD COLUMN IF NOT EXISTS locked_fields              TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
             ADD COLUMN IF NOT EXISTS lock_data                  BOOLEAN NOT NULL DEFAULT false,
             ADD COLUMN IF NOT EXISTS official_rating            TEXT,
+            ADD COLUMN IF NOT EXISTS parental_rating_value      INTEGER,
             ADD COLUMN IF NOT EXISTS custom_rating              TEXT,
             ADD COLUMN IF NOT EXISTS community_rating           DOUBLE PRECISION,
             ADD COLUMN IF NOT EXISTS critic_rating              DOUBLE PRECISION,

@@ -91,6 +91,21 @@ pub fn user_policy_from_value(value: &Value) -> UserPolicyDto {
     serde_json::from_value::<UserPolicyDto>(value.clone()).unwrap_or_default()
 }
 
+/// Emby 标准分级映射：将 official_rating 文本转为可比较的整数值
+pub fn official_rating_to_value(rating: &str) -> Option<i32> {
+    match rating.trim().to_uppercase().as_str() {
+        "G" | "TV-Y" | "APPROVED" => Some(1),
+        "TV-Y7" | "TV-Y7-FV" => Some(4),
+        "PG" | "TV-G" => Some(5),
+        "PG-13" | "TV-PG" => Some(7),
+        "TV-14" => Some(8),
+        "R" | "TV-MA" => Some(9),
+        "NC-17" | "X" | "XXX" | "UNRATED" => Some(10),
+        "NR" | "NOT RATED" => None,
+        _ => None,
+    }
+}
+
 pub async fn visible_library_ids_for_user(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -99,17 +114,23 @@ pub async fn visible_library_ids_for_user(
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
     let policy = user_policy_from_value(&user.policy);
+    let blocked: std::collections::HashSet<Uuid> =
+        policy.blocked_media_folders.iter().copied().collect();
 
     if user.is_admin || policy.enable_all_folders {
         let libraries = list_libraries(pool).await?;
-        return Ok(libraries.into_iter().map(|library| library.id).collect());
+        return Ok(libraries
+            .into_iter()
+            .map(|library| library.id)
+            .filter(|id| !blocked.contains(id))
+            .collect());
     }
 
     let visible: std::collections::BTreeSet<Uuid> = policy.enabled_folders.into_iter().collect();
     let libraries = list_libraries(pool).await?;
     Ok(libraries
         .into_iter()
-        .filter(|library| visible.contains(&library.id))
+        .filter(|library| visible.contains(&library.id) && !blocked.contains(&library.id))
         .map(|library| library.id)
         .collect())
 }
@@ -131,15 +152,26 @@ pub async fn effective_library_filter_for_user(
         return Ok(Some(Vec::new()));
     };
     let policy = user_policy_from_value(&user.policy);
+    let blocked: std::collections::HashSet<Uuid> =
+        policy.blocked_media_folders.iter().copied().collect();
     if user.is_admin || policy.enable_all_folders {
-        return Ok(None);
+        if blocked.is_empty() {
+            return Ok(None);
+        }
+        let libraries = list_libraries(pool).await?;
+        let allowed: Vec<Uuid> = libraries
+            .into_iter()
+            .map(|library| library.id)
+            .filter(|id| !blocked.contains(id))
+            .collect();
+        return Ok(Some(allowed));
     }
     let allowed_set: std::collections::BTreeSet<Uuid> =
         policy.enabled_folders.into_iter().collect();
     let libraries = list_libraries(pool).await?;
     let allowed: Vec<Uuid> = libraries
         .into_iter()
-        .filter(|library| allowed_set.contains(&library.id))
+        .filter(|library| allowed_set.contains(&library.id) && !blocked.contains(&library.id))
         .map(|library| library.id)
         .collect();
     Ok(Some(allowed))
@@ -948,6 +980,11 @@ pub async fn update_media_item_editable_fields(
     item_id: Uuid,
     updates: &MediaItemEditableFields,
 ) -> Result<bool, AppError> {
+    let parental_value: Option<i32> = updates
+        .official_rating
+        .as_deref()
+        .and_then(official_rating_to_value);
+
     let result = sqlx::query(
         r#"
         UPDATE media_items
@@ -958,6 +995,7 @@ pub async fn update_media_item_editable_fields(
             community_rating = COALESCE($6, community_rating),
             critic_rating    = COALESCE($7, critic_rating),
             official_rating  = COALESCE($8, official_rating),
+            parental_rating_value = CASE WHEN $8 IS NOT NULL THEN $18::integer ELSE parental_rating_value END,
             production_year  = COALESCE($9, production_year),
             premiere_date    = COALESCE($10, premiere_date),
             end_date         = COALESCE($11, end_date),
@@ -990,6 +1028,7 @@ pub async fn update_media_item_editable_fields(
     .bind(updates.studios.as_deref())
     .bind(updates.production_locations.as_deref())
     .bind(updates.provider_ids.as_ref())
+    .bind(parental_value)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -3800,6 +3839,12 @@ pub struct ItemListOptions {
     /// 时，这里会被填成"该用户允许访问的 library_id 白名单"；为空表示用户什么都看不到，
     /// 应当直接返回 0 行。`None` 表示无需叠加白名单（admin / 全可见）。
     pub allowed_library_ids: Option<Vec<Uuid>>,
+    /// 由 list_media_items 根据用户策略自动注入：排除超过此分级的内容
+    pub policy_max_parental_rating: Option<i32>,
+    /// 由 list_media_items 根据用户策略自动注入：排除含有这些标签的内容
+    pub policy_blocked_tags: Vec<String>,
+    /// 由 list_media_items 根据用户策略自动注入：排除未分级的特定类型
+    pub policy_block_unrated_items: Vec<String>,
 }
 
 impl Default for ItemListOptions {
@@ -3876,6 +3921,9 @@ impl Default for ItemListOptions {
             group_items_into_collections: true,
             enable_total_record_count: true,
             allowed_library_ids: None,
+            policy_max_parental_rating: None,
+            policy_blocked_tags: Vec::new(),
+            policy_block_unrated_items: Vec::new(),
         }
     }
 }
@@ -4195,15 +4243,50 @@ fn apply_item_where_conditions(
             .push_bind(lowercase_list(&options.series_status))
             .push(")");
     }
+
+    if let Some(max_rating) = options.policy_max_parental_rating {
+        builder
+            .push(" AND (parental_rating_value IS NULL OR parental_rating_value <= ")
+            .push_bind(max_rating)
+            .push(")");
+    }
+
+    if !options.policy_blocked_tags.is_empty() {
+        builder
+            .push(" AND NOT (tags && ")
+            .push_bind(options.policy_blocked_tags.clone())
+            .push(")");
+    }
+
+    if !options.policy_block_unrated_items.is_empty() {
+        builder
+            .push(" AND NOT (parental_rating_value IS NULL AND lower(item_type) = ANY(")
+            .push_bind(lowercase_list(&options.policy_block_unrated_items))
+            .push("))");
+    }
 }
 
 pub async fn list_media_items(
     pool: &sqlx::PgPool,
     mut options: ItemListOptions,
 ) -> Result<QueryResult<DbMediaItem>, AppError> {
-    if options.allowed_library_ids.is_none() {
-        if let Some(user_id) = options.user_id {
+    if let Some(user_id) = options.user_id {
+        if options.allowed_library_ids.is_none() {
             options.allowed_library_ids = effective_library_filter_for_user(pool, user_id).await?;
+        }
+        if options.policy_max_parental_rating.is_none() && options.policy_blocked_tags.is_empty() {
+            if let Some(user) = get_user_by_id(pool, user_id).await? {
+                if !user.is_admin {
+                    let policy = user_policy_from_value(&user.policy);
+                    options.policy_max_parental_rating = policy.max_parental_rating;
+                    if !policy.blocked_tags.is_empty() {
+                        options.policy_blocked_tags = policy.blocked_tags;
+                    }
+                    if !policy.block_unrated_items.is_empty() {
+                        options.policy_block_unrated_items = policy.block_unrated_items;
+                    }
+                }
+            }
         }
     }
 
@@ -9998,6 +10081,10 @@ pub async fn update_media_item_movie_metadata(
     metadata: &ExternalMovieMetadata,
 ) -> Result<(), AppError> {
     let provider_ids = serde_json::to_value(&metadata.provider_ids).unwrap_or_else(|_| json!({}));
+    let parental_value: Option<i32> = metadata
+        .official_rating
+        .as_deref()
+        .and_then(official_rating_to_value);
 
     sqlx::query(
         r#"
@@ -10010,6 +10097,7 @@ pub async fn update_media_item_movie_metadata(
             community_rating = COALESCE($7, community_rating),
             critic_rating = COALESCE($8, critic_rating),
             official_rating = COALESCE($9, official_rating),
+            parental_rating_value = CASE WHEN $9 IS NOT NULL THEN $18::integer ELSE parental_rating_value END,
             runtime_ticks = COALESCE($10, runtime_ticks),
             genres = CASE
                 WHEN cardinality($11::text[]) > 0 THEN $11
@@ -10057,6 +10145,7 @@ pub async fn update_media_item_movie_metadata(
     .bind(metadata.poster_image_url.as_deref())
     .bind(metadata.backdrop_image_url.as_deref())
     .bind(&metadata.remote_trailers)
+    .bind(parental_value)
     .execute(pool)
     .await?;
 

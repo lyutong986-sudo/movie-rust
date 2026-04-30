@@ -244,6 +244,7 @@ export interface ImportEmbyUsersResponse {
 export interface UserPolicy {
   IsAdministrator: boolean;
   IsHidden?: boolean;
+  IsHiddenRemotely?: boolean;
   IsDisabled?: boolean;
   EnableRemoteAccess?: boolean;
   EnableRemoteControlOfOtherUsers?: boolean;
@@ -252,6 +253,12 @@ export interface UserPolicy {
   EnableMediaPlayback?: boolean;
   EnableContentDeletion?: boolean;
   EnableContentDownloading?: boolean;
+  EnableSyncTranscoding?: boolean;
+  EnableMediaConversion?: boolean;
+  EnableCollectionManagement?: boolean;
+  EnableSubtitleManagement?: boolean;
+  EnableSubtitleDownloading?: boolean;
+  EnableLyricManagement?: boolean;
   EnableAudioPlaybackTranscoding?: boolean;
   EnableVideoPlaybackTranscoding?: boolean;
   EnablePlaybackRemuxing?: boolean;
@@ -259,7 +266,8 @@ export interface UserPolicy {
   EnableUserPreferenceAccess?: boolean;
   MaxParentalRating?: number | null;
   MaxParentalSubRating?: number | null;
-  MaxActiveSessions?: number;
+  SimultaneousStreamLimit?: number;
+  InvalidLoginAttemptCount?: number;
   LoginAttemptsBeforeLockout?: number;
   RemoteClientBitrateLimit?: number;
   BlockedTags?: string[];
@@ -278,6 +286,7 @@ export interface UserPolicy {
   AuthenticationProviderId?: string;
   PasswordResetProviderId?: string;
   SyncPlayAccess?: string;
+  AllowCameraUpload?: boolean;
 }
 
 export interface AuthResult {

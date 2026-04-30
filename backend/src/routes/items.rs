@@ -1939,7 +1939,13 @@ async fn delete_item(
     Path(item_id_str): Path<String>,
 ) -> Result<StatusCode, AppError> {
     if !session.is_admin {
-        return Err(AppError::Forbidden);
+        let user = repository::get_user_by_id(&state.pool, session.user_id)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let policy = repository::user_policy_from_value(&user.policy);
+        if !policy.enable_content_deletion {
+            return Err(AppError::Forbidden);
+        }
     }
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
@@ -1954,15 +1960,21 @@ async fn delete_item_info(
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    if !session.is_admin {
-        return Err(AppError::Forbidden);
-    }
+    let can_delete = if session.is_admin {
+        true
+    } else {
+        let user = repository::get_user_by_id(&state.pool, session.user_id)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let policy = repository::user_policy_from_value(&user.policy);
+        policy.enable_content_deletion
+    };
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
     let item = repository::get_media_item(&state.pool, item_id).await?;
     let exists = item.is_some();
     Ok(Json(json!({
-        "CanDelete": exists,
+        "CanDelete": exists && can_delete,
         "IsPermanent": false,
         "ItemName": item.as_ref().map(|value| value.name.clone()),
         "ItemType": item.as_ref().map(|value| value.item_type.clone())
@@ -2372,7 +2384,13 @@ async fn delete_items_bulk(
     Query(query): Query<ItemsQuery>,
 ) -> Result<StatusCode, AppError> {
     if !session.is_admin {
-        return Err(AppError::Forbidden);
+        let user = repository::get_user_by_id(&state.pool, session.user_id)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let policy = repository::user_policy_from_value(&user.policy);
+        if !policy.enable_content_deletion {
+            return Err(AppError::Forbidden);
+        }
     }
     let item_ids = parse_emby_uuid_list(query.ids.as_deref());
     for item_id in item_ids {
