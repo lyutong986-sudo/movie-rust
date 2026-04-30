@@ -362,6 +362,14 @@ struct RemoteBaseItem {
     image_tags: Option<Value>,
     #[serde(default)]
     backdrop_image_tags: Option<Value>,
+    #[serde(default)]
+    series_id: Option<String>,
+    #[serde(default)]
+    season_id: Option<String>,
+    #[serde(default)]
+    series_primary_image_tag: Option<String>,
+    #[serde(default)]
+    parent_backdrop_image_tags: Option<Value>,
 }
 
 fn deserialize_string_list_lossy<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -1628,6 +1636,34 @@ async fn ensure_virtual_series_folder(
     let path = build_virtual_series_path(source.id, view_scope, series_name.as_str());
     let path_ref = Path::new(path.as_str());
     let empty = Vec::<String>::new();
+    let series_primary_url = item
+        .item
+        .series_id
+        .as_deref()
+        .map(|sid| {
+            if let Some(tag) = item.item.series_primary_image_tag.as_deref() {
+                remote_image_url(source.server_url.as_str(), sid, "Primary", tag)
+            } else {
+                let base = source.server_url.trim_end_matches('/');
+                format!("{base}/emby/Items/{sid}/Images/Primary?quality=90&maxWidth=1920")
+            }
+        });
+    let series_backdrop_url = item
+        .item
+        .series_id
+        .as_deref()
+        .and_then(|sid| {
+            let tag = item.item.parent_backdrop_image_tags.as_ref().and_then(|tags| {
+                match tags {
+                    Value::Array(arr) => arr.first().and_then(Value::as_str),
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                }
+            });
+            tag.map(|t| remote_image_url(source.server_url.as_str(), sid, "Backdrop", t))
+        });
+    let series_primary_path = series_primary_url.as_ref().map(|s| Path::new(s.as_str()));
+    let series_backdrop_path = series_backdrop_url.as_ref().map(|s| Path::new(s.as_str()));
     let (item_id, _was_new) = repository::upsert_media_item(
         pool,
         repository::UpsertMediaItem {
@@ -1655,8 +1691,8 @@ async fn ensure_virtual_series_folder(
             studios: &empty,
             tags: &empty,
             production_locations: &empty,
-            image_primary_path: None,
-            backdrop_path: None,
+            image_primary_path: series_primary_path,
+            backdrop_path: series_backdrop_path,
             logo_path: None,
             thumb_path: None,
             art_path: None,
@@ -1709,6 +1745,15 @@ async fn ensure_virtual_season_folder(
         .clone()
         .unwrap_or_else(|| format!("Season {season_number:02}"));
     let empty = Vec::<String>::new();
+    let season_primary_url = item
+        .item
+        .season_id
+        .as_deref()
+        .map(|sid| {
+            let base = source.server_url.trim_end_matches('/');
+            format!("{base}/emby/Items/{sid}/Images/Primary?quality=90&maxWidth=1920")
+        });
+    let season_primary_path = season_primary_url.as_ref().map(|s| Path::new(s.as_str()));
     let (item_id, _was_new) = repository::upsert_media_item(
         pool,
         repository::UpsertMediaItem {
@@ -1736,7 +1781,7 @@ async fn ensure_virtual_season_folder(
             studios: &empty,
             tags: &empty,
             production_locations: &empty,
-            image_primary_path: None,
+            image_primary_path: season_primary_path,
             backdrop_path: None,
             logo_path: None,
             thumb_path: None,
@@ -2001,7 +2046,7 @@ async fn fetch_remote_items_page_for_view(
         ("IncludeItemTypes".to_string(), "Movie,Episode".to_string()),
         (
             "Fields".to_string(),
-            "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,ImageTags,BackdropImageTags".to_string(),
+            "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,ImageTags,BackdropImageTags,SeriesId,SeasonId,SeriesPrimaryImageTag,ParentBackdropImageTags".to_string(),
         ),
         ("EnableTotalRecordCount".to_string(), "true".to_string()),
         ("SortBy".to_string(), "SortName".to_string()),
