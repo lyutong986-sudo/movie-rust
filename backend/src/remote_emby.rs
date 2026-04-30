@@ -342,6 +342,10 @@ struct RemoteBaseItem {
     premiere_date: Option<String>,
     #[serde(default)]
     run_time_ticks: Option<i64>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    end_date: Option<String>,
     series_name: Option<String>,
     #[serde(default)]
     season_name: Option<String>,
@@ -370,6 +374,12 @@ struct RemoteBaseItem {
     series_primary_image_tag: Option<String>,
     #[serde(default)]
     parent_backdrop_image_tags: Option<Value>,
+    #[serde(default)]
+    parent_backdrop_item_id: Option<String>,
+    #[serde(default)]
+    parent_logo_item_id: Option<String>,
+    #[serde(default)]
+    parent_logo_image_tag: Option<String>,
 }
 
 fn deserialize_string_list_lossy<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -1015,6 +1025,7 @@ async fn sync_source_inner(
 
                 // separate 模式：电影/剧集直接放在 View 库根层，无视图文件夹
                 let mut parent_id: Option<Uuid> = None;
+                let mut series_db_id: Option<Uuid> = None;
 
                 if item.item.item_type.eq_ignore_ascii_case("Episode") {
                     let series_view_scope = item.view_id.as_str();
@@ -1028,6 +1039,7 @@ async fn sync_source_inner(
                         &mut series_parent_map,
                     )
                     .await?;
+                    series_db_id = Some(series_parent_id);
 
                     let season_parent_id = ensure_virtual_season_folder(
                         &state.pool,
@@ -1097,6 +1109,7 @@ async fn sync_source_inner(
                     strm_bundle
                         .as_ref()
                         .and_then(|(_, _, _, l)| l.as_ref().map(|p| p.as_path())),
+                    series_db_id,
                 )
                 .await?;
                 if let Some(analysis) = analysis {
@@ -1629,7 +1642,12 @@ async fn ensure_virtual_series_folder(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("Unknown Series");
     let series_name = raw_series_name.trim().to_string();
-    let series_key = format!("{view_scope}::{}", sanitize_segment(series_name.as_str()));
+    // 优先使用 SeriesId 做去重 key，避免同名不同剧冲突
+    let series_key = if let Some(sid) = item.item.series_id.as_deref().filter(|s| !s.trim().is_empty()) {
+        format!("{view_scope}::{sid}")
+    } else {
+        format!("{view_scope}::{}", sanitize_segment(series_name.as_str()))
+    };
     if let Some(existing) = series_parent_map.get(series_key.as_str()).copied() {
         return Ok(existing);
     }
@@ -1662,8 +1680,20 @@ async fn ensure_virtual_series_folder(
             });
             tag.map(|t| remote_image_url(source.server_url.as_str(), sid, "Backdrop", t))
         });
+    // Logo: 从 Episode 的 ParentLogoItemId + ParentLogoImageTag 推导 Series logo URL
+    let series_logo_url = item
+        .item
+        .parent_logo_item_id
+        .as_deref()
+        .and_then(|logo_item_id| {
+            item.item
+                .parent_logo_image_tag
+                .as_deref()
+                .map(|tag| remote_image_url(source.server_url.as_str(), logo_item_id, "Logo", tag))
+        });
     let series_primary_path = series_primary_url.as_ref().map(|s| Path::new(s.as_str()));
     let series_backdrop_path = series_backdrop_url.as_ref().map(|s| Path::new(s.as_str()));
+    let series_logo_path = series_logo_url.as_ref().map(|s| Path::new(s.as_str()));
     let (item_id, _was_new) = repository::upsert_media_item(
         pool,
         repository::UpsertMediaItem {
@@ -1682,18 +1712,18 @@ async fn ensure_virtual_series_folder(
             critic_rating: item.item.critic_rating,
             runtime_ticks: None,
             premiere_date: parse_remote_premiere_date(item.item.premiere_date.as_deref()),
-            status: None,
-            end_date: None,
+            status: item.item.status.as_deref(),
+            end_date: parse_remote_premiere_date(item.item.end_date.as_deref()),
             air_days: &empty,
             air_time: None,
             provider_ids: remote_marker_provider_ids(source.id, None, Some(&item.view_id), None),
-            genres: &empty,
-            studios: &empty,
-            tags: &empty,
+            genres: &item.item.genres,
+            studios: &item.item.studios,
+            tags: &item.item.tags,
             production_locations: &empty,
             image_primary_path: series_primary_path,
             backdrop_path: series_backdrop_path,
-            logo_path: None,
+            logo_path: series_logo_path,
             thumb_path: None,
             art_path: None,
             banner_path: None,
@@ -1751,7 +1781,7 @@ async fn ensure_virtual_season_folder(
         .as_deref()
         .map(|sid| {
             let base = source.server_url.trim_end_matches('/');
-            format!("{base}/emby/Items/{sid}/Images/Primary?quality=90&maxWidth=1920")
+            format!("{base}/emby/Items/{sid}/Images/Primary?tag=0&quality=90&maxWidth=1920")
         });
     let season_primary_path = season_primary_url.as_ref().map(|s| Path::new(s.as_str()));
     let (item_id, _was_new) = repository::upsert_media_item(
@@ -1772,14 +1802,14 @@ async fn ensure_virtual_season_folder(
             critic_rating: item.item.critic_rating,
             runtime_ticks: None,
             premiere_date: parse_remote_premiere_date(item.item.premiere_date.as_deref()),
-            status: None,
-            end_date: None,
+            status: item.item.status.as_deref(),
+            end_date: parse_remote_premiere_date(item.item.end_date.as_deref()),
             air_days: &empty,
             air_time: None,
             provider_ids: remote_marker_provider_ids(source.id, None, Some(&item.view_id), None),
-            genres: &empty,
-            studios: &empty,
-            tags: &empty,
+            genres: &item.item.genres,
+            studios: &item.item.studios,
+            tags: &item.item.tags,
             production_locations: &empty,
             image_primary_path: season_primary_path,
             backdrop_path: None,
@@ -1819,6 +1849,7 @@ async fn upsert_virtual_media_item(
     local_poster: Option<&Path>,
     local_backdrop: Option<&Path>,
     local_logo: Option<&Path>,
+    series_db_id: Option<Uuid>,
 ) -> Result<Uuid, AppError> {
     let container = analysis.and_then(|value| value.format.format_name.as_deref());
     let video_codec = analysis.and_then(|value| {
@@ -1849,11 +1880,8 @@ async fn upsert_virtual_media_item(
         None => PathBuf::from(build_virtual_item_path(source.id, item.item.id.as_str())),
     };
     let path_ref = strm_or_virtual.as_path();
-    let item_type = if item.item.item_type.eq_ignore_ascii_case("Episode") {
-        "Episode"
-    } else {
-        "Movie"
-    };
+    let is_episode = item.item.item_type.eq_ignore_ascii_case("Episode");
+    let item_type = if is_episode { "Episode" } else { "Movie" };
     let runtime_ticks = item.item.run_time_ticks.or_else(|| {
         analysis.and_then(|value| {
             value
@@ -1870,10 +1898,45 @@ async fn upsert_virtual_media_item(
         &item.item.image_tags,
         &item.item.backdrop_image_tags,
     );
+    // Episode 回退：当自身没有 Primary 图时，使用 Series 的 Primary 图
+    let series_fallback_primary = if remote_primary.is_none() && is_episode {
+        item.item.series_id.as_deref().map(|sid| {
+            if let Some(tag) = item.item.series_primary_image_tag.as_deref() {
+                remote_image_url(source.server_url.as_str(), sid, "Primary", tag)
+            } else {
+                let base = source.server_url.trim_end_matches('/');
+                format!("{base}/emby/Items/{sid}/Images/Primary?quality=90&maxWidth=1920")
+            }
+        })
+    } else {
+        None
+    };
     let image_primary_path = local_poster
-        .or_else(|| remote_primary.as_ref().map(|s| Path::new(s.as_str())));
+        .or_else(|| remote_primary.as_ref().map(|s| Path::new(s.as_str())))
+        .or_else(|| series_fallback_primary.as_ref().map(|s| Path::new(s.as_str())));
+    // Episode 回退：当自身没有 Backdrop 时，使用 ParentBackdropItemId 的 Backdrop
+    let series_fallback_backdrop = if remote_backdrop.is_none() && is_episode {
+        let backdrop_item = item
+            .item
+            .parent_backdrop_item_id
+            .as_deref()
+            .or(item.item.series_id.as_deref());
+        backdrop_item.and_then(|bid| {
+            let tag = item.item.parent_backdrop_image_tags.as_ref().and_then(|tags| {
+                match tags {
+                    Value::Array(arr) => arr.first().and_then(Value::as_str),
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                }
+            });
+            tag.map(|t| remote_image_url(source.server_url.as_str(), bid, "Backdrop", t))
+        })
+    } else {
+        None
+    };
     let backdrop_path = local_backdrop
-        .or_else(|| remote_backdrop.as_ref().map(|s| Path::new(s.as_str())));
+        .or_else(|| remote_backdrop.as_ref().map(|s| Path::new(s.as_str())))
+        .or_else(|| series_fallback_backdrop.as_ref().map(|s| Path::new(s.as_str())));
     let empty = Vec::<String>::new();
     let empty_backdrops = Vec::<String>::new();
     let empty_trailers = Vec::<String>::new();
@@ -1922,7 +1985,7 @@ async fn upsert_virtual_media_item(
             height: None,
             video_codec,
             audio_codec,
-            series_id: None,
+            series_id: series_db_id,
         },
     )
     .await
@@ -2046,7 +2109,13 @@ async fn fetch_remote_items_page_for_view(
         ("IncludeItemTypes".to_string(), "Movie,Episode".to_string()),
         (
             "Fields".to_string(),
-            "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,ImageTags,BackdropImageTags,SeriesId,SeasonId,SeriesPrimaryImageTag,ParentBackdropImageTags".to_string(),
+            "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,\
+             OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,\
+             ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,\
+             ImageTags,BackdropImageTags,SeriesId,SeasonId,\
+             SeriesPrimaryImageTag,ParentBackdropImageTags,ParentBackdropItemId,\
+             ParentLogoItemId,ParentLogoImageTag,Status,EndDate"
+                .to_string(),
         ),
         ("EnableTotalRecordCount".to_string(), "true".to_string()),
         ("SortBy".to_string(), "SortName".to_string()),
@@ -2355,11 +2424,11 @@ async fn send_remote_stream_request(
         }
 
         // ── 回退路径：通过 PlaybackInfo 获取 DirectStreamUrl/TranscodingUrl ──
-        let user_id = ensure_authenticated(pool, source, false).await?;
-        let token = source
-            .access_token
+        // token 在本轮已获取且未被清除，直接复用
+        let user_id = source
+            .remote_user_id
             .clone()
-            .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
+            .ok_or_else(|| AppError::Internal("远端用户ID为空".to_string()))?;
 
         let cache_key = playback_info_cache_key(source.id, remote_item_id, media_source_id);
         let playback_info = if let Some(cached) = get_cached_playback_info(&cache_key).await {

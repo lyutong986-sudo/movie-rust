@@ -8739,6 +8739,31 @@ pub fn media_item_to_dto_for_list(
         "Episode" => item.parent_id.map(|id| uuid_to_emby_guid(&id)),
         _ => None,
     };
+    // 为 Episode/Season 填充继承的图片字段（列表模式无 DB 查询，从已知字段推导）
+    let is_ep_or_season = item.item_type.eq_ignore_ascii_case("Episode")
+        || item.item_type.eq_ignore_ascii_case("Season");
+    let resolved_series_uuid = if is_ep_or_season {
+        item.series_id.or_else(|| {
+            if item.item_type.eq_ignore_ascii_case("Season") { item.parent_id } else { None }
+        })
+    } else {
+        None
+    };
+    let series_primary_image_tag = if is_ep_or_season {
+        resolved_series_uuid.map(|_| item.date_modified.timestamp().to_string())
+    } else {
+        None
+    };
+    let parent_backdrop_item_id = if is_ep_or_season {
+        resolved_series_uuid.map(|id| uuid_to_emby_guid(&id))
+    } else {
+        None
+    };
+    let parent_backdrop_image_tags = if is_ep_or_season && resolved_series_uuid.is_some() {
+        vec![item.date_modified.timestamp().to_string()]
+    } else {
+        Vec::new()
+    };
 
     let completion_percentage = if is_folder {
         user_data.played_percentage
@@ -8837,12 +8862,18 @@ pub fn media_item_to_dto_for_list(
         backdrop_image_tags,
         parent_logo_item_id: None,
         parent_logo_image_tag: None,
-        parent_backdrop_item_id: None,
-        parent_backdrop_image_tags: Vec::new(),
+        parent_backdrop_item_id,
+        parent_backdrop_image_tags,
         parent_thumb_item_id: None,
         parent_thumb_image_tag: None,
-        series_primary_image_tag: None,
-        primary_image_item_id: primary_image_tag.as_ref().map(|_| uuid_to_emby_guid(&item.id)),
+        series_primary_image_tag,
+        primary_image_item_id: if primary_image_tag.is_some() {
+            Some(uuid_to_emby_guid(&item.id))
+        } else if is_ep_or_season {
+            resolved_series_uuid.map(|id| uuid_to_emby_guid(&id))
+        } else {
+            None
+        },
         series_studio: item.studios.first().cloned(),
         user_data,
         media_sources: Vec::new(),
