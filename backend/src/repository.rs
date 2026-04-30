@@ -206,16 +206,21 @@ pub async fn visible_libraries_for_user(
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
     let policy = user_policy_from_value(&user.policy);
+    let blocked: std::collections::HashSet<Uuid> =
+        policy.blocked_media_folders.iter().copied().collect();
 
     let libraries = list_libraries(pool).await?;
     if user.is_admin || policy.enable_all_folders {
-        return Ok(libraries);
+        return Ok(libraries
+            .into_iter()
+            .filter(|library| !blocked.contains(&library.id))
+            .collect());
     }
 
     let visible: std::collections::BTreeSet<Uuid> = policy.enabled_folders.into_iter().collect();
     Ok(libraries
         .into_iter()
-        .filter(|library| visible.contains(&library.id))
+        .filter(|library| visible.contains(&library.id) && !blocked.contains(&library.id))
         .collect())
 }
 
@@ -1064,16 +1069,38 @@ pub async fn get_genres(
     pool: &sqlx::PgPool,
     start_index: Option<i32>,
     limit: Option<i32>,
+    user_id: Option<Uuid>,
 ) -> Result<Vec<GenreDto>, AppError> {
     let offset = start_index.unwrap_or(0).max(0) as i64;
     let cap = limit.unwrap_or(200).clamp(1, 500) as i64;
-    let query = "SELECT DISTINCT unnest(genres) as name FROM media_items WHERE array_length(genres, 1) > 0 ORDER BY name OFFSET $1 LIMIT $2";
 
-    let rows = sqlx::query(query)
+    let allowed_library_ids = if let Some(uid) = user_id {
+        effective_library_filter_for_user(pool, uid).await?
+    } else {
+        None
+    };
+
+    let rows = if let Some(ref lib_ids) = allowed_library_ids {
+        if lib_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query(
+            "SELECT DISTINCT unnest(genres) as name FROM media_items WHERE array_length(genres, 1) > 0 AND library_id = ANY($3) ORDER BY name OFFSET $1 LIMIT $2"
+        )
+        .bind(offset)
+        .bind(cap)
+        .bind(lib_ids)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT DISTINCT unnest(genres) as name FROM media_items WHERE array_length(genres, 1) > 0 ORDER BY name OFFSET $1 LIMIT $2"
+        )
         .bind(offset)
         .bind(cap)
         .fetch_all(pool)
-        .await?;
+        .await?
+    };
 
     let genres: Vec<GenreDto> = rows
         .iter()
@@ -1093,29 +1120,73 @@ pub async fn get_items_by_genre(
     server_id: Uuid,
     start_index: Option<i32>,
     limit: Option<i32>,
+    user_id: Option<Uuid>,
 ) -> Result<Vec<BaseItemDto>, AppError> {
-    let query = r#"
-        SELECT
-            id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
-            overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
-            premiere_date, status, end_date, air_days, air_time, series_name, season_name,
-            index_number, index_number_end, parent_index_number, provider_ids, genres,
-            studios, tags, production_locations,
-            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
-            logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, 0::bigint AS total_count
-        FROM media_items
-        WHERE $1 = ANY(genres)
-        ORDER BY sort_name
-        OFFSET $2 LIMIT $3
-    "#;
+    let allowed_library_ids = if let Some(uid) = user_id {
+        effective_library_filter_for_user(pool, uid).await?
+    } else {
+        None
+    };
 
-    let items = sqlx::query_as::<_, DbMediaItem>(query)
-        .bind(genre_name)
-        .bind(start_index.unwrap_or(0).max(0) as i64)
-        .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
-        .fetch_all(pool)
-        .await?;
+    let (query, use_lib_filter) = if let Some(ref lib_ids) = allowed_library_ids {
+        if lib_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        (
+            r#"
+            SELECT
+                id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
+                overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
+                premiere_date, status, end_date, air_days, air_time, series_name, season_name,
+                index_number, index_number_end, parent_index_number, provider_ids, genres,
+                studios, tags, production_locations,
+                width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+                logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
+                date_created, date_modified, image_blur_hashes, 0::bigint AS total_count
+            FROM media_items
+            WHERE $1 = ANY(genres) AND library_id = ANY($4)
+            ORDER BY sort_name
+            OFFSET $2 LIMIT $3
+            "#,
+            true,
+        )
+    } else {
+        (
+            r#"
+            SELECT
+                id, parent_id, name, original_title, sort_name, item_type, media_type, path, container,
+                overview, production_year, official_rating, community_rating, critic_rating, runtime_ticks,
+                premiere_date, status, end_date, air_days, air_time, series_name, season_name,
+                index_number, index_number_end, parent_index_number, provider_ids, genres,
+                studios, tags, production_locations,
+                width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+                logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
+                date_created, date_modified, image_blur_hashes, 0::bigint AS total_count
+            FROM media_items
+            WHERE $1 = ANY(genres)
+            ORDER BY sort_name
+            OFFSET $2 LIMIT $3
+            "#,
+            false,
+        )
+    };
+
+    let items = if use_lib_filter {
+        sqlx::query_as::<_, DbMediaItem>(query)
+            .bind(genre_name)
+            .bind(start_index.unwrap_or(0).max(0) as i64)
+            .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
+            .bind(&allowed_library_ids.unwrap())
+            .fetch_all(pool)
+            .await?
+    } else {
+        sqlx::query_as::<_, DbMediaItem>(query)
+            .bind(genre_name)
+            .bind(start_index.unwrap_or(0).max(0) as i64)
+            .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
+            .fetch_all(pool)
+            .await?
+    };
 
     let item_dtos: Vec<BaseItemDto> = items
         .iter()
@@ -1354,6 +1425,7 @@ pub async fn get_items_by_person(
     server_id: Uuid,
     start_index: Option<i32>,
     limit: Option<i32>,
+    user_id: Option<Uuid>,
 ) -> Result<Vec<BaseItemDto>, AppError> {
     let person_id = if let Ok(uuid) = emby_id_to_uuid(person_id_or_name) {
         uuid
@@ -1375,32 +1447,72 @@ pub async fn get_items_by_person(
         id
     };
 
-    let rows = sqlx::query_as::<_, DbMediaItem>(
-        r#"
-        SELECT
-            mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type, mi.media_type, mi.path, mi.container,
-            mi.overview, mi.production_year, mi.official_rating, mi.community_rating, mi.critic_rating, mi.runtime_ticks,
-            mi.premiere_date, mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
-            mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids, mi.genres,
-            mi.studios, mi.tags, mi.production_locations,
-            mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
-            mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-            mi.date_created, mi.date_modified, mi.image_blur_hashes, 0::bigint AS total_count
-        FROM media_items mi
-        WHERE mi.id IN (
-            SELECT DISTINCT pr.media_item_id
-            FROM person_roles pr
-            WHERE pr.person_id = $1
+    let allowed_library_ids = if let Some(uid) = user_id {
+        effective_library_filter_for_user(pool, uid).await?
+    } else {
+        None
+    };
+
+    let rows = if let Some(ref lib_ids) = allowed_library_ids {
+        if lib_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_as::<_, DbMediaItem>(
+            r#"
+            SELECT
+                mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type, mi.media_type, mi.path, mi.container,
+                mi.overview, mi.production_year, mi.official_rating, mi.community_rating, mi.critic_rating, mi.runtime_ticks,
+                mi.premiere_date, mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
+                mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids, mi.genres,
+                mi.studios, mi.tags, mi.production_locations,
+                mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
+                mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
+                mi.date_created, mi.date_modified, mi.image_blur_hashes, 0::bigint AS total_count
+            FROM media_items mi
+            WHERE mi.id IN (
+                SELECT DISTINCT pr.media_item_id
+                FROM person_roles pr
+                WHERE pr.person_id = $1
+            )
+            AND mi.library_id = ANY($4)
+            ORDER BY mi.sort_name
+            OFFSET $2 LIMIT $3
+            "#,
         )
-        ORDER BY mi.sort_name
-        OFFSET $2 LIMIT $3
-        "#,
-    )
-    .bind(person_id)
-    .bind(start_index.unwrap_or(0).max(0) as i64)
-    .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
-    .fetch_all(pool)
-    .await?;
+        .bind(person_id)
+        .bind(start_index.unwrap_or(0).max(0) as i64)
+        .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
+        .bind(lib_ids)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, DbMediaItem>(
+            r#"
+            SELECT
+                mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type, mi.media_type, mi.path, mi.container,
+                mi.overview, mi.production_year, mi.official_rating, mi.community_rating, mi.critic_rating, mi.runtime_ticks,
+                mi.premiere_date, mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
+                mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids, mi.genres,
+                mi.studios, mi.tags, mi.production_locations,
+                mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
+                mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
+                mi.date_created, mi.date_modified, mi.image_blur_hashes, 0::bigint AS total_count
+            FROM media_items mi
+            WHERE mi.id IN (
+                SELECT DISTINCT pr.media_item_id
+                FROM person_roles pr
+                WHERE pr.person_id = $1
+            )
+            ORDER BY mi.sort_name
+            OFFSET $2 LIMIT $3
+            "#,
+        )
+        .bind(person_id)
+        .bind(start_index.unwrap_or(0).max(0) as i64)
+        .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
+        .fetch_all(pool)
+        .await?
+    };
 
     let items: Vec<BaseItemDto> = rows
         .iter()
@@ -5128,6 +5240,23 @@ pub async fn get_next_up_episodes(
     limit: i64,
     enable_total_record_count: bool,
 ) -> Result<QueryResult<BaseItemDto>, AppError> {
+    let allowed_library_ids = effective_library_filter_for_user(pool, user_id).await?;
+    if let Some(ref ids) = allowed_library_ids {
+        if ids.is_empty() {
+            return Ok(QueryResult {
+                items: Vec::new(),
+                total_record_count: 0,
+                start_index: Some(start_index.max(0)),
+            });
+        }
+    }
+    let library_filter_sql = if allowed_library_ids.is_some() {
+        "AND mi.library_id = ANY($5)"
+    } else {
+        "AND ($5::uuid[] IS NULL OR TRUE)"
+    };
+    let allowed_ids_param: Option<Vec<Uuid>> = allowed_library_ids;
+
     // When a specific SeriesId is provided, use the indexed series_id column
     // instead of the expensive LEFT JOIN + OR chain across the entire table.
     let (scope_sql_fragment, use_series_fast_path) = if parent_id.is_some() {
@@ -5150,16 +5279,17 @@ pub async fn get_next_up_episodes(
 
     let total_record_count = if enable_total_record_count {
         let count_sql = if use_series_fast_path {
-            // For a single series, just count distinct seasons that have unplayed episodes
             format!(
                 r#"
                 SELECT COUNT(DISTINCT mi.parent_id) FROM media_items mi
                 LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
                 WHERE mi.item_type = 'Episode'
                   AND COALESCE(uid.is_played, false) = false
-                  {}
+                  {scope}
+                  {lib_filter}
                 "#,
-                scope_sql_fragment
+                scope = scope_sql_fragment,
+                lib_filter = library_filter_sql
             )
         } else {
             format!(
@@ -5177,16 +5307,21 @@ pub async fn get_next_up_episodes(
                     LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
                     WHERE mi.item_type = 'Episode'
                       AND COALESCE(uid.is_played, false) = false
-                      {}
+                      {scope}
+                      {lib_filter}
                 )
                 SELECT COUNT(*) FROM ranked WHERE next_rank = 1
                 "#,
-                scope_sql_fragment
+                scope = scope_sql_fragment,
+                lib_filter = library_filter_sql
             )
         };
         sqlx::query_scalar(&count_sql)
             .bind(user_id)
             .bind(parent_id)
+            .bind(start_index.max(0))
+            .bind(limit.clamp(1, 200))
+            .bind(allowed_ids_param.as_deref())
             .fetch_one(pool)
             .await?
     } else {
@@ -5222,7 +5357,8 @@ pub async fn get_next_up_episodes(
             LEFT JOIN user_item_data uid ON uid.item_id = mi.id AND uid.user_id = $1
             WHERE mi.item_type = 'Episode'
               AND COALESCE(uid.is_played, false) = false
-              {}
+              {scope}
+              {lib_filter}
         )
         SELECT
             id, parent_id, name, original_title, sort_name, item_type,
@@ -5242,7 +5378,8 @@ pub async fn get_next_up_episodes(
                  sort_name
         OFFSET $3 LIMIT $4
         "#,
-        scope_sql_fragment
+        scope = scope_sql_fragment,
+        lib_filter = library_filter_sql
     );
 
     let rows = sqlx::query_as::<_, DbMediaItem>(&data_sql)
@@ -5250,6 +5387,7 @@ pub async fn get_next_up_episodes(
         .bind(parent_id)
         .bind(start_index.max(0))
         .bind(limit.clamp(1, 200))
+        .bind(allowed_ids_param.as_deref())
         .fetch_all(pool)
         .await?;
 
@@ -5279,8 +5417,24 @@ pub async fn get_upcoming_episodes(
     start_index: i64,
     limit: i64,
 ) -> Result<QueryResult<BaseItemDto>, AppError> {
+    let allowed_library_ids = effective_library_filter_for_user(pool, user_id).await?;
+    if let Some(ref ids) = allowed_library_ids {
+        if ids.is_empty() {
+            return Ok(QueryResult {
+                items: Vec::new(),
+                total_record_count: 0,
+                start_index: Some(start_index.max(0)),
+            });
+        }
+    }
+    let library_filter_sql = if allowed_library_ids.is_some() {
+        "AND mi.library_id = ANY($5)"
+    } else {
+        "AND ($5::uuid[] IS NULL OR TRUE)"
+    };
+
     let today = Utc::now().date_naive();
-    let total_record_count: i64 = sqlx::query_scalar(
+    let count_sql = format!(
         r#"
         SELECT COUNT(*)
         FROM media_items mi
@@ -5297,14 +5451,20 @@ pub async fn get_upcoming_episodes(
                     AND (season.parent_id = $2 OR season.library_id = $2)
               )
           )
+          {lib_filter}
         "#,
-    )
-    .bind(today)
-    .bind(parent_id)
-    .fetch_one(pool)
-    .await?;
+        lib_filter = library_filter_sql
+    );
+    let total_record_count: i64 = sqlx::query_scalar(&count_sql)
+        .bind(today)
+        .bind(parent_id)
+        .bind(start_index.max(0))
+        .bind(limit.clamp(1, 200))
+        .bind(allowed_library_ids.as_deref())
+        .fetch_one(pool)
+        .await?;
 
-    let rows = sqlx::query_as::<_, DbMediaItem>(
+    let data_sql = format!(
         r#"
         SELECT
             mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type,
@@ -5330,6 +5490,7 @@ pub async fn get_upcoming_episodes(
                     AND (season.parent_id = $2 OR season.library_id = $2)
               )
           )
+          {lib_filter}
         ORDER BY mi.premiere_date,
                  mi.series_name NULLS LAST,
                  mi.parent_index_number NULLS LAST,
@@ -5337,11 +5498,14 @@ pub async fn get_upcoming_episodes(
                  mi.sort_name
         OFFSET $3 LIMIT $4
         "#,
-    )
-    .bind(today)
-    .bind(parent_id)
-    .bind(start_index.max(0))
-    .bind(limit.clamp(1, 200))
+        lib_filter = library_filter_sql
+    );
+    let rows = sqlx::query_as::<_, DbMediaItem>(&data_sql)
+        .bind(today)
+        .bind(parent_id)
+        .bind(start_index.max(0))
+        .bind(limit.clamp(1, 200))
+        .bind(allowed_library_ids.as_deref())
     .fetch_all(pool)
     .await?;
 
@@ -10831,11 +10995,27 @@ pub async fn find_similar_items(
     server_id: Uuid,
     group_items_into_collections: bool,
 ) -> Result<Vec<BaseItemDto>, AppError> {
+    let allowed_library_ids = if let Some(uid) = user_id {
+        effective_library_filter_for_user(pool, uid).await?
+    } else {
+        None
+    };
+    if let Some(ref ids) = allowed_library_ids {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+    }
+
     let target_identity = item_identity_key(target_item, &provider_ids_for_item(target_item));
     let fetch_limit = limit.saturating_mul(3).min(200);
 
     let similar_items = if target_item.genres.is_empty() {
-        sqlx::query_as::<_, DbMediaItem>(
+        let lib_filter = if allowed_library_ids.is_some() {
+            "AND library_id = ANY($5)"
+        } else {
+            "AND ($5::uuid[] IS NULL OR TRUE)"
+        };
+        let sql = format!(
             r#"
             SELECT id, parent_id, name, original_title, sort_name, item_type,
                    media_type, path, container, overview, production_year,
@@ -10849,18 +11029,26 @@ pub async fn find_similar_items(
                    remote_trailers, date_created, date_modified, image_blur_hashes
             FROM media_items
             WHERE id != $1 AND item_type = $2
+            {lib_filter}
             ORDER BY ABS(COALESCE(production_year, 0) - COALESCE($3, 0)) ASC
             LIMIT $4
-            "#,
-        )
-        .bind(&target_item.id)
-        .bind(&target_item.item_type)
-        .bind(target_item.production_year)
-        .bind(fetch_limit)
-        .fetch_all(pool)
-        .await?
+            "#
+        );
+        sqlx::query_as::<_, DbMediaItem>(&sql)
+            .bind(&target_item.id)
+            .bind(&target_item.item_type)
+            .bind(target_item.production_year)
+            .bind(fetch_limit)
+            .bind(allowed_library_ids.as_deref())
+            .fetch_all(pool)
+            .await?
     } else {
-        sqlx::query_as::<_, DbMediaItem>(
+        let lib_filter = if allowed_library_ids.is_some() {
+            "AND library_id = ANY($6)"
+        } else {
+            "AND ($6::uuid[] IS NULL OR TRUE)"
+        };
+        let sql = format!(
             r#"
             SELECT id, parent_id, name, original_title, sort_name, item_type,
                    media_type, path, container, overview, production_year,
@@ -10874,21 +11062,24 @@ pub async fn find_similar_items(
                    remote_trailers, date_created, date_modified, image_blur_hashes
             FROM media_items
             WHERE id != $1 AND item_type = $2 AND genres && $3
+            {lib_filter}
             ORDER BY
                 cardinality(
                     ARRAY(SELECT unnest(genres) INTERSECT SELECT unnest($3::text[]))
                 ) DESC,
                 ABS(COALESCE(production_year, 0) - COALESCE($4, 0)) ASC
             LIMIT $5
-            "#,
-        )
-        .bind(&target_item.id)
-        .bind(&target_item.item_type)
-        .bind(&target_item.genres)
-        .bind(target_item.production_year)
-        .bind(fetch_limit)
-        .fetch_all(pool)
-        .await?
+            "#
+        );
+        sqlx::query_as::<_, DbMediaItem>(&sql)
+            .bind(&target_item.id)
+            .bind(&target_item.item_type)
+            .bind(&target_item.genres)
+            .bind(target_item.production_year)
+            .bind(fetch_limit)
+            .bind(allowed_library_ids.as_deref())
+            .fetch_all(pool)
+            .await?
     };
 
     let row_ids: Vec<Uuid> = similar_items.iter().map(|r| r.id).collect();

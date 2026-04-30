@@ -659,7 +659,8 @@ async fn audio_hls_segment(
 ) -> Result<Response, AppError> {
     let item_id = emby_id_to_uuid(&path.item_id)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
-    auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
+    auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::AudioTranscode).await?;
     serve_hls_segment(
         &state,
         item_id,
@@ -902,6 +903,8 @@ async fn hls_audio_playlist_response(
     let requested_item_id = emby_id_to_uuid(item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", item_id_str)))?;
     let session = auth::require_auth(state, request.headers(), request.uri().query()).await?;
+    auth::ensure_item_access(state, &session, requested_item_id, MediaAccessKind::AudioTranscode)
+        .await?;
     let device_id = request_device_id(&request);
     if use_transcoded_hls_playlist() {
         return transcoded_hls_playlist_response(

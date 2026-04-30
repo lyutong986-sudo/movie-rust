@@ -76,7 +76,7 @@ pub async fn get_person(
 }
 
 pub async fn get_person_items(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(person_id): Path<String>,
     Query(query): Query<GetPersonsQuery>,
@@ -87,6 +87,7 @@ pub async fn get_person_items(
         state.config.server_id,
         query.start_index,
         query.limit,
+        Some(session.user_id),
     )
     .await?;
     Ok(Json(items))

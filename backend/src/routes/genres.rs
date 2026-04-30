@@ -51,7 +51,7 @@ pub async fn get_genres(
     let recursive = query.recursive.unwrap_or(true);
 
     let genres = if parent_id.is_none() && include_types.is_empty() && recursive {
-        repository::get_genres(&state.pool, query.start_index, query.limit).await?
+        repository::get_genres(&state.pool, query.start_index, query.limit, Some(user_id)).await?
     } else {
         genres_for_scope(&state, user_id, parent_id, include_types, recursive).await?
     };
@@ -111,6 +111,7 @@ pub async fn get_genre_items(
             state.config.server_id,
             query.start_index,
             query.limit,
+            Some(user_id),
         )
         .await?
     } else {

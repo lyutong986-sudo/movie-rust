@@ -725,7 +725,7 @@ async fn list_items_for_user(
     let requested_include_types = parse_include_types(query.include_item_types.as_deref());
 
     if is_top_level_items_request(&query, &requested_item_ids, &requested_include_types) {
-        return libraries_as_query_result(state).await;
+        return libraries_as_query_result_for_user(state, user_id).await;
     }
 
     // Emby 客户端进入详情页时会用 ListItemIds + IncludeItemTypes=BoxSet 查询“该条目所在合集”。
@@ -1214,6 +1214,9 @@ async fn user_item_data(
     let user_id = query.user_id.unwrap_or(session.user_id);
     ensure_user_access(&session, user_id)?;
     ensure_media_item_exists(&state, item_id).await?;
+    if !session.is_admin {
+        ensure_user_can_access_item(&state, user_id, item_id).await?;
+    }
     Ok(Json(
         repository::get_user_item_data_dto(&state.pool, user_id, item_id).await?,
     ))
@@ -1226,6 +1229,9 @@ async fn legacy_user_item_data(
 ) -> Result<Json<UserItemDataDto>, AppError> {
     ensure_user_access(&session, user_id)?;
     ensure_media_item_exists(&state, item_id).await?;
+    if !session.is_admin {
+        ensure_user_can_access_item(&state, user_id, item_id).await?;
+    }
     Ok(Json(
         repository::get_user_item_data_dto(&state.pool, user_id, item_id).await?,
     ))
@@ -1333,6 +1339,9 @@ async fn update_user_data_for_user(
 ) -> Result<Json<UserItemDataDto>, AppError> {
     ensure_user_access(session, user_id)?;
     ensure_media_item_exists(state, item_id).await?;
+    if !session.is_admin {
+        ensure_user_can_access_item(state, user_id, item_id).await?;
+    }
     let UpdateUserItemDataRequest {
         playback_position_ticks,
         play_count,
@@ -1370,6 +1379,9 @@ async fn set_favorite_for_user(
 ) -> Result<Json<UserItemDataDto>, AppError> {
     ensure_user_access(session, user_id)?;
     ensure_media_item_exists(state, item_id).await?;
+    if !session.is_admin {
+        ensure_user_can_access_item(state, user_id, item_id).await?;
+    }
     let dto = repository::set_user_favorite(&state.pool, user_id, item_id, is_favorite).await?;
 
     let user = repository::get_user_by_id(&state.pool, user_id).await.ok().flatten();
@@ -1409,9 +1421,23 @@ async fn set_played_for_user(
 ) -> Result<Json<UserItemDataDto>, AppError> {
     ensure_user_access(session, user_id)?;
     ensure_media_item_exists(state, item_id).await?;
+    if !session.is_admin {
+        ensure_user_can_access_item(state, user_id, item_id).await?;
+    }
     Ok(Json(
         repository::set_user_played(&state.pool, user_id, item_id, is_played, date_played).await?,
     ))
+}
+
+async fn ensure_user_can_access_item(
+    state: &AppState,
+    user_id: Uuid,
+    item_id: Uuid,
+) -> Result<(), AppError> {
+    if !repository::user_can_access_item(&state.pool, user_id, item_id).await? {
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    }
+    Ok(())
 }
 
 async fn ensure_media_item_exists(state: &AppState, item_id: Uuid) -> Result<(), AppError> {
@@ -3292,6 +3318,10 @@ async fn item_dto(
     }
 
     if let Some(library) = repository::get_library(&state.pool, item_id).await? {
+        let visible = repository::visible_library_ids_for_user(&state.pool, user_id).await?;
+        if !visible.contains(&library.id) {
+            return Err(AppError::NotFound("媒体条目不存在".to_string()));
+        }
         return Ok(Json(
             repository::library_to_item_dto(&state.pool, &library, state.config.server_id).await?,
         ));
@@ -3300,6 +3330,11 @@ async fn item_dto(
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+
+    if !repository::user_can_access_item(&state.pool, user_id, item_id).await? {
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    }
+
     Ok(Json(
         repository::media_item_to_dto(&state.pool, &item, Some(user_id), state.config.server_id)
             .await?,

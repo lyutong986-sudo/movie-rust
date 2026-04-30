@@ -51,6 +51,8 @@ const defaultPolicy = reactive<Partial<UserPolicy>>({
   EnableUserPreferenceAccess: true,
   EnableSharedDeviceControl: false,
   EnableRemoteControlOfOtherUsers: false,
+  RemoteClientBitrateLimit: 0,
+  SimultaneousStreamLimit: 0,
 });
 
 const folderOptions = computed(() =>
@@ -311,6 +313,36 @@ ensureAdmin();
               value-key="value"
               class="w-full"
             />
+          </UFormField>
+        </div>
+        <div class="mt-4 grid gap-3 sm:grid-cols-2">
+          <UFormField label="远程码率上限 (bps)" hint="0 = 不限制">
+            <UInput
+              v-model.number="defaultPolicy.RemoteClientBitrateLimit"
+              type="number"
+              :min="0"
+              :step="1000000"
+              placeholder="0"
+            />
+            <template #description>
+              <span class="text-xs text-muted">
+                常用值：8Mbps = 8000000 · 20Mbps = 20000000 · 100Mbps = 100000000
+              </span>
+            </template>
+          </UFormField>
+          <UFormField label="最大活跃会话数" hint="0 = 不限制">
+            <UInput
+              v-model.number="defaultPolicy.SimultaneousStreamLimit"
+              type="number"
+              :min="0"
+              :step="1"
+              placeholder="0"
+            />
+            <template #description>
+              <span class="text-xs text-muted">
+                限制用户同时播放的设备数量
+              </span>
+            </template>
           </UFormField>
         </div>
       </UCard>
