@@ -63,6 +63,10 @@ pub fn router() -> Router<AppState> {
         .route("/videos/{item_id}/hls/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
         .route("/Video/{item_id}/hls/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
         .route("/video/{item_id}/hls/{_playlist_id}/{segment_file}", get(video_hls_segment).head(video_hls_segment))
+        .route("/Audio/{item_id}/stream", get(stream_video).head(stream_video))
+        .route("/audio/{item_id}/stream", get(stream_video).head(stream_video))
+        .route("/Audio/{item_id}/stream.{container}", get(stream_video_with_container).head(stream_video_with_container))
+        .route("/audio/{item_id}/stream.{container}", get(stream_video_with_container).head(stream_video_with_container))
         .route("/Audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/audio/{item_id}/master.m3u8", get(audio_master_playlist).head(audio_master_playlist))
         .route("/Audio/{item_id}/main.m3u8", get(audio_master_playlist).head(audio_master_playlist))
@@ -1196,11 +1200,27 @@ async fn serve_subtitle(
         return Err(AppError::NotFound("字幕文件不存在".to_string()));
     }
 
-    ServeFile::new(path)
+    let content_type = subtitle_content_type_from_path(&path);
+    let mut response = ServeFile::new(path)
         .oneshot(request)
         .await
         .map(IntoResponse::into_response)
-        .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))
+        .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))?;
+    if let Ok(value) = axum::http::HeaderValue::from_str(&content_type) {
+        response.headers_mut().insert(axum::http::header::CONTENT_TYPE, value);
+    }
+    Ok(response)
+}
+
+fn subtitle_content_type_from_path(path: &std::path::Path) -> String {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "vtt" | "webvtt" => "text/vtt; charset=utf-8".to_string(),
+        "srt" => "application/x-subrip; charset=utf-8".to_string(),
+        "ass" | "ssa" => "text/x-ssa; charset=utf-8".to_string(),
+        "sub" => "text/plain; charset=utf-8".to_string(),
+        "ttml" => "application/ttml+xml; charset=utf-8".to_string(),
+        _ => "text/plain; charset=utf-8".to_string(),
+    }
 }
 
 async fn serve_attachment(

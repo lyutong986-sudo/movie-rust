@@ -1885,3 +1885,49 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | `ActivityLog` 语义偏播放事件 | 低 | 非完整系统审计日志，缺少登录/库变更等类型 |
 
 ---
+
+## 第二十一轮修复：WebSocket / 流媒体 / 缺失端点
+
+**审计时间**: 2026-04-30
+
+通过审计 WebSocket、视频/音频流、字幕端点和客户端必需端点，发现并修复以下问题：
+
+| 编号 | 严重 | 问题 | 文件 | 修复方案 |
+|------|------|------|------|----------|
+| R136 | 高 | 缺少 `/socket` WebSocket 别名，部分客户端固定连 `/socket` 而非 `/embywebsocket` | `routes/mod.rs` | 在 `api_router` 中新增 `/socket` 路由指向同一 WebSocket handler |
+| R137 | 高 | 缺少 `/Plugins`、`/Packages`、`/Notifications/Endpoints`、`/web/configurationpages` 端点，客户端启动时 404 | `routes/compat.rs` | 新增四个空数组存根端点，防止客户端因 404 异常退出 |
+| R138 | 高 | 缺少 `/Audio/{id}/stream` 和 `/Audio/{id}/stream.{container}` 渐进式音频流路由 | `routes/videos.rs` | 新增 Audio stream 路由（大小写各一），复用 `stream_video` handler |
+| R139 | 中 | 字幕端点 `ServeFile` 未设置正确 Content-Type（依赖磁盘扩展名而非语义） | `routes/videos.rs` | `serve_subtitle` 新增 `subtitle_content_type_from_path` 函数，按文件扩展名设置 charset 和 MIME |
+| R140 | 高 | WebSocket `LibraryChanged` 事件从未被触发 | `routes/admin.rs` | `enqueue_library_scan` 在扫描成功后通过 `event_tx` 发送 `LibraryChanged` 事件 |
+
+### 已知待处理项
+
+| 问题 | 严重 | 说明 |
+|------|------|------|
+| 附件流用封面图兜底，无法提供 ASS 字体 | 高 | 需要实现 MKV 容器内附件提取（ffmpeg -dump_attachment） |
+| 字幕无 SRT→VTT 格式转换 | 中 | 浏览器/WebView 需要 VTT 格式，需实现转换逻辑 |
+| `Static=true` 未参与 `serve_media_item` 分支决策 | 中 | 应根据 Static 参数强制直连 |
+| WebSocket 不主动发送周期性 KeepAlive | 低 | 当前仅响应客户端 KeepAlive |
+
+---
+
+## 第二十二轮修复：DB SELECT 查询字段遗漏
+
+**审计时间**: 2026-04-30
+
+通过对比 `models.rs` 中的 `DbMediaItem` 结构体与 `repository.rs` 中所有 SELECT 查询，发现关键列 `series_id` 在 10+ 处查询中被遗漏，虽然结构体有 `#[sqlx(default)]` 不会崩溃，但剧集相关功能（如 NextUp、系列关联）会静默失效。
+
+| 编号 | 严重 | 问题 | 文件 | 修复方案 |
+|------|------|------|------|----------|
+| R141 | 高 | `get_media_item` SELECT 缺少 `series_id` | `repository.rs` | 在 SELECT 列表末尾添加 `series_id` |
+| R142 | 高 | `list_media_item_children` SELECT 缺少 `series_id` | `repository.rs` | 同上 |
+| R143 | 高 | `list_media_items` 主查询 SELECT 缺少 `series_id` | `repository.rs` | 在 `image_blur_hashes` 后添加 `series_id` |
+| R144 | 中 | `get_items_by_genre` 两处查询缺少 `series_id` | `repository.rs` | 同上 |
+| R145 | 中 | `person_media_items` 两处查询缺少 `series_id` | `repository.rs` | 同上 |
+| R146 | 中 | `session_play_queue` 两处查询缺少 `series_id` | `repository.rs` | 同上 |
+| R147 | 中 | 版本分组查询两处缺少 `series_id` | `repository.rs` | 同上 |
+| R148 | 中 | `get_upcoming_episodes` 缺少 `series_id` | `repository.rs` | 同上 |
+| R149 | 低 | `get_similar_items` 缺少 `series_id` 和 `size` | `repository.rs` | 补全两个列 |
+| R150 | 低 | TMDB credit 匹配查询缺少 `series_id` | `repository.rs` | 同上 |
+
+---

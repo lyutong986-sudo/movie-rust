@@ -289,6 +289,7 @@ async fn enqueue_library_scan(
     let config = state.config.clone();
     let work_limiters = state.work_limiters.clone();
     let db_semaphore = Some(state.scan_db_semaphore.clone());
+    let event_tx = state.event_tx.clone();
     let trigger = trigger.to_string();
     let scope_key_for_task = scope_key.clone();
     let library_id_for_task = library_id;
@@ -484,6 +485,13 @@ async fn enqueue_library_scan(
                         {
                             registry.active_operation_ids.remove(&scope_key_for_task);
                         }
+                    }
+                    if summary.imported_items > 0 {
+                        let _ = event_tx.send(crate::state::ServerEvent::LibraryChanged {
+                            items_added: Vec::new(),
+                            items_updated: Vec::new(),
+                            items_removed: Vec::new(),
+                        });
                     }
                     tracing::info!(
                         operation_id = %operation_id,

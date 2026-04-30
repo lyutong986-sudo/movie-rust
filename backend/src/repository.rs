@@ -1157,7 +1157,7 @@ pub async fn get_items_by_genre(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes, 0::bigint AS total_count
+                date_created, date_modified, image_blur_hashes, series_id, 0::bigint AS total_count
             FROM media_items
             WHERE $1 = ANY(genres) AND library_id = ANY($4)
             ORDER BY sort_name
@@ -1176,7 +1176,7 @@ pub async fn get_items_by_genre(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes, 0::bigint AS total_count
+                date_created, date_modified, image_blur_hashes, series_id, 0::bigint AS total_count
             FROM media_items
             WHERE $1 = ANY(genres)
             ORDER BY sort_name
@@ -1501,7 +1501,7 @@ pub async fn get_items_by_person(
                 mi.studios, mi.tags, mi.production_locations,
                 mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
                 mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-                mi.date_created, mi.date_modified, mi.image_blur_hashes, 0::bigint AS total_count
+                mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, 0::bigint AS total_count
             FROM media_items mi
             WHERE mi.id IN (
                 SELECT DISTINCT pr.media_item_id
@@ -1530,7 +1530,7 @@ pub async fn get_items_by_person(
                 mi.studios, mi.tags, mi.production_locations,
                 mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
                 mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-                mi.date_created, mi.date_modified, mi.image_blur_hashes, 0::bigint AS total_count
+                mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, 0::bigint AS total_count
             FROM media_items mi
             WHERE mi.id IN (
                 SELECT DISTINCT pr.media_item_id
@@ -4490,7 +4490,7 @@ pub async fn list_media_items(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, 0::bigint AS total_count
+            date_created, date_modified, image_blur_hashes, series_id, 0::bigint AS total_count
         FROM media_items
         WHERE 1 = 1
         "#,
@@ -5544,7 +5544,7 @@ pub async fn get_upcoming_episodes(
             mi.genres, mi.studios, mi.tags, mi.production_locations, mi.width, mi.height,
             mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path,
             mi.backdrop_path, mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-            mi.date_created, mi.date_modified, mi.image_blur_hashes
+            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id
         FROM media_items mi
         WHERE mi.item_type = 'Episode'
           AND mi.premiere_date >= $1
@@ -6321,7 +6321,7 @@ pub async fn get_media_item(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes
+            date_created, date_modified, image_blur_hashes, series_id
         FROM media_items
         WHERE id = $1
         "#,
@@ -6345,7 +6345,7 @@ pub async fn list_media_item_children(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes
+            date_created, date_modified, image_blur_hashes, series_id
         FROM media_items
         WHERE parent_id = $1
         ORDER BY index_number, sort_name
@@ -6377,7 +6377,7 @@ pub async fn find_items_for_external_person_credit(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes
+            date_created, date_modified, image_blur_hashes, series_id
         FROM media_items
         WHERE item_type = $1
           AND (
@@ -6783,7 +6783,7 @@ pub async fn session_play_queue(
             mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
             mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-            mi.date_created, mi.date_modified, mi.image_blur_hashes
+            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id
         FROM session_play_queue q
         INNER JOIN sessions s ON s.access_token = q.session_id
         INNER JOIN media_items mi ON mi.id = q.item_id
@@ -6840,7 +6840,7 @@ pub async fn session_runtime_state(
             mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
             mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-            mi.date_created, mi.date_modified, mi.image_blur_hashes
+            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id
         FROM session_play_queue q
         INNER JOIN sessions s ON s.access_token = q.session_id
         INNER JOIN media_items mi ON mi.id = q.item_id
@@ -9208,7 +9208,7 @@ async fn version_group_items_for_item(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes
+                date_created, date_modified, image_blur_hashes, series_id
             FROM media_items
             WHERE item_type = 'Episode'
               AND media_type = $1
@@ -9265,7 +9265,7 @@ async fn version_group_items_for_item(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes
+                date_created, date_modified, image_blur_hashes, series_id
             FROM media_items
             WHERE item_type = $1
               AND media_type = $2
@@ -11250,7 +11250,7 @@ pub async fn find_similar_items(
                production_locations, width, height, bit_rate, video_codec,
                audio_codec, image_primary_path, backdrop_path, logo_path,
                thumb_path, art_path, banner_path, disc_path, backdrop_paths,
-               remote_trailers, date_created, date_modified, image_blur_hashes
+               remote_trailers, date_created, date_modified, image_blur_hashes, series_id, size
         FROM media_items
         WHERE id != $1 AND item_type = $2
         {lib_filter}

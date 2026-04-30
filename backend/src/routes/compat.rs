@@ -40,6 +40,10 @@ pub fn router() -> Router<AppState> {
             "/Users/{user_id}/Settings",
             get(user_settings).post(update_user_settings),
         )
+        .route("/Plugins", get(plugins_list))
+        .route("/Packages", get(packages_list))
+        .route("/Notifications/Endpoints", get(notification_endpoints))
+        .route("/web/configurationpages", get(configuration_pages))
 }
 
 #[derive(Debug, Deserialize)]
@@ -432,4 +436,20 @@ fn to_three_letter_language(language: &str) -> String {
         "en" => "eng".to_string(),
         other => other.to_string(),
     }
+}
+
+async fn plugins_list() -> Json<Value> {
+    Json(json!([]))
+}
+
+async fn packages_list() -> Json<Value> {
+    Json(json!([]))
+}
+
+async fn notification_endpoints() -> Json<Value> {
+    Json(json!([]))
+}
+
+async fn configuration_pages() -> Json<Value> {
+    Json(json!([]))
 }
