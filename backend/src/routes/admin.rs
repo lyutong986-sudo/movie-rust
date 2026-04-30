@@ -6,7 +6,7 @@ use crate::{
         LibrarySubFolderDto, MediaPathDto, ScanSummary, UpdateLibraryOptionsDto,
         UpdateMediaPathRequestDto, VirtualFolderInfoDto, VirtualFolderQuery,
     },
-    repository, scanner,
+    remote_emby, repository, scanner,
     state::AppState,
 };
 use axum::{
@@ -290,6 +290,7 @@ async fn enqueue_library_scan(
     let work_limiters = state.work_limiters.clone();
     let db_semaphore = Some(state.scan_db_semaphore.clone());
     let event_tx = state.event_tx.clone();
+    let app_state = state.clone();
     let trigger = trigger.to_string();
     let scope_key_for_task = scope_key.clone();
     let library_id_for_task = library_id;
@@ -382,18 +383,56 @@ async fn enqueue_library_scan(
                 let work_limiters = work_limiters.clone();
                 let progress = progress.clone();
                 let db_semaphore = db_semaphore.clone();
+                let state_for_remote = app_state.clone();
                 async move {
                     if let Some(scan_library_id) = library_id_for_task {
-                        scanner::scan_single_library_with_db_semaphore(
-                            &pool,
-                            metadata_manager,
-                            &config,
-                            work_limiters,
-                            scan_library_id,
-                            Some(progress),
-                            db_semaphore,
+                        // 检查该库是否有关联的远端 Emby 源
+                        let remote_sources = repository::find_remote_sources_for_library(
+                            &pool, scan_library_id,
                         )
                         .await
+                        .unwrap_or_default();
+                        if !remote_sources.is_empty() {
+                            let mut total_scanned = 0i64;
+                            let mut total_imported = 0i64;
+                            for source in &remote_sources {
+                                match remote_emby::sync_source_with_progress(
+                                    &state_for_remote,
+                                    source.id,
+                                    None,
+                                )
+                                .await
+                                {
+                                    Ok(result) => {
+                                        total_scanned += result.scan_summary.scanned_files;
+                                        total_imported += result.scan_summary.imported_items;
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            source_id = %source.id,
+                                            error = %err,
+                                            "远程库扫描触发同步失败"
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(ScanSummary {
+                                libraries: remote_sources.len() as i64,
+                                scanned_files: total_scanned,
+                                imported_items: total_imported,
+                            })
+                        } else {
+                            scanner::scan_single_library_with_db_semaphore(
+                                &pool,
+                                metadata_manager,
+                                &config,
+                                work_limiters,
+                                scan_library_id,
+                                Some(progress),
+                                db_semaphore,
+                            )
+                            .await
+                        }
                     } else {
                         scanner::scan_all_libraries_with_db_semaphore(
                             &pool,

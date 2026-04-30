@@ -99,6 +99,8 @@ struct CreateRemoteEmbySourceRequest {
     /// 流量模式：`"proxy"`（本地中转，默认）或 `"redirect"`（302 直链）
     #[serde(default, alias = "proxyMode", alias = "proxy_mode")]
     proxy_mode: Option<String>,
+    #[serde(default, alias = "viewLibraryMap", alias = "view_library_map")]
+    view_library_map: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +148,8 @@ struct UpdateRemoteEmbySourceRequest {
     /// 流量模式：`"proxy"`（本地中转，默认）或 `"redirect"`（302 直链）
     #[serde(default, alias = "proxyMode", alias = "proxy_mode")]
     proxy_mode: Option<String>,
+    #[serde(default, alias = "viewLibraryMap", alias = "view_library_map")]
+    view_library_map: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -373,7 +377,7 @@ async fn create_remote_emby_source(
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(remote_emby::default_spoofed_user_agent()),
         target_library_id,
-        payload.display_mode.as_deref().unwrap_or("separate"),
+        payload.display_mode.as_deref().unwrap_or("merge"),
         payload.remote_view_ids.as_slice(),
         &remote_views,
         payload.enabled.unwrap_or(true),
@@ -382,6 +386,7 @@ async fn create_remote_emby_source(
         payload.sync_subtitles.unwrap_or(true),
         payload.token_refresh_interval_secs.unwrap_or(3600),
         payload.proxy_mode.as_deref().unwrap_or("proxy"),
+        payload.view_library_map.as_ref(),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))
@@ -415,7 +420,7 @@ async fn update_remote_emby_source(
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(remote_emby::default_spoofed_user_agent()),
         target_library_id,
-        payload.display_mode.as_deref().unwrap_or("separate"),
+        payload.display_mode.as_deref().unwrap_or("merge"),
         payload.remote_view_ids.as_slice(),
         &remote_views,
         payload.enabled.unwrap_or(true),
@@ -424,6 +429,7 @@ async fn update_remote_emby_source(
         payload.sync_subtitles.unwrap_or(true),
         payload.token_refresh_interval_secs.unwrap_or(3600),
         payload.proxy_mode.as_deref().unwrap_or("proxy"),
+        payload.view_library_map.as_ref(),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))

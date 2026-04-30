@@ -33,7 +33,8 @@ const form = ref({
   password: '',
   remoteViewIds: [] as string[],
   targetLibraryId: '',
-  displayMode: 'separate' as 'merge' | 'separate',
+  displayMode: 'merge' as 'merge' | 'separate',
+  viewLibraryMap: {} as Record<string, string>,
   spoofedUserAgent: DEFAULT_SPOOFED_USER_AGENT,
   enabled: true,
   strmOutputPath: '',
@@ -53,7 +54,8 @@ const editForm = ref({
   password: '',
   remoteViewIds: [] as string[],
   targetLibraryId: '',
-  displayMode: 'separate' as 'merge' | 'separate',
+  displayMode: 'merge' as 'merge' | 'separate',
+  viewLibraryMap: {} as Record<string, string>,
   spoofedUserAgent: DEFAULT_SPOOFED_USER_AGENT,
   enabled: true,
   strmOutputPath: '',
@@ -76,8 +78,8 @@ const runningSyncCount = computed(
     ).length
 );
 const displayModeItems = [
-  { label: '独立媒体库（每个远端库单独建库）', value: 'separate' },
-  { label: '并入现有媒体库', value: 'merge' }
+  { label: '灵活映射（逐个指定目标本地库）', value: 'merge' },
+  { label: '自动独立（每个远端库自动建库）', value: 'separate' }
 ];
 /** 本地媒体库下拉项：排除内部虚拟中转库（不应让用户手动选择/删除） */
 const TRANSIT_LIB_NAME = '远端 Emby 中转'
@@ -120,6 +122,23 @@ const remoteViewNameMap = computed(() => {
   }
   return map;
 });
+const editRemoteViewNameMap = computed(() => {
+  const map = new Map<string, string>();
+  for (const v of editForm.value.mergedRemoteViews) {
+    map.set(v.Id.toLowerCase(), v.Name);
+  }
+  for (const v of remoteViews.value) {
+    map.set(v.Id.toLowerCase(), v.Name);
+  }
+  return map;
+});
+function remoteViewCollectionType(vid: string): string | undefined {
+  return remoteViews.value.find((v) => v.Id.toLowerCase() === vid.toLowerCase())?.CollectionType;
+}
+function editRemoteViewCollectionType(vid: string): string | undefined {
+  const all = [...editForm.value.mergedRemoteViews, ...remoteViews.value];
+  return all.find((v) => v.Id.toLowerCase() === vid.toLowerCase())?.CollectionType;
+}
 
 function collectionTypeLabel(type?: string) {
   const normalized = (type || '').toLowerCase();
@@ -133,7 +152,7 @@ function collectionTypeLabel(type?: string) {
 }
 
 function displayModeLabel(mode?: string) {
-  return mode === 'merge' ? '并入现有媒体库' : '独立媒体库';
+  return mode === 'merge' ? '灵活映射' : '自动独立';
 }
 
 function targetLibraryName(libraryId?: string) {
@@ -353,6 +372,7 @@ function openEditor(source: RemoteEmbySource) {
     remoteViewIds: [...(source.RemoteViewIds || [])],
     targetLibraryId: source.TargetLibraryId,
     displayMode: source.DisplayMode === 'merge' ? 'merge' : 'separate',
+    viewLibraryMap: { ...(source.ViewLibraryMap || {}) },
     spoofedUserAgent: source.SpoofedUserAgent || DEFAULT_SPOOFED_USER_AGENT,
     enabled: source.Enabled,
     strmOutputPath: source.StrmOutputPath || '',
@@ -384,9 +404,12 @@ async function saveEditor() {
     error.value = '请至少选择一个远端媒体库';
     return;
   }
-  if (p.displayMode === 'merge' && !p.targetLibraryId) {
-    error.value = '并入模式下请选择项目媒体库';
-    return;
+  if (p.displayMode === 'merge') {
+    const hasAnyMapping = p.remoteViewIds.some((vid) => p.viewLibraryMap[vid]);
+    if (!hasAnyMapping && !p.targetLibraryId) {
+      error.value = '灵活映射模式下，请为至少一个远端库指定目标本地库，或设置默认目标库';
+      return;
+    }
   }
   editSaving.value = true;
   error.value = '';
@@ -405,6 +428,7 @@ async function saveEditor() {
       DisplayMode: 'merge' | 'separate';
       RemoteViewIds: string[];
       RemoteViews: RemoteEmbyView[];
+      ViewLibraryMap: Record<string, string>;
       SpoofedUserAgent: string;
       Enabled: boolean;
       StrmOutputPath: string;
@@ -420,6 +444,7 @@ async function saveEditor() {
       DisplayMode: p.displayMode,
       RemoteViewIds: p.remoteViewIds,
       RemoteViews: selectedRemoteViews,
+      ViewLibraryMap: p.viewLibraryMap,
       SpoofedUserAgent: p.spoofedUserAgent.trim(),
       Enabled: p.enabled,
       StrmOutputPath: p.strmOutputPath.trim(),
@@ -468,25 +493,20 @@ async function createSource() {
     error.value = '请选择至少一个远端媒体库';
     return;
   }
-  if (payload.displayMode === 'merge' && !payload.targetLibraryId) {
-    error.value = '并入模式下请选择项目媒体库';
-    return;
+  if (payload.displayMode === 'merge') {
+    const hasAnyMapping = payload.remoteViewIds.some((vid) => payload.viewLibraryMap[vid]);
+    if (!hasAnyMapping && !payload.targetLibraryId) {
+      error.value = '灵活映射模式下，请为至少一个远端库指定目标本地库，或设置默认目标库';
+      return;
+    }
   }
   if (!payload.spoofedUserAgent.trim()) {
     error.value = '请输入伪装 User-Agent';
     return;
   }
 
-  // separate 模式下 targetLibraryId 可为空，后端会自动使用「远端 Emby 中转」库
   const selectedLocalLibraryId =
-    payload.displayMode === 'merge'
-      ? payload.targetLibraryId || localLibraries.value[0]?.ItemId || ''
-      : payload.targetLibraryId || localLibraries.value[0]?.ItemId || '';
-
-  if (payload.displayMode === 'merge' && !selectedLocalLibraryId) {
-    error.value = '并入模式下请先创建本地媒体库并选择目标库';
-    return;
-  }
+    payload.targetLibraryId || localLibraries.value[0]?.ItemId || '';
 
   saving.value = true;
   error.value = '';
@@ -504,6 +524,7 @@ async function createSource() {
       DisplayMode: payload.displayMode,
       RemoteViewIds: payload.remoteViewIds,
       RemoteViews: selectedRemoteViews,
+      ViewLibraryMap: payload.viewLibraryMap,
       SpoofedUserAgent: payload.spoofedUserAgent.trim(),
       Enabled: payload.enabled,
       StrmOutputPath: payload.strmOutputPath.trim() || undefined,
@@ -521,6 +542,7 @@ async function createSource() {
     form.value.username = '';
     form.value.password = '';
     form.value.remoteViewIds = [];
+    form.value.viewLibraryMap = {};
     await load();
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -738,18 +760,43 @@ onBeforeUnmount(() => {
               获取远端媒体库列表
             </UButton>
           </div>
-          <UFormField v-if="form.displayMode === 'merge'" label="并入项目媒体库">
-            <USelect
-              v-model="form.targetLibraryId"
-              :items="localLibraryItems"
-              value-key="value"
-              class="w-full"
-              placeholder="选择项目本地媒体库"
-            />
-          </UFormField>
-          <UFormField v-else label="独立媒体库说明" class="lg:col-span-2">
+          <template v-if="form.displayMode === 'merge' && form.remoteViewIds.length">
+            <UFormField label="默认目标本地库（可选）">
+              <USelect
+                v-model="form.targetLibraryId"
+                :items="[{ label: '— 无 —', value: '' }, ...localLibraryItems]"
+                value-key="value"
+                class="w-full"
+                placeholder="未单独指定的远端库将使用此库"
+              />
+            </UFormField>
+            <div class="lg:col-span-2">
+              <p class="text-muted mb-2 text-xs font-medium">为每个远端库指定目标本地库：</p>
+              <div class="space-y-2">
+                <div
+                  v-for="vid in form.remoteViewIds"
+                  :key="vid"
+                  class="flex items-center gap-2 rounded-lg border border-default px-3 py-2"
+                >
+                  <span class="min-w-0 flex-1 truncate text-sm font-medium">
+                    {{ remoteViewNameMap.get(vid.toLowerCase()) || vid }}
+                    <span class="text-muted text-xs ml-1">{{ collectionTypeLabel(remoteViewCollectionType(vid)) }}</span>
+                  </span>
+                  <USelect
+                    :model-value="form.viewLibraryMap[vid] || ''"
+                    @update:model-value="(v: string) => { if (v) form.viewLibraryMap[vid] = v; else delete form.viewLibraryMap[vid]; }"
+                    :items="[{ label: '使用默认', value: '' }, ...localLibraryItems]"
+                    value-key="value"
+                    class="w-48"
+                    size="sm"
+                  />
+                </div>
+              </div>
+            </div>
+          </template>
+          <UFormField v-else-if="form.displayMode === 'separate'" label="自动独立说明" class="lg:col-span-2">
             <p class="text-muted text-xs leading-relaxed">
-              单独显示模式：同步时将为每个远端媒体库自动创建对应的本地独立媒体库，名称与远端媒体库相同。<br />
+              自动独立模式：同步时将为每个远端媒体库自动创建对应的本地独立媒体库，名称与远端媒体库相同。<br />
               无需手动指定目标库，首次同步后可在「媒体库管理」中查看自动创建的媒体库。
             </p>
           </UFormField>
@@ -986,9 +1033,14 @@ onBeforeUnmount(() => {
 
           <template #footer>
             <div class="space-y-1 text-xs">
-              <p class="text-muted">并入项目媒体库: {{ targetLibraryName(source.TargetLibraryId) }}</p>
-              <p class="text-muted break-all font-mono">目标库 ID: {{ source.TargetLibraryId }}</p>
-              <p class="text-muted break-all font-mono">远端库 ID: {{ source.RemoteViewIds?.join(', ') || 'ALL' }}</p>
+              <template v-if="source.ViewLibraryMap && Object.keys(source.ViewLibraryMap).length">
+                <p class="text-muted font-medium">映射关系：</p>
+                <div v-for="(libId, viewId) in source.ViewLibraryMap" :key="viewId" class="text-muted pl-2">
+                  {{ remoteViewNameMap.get(String(viewId).toLowerCase()) || viewId }} → {{ targetLibraryName(String(libId)) }}
+                </div>
+              </template>
+              <p v-else class="text-muted">默认目标库: {{ targetLibraryName(source.TargetLibraryId) }}</p>
+              <p class="text-muted break-all font-mono">远端库: {{ source.RemoteViewIds?.join(', ') || 'ALL' }}</p>
               <p class="text-muted break-all font-mono">UA: {{ source.SpoofedUserAgent }}</p>
             </div>
           </template>
@@ -1039,18 +1091,43 @@ onBeforeUnmount(() => {
             <UFormField label="显示方式（本地）">
               <USelect v-model="editForm.displayMode" :items="displayModeItems" value-key="value" class="w-full" />
             </UFormField>
-            <UFormField v-if="editForm.displayMode === 'merge'" label="并入项目媒体库" class="lg:col-span-2">
-              <USelect
-                v-model="editForm.targetLibraryId"
-                :items="localLibraryItems"
-                value-key="value"
-                class="w-full"
-                placeholder="选择本地库"
-              />
-            </UFormField>
-            <UFormField v-else label="独立媒体库说明" class="lg:col-span-2">
+            <template v-if="editForm.displayMode === 'merge' && editForm.remoteViewIds.length">
+              <UFormField label="默认目标本地库（可选）" class="lg:col-span-2">
+                <USelect
+                  v-model="editForm.targetLibraryId"
+                  :items="[{ label: '— 无 —', value: '' }, ...localLibraryItems]"
+                  value-key="value"
+                  class="w-full"
+                  placeholder="未单独指定的远端库将使用此库"
+                />
+              </UFormField>
+              <div class="lg:col-span-2">
+                <p class="text-muted mb-2 text-xs font-medium">为每个远端库指定目标本地库：</p>
+                <div class="space-y-2">
+                  <div
+                    v-for="vid in editForm.remoteViewIds"
+                    :key="vid"
+                    class="flex items-center gap-2 rounded-lg border border-default px-3 py-2"
+                  >
+                    <span class="min-w-0 flex-1 truncate text-sm font-medium">
+                      {{ editRemoteViewNameMap.get(vid.toLowerCase()) || vid }}
+                      <span class="text-muted text-xs ml-1">{{ collectionTypeLabel(editRemoteViewCollectionType(vid)) }}</span>
+                    </span>
+                    <USelect
+                      :model-value="editForm.viewLibraryMap[vid] || ''"
+                      @update:model-value="(v: string) => { if (v) editForm.viewLibraryMap[vid] = v; else delete editForm.viewLibraryMap[vid]; }"
+                      :items="[{ label: '使用默认', value: '' }, ...localLibraryItems]"
+                      value-key="value"
+                      class="w-48"
+                      size="sm"
+                    />
+                  </div>
+                </div>
+              </div>
+            </template>
+            <UFormField v-else-if="editForm.displayMode === 'separate'" label="自动独立说明" class="lg:col-span-2">
               <p class="text-muted text-xs leading-relaxed">
-                单独显示模式：同步时将为每个远端媒体库自动创建对应的本地独立媒体库，名称与远端媒体库名相同。<br />
+                自动独立模式：同步时将为每个远端媒体库自动创建对应的本地独立媒体库，名称与远端媒体库名相同。<br />
                 无需手动指定目标库，已同步的媒体库可在「媒体库管理」中查看。
               </p>
             </UFormField>

@@ -47,6 +47,16 @@ pub struct ExternalMovieMetadata {
     pub backdrop_image_url: Option<String>,
     pub remote_trailers: Vec<String>,
     pub metadata: Value,
+    #[serde(default)]
+    pub collection_info: Option<MovieCollectionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MovieCollectionInfo {
+    pub tmdb_collection_id: i32,
+    pub name: String,
+    pub poster_url: Option<String>,
+    pub backdrop_url: Option<String>,
 }
 
 /// 外部人物搜索结果

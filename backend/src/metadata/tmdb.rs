@@ -767,6 +767,16 @@ impl MetadataProvider for TmdbProvider {
             .unwrap_or_default();
         let metadata = serde_json::to_value(&details).unwrap_or_default();
 
+        let collection_info = details.belongs_to_collection.as_ref().map(|c| {
+            use crate::metadata::models::MovieCollectionInfo;
+            MovieCollectionInfo {
+                tmdb_collection_id: c.id,
+                name: c.name.clone().unwrap_or_else(|| format!("Collection {}", c.id)),
+                poster_url: c.poster_path.as_ref().map(|p| format!("{}/original{}", self.config.image_base_url, p)),
+                backdrop_url: c.backdrop_path.as_ref().map(|p| format!("{}/original{}", self.config.image_base_url, p)),
+            }
+        });
+
         Ok(ExternalMovieMetadata {
             external_id: details.id.to_string(),
             provider: "tmdb".to_string(),
@@ -801,6 +811,7 @@ impl MetadataProvider for TmdbProvider {
                 .map(|path| format!("{}/original{}", self.config.image_base_url, path)),
             remote_trailers,
             metadata,
+            collection_info,
         })
     }
 
@@ -1390,6 +1401,15 @@ struct TmdbMovieDetails {
     external_ids: Option<TmdbMovieExternalIds>,
     release_dates: Option<TmdbMovieReleaseDates>,
     videos: Option<TmdbVideoCollection>,
+    belongs_to_collection: Option<TmdbCollectionRef>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TmdbCollectionRef {
+    id: i32,
+    name: Option<String>,
+    poster_path: Option<String>,
+    backdrop_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -726,6 +726,10 @@ async fn import_movie_file(
     }
     analyze_imported_media(pool, runtime, movie_id, file).await?;
 
+    if library_options.enable_chapter_image_extraction {
+        extract_chapter_images(pool, config, movie_id, file).await;
+    }
+
     Ok(())
 }
 
@@ -766,9 +770,20 @@ async fn import_tv_file(
         .map(ToOwned::to_owned)
         .unwrap_or(preliminary_series_name);
     // 若磁盘上已找到 tvshow.nfo，剧集根路径以该目录为准。
-    let series_path = walked_tvshow
+    let mut series_path = walked_tvshow
         .map(|(dir, _)| dir)
         .unwrap_or_else(|| series_virtual_path(library_root, file, &series_name));
+
+    // EnableAutomaticSeriesGrouping: 跨目录同名 Series 合并
+    if library_options.enable_automatic_series_grouping {
+        if let Ok(existing) = repository::find_series_by_name_in_library(
+            pool, library.id, &series_name,
+        ).await {
+            if let Some(existing_series) = existing {
+                series_path = PathBuf::from(&existing_series.path);
+            }
+        }
+    }
     let series_provider_ids = merge_provider_ids(
         series_nfo.provider_ids.clone(),
         provider_ids_from_path(&series_path),
@@ -1320,6 +1335,10 @@ async fn import_tv_file(
     sync_nfo_people(pool, episode_id, episode_people).await?;
     analyze_imported_media(pool, runtime, episode_id, file).await?;
 
+    if library_options.enable_chapter_image_extraction {
+        extract_chapter_images(pool, config, episode_id, file).await;
+    }
+
     Ok(())
 }
 
@@ -1394,6 +1413,26 @@ async fn refresh_movie_remote_metadata(
                     error = %error,
                     "刷新远程电影元数据落库失败"
                 );
+            }
+            // ImportCollections: 将电影加入 TMDb collection BoxSet
+            if library_options.import_collections {
+                if let Some(ref coll) = metadata.collection_info {
+                    if let Err(error) = repository::upsert_movie_into_collection(
+                        pool,
+                        movie_id,
+                        coll.tmdb_collection_id,
+                        &coll.name,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            movie_id = %movie_id,
+                            collection = %coll.name,
+                            error = %error,
+                            "将电影加入合集失败"
+                        );
+                    }
+                }
             }
         }
         Err(error) => {
@@ -3058,5 +3097,83 @@ mod tests {
 
         assert_eq!(found.as_deref(), Some(fanart.as_path()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// 提取章节缩略图：对每个章节使用 ffmpeg 截图并保存到缓存目录
+async fn extract_chapter_images(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    item_id: uuid::Uuid,
+    file: &Path,
+) {
+    if !file.exists() || naming::is_strm(file) {
+        return;
+    }
+    let chapters = match repository::get_media_chapters(pool, item_id).await {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if chapters.is_empty() {
+        return;
+    }
+    let ffmpeg = config.ffmpeg_path.as_str();
+    let cache_dir = "cache";
+    let chapter_dir = PathBuf::from(cache_dir)
+        .join("chapter-images")
+        .join(item_id.to_string());
+    if let Err(err) = tokio::fs::create_dir_all(&chapter_dir).await {
+        tracing::debug!(error = %err, "创建章节图片目录失败");
+        return;
+    }
+
+    for chapter in &chapters {
+        if chapter.image_path.is_some() {
+            continue;
+        }
+        let seconds = (chapter.start_position_ticks as f64) / 10_000_000.0;
+        let out_path = chapter_dir.join(format!("chapter_{}.jpg", chapter.chapter_index));
+        let result = tokio::process::Command::new(ffmpeg)
+            .args([
+                "-ss",
+                &format!("{seconds:.3}"),
+                "-i",
+            ])
+            .arg(file.as_os_str())
+            .args([
+                "-frames:v", "1",
+                "-q:v", "6",
+                "-vf", "scale=480:-1",
+                "-y",
+            ])
+            .arg(out_path.as_os_str())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+        match result {
+            Ok(status) if status.success() && out_path.exists() => {
+                if let Err(err) = repository::update_chapter_image_path(
+                    pool,
+                    chapter.id,
+                    out_path.to_string_lossy().as_ref(),
+                )
+                .await
+                {
+                    tracing::debug!(
+                        chapter_id = %chapter.id,
+                        error = %err,
+                        "更新章节图片路径失败"
+                    );
+                }
+            }
+            _ => {
+                tracing::debug!(
+                    item_id = %item_id,
+                    chapter_index = chapter.chapter_index,
+                    "章节截图提取失败"
+                );
+            }
+        }
     }
 }

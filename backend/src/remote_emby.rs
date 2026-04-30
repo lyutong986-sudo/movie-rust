@@ -759,12 +759,8 @@ async fn sync_source_inner(
     source: &mut DbRemoteEmbySource,
     progress: Option<RemoteSyncProgress>,
 ) -> Result<RemoteEmbySyncResult, AppError> {
-    // merge 模式仍需要 target_library；separate 模式每个 View 自建库
     let display_mode_str = normalize_display_mode(source.display_mode.as_str());
     let target_library_opt = repository::get_library(&state.pool, source.target_library_id).await?;
-    if display_mode_str == REMOTE_DISPLAY_MODE_MERGE && target_library_opt.is_none() {
-        return Err(AppError::BadRequest("合并模式下目标媒体库不存在".to_string()));
-    }
 
     if let Some(handle) = &progress {
         handle.set_phase("CountingRemoteItems", 3.0);
@@ -785,39 +781,79 @@ async fn sync_source_inner(
         }
     }
 
-    // ── separate 模式：为每个 View 确保存在独立本地库 ────────────────────
+    // ── 灵活映射：为每个 View 解析目标本地库 ────────────────────
+    // view_library_map 统一适用于 merge 和 separate 模式：
+    //   - map 中有明确映射 → 使用该库（已验证存在）
+    //   - map 中无映射 + merge 模式 → fallback 到 target_library_id
+    //   - map 中无映射 + separate 模式 → 自动创建独立库
     let mut view_library_id_map: HashMap<String, Uuid> = HashMap::new();
-    if display_mode_str == REMOTE_DISPLAY_MODE_SEPARATE {
-        let map_obj = source.view_library_map
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
-        for view in &views {
-            let existing_lib_id = map_obj
-                .get(&view.id)
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<Uuid>().ok());
-            let lib_id = repository::ensure_view_library(
+    let map_obj = source.view_library_map
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for view in &views {
+        let explicit_lib_id = map_obj
+            .get(&view.id)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<Uuid>().ok());
+
+        // 验证显式映射的库是否存在
+        let validated_lib_id = if let Some(lib_id) = explicit_lib_id {
+            if repository::get_library(&state.pool, lib_id).await?.is_some() {
+                Some(lib_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let lib_id = if let Some(id) = validated_lib_id {
+            id
+        } else if display_mode_str == REMOTE_DISPLAY_MODE_MERGE {
+            // merge 模式 fallback: 使用全局 target_library_id
+            if target_library_opt.is_none() {
+                return Err(AppError::BadRequest(
+                    format!("远端库「{}」未指定目标本地库且全局目标库不存在", view.name),
+                ));
+            }
+            source.target_library_id
+        } else {
+            // separate 模式: 自动创建独立库
+            repository::ensure_view_library(
                 &state.pool,
                 source.id,
                 &source.name,
                 &view.id,
                 &view.name,
                 view.collection_type.as_deref(),
-                existing_lib_id,
+                None,
+            )
+            .await?
+        };
+        view_library_id_map.insert(view.id.clone(), lib_id);
+    }
+    // 持久化更新后的映射
+    let updated_map: serde_json::Map<String, Value> = view_library_id_map
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.to_string())))
+        .collect();
+    let updated_map_value = Value::Object(updated_map);
+    source.view_library_map = updated_map_value.clone();
+    repository::update_source_view_library_map(&state.pool, source.id, &updated_map_value)
+        .await?;
+
+    // 将远程 View 虚拟路径注册到对应本地库的 PathInfos（合并时需要）
+    for view in &views {
+        if let Some(&lib_id) = view_library_id_map.get(&view.id) {
+            repository::ensure_remote_view_path_in_library(
+                &state.pool,
+                lib_id,
+                source.id,
+                &view.id,
             )
             .await?;
-            view_library_id_map.insert(view.id.clone(), lib_id);
         }
-        // 持久化
-        let updated_map: serde_json::Map<String, Value> = view_library_id_map
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::String(v.to_string())))
-            .collect();
-        let updated_map_value = Value::Object(updated_map);
-        source.view_library_map = updated_map_value.clone();
-        repository::update_source_view_library_map(&state.pool, source.id, &updated_map_value)
-            .await?;
     }
 
     // 增量同步：有 last_sync_at 则仅同步变更条目；否则全量同步
@@ -925,14 +961,9 @@ async fn sync_source_inner(
     }
 
     for view in &views {
-        // 确定该 View 对应的本地库 ID
-        let item_library_id = if display_mode_str == REMOTE_DISPLAY_MODE_SEPARATE {
-            *view_library_id_map.get(&view.id).ok_or_else(|| {
-                AppError::Internal(format!("View「{}」未找到对应本地库", view.name))
-            })?
-        } else {
-            source.target_library_id
-        };
+        let item_library_id = *view_library_id_map.get(&view.id).ok_or_else(|| {
+            AppError::Internal(format!("View「{}」未找到对应本地库映射", view.name))
+        })?;
 
         // 每个 View 在源根目录下独占子目录：{strm_root}/{source_name}/{view_name}/
         let view_strm_workspace: Option<PathBuf> = strm_workspace.as_ref().map(|w| {
@@ -978,11 +1009,7 @@ async fn sync_source_inner(
                 let mut parent_id: Option<Uuid> = None;
 
                 if item.item.item_type.eq_ignore_ascii_case("Episode") {
-                    let series_view_scope = if display_mode_str == REMOTE_DISPLAY_MODE_SEPARATE {
-                        item.view_id.as_str()
-                    } else {
-                        "_merged"
-                    };
+                    let series_view_scope = item.view_id.as_str();
                     let series_parent_id = ensure_virtual_series_folder(
                         &state.pool,
                         source,
@@ -3286,6 +3313,87 @@ pub async fn remote_emby_token_refresh_loop(pool: sqlx::PgPool) {
             tracing::warn!(error = %error, "远端 Emby token 刷新批次失败");
         }
     }
+}
+
+/// 远端媒体库实时监控轮询：每 5 分钟检查启用了 EnableRealtimeMonitor 的远端库，
+/// 若远端有变更则触发增量同步。
+pub async fn remote_library_monitor_loop(state: crate::state::AppState) {
+    const POLL_INTERVAL_SECS: u64 = 300;
+    let mut ticker = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
+    ticker.tick().await; // 跳过首次立即触发
+    loop {
+        ticker.tick().await;
+        if let Err(err) = run_remote_library_monitor_pass(&state).await {
+            tracing::warn!(error = %err, "远端库实时监控轮询失败");
+        }
+    }
+}
+
+async fn run_remote_library_monitor_pass(
+    state: &crate::state::AppState,
+) -> Result<(), AppError> {
+    let sources = repository::list_remote_emby_sources(&state.pool).await?;
+    for source in &sources {
+        if !source.enabled {
+            continue;
+        }
+        // 检查该源关联的所有本地库是否启用了 EnableRealtimeMonitor
+        let map_obj = source.view_library_map.as_object();
+        let mut monitor_enabled = false;
+        if let Some(map) = map_obj {
+            for (_view_id, lib_id_val) in map {
+                if let Some(lib_id_str) = lib_id_val.as_str() {
+                    if let Ok(lib_id) = lib_id_str.parse::<Uuid>() {
+                        if let Ok(Some(lib)) = repository::get_library(&state.pool, lib_id).await {
+                            let opts = repository::library_options(&lib);
+                            if opts.enable_realtime_monitor {
+                                monitor_enabled = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 也检查 target_library_id
+        if !monitor_enabled {
+            if let Ok(Some(lib)) = repository::get_library(&state.pool, source.target_library_id).await {
+                let opts = repository::library_options(&lib);
+                if opts.enable_realtime_monitor {
+                    monitor_enabled = true;
+                }
+            }
+        }
+        if !monitor_enabled {
+            continue;
+        }
+        // 只有 last_sync_at 不为空的源才进行增量轮询
+        if source.last_sync_at.is_none() {
+            continue;
+        }
+        tracing::info!(
+            source_id = %source.id,
+            source_name = %source.name,
+            "远端库实时监控：检测到启用监控，触发增量同步"
+        );
+        match sync_source_with_progress(state, source.id, None).await {
+            Ok(result) => {
+                tracing::info!(
+                    source_id = %source.id,
+                    written = result.written_files,
+                    "远端库实时监控：增量同步完成"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    source_id = %source.id,
+                    error = %err,
+                    "远端库实时监控：增量同步失败"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn build_local_proxy_url(

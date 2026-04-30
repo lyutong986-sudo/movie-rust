@@ -1537,6 +1537,7 @@ export class EmbyApi {
     DisplayMode?: 'merge' | 'separate';
     RemoteViewIds?: string[];
     RemoteViews?: RemoteEmbyView[];
+    ViewLibraryMap?: Record<string, string>;
     SpoofedUserAgent?: string;
     Enabled?: boolean;
     StrmOutputPath?: string;
@@ -1562,6 +1563,7 @@ export class EmbyApi {
       DisplayMode?: 'merge' | 'separate';
       RemoteViewIds?: string[];
       RemoteViews?: RemoteEmbyView[];
+      ViewLibraryMap?: Record<string, string>;
       SpoofedUserAgent?: string;
       Enabled?: boolean;
       StrmOutputPath?: string;

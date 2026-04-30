@@ -795,6 +795,49 @@ pub async fn delete_setting_value(pool: &sqlx::PgPool, key: &str) -> Result<(), 
     Ok(())
 }
 
+/// 将电影加入 TMDb collection 对应的 BoxSet（系统设置存储）。
+/// 如果该 collection 的 BoxSet 不存在则创建。
+pub async fn upsert_movie_into_collection(
+    pool: &sqlx::PgPool,
+    movie_id: Uuid,
+    tmdb_collection_id: i32,
+    collection_name: &str,
+) -> Result<(), AppError> {
+    let coll_uuid = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("tmdb_collection:{tmdb_collection_id}").as_bytes(),
+    );
+    let coll_id_str = uuid_to_emby_guid(&coll_uuid);
+    let movie_id_str = uuid_to_emby_guid(&movie_id);
+    let key = format!("collection:{coll_id_str}");
+
+    let existing = get_system_setting(pool, &key).await?;
+    let mut coll_value = if let Some(val) = existing {
+        val
+    } else {
+        serde_json::json!({
+            "Id": coll_id_str,
+            "Name": collection_name,
+            "TmdbCollectionId": tmdb_collection_id,
+            "ItemIds": []
+        })
+    };
+
+    // 更新名称（TMDb 可能修改）
+    if let Some(obj) = coll_value.as_object_mut() {
+        obj.insert("Name".to_string(), serde_json::Value::String(collection_name.to_string()));
+    }
+
+    if let Some(item_ids) = coll_value.get_mut("ItemIds").and_then(|v| v.as_array_mut()) {
+        let already = item_ids.iter().any(|v| v.as_str() == Some(movie_id_str.as_str()));
+        if !already {
+            item_ids.push(serde_json::Value::String(movie_id_str));
+        }
+    }
+
+    set_system_setting(pool, &key, coll_value).await
+}
+
 fn normalize_connect_guid_str(raw: &str) -> String {
     raw.trim()
         .trim_matches(|c| c == '{' || c == '}')
@@ -3222,6 +3265,39 @@ pub async fn ensure_view_library(
     )))
 }
 
+/// 将远程 View 的虚拟路径注册到已有本地库的 PathInfos 中（合并模式）。
+/// 如果路径已存在则跳过。
+pub async fn ensure_remote_view_path_in_library(
+    pool: &sqlx::PgPool,
+    library_id: Uuid,
+    source_id: Uuid,
+    view_id: &str,
+) -> Result<(), AppError> {
+    let virtual_path = format!("__remote_view_{}_{}", source_id.simple(), view_id.trim());
+    let lib = match get_library(pool, library_id).await? {
+        Some(lib) => lib,
+        None => return Ok(()),
+    };
+    let mut options: serde_json::Value = lib.library_options.clone();
+    let path_infos = options
+        .as_object_mut()
+        .and_then(|obj| obj.entry("PathInfos").or_insert_with(|| serde_json::json!([])).as_array_mut());
+    if let Some(arr) = path_infos {
+        let already = arr.iter().any(|p| {
+            p.get("Path").and_then(|v| v.as_str()).map_or(false, |s| s == virtual_path)
+        });
+        if !already {
+            arr.push(serde_json::json!({"Path": virtual_path}));
+            sqlx::query("UPDATE libraries SET library_options = $1, date_modified = now() WHERE id = $2")
+                .bind(&options)
+                .bind(library_id)
+                .execute(pool)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 /// 将 view_library_map 写回 remote_emby_sources
 pub async fn update_source_view_library_map(
     pool: &sqlx::PgPool,
@@ -3311,6 +3387,32 @@ pub async fn list_remote_emby_sources(
     .await?)
 }
 
+/// 查找映射到指定本地库的远端 Emby 源（通过 target_library_id 或 view_library_map）
+pub async fn find_remote_sources_for_library(
+    pool: &sqlx::PgPool,
+    library_id: Uuid,
+) -> Result<Vec<DbRemoteEmbySource>, AppError> {
+    let lib_id_str = library_id.to_string();
+    Ok(sqlx::query_as::<_, DbRemoteEmbySource>(
+        r#"
+        SELECT
+            id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
+            enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
+            strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
+            view_library_map, proxy_mode,
+            created_at, updated_at
+        FROM remote_emby_sources
+        WHERE enabled = true
+          AND (target_library_id = $1 OR view_library_map::text LIKE '%' || $2 || '%')
+        ORDER BY name
+        "#,
+    )
+    .bind(library_id)
+    .bind(&lib_id_str)
+    .fetch_all(pool)
+    .await?)
+}
+
 pub async fn get_remote_emby_source(
     pool: &sqlx::PgPool,
     id: Uuid,
@@ -3349,6 +3451,7 @@ pub async fn create_remote_emby_source(
     sync_subtitles: bool,
     token_refresh_interval_secs: i32,
     proxy_mode: &str,
+    view_library_map: Option<&Value>,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
     let server_url = server_url.trim().trim_end_matches('/');
@@ -3454,14 +3557,16 @@ pub async fn create_remote_emby_source(
     let row_id = Uuid::new_v4();
     // remote_views 列类型为 jsonb（单个 JSON 数组），必须 wrap 成 Value::Array
     let remote_views_json = Value::Array(sanitized_remote_views);
+    let vlm = view_library_map.cloned().unwrap_or_else(|| serde_json::json!({}));
     sqlx::query(
         r#"
         INSERT INTO remote_emby_sources (
             id, name, server_url, username, password, spoofed_user_agent, target_library_id,
             display_mode, remote_view_ids, remote_views, enabled, source_secret,
-            strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, proxy_mode
+            strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, proxy_mode,
+            view_library_map
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         "#,
     )
     .bind(row_id)
@@ -3481,6 +3586,7 @@ pub async fn create_remote_emby_source(
     .bind(sync_subtitles)
     .bind(token_refresh_interval_secs)
     .bind(proxy_mode)
+    .bind(&vlm)
     .execute(pool)
     .await?;
 
@@ -3519,6 +3625,7 @@ pub async fn update_remote_emby_source(
     sync_subtitles: bool,
     token_refresh_interval_secs: i32,
     proxy_mode: &str,
+    view_library_map: Option<&Value>,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
     let server_url = server_url.trim().trim_end_matches('/');
@@ -3622,6 +3729,7 @@ pub async fn update_remote_emby_source(
         _ => "proxy",
     };
 
+    let vlm = view_library_map.cloned().unwrap_or_else(|| serde_json::json!({}));
     let rows = if let Some(pw) = password.filter(|p| !p.trim().is_empty()) {
         sqlx::query(
             r#"
@@ -3630,7 +3738,8 @@ pub async fn update_remote_emby_source(
                 spoofed_user_agent = $6, target_library_id = $7, display_mode = $8,
                 remote_view_ids = $9, remote_views = $10, enabled = $11,
                 strm_output_path = $12, sync_metadata = $13, sync_subtitles = $14,
-                token_refresh_interval_secs = $15, proxy_mode = $16, updated_at = now()
+                token_refresh_interval_secs = $15, proxy_mode = $16,
+                view_library_map = $17, updated_at = now()
             WHERE id = $1
             "#,
         )
@@ -3650,6 +3759,7 @@ pub async fn update_remote_emby_source(
         .bind(sync_subtitles)
         .bind(token_refresh_interval_secs)
         .bind(proxy_mode)
+        .bind(&vlm)
         .execute(pool)
         .await?
     } else {
@@ -3660,7 +3770,8 @@ pub async fn update_remote_emby_source(
                 spoofed_user_agent = $5, target_library_id = $6, display_mode = $7,
                 remote_view_ids = $8, remote_views = $9, enabled = $10,
                 strm_output_path = $11, sync_metadata = $12, sync_subtitles = $13,
-                token_refresh_interval_secs = $14, proxy_mode = $15, updated_at = now()
+                token_refresh_interval_secs = $14, proxy_mode = $15,
+                view_library_map = $16, updated_at = now()
             WHERE id = $1
             "#,
         )
@@ -3679,6 +3790,7 @@ pub async fn update_remote_emby_source(
         .bind(sync_subtitles)
         .bind(token_refresh_interval_secs)
         .bind(proxy_mode)
+        .bind(&vlm)
         .execute(pool)
         .await?
     };
@@ -11115,6 +11227,43 @@ pub async fn get_media_chapters(
     .await?;
 
     Ok(chapters)
+}
+
+pub async fn update_chapter_image_path(
+    pool: &sqlx::PgPool,
+    chapter_id: Uuid,
+    image_path: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE media_chapters SET image_path = $1, updated_at = now() WHERE id = $2",
+    )
+    .bind(image_path)
+    .bind(chapter_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 在指定库中查找同名 Series（用于 EnableAutomaticSeriesGrouping）
+pub async fn find_series_by_name_in_library(
+    pool: &sqlx::PgPool,
+    library_id: Uuid,
+    series_name: &str,
+) -> Result<Option<DbMediaItem>, AppError> {
+    Ok(sqlx::query_as::<_, DbMediaItem>(
+        r#"
+        SELECT *
+        FROM media_items
+        WHERE library_id = $1
+          AND item_type = 'Series'
+          AND LOWER(name) = LOWER($2)
+        LIMIT 1
+        "#,
+    )
+    .bind(library_id)
+    .bind(series_name)
+    .fetch_optional(pool)
+    .await?)
 }
 
 pub async fn get_media_source_with_streams(

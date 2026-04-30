@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod error;
+mod file_watcher;
 pub mod http_client;
 mod media_analyzer;
 pub mod repo_cache;
@@ -177,6 +178,16 @@ async fn main() -> Result<()> {
     let remote_emby_refresh_pool = state.pool.clone();
     tokio::spawn(async move {
         crate::remote_emby::remote_emby_token_refresh_loop(remote_emby_refresh_pool).await;
+    });
+
+    let monitor_state = state.clone();
+    tokio::spawn(async move {
+        crate::remote_emby::remote_library_monitor_loop(monitor_state).await;
+    });
+
+    let watcher_state = state.clone();
+    tokio::spawn(async move {
+        crate::file_watcher::file_watcher_loop(watcher_state).await;
     });
 
     axum::serve(listener, app.into_make_service()).await?;

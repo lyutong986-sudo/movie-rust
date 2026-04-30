@@ -2301,13 +2301,22 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 | MetadataCountryCode | ✅ 已生效 | 同上 |
 | IgnoreHiddenFiles | ✅ 已生效 | scanner.rs → 文件收集 |
 
-### 暂未实现（存储但无后端逻辑）
+### 已实现的大功能（2026-05-01）
 
-| 选项 | 说明 |
-|------|------|
-| EnableRealtimeMonitor | 需要文件系统 watcher（inotify/FSEvents），属于大功能 |
-| ImportCollections | 需要基于 TMDb collection 信息自动创建 BoxSet，属于大功能 |
-| EnableChapterImageExtraction | 需要 ffmpeg 提取章节缩略图 |
-| EnableAutomaticSeriesGrouping | 需要跨目录合并同名 Series |
+| 选项 | 实现方式 | 位置 |
+|------|----------|------|
+| EnableRealtimeMonitor（本地） | `notify` crate 文件系统监控，检测变更后自动触发库扫描（15s 防抖） | `file_watcher.rs` |
+| EnableRealtimeMonitor（远程） | 每 5 分钟轮询已启用监控的远端 Emby 源，触发增量同步 | `remote_emby.rs::remote_library_monitor_loop` |
+| ImportCollections | 扫描电影时从 TMDb `belongs_to_collection` 提取合集信息，自动创建 BoxSet（`system_settings`） | `scanner.rs::refresh_movie_remote_metadata` + `repository.rs::upsert_movie_into_collection` |
+| EnableChapterImageExtraction | 媒体入库后使用 ffmpeg 对每个章节起始时间截图，保存到 `cache/chapter-images/` | `scanner.rs::extract_chapter_images` |
+| EnableAutomaticSeriesGrouping | 导入剧集时按名称匹配已有 Series，跨目录合并到同一 Series 节点 | `scanner.rs::import_tv_file` + `repository.rs::find_series_by_name_in_library` |
+
+### 远程媒体库灵活映射模式（2026-05-01）
+
+- **灵活映射**：废弃 merge/separate 二选一，统一使用 `view_library_map` — 每个远端 View 可独立指定目标本地库
+- 多个远端 View 可合并到同一个本地库（效果等同旧的 merge），也可各自指向不同库（效果等同旧的 separate）
+- 合并后远端 View 虚拟路径自动注册到本地库的 `PathInfos`，在库设置中可见
+- 前端 UI 改为逐个 View 下拉选择目标库 + 可选默认目标库
+- 库扫描触发时自动检测远端源，触发远端同步而非本地文件扫描
 
 ---

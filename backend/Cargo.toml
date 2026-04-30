@@ -39,3 +39,4 @@ form_urlencoded = "1"
 moka = { version = "0.12", features = ["future"] }
 dashmap = "6"
 bytes = "1"
+notify = "7"
