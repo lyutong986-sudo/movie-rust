@@ -1089,6 +1089,7 @@ fn item_list_options_from_query(
     let mut is_folder = query.is_folder;
     let mut is_played = query.is_played;
     let mut resume_only = false;
+    let mut is_favorite_from_filter = false;
     let requested_folder_like_type = include_types
         .iter()
         .any(|item_type| is_folder_like_item_type(item_type));
@@ -1109,6 +1110,8 @@ fn item_list_options_from_query(
             is_played.get_or_insert(true);
         } else if filter.eq_ignore_ascii_case("IsUnplayed") {
             is_played.get_or_insert(false);
+        } else if filter.eq_ignore_ascii_case("IsFavorite") {
+            is_favorite_from_filter = true;
         }
     }
     if query.is_movie == Some(true)
@@ -1158,7 +1161,7 @@ fn item_list_options_from_query(
         subtitle_codecs: parse_list(query.subtitle_codecs.as_deref()),
         any_provider_id_equals: parse_list(query.any_provider_id_equals.as_deref()),
         is_played,
-        is_favorite: query.is_favorite,
+        is_favorite: query.is_favorite.or(if is_favorite_from_filter { Some(true) } else { None }),
         is_folder,
         is_hd: query.is_hd,
         is_3d: query.is_3d,

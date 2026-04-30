@@ -1070,7 +1070,7 @@ pub async fn get_genres(
     start_index: Option<i32>,
     limit: Option<i32>,
     user_id: Option<Uuid>,
-) -> Result<Vec<GenreDto>, AppError> {
+) -> Result<(Vec<GenreDto>, i64), AppError> {
     let offset = start_index.unwrap_or(0).max(0) as i64;
     let cap = limit.unwrap_or(200).clamp(1, 500) as i64;
 
@@ -1080,10 +1080,25 @@ pub async fn get_genres(
         None
     };
 
-    let rows = if let Some(ref lib_ids) = allowed_library_ids {
+    let total: i64 = if let Some(ref lib_ids) = allowed_library_ids {
         if lib_ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT unnest(genres) as name FROM media_items WHERE array_length(genres, 1) > 0 AND library_id = ANY($1)) t"
+        )
+        .bind(lib_ids)
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT unnest(genres) as name FROM media_items WHERE array_length(genres, 1) > 0) t"
+        )
+        .fetch_one(pool)
+        .await?
+    };
+
+    let rows = if let Some(ref lib_ids) = allowed_library_ids {
         sqlx::query(
             "SELECT DISTINCT unnest(genres) as name FROM media_items WHERE array_length(genres, 1) > 0 AND library_id = ANY($3) ORDER BY name OFFSET $1 LIMIT $2"
         )
@@ -1111,7 +1126,7 @@ pub async fn get_genres(
         })
         .collect();
 
-    Ok(genres)
+    Ok((genres, total))
 }
 
 pub async fn get_items_by_genre(
@@ -7569,7 +7584,7 @@ pub fn user_to_public_dto(user: &DbUser, server_id: Uuid) -> PublicUserDto {
 pub fn session_to_dto(session: &AuthSessionRow, server_id: Uuid) -> SessionInfoDto {
     SessionInfoDto {
         id: session.access_token.clone(),
-        user_id: session.user_id.to_string(),
+        user_id: uuid_to_emby_guid(&session.user_id),
         user_name: session.user_name.clone(),
         server_id: uuid_to_emby_guid(&server_id),
         client: session

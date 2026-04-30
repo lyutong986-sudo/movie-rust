@@ -50,10 +50,12 @@ pub async fn get_genres(
     let include_types = parse_list(query.include_item_types.as_deref());
     let recursive = query.recursive.unwrap_or(true);
 
-    let genres = if parent_id.is_none() && include_types.is_empty() && recursive {
+    let (genres, total) = if parent_id.is_none() && include_types.is_empty() && recursive {
         repository::get_genres(&state.pool, query.start_index, query.limit, Some(user_id)).await?
     } else {
-        genres_for_scope(&state, user_id, parent_id, include_types, recursive).await?
+        let g = genres_for_scope(&state, user_id, parent_id, include_types, recursive).await?;
+        let len = g.len() as i64;
+        (g, len)
     };
 
     let items: Vec<BaseItemDto> = genres
@@ -62,7 +64,7 @@ pub async fn get_genres(
         .collect();
 
     Ok(Json(QueryResult {
-        total_record_count: items.len() as i64,
+        total_record_count: total,
         items,
         start_index: Some(query.start_index.unwrap_or(0).max(0) as i64),
     }))

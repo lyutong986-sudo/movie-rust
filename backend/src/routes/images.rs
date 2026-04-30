@@ -1621,12 +1621,19 @@ fn normalized_user_image_type(image_type: &str) -> String {
 
 fn normalized_item_image_type(image_type: &str) -> String {
     match image_type.to_ascii_lowercase().as_str() {
+        "primary" => "Primary".to_string(),
         "backdrop" => "Backdrop".to_string(),
         "logo" => "Logo".to_string(),
         "thumb" => "Thumb".to_string(),
         "banner" => "Banner".to_string(),
         "disc" => "Disc".to_string(),
         "art" => "Art".to_string(),
+        "box" => "Box".to_string(),
+        "boxrear" => "BoxRear".to_string(),
+        "menu" => "Menu".to_string(),
+        "chapter" => "Chapter".to_string(),
+        "screenshot" => "Screenshot".to_string(),
+        "profile" => "Profile".to_string(),
         _ => "Primary".to_string(),
     }
 }

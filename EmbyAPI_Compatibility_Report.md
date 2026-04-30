@@ -1861,3 +1861,27 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | R131 | 低 | `DirectStreamUrl` 使用小写 `/videos/` 不符合 Emby 大写惯例 | `items.rs` | `build_direct_stream_url` 改为 `/Videos/{id}/stream.{container}?Static=true&...` |
 
 ---
+
+## 第二十轮修复：Sessions / Items / Genres / Images 综合审计
+
+**审计时间**: 2026-04-30
+
+通过全面审计 Sessions、Items 列表、Genres、Images 等端点，发现并修复以下问题：
+
+| 编号 | 严重 | 问题 | 文件 | 修复方案 |
+|------|------|------|------|----------|
+| R132 | 高 | `Genres` 列表 `TotalRecordCount` 使用 `items.len()`（当前页大小），分页 UI 严重错位 | `genres.rs` + `repository.rs` | `get_genres()` 新增 `COUNT(*)` 子查询返回真实总数，返回类型改为 `(Vec<GenreDto>, i64)` |
+| R133 | 高 | `SessionInfo.UserId` 使用 `to_string()` 格式，而 `User.Id` 使用 `uuid_to_emby_guid()` 格式，两者不一致导致客户端无法关联 | `repository.rs` | `session_to_dto` 中 `user_id` 改为 `uuid_to_emby_guid(&session.user_id)` |
+| R134 | 中 | `Filters` 字符串不处理 `IsFavorite`，仅独立 `IsFavorite` 查询参数可用 | `items.rs` | `item_list_options_from_query` 新增 `IsFavorite` filter 解析，设置 `is_favorite = Some(true)` |
+| R135 | 中 | `normalized_item_image_type` 对未识别的 ImageType 一律返回 `Primary`，缺少 Box/BoxRear/Menu/Chapter/Screenshot/Profile 等 | `images.rs` | 新增所有 Emby 标准 ImageType 映射 |
+
+### 已知待处理项（需 schema 变更或大范围改动）
+
+| 问题 | 严重 | 说明 |
+|------|------|------|
+| `PlaySessionId` 未贯通会话链路 | 中 | `PlaybackReport` 中的 `play_session_id` 未存入 `session_play_queue`，需新增列 |
+| `PlayState` 缺少 `AudioStreamIndex` / `SubtitleStreamIndex` | 中 | 播放上报未解析这些字段，会话状态缺失轨道选择信息 |
+| `PlayMethod` 为推断而非客户端上报 | 中 | 应从 `PlaybackReport` 读取客户端实际使用的 `PlayMethod` |
+| `ActivityLog` 语义偏播放事件 | 低 | 非完整系统审计日志，缺少登录/库变更等类型 |
+
+---
