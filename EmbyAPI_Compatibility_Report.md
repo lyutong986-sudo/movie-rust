@@ -2098,11 +2098,49 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 
 ### 预期效果
 
-| 场景 | 优化前 | 优化后 |
-|------|--------|--------|
-| 首次起播 | 2 次远端往返（PlaybackInfo + stream） | 2 次远端往返（不变，需要首次获取） |
-| Seek/Range 请求 | 2 次远端往返 | 1 次远端往返（PlaybackInfo 缓存命中） |
-| 暂停后恢复 | 2 次远端往返 | 1 次远端往返（5分钟内缓存有效） |
-| 连续播放同剧集 | 每集 2 次远端往返 | 每集 1 次远端往返（不同 item 无缓存） |
+| 场景 | 优化前 | R170 缓存优化后 | R173 Static 直链优化后 |
+|------|--------|-----------------|----------------------|
+| 首次起播 | 2 次远端往返 | 2 次（不变） | **1 次**（直接 Static URL，无 PlaybackInfo） |
+| Seek/Range 请求 | 2 次远端往返 | 1 次（缓存命中） | **1 次**（直接 Static URL） |
+| 暂停后恢复 | 2 次远端往返 | 1 次（5分钟缓存） | **1 次**（直接 Static URL） |
+| 连续播放同剧集 | 每集 2 次远端往返 | 每集 1 次 | **每集 1 次**（Static URL 即时构造） |
+
+---
+
+## 第二十八轮修复：Static 直链快速路径（彻底消除 PlaybackInfo 往返）
+
+**审计时间**: 2026-04-30
+
+### 核心变更 R173
+
+基于用户发现的远端 Emby 直链格式：
+```
+GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={device_id}&api_key={token}
+```
+
+**实现方案**：`send_remote_stream_request` 重构为两级策略：
+
+**快速路径（0 个 PlaybackInfo 往返）**：
+1. 从 DB 动态获取 token（`ensure_authenticated` 已缓存，通常 0ms）
+2. 直接构造 `{server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={device_id}&api_key={token}`
+3. 发请求到远端 Emby → 如果返回 200/206 → 直接代理给客户端
+4. **完全跳过 PlaybackInfo**，从客户端请求到出数据只有 1 次远端网络往返
+
+**回退路径（Static URL 失败时）**：
+1. 远端返回非成功状态（如远端不支持 Static 直连、需要转码等场景）
+2. 回退到 PlaybackInfo 流程：获取 DirectStreamUrl / TranscodingUrl
+3. PlaybackInfo 有缓存（5分钟 TTL），回退路径也不慢
+
+**401/403 处理**：清除 token → 重新登录 → 用新 token 重试
+
+### 与原有方案对比
+
+| 方面 | 写 STRM 文件 | 动态构造 Static URL（已实现） |
+|------|-------------|---------------------------|
+| 起播延迟 | **0 额外往返** | **0 额外往返** |
+| 需要定时刷新 token | 是（后台任务写文件） | 否（每次请求动态获取） |
+| 磁盘 I/O | 需要读 STRM 文件 | 无磁盘 I/O |
+| 远端不支持 Static | 需要额外处理 | 自动回退 PlaybackInfo |
+| 复杂度 | 高（文件管理+定时任务） | 低（纯逻辑变更） |
 
 ---

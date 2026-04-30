@@ -1681,6 +1681,84 @@ async fn fetch_remote_items_page_for_view(
     get_json_with_retry(pool, source, &endpoint, &query).await
 }
 
+/// 构造远端 Emby 的 Static 直链 URL，跳过 PlaybackInfo 往返
+fn build_remote_static_stream_url(
+    server_url: &str,
+    remote_item_id: &str,
+    media_source_id: Option<&str>,
+    token: &str,
+    device_id: &str,
+) -> String {
+    let base = server_url.trim_end_matches('/');
+    let msid = media_source_id
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or(remote_item_id);
+    format!(
+        "{base}/emby/videos/{remote_item_id}/stream?Static=true\
+         &MediaSourceId={msid}\
+         &DeviceId={device_id}\
+         &api_key={token}"
+    )
+}
+
+/// 向远端发起流请求，附带认证头和客户端透传头
+fn build_remote_stream_builder(
+    client: &reqwest::Client,
+    endpoint: &str,
+    method: &Method,
+    source: &DbRemoteEmbySource,
+    token: &str,
+    request_headers: &HeaderMap,
+    extra_headers: &HashMap<String, String>,
+) -> reqwest::RequestBuilder {
+    let normalized_method = if *method == Method::HEAD {
+        Method::HEAD
+    } else {
+        Method::GET
+    };
+    let mut builder = if normalized_method == Method::HEAD {
+        client.head(endpoint)
+    } else {
+        client.get(endpoint)
+    };
+    builder = builder
+        .header(
+            header::USER_AGENT.as_str(),
+            source.spoofed_user_agent.as_str(),
+        )
+        .header("X-Emby-Token", token)
+        .header(
+            "X-Emby-Authorization",
+            emby_auth_header(source, Some(token)),
+        );
+    for (key, value) in extra_headers {
+        if key.trim().is_empty() || value.trim().is_empty() {
+            continue;
+        }
+        if is_hop_by_hop_header(key.as_str())
+            || key.eq_ignore_ascii_case("Host")
+            || key.eq_ignore_ascii_case("Content-Length")
+        {
+            continue;
+        }
+        builder = builder.header(key.as_str(), value.as_str());
+    }
+    for name in [
+        header::RANGE,
+        header::IF_RANGE,
+        header::ACCEPT,
+        header::ACCEPT_LANGUAGE,
+    ] {
+        if let Some(value) = request_headers
+            .get(&name)
+            .and_then(|value| value.to_str().ok())
+        {
+            builder = builder.header(name.as_str(), value);
+        }
+    }
+    builder
+}
+
 async fn send_remote_stream_request(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
@@ -1690,19 +1768,63 @@ async fn send_remote_stream_request(
     request_headers: &HeaderMap,
 ) -> Result<reqwest::Response, AppError> {
     let client = &*crate::http_client::SHARED;
-    let normalized_method = if *method == Method::HEAD {
-        Method::HEAD
-    } else {
-        Method::GET
-    };
+    let empty_headers = HashMap::new();
 
     for attempt in 0..2 {
-        let user_id = ensure_authenticated(pool, source, attempt > 0).await?;
+        let _user_id = ensure_authenticated(pool, source, attempt > 0).await?;
         let token = source
             .access_token
             .clone()
             .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
         let server_url = normalize_server_url(&source.server_url);
+        let device_id = format!("movie-rust-{}", source.id.simple());
+
+        // ── 快速路径：直接构造 Static URL，跳过 PlaybackInfo 往返 ──
+        let static_url = build_remote_static_stream_url(
+            &server_url,
+            remote_item_id,
+            media_source_id,
+            &token,
+            &device_id,
+        );
+        let builder = build_remote_stream_builder(
+            client,
+            &static_url,
+            method,
+            source,
+            &token,
+            request_headers,
+            &empty_headers,
+        );
+        match builder.send().await {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT {
+                    return Ok(response);
+                }
+                if matches!(
+                    status,
+                    reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+                ) && attempt == 0
+                {
+                    repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
+                    source.access_token = None;
+                    source.remote_user_id = None;
+                    continue;
+                }
+                // Static URL 返回了非成功状态，回退到 PlaybackInfo 路径
+            }
+            Err(_) => {
+                // 网络错误，回退到 PlaybackInfo
+            }
+        }
+
+        // ── 回退路径：通过 PlaybackInfo 获取 DirectStreamUrl/TranscodingUrl ──
+        let user_id = ensure_authenticated(pool, source, false).await?;
+        let token = source
+            .access_token
+            .clone()
+            .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
 
         let cache_key = playback_info_cache_key(source.id, remote_item_id, media_source_id);
         let playback_info = if let Some(cached) = get_cached_playback_info(&cache_key).await {
@@ -1727,54 +1849,22 @@ async fn send_remote_stream_request(
         )
         .ok_or_else(|| AppError::BadRequest("远端 PlaybackInfo 未返回可用媒体源".to_string()))?;
 
-        let endpoint = resolve_remote_stream_endpoint(
+        let endpoint = resolve_playback_info_stream_endpoint(
             &server_url,
             &token,
             remote_item_id,
             media_source,
         );
 
-        let mut builder = if normalized_method == Method::HEAD {
-            client.head(&endpoint)
-        } else {
-            client.get(&endpoint)
-        };
-        builder = builder
-            .header(
-                header::USER_AGENT.as_str(),
-                source.spoofed_user_agent.as_str(),
-            )
-            .header("X-Emby-Token", token.as_str())
-            .header(
-                "X-Emby-Authorization",
-                emby_auth_header(source, Some(token.as_str())),
-            );
-        for (key, value) in &media_source.required_http_headers {
-            if key.trim().is_empty() || value.trim().is_empty() {
-                continue;
-            }
-            if is_hop_by_hop_header(key.as_str())
-                || key.eq_ignore_ascii_case("Host")
-                || key.eq_ignore_ascii_case("Content-Length")
-            {
-                continue;
-            }
-            builder = builder.header(key.as_str(), value.as_str());
-        }
-
-        for name in [
-            header::RANGE,
-            header::IF_RANGE,
-            header::ACCEPT,
-            header::ACCEPT_LANGUAGE,
-        ] {
-            if let Some(value) = request_headers
-                .get(&name)
-                .and_then(|value| value.to_str().ok())
-            {
-                builder = builder.header(name.as_str(), value);
-            }
-        }
+        let builder = build_remote_stream_builder(
+            client,
+            &endpoint,
+            method,
+            source,
+            &token,
+            request_headers,
+            &media_source.required_http_headers,
+        );
 
         let response = builder.send().await?;
         let status = response.status();
@@ -1792,20 +1882,13 @@ async fn send_remote_stream_request(
             source.remote_user_id = None;
             continue;
         }
-        if status == reqwest::StatusCode::NOT_FOUND && attempt == 0 {
-            {
-                let mut cache = PLAYBACK_INFO_CACHE.write().await;
-                cache.remove(&cache_key);
-            }
-            continue;
-        }
         return Ok(response);
     }
 
     Err(AppError::Unauthorized)
 }
 
-fn resolve_remote_stream_endpoint(
+fn resolve_playback_info_stream_endpoint(
     server_url: &str,
     token: &str,
     remote_item_id: &str,
