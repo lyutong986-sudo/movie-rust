@@ -1783,20 +1783,24 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 
 **问题表现：**
 - Infuse 播放电视剧正常，但播放电影报错 "Failed to read the file with URL (File size exceeds limit (55457285415 bytes))"
-- 55457285415 bytes ≈ 55 GB，对普通电影文件明显异常
+- 原盘电影本身就很大（50+ GB 正常），Infuse 通过真实 Emby 服务器可以正常播放大文件
 
-**根因分析：**
-- `media_source_size()` 函数对远程/strm 文件使用 `bitrate × runtime_seconds / 8` 公式估算文件大小
-- 高码率电影（如 82 Mbps × 90 分钟 = ~55 GB）估算值超出 Infuse 的文件大小限制
-- 电视剧剧集因为时长短、码率相对低，估算值在限制内所以正常
-- Jellyfin/Emby 不会在 PlaybackInfo 的 MediaSource 中为远程流估算 Size，使用实际存储值或 null
+**根因分析（修正）：**
+- 问题**不是** Size 值本身过大，而是远程 Http 协议源的 `SupportsDirectPlay` 设置错误
+- 通过对比 Jellyfin 模板 `MediaInfoHelper.SetDeviceSpecificData`，发现：
+  - Jellyfin 对 Http 协议源默认 `EnableDirectStream = false`，且通过 `StreamBuilder` 评估 `PlayMethod` 后写回 `SupportsDirectPlay`
+  - Jellyfin 对 `IsRemote` 源还有 `ForceRemoteSourceTranscoding` 策略
+  - 我们的代码对所有源（包括远程 Http）都设 `SupportsDirectPlay = true`
+- 当 Infuse 收到 `SupportsDirectPlay = true` + `Protocol = "Http"` 时，会尝试 HTTP DirectPlay（直接下载 `Path` 里的远程 URL），而非通过服务器代理的 DirectStream
+- HTTP DirectPlay 对文件大小的处理不同于 SMB/NFS DirectPlay，大文件会触发 "File size exceeds limit"
+- 电视剧集因文件小未触发；原盘电影在真实 Emby 中走本地 SMB/NFS DirectPlay，不经 HTTP，所以没问题
 
 **修复内容：**
 
 | # | 修复 | 文件 | 说明 |
 |---|------|------|------|
-| R105 | MediaSource.Size 远程流返回 null | `repository.rs` | `media_source_size()` 对 `is_remote=true` 直接返回 `None` 而非估算值，与 Emby/Jellyfin 行为一致 |
-| R106 | item_size strm 估算保留 | `repository.rs` | `item_size()` 对 strm 文件仍保留 `estimated_media_size` 估算用于库列表展示，但不影响 PlaybackInfo |
+| R105 | Http 远程源 SupportsDirectPlay = false | `items.rs` | PlaybackInfo 中对 `is_remote && Protocol=="Http"` 的 MediaSource 设 `supports_direct_play = false`，迫使客户端使用 DirectStream（通过服务器代理）而非 HTTP DirectPlay |
+| R106 | 保留 Size 估算用于 UI 展示 | `repository.rs` | `media_source_size()` 对远程文件仍返回估算值（码率×时长/8），库列表中正常展示文件大小 |
 
 ---
 

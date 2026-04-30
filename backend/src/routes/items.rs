@@ -4771,8 +4771,8 @@ async fn playback_info(
         media_source.required_http_headers.retain(|key, _| {
             key.eq_ignore_ascii_case("Accept-Ranges") || key.eq_ignore_ascii_case("Range")
         });
-        if media_source.is_remote {
-            media_source.size = None;
+        if media_source.is_remote && media_source.protocol.eq_ignore_ascii_case("Http") {
+            media_source.supports_direct_play = false;
         }
     }
 
