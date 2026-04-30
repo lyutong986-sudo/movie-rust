@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-04-30（第十九批 三方插件/管理系统功能对比审计 + SimultaneousStreamLimit/UUID 序列化修复）
+> 对比时间：2026-04-30（第二十批 远端 Emby 中转源链路深度审计 + 字幕代理/图片 Token/STRM 路径结构优化）
 
 ---
 
@@ -2169,5 +2169,73 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 ### 对 Emby 客户端 API 的影响
 
 本批为 **管理端媒体同步与落盘** 能力，不新增或修改面向 Emby SDK 播放器的 HTTP 路由契约。
+
+---
+
+## 第二十批：远端 Emby 中转源链路深度审计与修复（2026-04-30）
+
+### 审计范围
+对照本地播放器模板（`EmbyApi.fetchPlaybackInfo`、`fetchItemDetail`、`imageUrl`、字幕 `DeliveryUrl`）及 Emby 官方 SDK 行为，全面审计远端 Emby 中转源的三条关键链路。
+
+### 媒体流链路 ✅ 符合 EmbySDK
+
+| 环节 | 实现 | 评估 |
+|------|------|------|
+| `PlaybackInfo` | `POST /Items/{id}/PlaybackInfo` → 返回 `MediaSources[0].DirectStreamUrl = /Videos/{id}/stream.{ext}?Static=true&api_key=...` | ✅ 标准 EmbySDK 格式 |
+| 流请求 | `/Videos/{id}/stream.{ext}` → `videos.rs::serve_media_item` | ✅ |
+| 虚拟路径 `REMOTE_EMBY/...` | 服务端直接调用 `proxy_item_stream_internal` 代理远端流 | ✅ |
+| STRM 文件 | STRM 内含本地签名代理 URL → `proxy_remote_stream` | ✅ |
+| Range 支持 | `Range`/`If-Range` 随 RemoteEmby 代理转发 | ✅ |
+| HEAD | body 置空，上游响应头透传 | ✅ |
+
+### 字幕链路 — 已修复
+
+**原问题：**
+- `RemotePlaybackMediaStream` 缺少 `DeliveryUrl`/`IsExternal` 字段，`is_external_url` 存储为 `None`
+- `serve_subtitle` 的 `subtitle_path_for_stream_index` 只处理 sidecar（`stream_index > max_db_index`）
+- DB 中 `is_external=true` 且 `stream_index <= max_db_index` 的字幕流 → 404
+
+**修复内容：**
+1. `RemotePlaybackMediaStream` 新增 `delivery_url: Option<String>`、`is_external: Option<bool>`
+2. `remote_playback_stream_to_analysis_stream`：对 `is_external=true` 的字幕流，将 `delivery_url` 存入 `is_external_url` DB 字段
+3. `repository::subtitle_external_url_for_stream_index`：新增查询函数，按 `(media_item_id, stream_index)` 查 DB 中 `is_external_url`
+4. `serve_subtitle`：sidecar 不存在时，fallback 到 DB `is_external_url` → `serve_remote_emby_subtitle`（代理远端字幕 + SRT→VTT 转换）
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| STRM + sync_subtitles 已下载 | ✅ sidecar 可用 | ✅ |
+| 虚拟路径 + is_external DB 流 | ❌ 404 | ✅ 代理远端 |
+| 虚拟路径 + 无字幕 | ❌ 404 | ✅ 明确 404 |
+
+### 图片链路 — 已修复
+
+**原问题：**
+- `extract_remote_image_urls` 生成的 URL 无 `api_key`
+- `serve_remote_image` 直接 GET 无 Token，远端 Emby 可能 401/403
+
+**修复内容：**
+- `serve_item_image`：当 `image_primary_path` 是 http URL 且条目 `provider_ids` 有 `RemoteEmbySourceId` 时，动态查询 source `access_token` 并拼接 `?api_key=`
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| 已同步本地图片 | ✅ 本地文件 | ✅ |
+| 远端 URL（无 token） | ❌ 可能 401 | ✅ 自动追加 api_key |
+| TMDB 回退 | ✅ | ✅ |
+
+### STRM 路径结构优化（本批完成）
+
+新层级结构：
+```
+{root}/{source_name}/{view_name}/{items...}
+```
+- `strm_workspace_for_source`：去掉 UUID 后缀，只用 `{source_name}`
+- 同步循环：每个 View 计算独立 `view_workspace = workspace/{view_name}`
+- `preview_remote_views`：新增拉取 `/System/Info` 获取 `ServerName`，返回 `RemotePreviewResult { server_name, views }`
+- 前端：预览时自动将 `ServerName` 填入"源名称"字段
+
+### 对 Emby 客户端 API 的影响
+
+- `POST /api/admin/remote-emby/views/preview`：响应格式从 `Array<View>` 变为 `{ ServerName, Views }`（前端同步更新）
+- `/Videos/{id}/{msid}/Subtitles/{index}/Stream.{ext}`：现支持代理远端字幕（无需本地文件）
 
 ---

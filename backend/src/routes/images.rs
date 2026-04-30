@@ -1346,8 +1346,40 @@ async fn serve_item_image(
     .filter(|p| !p.trim().is_empty());
 
     if let Some(path) = path_opt {
+        // 远端 Emby 条目的图片 URL（无 token）：动态追加 access_token
+        let effective_path = if (path.starts_with("http://") || path.starts_with("https://"))
+            && item
+                .provider_ids
+                .get("RemoteEmbySourceId")
+                .and_then(|v| v.as_str())
+                .is_some()
+        {
+            let source_token = async {
+                let source_id_str = item
+                    .provider_ids
+                    .get("RemoteEmbySourceId")
+                    .and_then(|v| v.as_str())?;
+                let source_id = uuid::Uuid::parse_str(source_id_str).ok()?;
+                let source = repository::get_remote_emby_source(&state.pool, source_id)
+                    .await
+                    .ok()??;
+                source
+                    .access_token
+                    .filter(|t| !t.trim().is_empty())
+            }
+            .await;
+            if let Some(token) = source_token {
+                let sep = if path.contains('?') { '&' } else { '?' };
+                format!("{path}{sep}api_key={token}")
+            } else {
+                path.clone()
+            }
+        } else {
+            path.clone()
+        };
+
         let method = request.method().clone();
-        let result = serve_image(&path, request, &image_query).await;
+        let result = serve_image(&effective_path, request, &image_query).await;
         if let Err(AppError::NotFound(_)) = &result {
             if !path.starts_with("http://") && !path.starts_with("https://") {
                 if let Some(fallback_url) =

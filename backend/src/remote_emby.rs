@@ -537,6 +537,12 @@ struct RemotePlaybackMediaStream {
     extended_video_sub_type_description: Option<String>,
     #[serde(default)]
     extended_video_type: Option<String>,
+    /// 外挂字幕的 Emby 原始交付 URL（如 /Videos/.../Subtitles/.../Stream.srt）
+    #[serde(default)]
+    delivery_url: Option<String>,
+    /// 是否为外挂流（对字幕有意义）
+    #[serde(default)]
+    is_external: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2640,7 +2646,14 @@ fn remote_playback_stream_to_analysis_stream(
             .codec
             .as_deref()
             .map(|codec| codec.eq_ignore_ascii_case("h264")),
-        is_external_url: None,
+        // 外挂字幕：保存远端 DeliveryUrl，后续代理时使用
+        is_external_url: if stream.is_external.unwrap_or(false)
+            && stream.stream_type.eq_ignore_ascii_case("Subtitle")
+        {
+            stream.delivery_url.clone().filter(|u| !u.trim().is_empty())
+        } else {
+            None
+        },
         is_text_subtitle_stream: stream.is_text_subtitle_stream,
         tags,
     }

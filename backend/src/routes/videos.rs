@@ -1201,9 +1201,30 @@ async fn serve_subtitle(
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-    let path = repository::subtitle_path_for_stream_index(&state.pool, &item, stream_index)
+
+    // 先尝试 sidecar 字幕
+    let path_opt = repository::subtitle_path_for_stream_index(&state.pool, &item, stream_index).await;
+
+    // sidecar 不存在时，检查 DB 中 is_external_url（远端 Emby 字幕代理）
+    if path_opt.is_none() || !path_opt.as_ref().map_or(false, |p| p.exists()) {
+        if let Some(ext_url) = repository::subtitle_external_url_for_stream_index(
+            &state.pool,
+            item_id,
+            stream_index,
+        )
         .await
-        .ok_or_else(|| AppError::NotFound("字幕不存在".to_string()))?;
+        {
+            return serve_remote_emby_subtitle(
+                state,
+                &item,
+                &ext_url,
+                requested_format,
+            )
+            .await;
+        }
+    }
+
+    let path = path_opt.ok_or_else(|| AppError::NotFound("字幕不存在".to_string()))?;
 
     if !path.exists() {
         return Err(AppError::NotFound("字幕文件不存在".to_string()));
@@ -1264,6 +1285,101 @@ fn srt_to_vtt(srt: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// 代理远端 Emby 的字幕流：根据 is_external_url（远端相对路径）拼出完整 URL，
+/// 加上 source 的 access_token，请求远端后将响应转发给客户端。
+async fn serve_remote_emby_subtitle(
+    state: &AppState,
+    item: &crate::models::DbMediaItem,
+    ext_url: &str,
+    requested_format: Option<&str>,
+) -> Result<Response, AppError> {
+    // 从条目 provider_ids（JSONB）中取出 RemoteEmbySourceId
+    let source_id_str = item
+        .provider_ids
+        .get("RemoteEmbySourceId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::NotFound("非远端 Emby 条目，无法代理字幕".to_string()))?
+        .to_string();
+    let source_id = Uuid::parse_str(source_id_str.trim())
+        .map_err(|_| AppError::Internal("RemoteEmbySourceId 格式非法".to_string()))?;
+
+    let source = repository::get_remote_emby_source(&state.pool, source_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("远端 Emby 源不存在".to_string()))?;
+    let token = source
+        .access_token
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| AppError::Internal("远端 Emby Token 为空".to_string()))?;
+
+    // ext_url 可能是相对路径（/Videos/...）或绝对 URL
+    let full_url = if ext_url.starts_with("http://") || ext_url.starts_with("https://") {
+        // 已是绝对 URL，直接追加 api_key
+        let sep = if ext_url.contains('?') { '&' } else { '?' };
+        format!("{ext_url}{sep}api_key={token}")
+    } else {
+        // 相对路径：拼上服务器基址
+        let base = source.server_url.trim_end_matches('/');
+        let path = if ext_url.starts_with('/') {
+            ext_url.to_string()
+        } else {
+            format!("/{ext_url}")
+        };
+        let sep = if path.contains('?') { '&' } else { '?' };
+        format!("{base}{path}{sep}api_key={token}")
+    };
+
+    let client = &*crate::http_client::SHARED;
+    let resp = client
+        .get(&full_url)
+        .header(axum::http::header::USER_AGENT, source.spoofed_user_agent.as_str())
+        .header(axum::http::header::ACCEPT, "text/plain,application/octet-stream,*/*")
+        .header(axum::http::header::ACCEPT_ENCODING, "identity")
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("代理远端字幕失败: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(AppError::NotFound(format!(
+            "远端字幕不存在 (HTTP {status})"
+        )));
+    }
+
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let bytes = resp.bytes().await.map_err(|e| AppError::Internal(format!("读取远端字幕失败: {e}")))?;
+
+    // 是否需要 SRT → VTT 转换
+    let target_fmt = requested_format.map(str::to_ascii_lowercase).unwrap_or_default();
+    if target_fmt == "vtt" || target_fmt == "webvtt" {
+        let is_srt = content_type.contains("subrip")
+            || full_url.to_ascii_lowercase().contains(".srt");
+        if is_srt {
+            let text = String::from_utf8_lossy(&bytes);
+            let vtt = srt_to_vtt(&text);
+            return Ok(axum::http::Response::builder()
+                .status(200)
+                .header(axum::http::header::CONTENT_TYPE, "text/vtt; charset=utf-8")
+                .body(Body::from(vtt.into_bytes()))
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .into_response());
+        }
+    }
+
+    Ok(axum::http::Response::builder()
+        .status(200)
+        .header(axum::http::header::CONTENT_TYPE, content_type)
+        .body(Body::from(bytes))
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .into_response())
 }
 
 fn subtitle_content_type_from_path(path: &std::path::Path) -> String {

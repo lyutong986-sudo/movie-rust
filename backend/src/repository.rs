@@ -9832,6 +9832,30 @@ pub async fn subtitle_path_for_stream_index(
     }
 }
 
+/// 对于 DB 中 is_external=true 的字幕流（index 范围在 DB 流内），
+/// 查询其 is_external_url 字段（远端 Emby 的 DeliveryUrl）。
+/// 返回远端相对 URL（如 /Videos/.../Subtitles/.../Stream.srt）。
+pub async fn subtitle_external_url_for_stream_index(
+    pool: &sqlx::PgPool,
+    media_item_id: uuid::Uuid,
+    stream_index: i32,
+) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>(
+        r#"SELECT is_external_url FROM media_streams
+           WHERE media_item_id = $1 AND index = $2
+             AND stream_type = 'subtitle' AND is_external = true
+           LIMIT 1"#,
+    )
+    .bind(media_item_id)
+    .bind(stream_index)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .filter(|u| !u.trim().is_empty())
+}
+
 /// 根据已写入磁盘的 sidecar 字幕路径，反查它在 Emby `MediaStreams` 序列中的
 /// 索引（视频路径同目录扫描，按完整 path 匹配）。供字幕下载完成后回填
 /// `SubtitleDownloadResult.NewIndex` 使用。
