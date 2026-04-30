@@ -3093,6 +3093,44 @@ pub async fn create_library(
         .ok_or_else(|| AppError::Internal("创建媒体库后无法读取媒体库".to_string()))
 }
 
+/// 确保"远端 Emby 中转"虚拟媒体库存在，若不存在则自动创建。
+/// 用于 separate 显示模式下不强制要求用户手动选择目标媒体库。
+pub async fn ensure_remote_transit_library(pool: &sqlx::PgPool) -> Result<DbLibrary, AppError> {
+    const TRANSIT_LIB_NAME: &str = "远端 Emby 中转";
+    const TRANSIT_LIB_PATH: &str = "__remote_transit__";
+
+    if let Some(lib) = get_library_by_name(pool, TRANSIT_LIB_NAME).await? {
+        return Ok(lib);
+    }
+
+    // 已无同名库，插入
+    let id = Uuid::new_v4();
+    let options_value = serde_json::json!({
+        "PathInfos": [{"Path": TRANSIT_LIB_PATH}],
+        "EnableAutoBoxSets": false,
+        "EnableRealtimeMonitor": false,
+        "SkipSubtitlesIfEmbeddedSubtitlesPresent": false
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO libraries (id, name, collection_type, path, library_options, date_modified)
+        VALUES ($1, $2, 'movies', $3, $4, now())
+        ON CONFLICT (name) DO NOTHING
+        "#,
+    )
+    .bind(id)
+    .bind(TRANSIT_LIB_NAME)
+    .bind(TRANSIT_LIB_PATH)
+    .bind(&options_value)
+    .execute(pool)
+    .await?;
+
+    // ON CONFLICT DO NOTHING 时返回已存在的那条
+    get_library_by_name(pool, TRANSIT_LIB_NAME)
+        .await?
+        .ok_or_else(|| AppError::Internal("无法创建远端 Emby 中转库".to_string()))
+}
+
 pub async fn list_libraries(pool: &sqlx::PgPool) -> Result<Vec<DbLibrary>, AppError> {
     Ok(sqlx::query_as::<_, DbLibrary>(
         r#"

@@ -457,10 +457,14 @@ async function createSource() {
     return;
   }
 
+  // separate 模式下 targetLibraryId 可为空，后端会自动使用「远端 Emby 中转」库
   const selectedLocalLibraryId =
-    payload.targetLibraryId || localLibraries.value[0]?.ItemId || '';
-  if (!selectedLocalLibraryId) {
-    error.value = '项目中还没有可用媒体库，请先创建本地媒体库';
+    payload.displayMode === 'merge'
+      ? payload.targetLibraryId || localLibraries.value[0]?.ItemId || ''
+      : payload.targetLibraryId || localLibraries.value[0]?.ItemId || '';
+
+  if (payload.displayMode === 'merge' && !selectedLocalLibraryId) {
+    error.value = '并入模式下请先创建本地媒体库并选择目标库';
     return;
   }
 
@@ -723,7 +727,7 @@ onBeforeUnmount(() => {
               placeholder="例如 D:\Media\remote-strm — 同步时在子目录 {源名}.{源Id} 内写 .strm / NFO / 图片"
             />
             <p class="text-muted mt-1 text-xs">
-              留空则仅使用虚拟路径入库；填写后每次全量同步会先清空该源的独占子目录再重写文件。api_key 可由下方刷新间隔配合后台任务重写。
+              留空则仅使用虚拟路径入库；填写后每次全量同步会先清空该源的独占子目录再重写文件。STRM 文件指向本地代理，与远端 api_key 无关。
             </p>
           </UFormField>
           <UFormField label="同步元数据到侧车（NFO/图）">
@@ -732,9 +736,11 @@ onBeforeUnmount(() => {
           <UFormField label="下载外挂字幕">
             <USwitch v-model="form.syncSubtitles" />
           </UFormField>
-          <UFormField class="lg:col-span-2" label="STRM 内 api_key 刷新间隔（秒）">
+          <UFormField class="lg:col-span-2" label="远端令牌刷新间隔（秒）">
             <UInput v-model.number="form.tokenRefreshIntervalSecs" type="number" class="w-full max-w-xs" :min="300" />
-            <p class="text-muted mt-1 text-xs">范围 300–2592000；仅当配置了 STRM 目录且间隔大于 0 时后台会定期重写 .strm 中的 api_key。</p>
+            <p class="text-muted mt-1 text-xs">
+              范围 300–2592000。STRM 文件指向本地代理（无需嵌入 api_key），此间隔控制后台任务刷新本地服务器缓存的远端访问令牌，确保代理能持续鉴权。
+            </p>
           </UFormField>
           <div class="lg:col-span-2 flex flex-wrap items-center justify-between gap-2">
             <UButton
@@ -833,17 +839,17 @@ onBeforeUnmount(() => {
               </p>
             </div>
             <div class="rounded-lg border border-default p-3 md:col-span-2">
-              <p class="text-muted text-xs">STRM / api_key 刷新</p>
+              <p class="text-muted text-xs">STRM 文件 / 侧车同步</p>
               <p class="text-highlighted mt-1 break-all text-sm font-medium">
-                {{ source.StrmOutputPath || '未配置 STRM 根目录（仅虚拟路径）' }}
+                {{ source.StrmOutputPath || '未配置 STRM 根目录（仅虚拟路径入库）' }}
               </p>
               <p class="text-muted mt-1 text-xs">
                 侧车：元数据 {{ source.SyncMetadata !== false ? '开' : '关' }} · 外挂字幕
-                {{ source.SyncSubtitles !== false ? '开' : '关' }} · 间隔 {{ source.TokenRefreshIntervalSecs ?? 3600 }}
+                {{ source.SyncSubtitles !== false ? '开' : '关' }} · 远端令牌刷新 {{ source.TokenRefreshIntervalSecs ?? 3600 }}
                 秒
               </p>
               <p v-if="source.LastTokenRefreshAt" class="text-muted text-xs">
-                上次重写 STRM 内 api_key：{{ formatDate(source.LastTokenRefreshAt) }}
+                上次远端令牌刷新：{{ formatDate(source.LastTokenRefreshAt) }}
               </p>
             </div>
           </div>
@@ -977,9 +983,11 @@ onBeforeUnmount(() => {
             <UFormField label="外挂字幕下载">
               <USwitch v-model="editForm.syncSubtitles" />
             </UFormField>
-            <UFormField class="lg:col-span-2" label="STRM api_key 刷新间隔（秒）">
+            <UFormField class="lg:col-span-2" label="远端令牌刷新间隔（秒）">
               <UInput v-model.number="editForm.tokenRefreshIntervalSecs" type="number" class="max-w-xs" :min="300" />
-              <p class="text-muted mt-1 text-xs">300–2592000；配置了 STRM 目录且启用后台任务才会定期重写。</p>
+              <p class="text-muted mt-1 text-xs">
+                300–2592000。后台任务据此周期刷新本地缓存的远端鉴权令牌，STRM 文件指向本地代理无需嵌入 api_key。
+              </p>
             </UFormField>
             <div class="lg:col-span-2 mt-2 flex flex-wrap justify-end gap-2">
               <UButton color="neutral" variant="subtle" @click="editOpen = false">取消</UButton>

@@ -61,8 +61,9 @@ struct CreateRemoteEmbySourceRequest {
     username: String,
     #[serde(alias = "pw", alias = "pwd")]
     password: String,
-    #[serde(alias = "targetLibraryId")]
-    target_library_id: Uuid,
+    /// 可选：separate 模式下可不填，后端会自动使用「远端 Emby 中转」库
+    #[serde(default, alias = "targetLibraryId")]
+    target_library_id: Option<Uuid>,
     #[serde(default, alias = "displayMode")]
     display_mode: Option<String>,
     #[serde(default, alias = "remoteViewIds")]
@@ -104,8 +105,9 @@ struct UpdateRemoteEmbySourceRequest {
     username: String,
     #[serde(default, alias = "pw", alias = "pwd")]
     password: Option<String>,
-    #[serde(alias = "targetLibraryId")]
-    target_library_id: Uuid,
+    /// 可选：separate 模式下可不填，后端会自动使用「远端 Emby 中转」库
+    #[serde(default, alias = "targetLibraryId")]
+    target_library_id: Option<Uuid>,
     #[serde(default, alias = "displayMode")]
     display_mode: Option<String>,
     #[serde(default, alias = "remoteViewIds")]
@@ -339,6 +341,11 @@ async fn create_remote_emby_source(
     auth::require_admin(&session)?;
     let remote_views =
         serde_json::to_value(&payload.remote_views).unwrap_or_else(|_| serde_json::json!([]));
+    // target_library_id 可选：未填时自动使用「远端 Emby 中转」库
+    let target_library_id = match payload.target_library_id {
+        Some(id) if id != Uuid::nil() => id,
+        _ => repository::ensure_remote_transit_library(&state.pool).await?.id,
+    };
     let source = repository::create_remote_emby_source(
         &state.pool,
         &payload.name,
@@ -350,7 +357,7 @@ async fn create_remote_emby_source(
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(remote_emby::default_spoofed_user_agent()),
-        payload.target_library_id,
+        target_library_id,
         payload.display_mode.as_deref().unwrap_or("separate"),
         payload.remote_view_ids.as_slice(),
         &remote_views,
@@ -374,6 +381,11 @@ async fn update_remote_emby_source(
     let remote_views =
         serde_json::to_value(&payload.remote_views).unwrap_or_else(|_| serde_json::json!([]));
     let strm_raw = payload.strm_output_path.as_deref();
+    // target_library_id 可选：未填时自动使用「远端 Emby 中转」库
+    let target_library_id = match payload.target_library_id {
+        Some(id) if id != Uuid::nil() => id,
+        _ => repository::ensure_remote_transit_library(&state.pool).await?.id,
+    };
     let source = repository::update_remote_emby_source(
         &state.pool,
         source_id,
@@ -386,7 +398,7 @@ async fn update_remote_emby_source(
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(remote_emby::default_spoofed_user_agent()),
-        payload.target_library_id,
+        target_library_id,
         payload.display_mode.as_deref().unwrap_or("separate"),
         payload.remote_view_ids.as_slice(),
         &remote_views,
