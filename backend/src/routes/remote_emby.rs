@@ -30,7 +30,7 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/admin/remote-emby/sources/{source_id}",
-            delete(delete_remote_emby_source),
+            delete(delete_remote_emby_source).put(update_remote_emby_source),
         )
         .route(
             "/api/admin/remote-emby/sources/{source_id}/sync",
@@ -73,6 +73,67 @@ struct CreateRemoteEmbySourceRequest {
     spoofed_user_agent: Option<String>,
     #[serde(default, alias = "isEnabled", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     enabled: Option<bool>,
+    #[serde(default, alias = "strmOutputPath", alias = "strm_output_path")]
+    strm_output_path: Option<String>,
+    #[serde(
+        default,
+        alias = "syncMetadata",
+        alias = "sync_metadata",
+        deserialize_with = "crate::models::deserialize_option_bool_lenient"
+    )]
+    sync_metadata: Option<bool>,
+    #[serde(
+        default,
+        alias = "syncSubtitles",
+        alias = "sync_subtitles",
+        deserialize_with = "crate::models::deserialize_option_bool_lenient"
+    )]
+    sync_subtitles: Option<bool>,
+    #[serde(default, alias = "tokenRefreshIntervalSecs", alias = "token_refresh_interval_secs")]
+    token_refresh_interval_secs: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct UpdateRemoteEmbySourceRequest {
+    #[serde(alias = "name")]
+    name: String,
+    #[serde(alias = "serverUrl", alias = "url")]
+    server_url: String,
+    #[serde(alias = "userName", alias = "user")]
+    username: String,
+    #[serde(default, alias = "pw", alias = "pwd")]
+    password: Option<String>,
+    #[serde(alias = "targetLibraryId")]
+    target_library_id: Uuid,
+    #[serde(default, alias = "displayMode")]
+    display_mode: Option<String>,
+    #[serde(default, alias = "remoteViewIds")]
+    remote_view_ids: Vec<String>,
+    #[serde(default, alias = "remoteViews")]
+    remote_views: Vec<CreateRemoteEmbySourceRemoteView>,
+    #[serde(default, alias = "spoofedUserAgent", alias = "UserAgent")]
+    spoofed_user_agent: Option<String>,
+    #[serde(default, alias = "isEnabled", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
+    enabled: Option<bool>,
+    #[serde(default, alias = "strmOutputPath", alias = "strm_output_path")]
+    strm_output_path: Option<String>,
+    #[serde(
+        default,
+        alias = "syncMetadata",
+        alias = "sync_metadata",
+        deserialize_with = "crate::models::deserialize_option_bool_lenient"
+    )]
+    sync_metadata: Option<bool>,
+    #[serde(
+        default,
+        alias = "syncSubtitles",
+        alias = "sync_subtitles",
+        deserialize_with = "crate::models::deserialize_option_bool_lenient"
+    )]
+    sync_subtitles: Option<bool>,
+    #[serde(default, alias = "tokenRefreshIntervalSecs", alias = "token_refresh_interval_secs")]
+    token_refresh_interval_secs: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -114,6 +175,13 @@ struct RemoteEmbySourceDto {
     has_access_token: bool,
     last_sync_at: Option<String>,
     last_sync_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strm_output_path: Option<String>,
+    sync_metadata: bool,
+    sync_subtitles: bool,
+    token_refresh_interval_secs: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_token_refresh_at: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -287,6 +355,46 @@ async fn create_remote_emby_source(
         payload.remote_view_ids.as_slice(),
         &remote_views,
         payload.enabled.unwrap_or(true),
+        payload.strm_output_path.as_deref(),
+        payload.sync_metadata.unwrap_or(true),
+        payload.sync_subtitles.unwrap_or(true),
+        payload.token_refresh_interval_secs.unwrap_or(3600),
+    )
+    .await?;
+    Ok(Json(remote_emby_source_to_dto(source)))
+}
+
+async fn update_remote_emby_source(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(source_id): Path<Uuid>,
+    Json(payload): Json<UpdateRemoteEmbySourceRequest>,
+) -> Result<Json<RemoteEmbySourceDto>, AppError> {
+    auth::require_admin(&session)?;
+    let remote_views =
+        serde_json::to_value(&payload.remote_views).unwrap_or_else(|_| serde_json::json!([]));
+    let strm_raw = payload.strm_output_path.as_deref();
+    let source = repository::update_remote_emby_source(
+        &state.pool,
+        source_id,
+        &payload.name,
+        &payload.server_url,
+        &payload.username,
+        payload.password.as_deref(),
+        payload
+            .spoofed_user_agent
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(remote_emby::default_spoofed_user_agent()),
+        payload.target_library_id,
+        payload.display_mode.as_deref().unwrap_or("separate"),
+        payload.remote_view_ids.as_slice(),
+        &remote_views,
+        payload.enabled.unwrap_or(true),
+        strm_raw,
+        payload.sync_metadata.unwrap_or(true),
+        payload.sync_subtitles.unwrap_or(true),
+        payload.token_refresh_interval_secs.unwrap_or(3600),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))
@@ -615,6 +723,13 @@ fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> Remot
             .is_some_and(|value| !value.trim().is_empty()),
         last_sync_at: source.last_sync_at.map(|value| value.to_rfc3339()),
         last_sync_error: source.last_sync_error,
+        strm_output_path: source.strm_output_path.clone(),
+        sync_metadata: source.sync_metadata,
+        sync_subtitles: source.sync_subtitles,
+        token_refresh_interval_secs: source.token_refresh_interval_secs,
+        last_token_refresh_at: source
+            .last_token_refresh_at
+            .map(|value| value.to_rfc3339()),
         created_at: source.created_at.to_rfc3339(),
         updated_at: source.updated_at.to_rfc3339(),
     }

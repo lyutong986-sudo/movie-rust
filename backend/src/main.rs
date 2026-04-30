@@ -174,6 +174,11 @@ async fn main() -> Result<()> {
 
     tokio::spawn(routes::scheduled_tasks::run_scheduler(state.clone()));
 
+    let remote_emby_refresh_pool = state.pool.clone();
+    tokio::spawn(async move {
+        crate::remote_emby::remote_emby_token_refresh_loop(remote_emby_refresh_pool).await;
+    });
+
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
 }
@@ -378,6 +383,26 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         r#"
         ALTER TABLE remote_emby_sources
             ADD COLUMN IF NOT EXISTS remote_views JSONB NOT NULL DEFAULT '[]'::jsonb
+        "#,
+        r#"
+        ALTER TABLE remote_emby_sources
+            ADD COLUMN IF NOT EXISTS strm_output_path TEXT
+        "#,
+        r#"
+        ALTER TABLE remote_emby_sources
+            ADD COLUMN IF NOT EXISTS sync_metadata BOOLEAN NOT NULL DEFAULT true
+        "#,
+        r#"
+        ALTER TABLE remote_emby_sources
+            ADD COLUMN IF NOT EXISTS sync_subtitles BOOLEAN NOT NULL DEFAULT true
+        "#,
+        r#"
+        ALTER TABLE remote_emby_sources
+            ADD COLUMN IF NOT EXISTS token_refresh_interval_secs INTEGER NOT NULL DEFAULT 3600
+        "#,
+        r#"
+        ALTER TABLE remote_emby_sources
+            ADD COLUMN IF NOT EXISTS last_token_refresh_at TIMESTAMPTZ
         "#,
         r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique ON remote_emby_sources (lower(name))"#,
         r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_library ON remote_emby_sources(target_library_id)"#,

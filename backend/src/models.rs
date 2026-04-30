@@ -64,6 +64,16 @@ pub struct DbRemoteEmbySource {
     pub source_secret: Uuid,
     pub last_sync_at: Option<DateTime<Utc>>,
     pub last_sync_error: Option<String>,
+    #[sqlx(default)]
+    pub strm_output_path: Option<String>,
+    #[sqlx(default)]
+    pub sync_metadata: bool,
+    #[sqlx(default)]
+    pub sync_subtitles: bool,
+    #[sqlx(default)]
+    pub token_refresh_interval_secs: i32,
+    #[sqlx(default)]
+    pub last_token_refresh_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

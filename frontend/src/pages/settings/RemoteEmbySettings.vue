@@ -35,7 +35,31 @@ const form = ref({
   targetLibraryId: '',
   displayMode: 'separate' as 'merge' | 'separate',
   spoofedUserAgent: DEFAULT_SPOOFED_USER_AGENT,
-  enabled: true
+  enabled: true,
+  strmOutputPath: '',
+  syncMetadata: true,
+  syncSubtitles: true,
+  tokenRefreshIntervalSecs: 3600
+});
+
+const editOpen = ref(false);
+const editSaving = ref(false);
+const editForm = ref({
+  sourceId: '',
+  name: '',
+  serverUrl: '',
+  username: '',
+  password: '',
+  remoteViewIds: [] as string[],
+  targetLibraryId: '',
+  displayMode: 'separate' as 'merge' | 'separate',
+  spoofedUserAgent: DEFAULT_SPOOFED_USER_AGENT,
+  enabled: true,
+  strmOutputPath: '',
+  syncMetadata: true,
+  syncSubtitles: true,
+  tokenRefreshIntervalSecs: 3600,
+  mergedRemoteViews: [] as RemoteEmbyView[]
 });
 
 const sourceCount = computed(() => sources.value.length);
@@ -65,6 +89,17 @@ const remoteViewItems = computed(() =>
     value: view.Id
   }))
 );
+
+/** 编辑弹窗下拉：预览列表 ∪ 条目自带 RemoteViews ∪ 占位 Id */
+const editRemoteViewItems = computed(() => {
+  const map = new Map<string, RemoteEmbyView>();
+  for (const v of remoteViews.value) map.set(v.Id.toLowerCase(), v);
+  for (const v of editForm.value.mergedRemoteViews) map.set(v.Id.toLowerCase(), v);
+  return [...map.values()].map((view) => ({
+    label: `${view.Name}${view.CollectionType ? ` · ${collectionTypeLabel(view.CollectionType)}` : ''}`,
+    value: view.Id
+  }));
+});
 const localLibraryNameMap = computed(() => {
   const map = new Map<string, string>();
   for (const folder of localLibraries.value) {
@@ -282,6 +317,115 @@ async function load() {
   }
 }
 
+function openEditor(source: RemoteEmbySource) {
+  error.value = '';
+  saved.value = '';
+  const merged = new Map<string, RemoteEmbyView>();
+  for (const v of remoteViews.value) merged.set(v.Id.toLowerCase(), v);
+  for (const v of source.RemoteViews || []) merged.set(v.Id.toLowerCase(), v);
+  for (const vid of source.RemoteViewIds || []) {
+    const k = vid.toLowerCase();
+    if (!merged.has(k)) merged.set(k, { Id: vid, Name: vid });
+  }
+  editForm.value = {
+    sourceId: source.Id,
+    name: source.Name,
+    serverUrl: source.ServerUrl,
+    username: source.Username,
+    password: '',
+    remoteViewIds: [...(source.RemoteViewIds || [])],
+    targetLibraryId: source.TargetLibraryId,
+    displayMode: source.DisplayMode === 'merge' ? 'merge' : 'separate',
+    spoofedUserAgent: source.SpoofedUserAgent || DEFAULT_SPOOFED_USER_AGENT,
+    enabled: source.Enabled,
+    strmOutputPath: source.StrmOutputPath || '',
+    syncMetadata: source.SyncMetadata !== false,
+    syncSubtitles: source.SyncSubtitles !== false,
+    tokenRefreshIntervalSecs: source.TokenRefreshIntervalSecs ?? 3600,
+    mergedRemoteViews: [...merged.values()]
+  };
+  editOpen.value = true;
+}
+
+async function saveEditor() {
+  const p = editForm.value;
+  if (!p.sourceId) return;
+  if (!p.name.trim()) {
+    error.value = '请输入远端源名称';
+    return;
+  }
+  if (!p.serverUrl.trim()) {
+    error.value = '请输入远端 Emby 地址';
+    return;
+  }
+  if (!p.username.trim()) {
+    error.value = '请输入远端用户名';
+    return;
+  }
+  if (!p.remoteViewIds.length) {
+    error.value = '请至少选择一个远端媒体库';
+    return;
+  }
+  if (p.displayMode === 'merge' && !p.targetLibraryId) {
+    error.value = '并入模式下请选择项目媒体库';
+    return;
+  }
+  editSaving.value = true;
+  error.value = '';
+  saved.value = '';
+  try {
+    const byId = new Map(p.mergedRemoteViews.map((v) => [v.Id.toLowerCase(), v]));
+    const selectedRemoteViews = p.remoteViewIds
+      .map((id) => byId.get(id.toLowerCase()) || ({ Id: id, Name: id } as RemoteEmbyView));
+
+    const payload: {
+      Name: string;
+      ServerUrl: string;
+      Username: string;
+      Password?: string;
+      TargetLibraryId: string;
+      DisplayMode: 'merge' | 'separate';
+      RemoteViewIds: string[];
+      RemoteViews: RemoteEmbyView[];
+      SpoofedUserAgent: string;
+      Enabled: boolean;
+      StrmOutputPath: string;
+      SyncMetadata: boolean;
+      SyncSubtitles: boolean;
+      TokenRefreshIntervalSecs: number;
+    } = {
+      Name: p.name.trim(),
+      ServerUrl: p.serverUrl.trim(),
+      Username: p.username.trim(),
+      TargetLibraryId: p.targetLibraryId,
+      DisplayMode: p.displayMode,
+      RemoteViewIds: p.remoteViewIds,
+      RemoteViews: selectedRemoteViews,
+      SpoofedUserAgent: p.spoofedUserAgent.trim(),
+      Enabled: p.enabled,
+      StrmOutputPath: p.strmOutputPath.trim(),
+      SyncMetadata: p.syncMetadata,
+      SyncSubtitles: p.syncSubtitles,
+      TokenRefreshIntervalSecs: Math.min(
+        Math.max(Number(p.tokenRefreshIntervalSecs) || 3600, 300),
+        86400 * 30
+      )
+    };
+    if (p.password.trim()) {
+      payload.Password = p.password;
+    }
+
+    await api.updateRemoteEmbySource(p.sourceId, payload);
+    editOpen.value = false;
+    saved.value = `已保存远端源：${p.name.trim()}`;
+    await load();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    editSaving.value = false;
+  }
+}
+
 async function createSource() {
   const payload = form.value;
   if (!payload.name.trim()) {
@@ -337,7 +481,14 @@ async function createSource() {
       RemoteViewIds: payload.remoteViewIds,
       RemoteViews: selectedRemoteViews,
       SpoofedUserAgent: payload.spoofedUserAgent.trim(),
-      Enabled: payload.enabled
+      Enabled: payload.enabled,
+      StrmOutputPath: payload.strmOutputPath.trim() || undefined,
+      SyncMetadata: payload.syncMetadata,
+      SyncSubtitles: payload.syncSubtitles,
+      TokenRefreshIntervalSecs: Math.min(
+        Math.max(Number(payload.tokenRefreshIntervalSecs) || 3600, 300),
+        86400 * 30
+      )
     });
     saved.value = `已创建远端源：${payload.name.trim()}`;
     form.value.name = '';
@@ -565,6 +716,26 @@ onBeforeUnmount(() => {
               placeholder="填写你要用于远端请求的 UA"
             />
           </UFormField>
+          <UFormField class="lg:col-span-2" label="STRM 输出根目录（可选）">
+            <UInput
+              v-model="form.strmOutputPath"
+              class="w-full"
+              placeholder="例如 D:\Media\remote-strm — 同步时在子目录 {源名}.{源Id} 内写 .strm / NFO / 图片"
+            />
+            <p class="text-muted mt-1 text-xs">
+              留空则仅使用虚拟路径入库；填写后每次全量同步会先清空该源的独占子目录再重写文件。api_key 可由下方刷新间隔配合后台任务重写。
+            </p>
+          </UFormField>
+          <UFormField label="同步元数据到侧车（NFO/图）">
+            <USwitch v-model="form.syncMetadata" />
+          </UFormField>
+          <UFormField label="下载外挂字幕">
+            <USwitch v-model="form.syncSubtitles" />
+          </UFormField>
+          <UFormField class="lg:col-span-2" label="STRM 内 api_key 刷新间隔（秒）">
+            <UInput v-model.number="form.tokenRefreshIntervalSecs" type="number" class="w-full max-w-xs" :min="300" />
+            <p class="text-muted mt-1 text-xs">范围 300–2592000；仅当配置了 STRM 目录且间隔大于 0 时后台会定期重写 .strm 中的 api_key。</p>
+          </UFormField>
           <div class="lg:col-span-2 flex flex-wrap items-center justify-between gap-2">
             <UButton
               color="neutral"
@@ -596,6 +767,16 @@ onBeforeUnmount(() => {
                 <p class="text-muted mt-1 text-xs">{{ source.ServerUrl }}</p>
               </div>
               <div class="flex gap-2">
+                <UButton
+                  color="neutral"
+                  variant="outline"
+                  size="sm"
+                  icon="i-lucide-pencil"
+                  :disabled="isSourceSyncing(source)"
+                  @click="openEditor(source)"
+                >
+                  编辑
+                </UButton>
                 <UButton
                   color="primary"
                   variant="soft"
@@ -649,6 +830,20 @@ onBeforeUnmount(() => {
               <p class="text-muted text-xs">远端媒体库</p>
               <p class="text-highlighted mt-1 text-sm font-medium">
                 {{ sourceRemoteViewsText(source) }}
+              </p>
+            </div>
+            <div class="rounded-lg border border-default p-3 md:col-span-2">
+              <p class="text-muted text-xs">STRM / api_key 刷新</p>
+              <p class="text-highlighted mt-1 break-all text-sm font-medium">
+                {{ source.StrmOutputPath || '未配置 STRM 根目录（仅虚拟路径）' }}
+              </p>
+              <p class="text-muted mt-1 text-xs">
+                侧车：元数据 {{ source.SyncMetadata !== false ? '开' : '关' }} · 外挂字幕
+                {{ source.SyncSubtitles !== false ? '开' : '关' }} · 间隔 {{ source.TokenRefreshIntervalSecs ?? 3600 }}
+                秒
+              </p>
+              <p v-if="source.LastTokenRefreshAt" class="text-muted text-xs">
+                上次重写 STRM 内 api_key：{{ formatDate(source.LastTokenRefreshAt) }}
               </p>
             </div>
           </div>
@@ -715,6 +910,84 @@ onBeforeUnmount(() => {
           <p class="text-muted text-sm">还没有远端 Emby 源，先用上方表单添加一个。</p>
         </div>
       </div>
+
+      <UModal v-model:open="editOpen" :ui="{ content: 'max-w-2xl max-h-[90vh] overflow-y-auto' }">
+        <template #header>
+          <h3 class="text-highlighted text-base font-semibold">编辑远端 Emby 源</h3>
+        </template>
+        <template #body>
+          <div class="grid gap-3 lg:grid-cols-2">
+            <UFormField label="源名称" class="lg:col-span-2">
+              <UInput v-model="editForm.name" class="w-full" />
+            </UFormField>
+            <UFormField label="远端地址" class="lg:col-span-2">
+              <UInput v-model="editForm.serverUrl" class="w-full" />
+            </UFormField>
+            <UFormField label="用户名">
+              <UInput v-model="editForm.username" class="w-full" />
+            </UFormField>
+            <UFormField label="新密码（可选）">
+              <UInput
+                v-model="editForm.password"
+                type="password"
+                placeholder="留空则不修改远端密码字段"
+                class="w-full"
+              />
+            </UFormField>
+            <UFormField label="远端媒体库" class="lg:col-span-2">
+              <USelect
+                v-model="editForm.remoteViewIds"
+                :items="editRemoteViewItems"
+                multiple
+                value-key="value"
+                class="w-full"
+              />
+              <p class="text-muted mt-1 text-xs">若某项仅显示 GUID，可先在本页用「获取远端媒体库列表」再打开编辑。</p>
+            </UFormField>
+            <UFormField label="显示方式（本地）">
+              <USelect v-model="editForm.displayMode" :items="displayModeItems" value-key="value" class="w-full" />
+            </UFormField>
+            <UFormField label="目标项目媒体库" class="lg:col-span-2">
+              <USelect
+                v-model="editForm.targetLibraryId"
+                :items="localLibraryItems"
+                value-key="value"
+                class="w-full"
+                placeholder="选择本地库"
+              />
+              <p class="text-muted mt-1 text-xs">单独显示与并入模式均需指定挂载媒体库。</p>
+            </UFormField>
+            <UFormField label="启用">
+              <USwitch v-model="editForm.enabled" />
+            </UFormField>
+            <UFormField class="lg:col-span-2" label="伪装 User-Agent">
+              <UTextarea v-model="editForm.spoofedUserAgent" :rows="2" class="w-full" />
+            </UFormField>
+            <UFormField class="lg:col-span-2" label="STRM 输出根目录（可选）">
+              <UInput
+                v-model="editForm.strmOutputPath"
+                class="w-full"
+                placeholder="留空可清空数据库中的路径（不写侧车）"
+              />
+              <p class="text-muted mt-1 text-xs">保存为空字符串即清除 STRM 根路径配置。</p>
+            </UFormField>
+            <UFormField label="同步侧车元数据">
+              <USwitch v-model="editForm.syncMetadata" />
+            </UFormField>
+            <UFormField label="外挂字幕下载">
+              <USwitch v-model="editForm.syncSubtitles" />
+            </UFormField>
+            <UFormField class="lg:col-span-2" label="STRM api_key 刷新间隔（秒）">
+              <UInput v-model.number="editForm.tokenRefreshIntervalSecs" type="number" class="max-w-xs" :min="300" />
+              <p class="text-muted mt-1 text-xs">300–2592000；配置了 STRM 目录且启用后台任务才会定期重写。</p>
+            </UFormField>
+            <div class="lg:col-span-2 mt-2 flex flex-wrap justify-end gap-2">
+              <UButton color="neutral" variant="subtle" @click="editOpen = false">取消</UButton>
+              <UButton icon="i-lucide-save" :loading="editSaving" @click="saveEditor">保存</UButton>
+            </div>
+          </div>
+        </template>
+      </UModal>
     </div>
   </SettingsLayout>
 </template>

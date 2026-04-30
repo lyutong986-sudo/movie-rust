@@ -2144,3 +2144,30 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 | 复杂度 | 高（文件管理+定时任务） | 低（纯逻辑变更） |
 
 ---
+
+## 第二十九批：远端 STRM 工作区写入 + api_key 周期刷新（管理后台）
+
+**审计时间**：2026-04-30
+
+### 后端
+
+| 项 | 说明 |
+|----|------|
+| 工作区路径 | `{StrmOutputPath}/{sanitize(Name)}.{source_uuid}/`，每次全量同步前清空并重建该子目录，与用户填写的根目录隔离。 |
+| `.strm` 内容 | 与起播一致的 Static 直链：`/emby/videos/{id}/stream?Static=true&MediaSourceId=…&DeviceId=…&api_key=…`。 |
+| 侧车文件 | `sync_metadata`：远端图落盘、`movie.nfo` / `episodedetails.nfo`、按季首次写入 `tvshow.nfo`；`sync_subtitles`：`/emby/Videos/{item}/{ms}/Subtitles/{index}/Stream.{ext}` 下载外挂字幕。 |
+| DB 入库 | `upsert_virtual_media_item` 使用 STRM 绝对路径，海报/背景/台标优先本地文件路径。 |
+| Token 重写 | `main.rs` 启动 `remote_emby_token_refresh_loop`：满足 `token_refresh_interval_secs` 与 STRM 根目录配置时强制重登并批量替换工作区内 `.strm` 的 `api_key=`。 |
+| 其它 | 修复 `create_remote_emby_source` 使用独立 `row_id`（`Uuid::new_v4()`）绑定 INSERT，避免与视图循环中的 `id` 变量串扰。 |
+
+主要文件：`backend/src/remote_emby.rs`、`backend/src/main.rs`、`backend/src/repository.rs`。
+
+### 前端
+
+`RemoteEmbySettings.vue`：STRM 路径、元数据/字幕、刷新间隔；列表摘要与「编辑」弹窗 + `PUT`。`frontend/src/api/emby.ts`：`RemoteEmbySource` 扩展与 `updateRemoteEmbySource`。
+
+### 对 Emby 客户端 API 的影响
+
+本批为 **管理端媒体同步与落盘** 能力，不新增或修改面向 Emby SDK 播放器的 HTTP 路由契约。
+
+---

@@ -560,6 +560,12 @@ export interface RemoteEmbySource {
   HasAccessToken: boolean;
   LastSyncAt?: string;
   LastSyncError?: string;
+  /** 本地 STRM 输出根目录；实际写入 `{根}/{SanitizedName}.{源Id}` 子目录 */
+  StrmOutputPath?: string;
+  SyncMetadata?: boolean;
+  SyncSubtitles?: boolean;
+  TokenRefreshIntervalSecs?: number;
+  LastTokenRefreshAt?: string;
   CreatedAt: string;
   UpdatedAt: string;
 }
@@ -1518,9 +1524,38 @@ export class EmbyApi {
     RemoteViews?: RemoteEmbyView[];
     SpoofedUserAgent?: string;
     Enabled?: boolean;
+    StrmOutputPath?: string;
+    SyncMetadata?: boolean;
+    SyncSubtitles?: boolean;
+    TokenRefreshIntervalSecs?: number;
   }) {
     return this.request<RemoteEmbySource>('/api/admin/remote-emby/sources', {
       method: 'POST',
+      body: payload
+    });
+  }
+
+  async updateRemoteEmbySource(
+    sourceId: string,
+    payload: {
+      Name: string;
+      ServerUrl: string;
+      Username: string;
+      Password?: string;
+      TargetLibraryId: string;
+      DisplayMode?: 'merge' | 'separate';
+      RemoteViewIds?: string[];
+      RemoteViews?: RemoteEmbyView[];
+      SpoofedUserAgent?: string;
+      Enabled?: boolean;
+      StrmOutputPath?: string;
+      SyncMetadata?: boolean;
+      SyncSubtitles?: boolean;
+      TokenRefreshIntervalSecs?: number;
+    }
+  ) {
+    return this.request<RemoteEmbySource>(`/api/admin/remote-emby/sources/${encodeURIComponent(sourceId)}`, {
+      method: 'PUT',
       body: payload
     });
   }

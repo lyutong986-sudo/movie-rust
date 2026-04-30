@@ -3128,6 +3128,7 @@ pub async fn list_remote_emby_sources(
         SELECT
             id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
+            strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
             created_at, updated_at
         FROM remote_emby_sources
         ORDER BY name
@@ -3146,6 +3147,7 @@ pub async fn get_remote_emby_source(
         SELECT
             id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
+            strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
             created_at, updated_at
         FROM remote_emby_sources
         WHERE id = $1
@@ -3168,6 +3170,10 @@ pub async fn create_remote_emby_source(
     remote_view_ids: &[String],
     remote_views: &Value,
     enabled: bool,
+    strm_output_path: Option<&str>,
+    sync_metadata: bool,
+    sync_subtitles: bool,
+    token_refresh_interval_secs: i32,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
     let server_url = server_url.trim().trim_end_matches('/');
@@ -3263,20 +3269,21 @@ pub async fn create_remote_emby_source(
             }));
         }
     }
-    let sanitized_remote_views = Value::Array(sanitized_remote_views);
-
-    let id = Uuid::new_v4();
+    let strm_output_path = strm_output_path.map(|s| s.trim()).filter(|s| !s.is_empty());
+    let token_refresh_interval_secs = token_refresh_interval_secs.clamp(300, 86400 * 30);
     let source_secret = Uuid::new_v4();
+    let row_id = Uuid::new_v4();
     sqlx::query(
         r#"
         INSERT INTO remote_emby_sources (
             id, name, server_url, username, password, spoofed_user_agent, target_library_id,
-            display_mode, remote_view_ids, remote_views, enabled, source_secret
+            display_mode, remote_view_ids, remote_views, enabled, source_secret,
+            strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         "#,
     )
-    .bind(id)
+    .bind(row_id)
     .bind(name)
     .bind(server_url)
     .bind(username)
@@ -3288,10 +3295,14 @@ pub async fn create_remote_emby_source(
     .bind(sanitized_remote_views)
     .bind(enabled)
     .bind(source_secret)
+    .bind(strm_output_path)
+    .bind(sync_metadata)
+    .bind(sync_subtitles)
+    .bind(token_refresh_interval_secs)
     .execute(pool)
     .await?;
 
-    get_remote_emby_source(pool, id)
+    get_remote_emby_source(pool, row_id)
         .await?
         .ok_or_else(|| AppError::Internal("创建远端 Emby 源后无法读取记录".to_string()))
 }
@@ -3304,6 +3315,206 @@ pub async fn delete_remote_emby_source(pool: &sqlx::PgPool, id: Uuid) -> Result<
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound("远端 Emby 源不存在".to_string()));
     }
+    Ok(())
+}
+
+/// 更新远端 Emby 源。`password` 为 `None` 或未填则保留数据库中原密码。
+pub async fn update_remote_emby_source(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    name: &str,
+    server_url: &str,
+    username: &str,
+    password: Option<&str>,
+    spoofed_user_agent: &str,
+    target_library_id: Uuid,
+    display_mode: &str,
+    remote_view_ids: &[String],
+    remote_views: &Value,
+    enabled: bool,
+    strm_output_path: Option<&str>,
+    sync_metadata: bool,
+    sync_subtitles: bool,
+    token_refresh_interval_secs: i32,
+) -> Result<DbRemoteEmbySource, AppError> {
+    let name = name.trim();
+    let server_url = server_url.trim().trim_end_matches('/');
+    let username = username.trim();
+    let spoofed_user_agent = spoofed_user_agent.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("远端源名称不能为空".to_string()));
+    }
+    if server_url.is_empty() {
+        return Err(AppError::BadRequest("远端 Emby 地址不能为空".to_string()));
+    }
+    if username.is_empty() {
+        return Err(AppError::BadRequest("远端 Emby 用户名不能为空".to_string()));
+    }
+    if get_remote_emby_source(pool, id).await?.is_none() {
+        return Err(AppError::NotFound("远端 Emby 源不存在".to_string()));
+    }
+    if spoofed_user_agent.is_empty() {
+        return Err(AppError::BadRequest("伪装 User-Agent 不能为空".to_string()));
+    }
+    if get_library(pool, target_library_id).await?.is_none() {
+        return Err(AppError::BadRequest("目标媒体库不存在".to_string()));
+    }
+    let display_mode = match display_mode.trim().to_ascii_lowercase().as_str() {
+        "merge" => "merge",
+        _ => "separate",
+    };
+    let mut sanitized_remote_view_ids = Vec::new();
+    let mut selected_remote_view_id_set = HashSet::new();
+    for raw in remote_view_ids {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let lowercase = value.to_ascii_lowercase();
+        if selected_remote_view_id_set.insert(lowercase) {
+            sanitized_remote_view_ids.push(value.to_string());
+        }
+    }
+    let mut sanitized_remote_views = Vec::new();
+    let mut included_view_id_set = HashSet::new();
+    if let Some(items) = remote_views.as_array() {
+        for item in items {
+            let Some(map) = item.as_object() else {
+                continue;
+            };
+            let vid = map
+                .get("Id")
+                .or_else(|| map.get("id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            if vid.is_empty() {
+                continue;
+            }
+            if !selected_remote_view_id_set.is_empty()
+                && !selected_remote_view_id_set.contains(&vid.to_ascii_lowercase())
+            {
+                continue;
+            }
+            let id_lower = vid.to_ascii_lowercase();
+            if !included_view_id_set.insert(id_lower) {
+                continue;
+            }
+            let vname = map
+                .get("Name")
+                .or_else(|| map.get("name"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(vid);
+            let collection_type = map
+                .get("CollectionType")
+                .or_else(|| map.get("collectionType"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            sanitized_remote_views.push(json!({
+                "Id": vid,
+                "Name": vname,
+                "CollectionType": collection_type,
+            }));
+        }
+    }
+    for vid in &sanitized_remote_view_ids {
+        if included_view_id_set.insert(vid.to_ascii_lowercase()) {
+            sanitized_remote_views.push(json!({
+                "Id": vid,
+                "Name": vid,
+                "CollectionType": Value::Null,
+            }));
+        }
+    }
+    let sanitized_remote_views = Value::Array(sanitized_remote_views);
+    let strm_trim = strm_output_path.unwrap_or("").trim();
+    let strm_binding: Option<&str> = (!strm_trim.is_empty()).then_some(strm_trim);
+    let token_refresh_interval_secs = token_refresh_interval_secs.clamp(300, 86400 * 30);
+
+    let rows = if let Some(pw) = password.filter(|p| !p.trim().is_empty()) {
+        sqlx::query(
+            r#"
+            UPDATE remote_emby_sources SET
+                name = $2, server_url = $3, username = $4, password = $5,
+                spoofed_user_agent = $6, target_library_id = $7, display_mode = $8,
+                remote_view_ids = $9, remote_views = $10, enabled = $11,
+                strm_output_path = $12, sync_metadata = $13, sync_subtitles = $14,
+                token_refresh_interval_secs = $15, updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(name)
+        .bind(server_url)
+        .bind(username)
+        .bind(pw.trim())
+        .bind(spoofed_user_agent)
+        .bind(target_library_id)
+        .bind(display_mode)
+        .bind(sanitized_remote_view_ids.clone())
+        .bind(&sanitized_remote_views)
+        .bind(enabled)
+        .bind(strm_binding)
+        .bind(sync_metadata)
+        .bind(sync_subtitles)
+        .bind(token_refresh_interval_secs)
+        .execute(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE remote_emby_sources SET
+                name = $2, server_url = $3, username = $4,
+                spoofed_user_agent = $5, target_library_id = $6, display_mode = $7,
+                remote_view_ids = $8, remote_views = $9, enabled = $10,
+                strm_output_path = $11, sync_metadata = $12, sync_subtitles = $13,
+                token_refresh_interval_secs = $14, updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(name)
+        .bind(server_url)
+        .bind(username)
+        .bind(spoofed_user_agent)
+        .bind(target_library_id)
+        .bind(display_mode)
+        .bind(sanitized_remote_view_ids.clone())
+        .bind(&sanitized_remote_views)
+        .bind(enabled)
+        .bind(strm_binding)
+        .bind(sync_metadata)
+        .bind(sync_subtitles)
+        .bind(token_refresh_interval_secs)
+        .execute(pool)
+        .await?
+    };
+    if rows.rows_affected() == 0 {
+        return Err(AppError::NotFound("远端 Emby 源不存在".to_string()));
+    }
+    get_remote_emby_source(pool, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("远端 Emby 源不存在".to_string()))
+}
+
+pub async fn update_remote_emby_source_last_token_refresh(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE remote_emby_sources
+        SET last_token_refresh_at = now(), updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 

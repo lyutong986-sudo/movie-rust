@@ -718,6 +718,18 @@ CREATE TABLE IF NOT EXISTS remote_emby_sources (
     updated_at         timestamptz NOT NULL DEFAULT now()
 );
 
+-- remote_emby STRM/output + 元数据同步（见 ensure_schema）
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS strm_output_path TEXT;
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS sync_metadata BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS sync_subtitles BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS token_refresh_interval_secs INTEGER NOT NULL DEFAULT 3600;
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS last_token_refresh_at TIMESTAMPTZ;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique
     ON remote_emby_sources(lower(name));
 CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_library

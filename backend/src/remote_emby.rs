@@ -11,17 +11,19 @@ use axum::{
     http::{header, HeaderMap, Method, StatusCode},
     response::Response,
 };
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Utc};
+use regex::Regex;
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
-    time::Instant,
+    sync::{Arc, LazyLock},
+    time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
+use walkdir::WalkDir;
 
 const REMOTE_PAGE_SIZE: i64 = 200;
 const PLAYBACK_INFO_CACHE_TTL_SECS: u64 = 300;
@@ -330,6 +332,8 @@ struct RemoteBaseItem {
     studios: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
     tags: Vec<String>,
+    #[serde(default)]
+    media_streams: Vec<RemoteItemMediaStream>,
     media_sources: Option<Vec<RemoteMediaSource>>,
     #[serde(default)]
     image_tags: Option<Value>,
@@ -391,6 +395,26 @@ fn value_to_lossy_string(value: &Value) -> Option<String> {
 #[serde(rename_all = "PascalCase")]
 struct RemoteMediaSource {
     id: String,
+    #[serde(default)]
+    media_streams: Vec<RemoteItemMediaStream>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteItemMediaStream {
+    index: i32,
+    #[serde(rename = "Type")]
+    stream_type: String,
+    #[serde(default)]
+    codec: Option<String>,
+    #[serde(default, rename = "IsExternal")]
+    is_external: Option<bool>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -709,6 +733,22 @@ async fn sync_source_inner(
     }
 
     let source_root = source_root_path(&target_library, source);
+    let playback_token = source
+        .access_token
+        .as_ref()
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| AppError::Internal("远端令牌为空，无法写入 STRM/同步条目".into()))?
+        .clone();
+
+    let strm_workspace = strm_workspace_for_source(source);
+    if let Some(ref workspace) = strm_workspace {
+        let _ = tokio::fs::remove_dir_all(workspace).await.ok();
+        tokio::fs::create_dir_all(workspace)
+            .await
+            .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
+    }
+    let mut tvshow_roots_written: HashSet<PathBuf> = HashSet::new();
+
     if let Some(handle) = &progress {
         handle.set_phase("PreparingTargetLibrary", 5.0);
     }
@@ -812,6 +852,31 @@ async fn sync_source_inner(
                 .await
                 .ok()
                 .flatten();
+                let strm_bundle = match &strm_workspace {
+                    Some(workspace) => {
+                        match write_remote_strm_bundle(
+                            source,
+                            workspace.as_path(),
+                            playback_token.as_str(),
+                            &item,
+                            media_source_id,
+                            &mut tvshow_roots_written,
+                        )
+                        .await
+                        {
+                            Ok(paths) => Some(paths),
+                            Err(error) => {
+                                tracing::warn!(
+                                    remote_item_id = %item.item.id,
+                                    error = %error,
+                                    "STRM 旁路写入失败，回退虚拟路径"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => None,
+                };
                 let upserted = upsert_virtual_media_item(
                     &state.pool,
                     source,
@@ -819,6 +884,18 @@ async fn sync_source_inner(
                     parent_id,
                     media_source_id,
                     analysis.as_ref(),
+                    strm_bundle
+                        .as_ref()
+                        .map(|(p, _, _, _)| p.as_path()),
+                    strm_bundle
+                        .as_ref()
+                        .and_then(|(_, a, _, _)| a.as_ref().map(|p| p.as_path())),
+                    strm_bundle
+                        .as_ref()
+                        .and_then(|(_, _, b, _)| b.as_ref().map(|p| p.as_path())),
+                    strm_bundle
+                        .as_ref()
+                        .and_then(|(_, _, _, l)| l.as_ref().map(|p| p.as_path())),
                 )
                 .await?;
                 if let Some(analysis) = analysis {
@@ -1454,6 +1531,10 @@ async fn upsert_virtual_media_item(
     parent_id: Option<Uuid>,
     media_source_id: Option<&str>,
     analysis: Option<&MediaAnalysisResult>,
+    path_override: Option<&Path>,
+    local_poster: Option<&Path>,
+    local_backdrop: Option<&Path>,
+    local_logo: Option<&Path>,
 ) -> Result<Uuid, AppError> {
     let container = analysis.and_then(|value| value.format.format_name.as_deref());
     let video_codec = analysis.and_then(|value| {
@@ -1479,8 +1560,11 @@ async fn upsert_virtual_media_item(
             media_source_id,
         ),
     );
-    let item_path = build_virtual_item_path(source.id, item.item.id.as_str());
-    let path_ref = Path::new(item_path.as_str());
+    let strm_or_virtual = match path_override {
+        Some(p) => p.to_path_buf(),
+        None => PathBuf::from(build_virtual_item_path(source.id, item.item.id.as_str())),
+    };
+    let path_ref = strm_or_virtual.as_path();
     let item_type = if item.item.item_type.eq_ignore_ascii_case("Episode") {
         "Episode"
     } else {
@@ -1502,6 +1586,10 @@ async fn upsert_virtual_media_item(
         &item.item.image_tags,
         &item.item.backdrop_image_tags,
     );
+    let image_primary_path = local_poster
+        .or_else(|| remote_primary.as_ref().map(|s| Path::new(s.as_str())));
+    let backdrop_path = local_backdrop
+        .or_else(|| remote_backdrop.as_ref().map(|s| Path::new(s.as_str())));
     let empty = Vec::<String>::new();
     let empty_backdrops = Vec::<String>::new();
     let empty_trailers = Vec::<String>::new();
@@ -1532,9 +1620,9 @@ async fn upsert_virtual_media_item(
             studios: &item.item.studios,
             tags: &item.item.tags,
             production_locations: &empty,
-            image_primary_path: remote_primary.as_deref().map(Path::new),
-            backdrop_path: remote_backdrop.as_deref().map(Path::new),
-            logo_path: None,
+            image_primary_path,
+            backdrop_path,
+            logo_path: local_logo,
             thumb_path: None,
             art_path: None,
             banner_path: None,
@@ -1670,7 +1758,7 @@ async fn fetch_remote_items_page_for_view(
         ("IncludeItemTypes".to_string(), "Movie,Episode".to_string()),
         (
             "Fields".to_string(),
-            "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,ProviderIds,Genres,Studios,Tags,MediaSources,ImageTags,BackdropImageTags".to_string(),
+            "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,ImageTags,BackdropImageTags".to_string(),
         ),
         ("EnableTotalRecordCount".to_string(), "true".to_string()),
         ("SortBy".to_string(), "SortName".to_string()),
@@ -2368,7 +2456,6 @@ async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse
     parse_remote_json_response(response, endpoint.as_str()).await
 }
 
-#[allow(dead_code)]
 fn build_relative_strm_path(item: &RemoteSyncItem) -> Option<PathBuf> {
     if item.item.id.trim().is_empty() || item.item.name.trim().is_empty() {
         return None;
@@ -2409,6 +2496,443 @@ fn build_relative_strm_path(item: &RemoteSyncItem) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// 每个远端源独占子目录：`{STRM_OUTPUT_PATH}/{SanitizedName}.{source_simple_uuid}/`
+fn strm_workspace_for_source(source: &DbRemoteEmbySource) -> Option<PathBuf> {
+    let raw = source.strm_output_path.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(
+        Path::new(raw).join(format!(
+            "{}.{}",
+            sanitize_segment(source.name.as_str()),
+            source.id.simple()
+        )),
+    )
+}
+
+static REMOTE_EMBY_STRM_API_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)api_key=[^&#\s\r\n]+").expect("REMOTE_EMBY_STRM_API_KEY_RE")
+});
+
+fn rewrite_strm_line_api_key(line: &str, access_token: &str) -> String {
+    REMOTE_EMBY_STRM_API_KEY_RE
+        .replace_all(line.trim_end(), format!("api_key={access_token}"))
+        .into_owned()
+}
+
+async fn rewrite_strm_api_keys_under_root(root: &Path, access_token: &str) -> Result<(), AppError> {
+    let exists = tokio::fs::try_exists(root)
+        .await
+        .map_err(|e| AppError::Internal(format!("检查 STRM 目录失败: {e}")))?;
+    if !exists {
+        return Ok(());
+    }
+    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let is_strm = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("strm"));
+        if !is_strm {
+            continue;
+        }
+        let raw = tokio::fs::read_to_string(path).await.unwrap_or_default();
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let rewritten = rewrite_strm_line_api_key(line, access_token.trim());
+        if rewritten != line {
+            tokio::fs::write(path, format!("{rewritten}\n"))
+                .await
+                .map_err(|e| AppError::Internal(format!("重写 STRM api_key 失败: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
+fn append_remote_api_key_param(url: &str, token: &str) -> String {
+    if url.contains("api_key=") {
+        return url.to_string();
+    }
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}api_key={token}")
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\"', "&quot;")
+}
+
+fn subtitle_file_extension(codec: Option<&str>) -> &'static str {
+    let raw = codec.unwrap_or("").to_ascii_lowercase();
+    if raw.contains("subrip") || raw == "srt" {
+        return "srt";
+    }
+    if raw.contains("ass") || raw == "ssa" {
+        return "ass";
+    }
+    if raw.contains("vtt") {
+        return "vtt";
+    }
+    if raw.contains("pgs") {
+        return "sup";
+    }
+    "srt"
+}
+
+fn remote_subtitle_stream_url(
+    server_url: &str,
+    remote_item_id: &str,
+    media_source_id: &str,
+    stream_index: i32,
+    ext: &str,
+    token: &str,
+) -> String {
+    let base = normalize_server_url(server_url);
+    format!(
+        "{base}/emby/Videos/{remote_item_id}/{media_source_id}/Subtitles/{stream_index}/Stream.{ext}?api_key={token}",
+    )
+}
+
+fn nfo_header_line() -> &'static str {
+    r#"<?xml version="1.0" encoding="utf-8" standalone="yes"?>"#
+}
+
+fn build_movie_nfo_xml(item: &RemoteSyncItem) -> String {
+    let title = xml_escape(item.item.name.as_str());
+    let plot = item
+        .item
+        .overview
+        .as_deref()
+        .map(xml_escape)
+        .unwrap_or_default();
+    let year_line = item
+        .item
+        .production_year
+        .map(|y| format!("  <year>{y}</year>\n"))
+        .unwrap_or_default();
+    let runtime_line = item
+        .item
+        .run_time_ticks
+        .map(|ticks| {
+            let mins = ((ticks / 10_000_000).max(0) / 60).max(1) as i64;
+            format!("  <runtime>{mins}</runtime>\n")
+        })
+        .unwrap_or_default();
+    format!(
+        "{hdr}\n<movie>\n  <title>{title}</title>\n  <plot>{plot}</plot>\n{year_line}{runtime_line}</movie>\n",
+        hdr = nfo_header_line(),
+    )
+}
+
+fn build_episode_nfo_xml(item: &RemoteSyncItem) -> String {
+    let title = xml_escape(item.item.name.as_str());
+    let show = xml_escape(item.item.series_name.as_deref().unwrap_or(""));
+    let plot = item
+        .item
+        .overview
+        .as_deref()
+        .map(xml_escape)
+        .unwrap_or_default();
+    let sn = item.item.parent_index_number.unwrap_or(1);
+    let en = item.item.index_number.unwrap_or(1);
+    format!(
+        "{hdr}\n<episodedetails>\n  <title>{title}</title>\n  <showtitle>{show}</showtitle>\n  <season>{sn}</season>\n  <episode>{en}</episode>\n  <plot>{plot}</plot>\n</episodedetails>\n",
+        hdr = nfo_header_line(),
+    )
+}
+
+fn build_tvshow_nfo_xml_from_episode(item: &RemoteSyncItem) -> String {
+    let title = xml_escape(item.item.series_name.as_deref().unwrap_or("Unknown Series"));
+    format!(
+        "{hdr}\n<tvshow>\n  <title>{title}</title>\n</tvshow>\n",
+        hdr = nfo_header_line(),
+    )
+}
+
+fn media_source_row<'a>(
+    item: &'a RemoteBaseItem,
+    preferred_msid: Option<&str>,
+) -> Option<(&'a str, &'a [RemoteItemMediaStream])> {
+    let sources = item.media_sources.as_ref()?;
+    if let Some(want) = preferred_msid.filter(|s| !s.trim().is_empty()) {
+        for ms in sources {
+            if ms.id.trim() == want.trim() {
+                return Some((ms.id.as_str(), ms.media_streams.as_slice()));
+            }
+        }
+    }
+    sources
+        .first()
+        .map(|ms| (ms.id.as_str(), ms.media_streams.as_slice()))
+}
+
+fn resolve_media_source_id_for_playback<'a>(
+    remote_item_id: &'a str,
+    msid_opt: Option<&'a str>,
+) -> &'a str {
+    msid_opt
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(remote_item_id)
+}
+
+async fn emby_download_bytes(
+    source: &DbRemoteEmbySource,
+    token: &str,
+    url: &str,
+) -> Result<Vec<u8>, AppError> {
+    let resp = crate::http_client::SHARED
+        .get(url)
+        .header(header::USER_AGENT.as_str(), source.spoofed_user_agent.as_str())
+        .header("X-Emby-Token", token)
+        .header("X-Emby-Authorization", emby_auth_header(source, Some(token)))
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(format!("下载远端资源失败: {e}: {url}")))?;
+    if !resp.status().is_success() {
+        return Err(AppError::Internal(format!(
+            "下载远端 HTTP {} {}",
+            resp.status().as_u16(),
+            url
+        )));
+    }
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| AppError::Internal(format!("读取远端字节失败: {e}")))
+}
+
+async fn write_remote_strm_bundle(
+    source: &DbRemoteEmbySource,
+    workspace_root: &Path,
+    playback_token: &str,
+    item: &RemoteSyncItem,
+    media_source_id: Option<&str>,
+    tvshow_written: &mut HashSet<PathBuf>,
+) -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>, Option<PathBuf>), AppError> {
+    let relative = build_relative_strm_path(item).ok_or_else(|| {
+        AppError::Internal(format!(
+            "无法为远端条目 {} 生成 STRM 相对路径",
+            item.item.id
+        ))
+    })?;
+    let strm_path = workspace_root.join(&relative);
+    if let Some(parent) = strm_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::Internal(format!("创建 STRM 目录失败: {e}")))?;
+    }
+
+    let base = normalize_server_url(&source.server_url);
+    let device_id = format!("movie-rust-{}", source.id.simple());
+    let ms_for_static = resolve_media_source_id_for_playback(item.item.id.as_str(), media_source_id);
+    let stream_line = build_remote_static_stream_url(
+        base.as_str(),
+        item.item.id.as_str(),
+        Some(ms_for_static),
+        playback_token.trim(),
+        device_id.as_str(),
+    );
+    tokio::fs::write(&strm_path, format!("{}\n", stream_line.trim()))
+        .await
+        .map_err(|e| AppError::Internal(format!("写入 STRM 失败: {e}")))?;
+
+    let mut local_poster: Option<PathBuf> = None;
+    let mut local_backdrop: Option<PathBuf> = None;
+    let mut local_logo: Option<PathBuf> = None;
+
+    let sidecar_dir = strm_path
+        .parent()
+        .ok_or_else(|| AppError::Internal("STRM 缺父目录".into()))?;
+
+    if source.sync_metadata {
+        if let Some(tag) = item
+            .item
+            .image_tags
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .and_then(|m| m.get("Primary").and_then(Value::as_str))
+        {
+            let url = append_remote_api_key_param(
+                remote_image_url(base.as_str(), item.item.id.as_str(), "Primary", tag).as_str(),
+                playback_token.trim(),
+            );
+            if let Ok(bytes) = emby_download_bytes(source, playback_token, url.as_str()).await {
+                let path = sidecar_dir.join("poster.jpg");
+                if tokio::fs::write(&path, &bytes).await.is_ok() {
+                    local_poster = Some(path);
+                }
+            }
+        }
+        if let Some(tag) = item.item.backdrop_image_tags.as_ref().and_then(|tags| match tags {
+            Value::Array(arr) => arr.first().and_then(Value::as_str),
+            Value::Object(map) => map.values().next().and_then(Value::as_str),
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        }) {
+            let url = append_remote_api_key_param(
+                remote_image_url(base.as_str(), item.item.id.as_str(), "Backdrop", tag).as_str(),
+                playback_token.trim(),
+            );
+            if let Ok(bytes) = emby_download_bytes(source, playback_token, url.as_str()).await {
+                let path = sidecar_dir.join("backdrop.jpg");
+                if tokio::fs::write(&path, &bytes).await.is_ok() {
+                    local_backdrop = Some(path);
+                }
+            }
+        }
+        if let Some(tag) = item
+            .item
+            .image_tags
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .and_then(|m| m.get("Logo").and_then(Value::as_str))
+        {
+            let url = append_remote_api_key_param(
+                remote_image_url(base.as_str(), item.item.id.as_str(), "Logo", tag).as_str(),
+                playback_token.trim(),
+            );
+            if let Ok(bytes) = emby_download_bytes(source, playback_token, url.as_str()).await {
+                let path = sidecar_dir.join("logo.png");
+                if tokio::fs::write(&path, &bytes).await.is_ok() {
+                    local_logo = Some(path);
+                }
+            }
+        }
+
+        let nfo_body = if item.item.item_type.eq_ignore_ascii_case("Episode") {
+            build_episode_nfo_xml(item)
+        } else {
+            build_movie_nfo_xml(item)
+        };
+        let nfo_path = strm_path.with_extension("nfo");
+        let _ = tokio::fs::write(&nfo_path, nfo_body).await;
+
+        if item.item.item_type.eq_ignore_ascii_case("Episode") {
+            if let Some(series_dir) = strm_path.parent().and_then(Path::parent) {
+                if tvshow_written.insert(series_dir.to_path_buf()) {
+                    let tvshow_path = series_dir.join("tvshow.nfo");
+                    let show_body = build_tvshow_nfo_xml_from_episode(item);
+                    let _ = tokio::fs::write(&tvshow_path, show_body).await;
+                }
+            }
+        }
+    }
+
+    if source.sync_subtitles {
+        if let Some((ms_id, streams)) = media_source_row(&item.item, media_source_id) {
+            let stem = strm_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("media");
+            for stream in streams {
+                if !stream.stream_type.eq_ignore_ascii_case("Subtitle") {
+                    continue;
+                }
+                if !stream.is_external.unwrap_or(false) {
+                    continue;
+                }
+                let ext = subtitle_file_extension(stream.codec.as_deref());
+                let lang = stream
+                    .language
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("und");
+                let safe_lang = sanitize_segment(lang);
+                let fname = format!("{stem}.{safe_lang}.{ext}");
+                let sub_path = sidecar_dir.join(fname);
+                let url = remote_subtitle_stream_url(
+                    base.as_str(),
+                    item.item.id.as_str(),
+                    ms_id,
+                    stream.index,
+                    ext,
+                    playback_token.trim(),
+                );
+                if let Ok(bytes) = emby_download_bytes(source, playback_token, url.as_str()).await {
+                    let _ = tokio::fs::write(&sub_path, bytes).await;
+                }
+            }
+        }
+    }
+
+    Ok((strm_path, local_poster, local_backdrop, local_logo))
+}
+
+async fn refresh_single_remote_strm_tokens(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    workspace: &Path,
+) -> Result<(), AppError> {
+    ensure_authenticated(pool, source, true).await?;
+    let token = source
+        .access_token
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| AppError::Internal("刷新后令牌仍为空".into()))?;
+    rewrite_strm_api_keys_under_root(workspace, token).await?;
+    repository::update_remote_emby_source_last_token_refresh(pool, source.id).await?;
+    Ok(())
+}
+
+async fn run_remote_emby_token_refresh_pass(pool: &sqlx::PgPool) -> Result<(), AppError> {
+    let sources = repository::list_remote_emby_sources(pool).await?;
+    let now = Utc::now();
+    for mut source in sources {
+        if !source.enabled {
+            continue;
+        }
+        let interval_secs = source.token_refresh_interval_secs.max(0);
+        if interval_secs <= 0 {
+            continue;
+        }
+        let Some(workspace) = strm_workspace_for_source(&source) else {
+            continue;
+        };
+        let due = match source.last_token_refresh_at {
+            None => true,
+            Some(ts) => {
+                now.signed_duration_since(ts)
+                    .num_seconds()
+                    .max(-1)
+                    >= i64::from(interval_secs)
+            }
+        };
+        if !due {
+            continue;
+        }
+        if let Err(error) =
+            refresh_single_remote_strm_tokens(pool, &mut source, workspace.as_path()).await
+        {
+            tracing::warn!(
+                source_id = %source.id,
+                source_name = %source.name,
+                error = %error,
+                "远端 STRM api_key 刷新失败"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 每分钟扫描配置了 `token_refresh_interval_secs` 且已设置 STRM 输出目录的源，重写工作区内 `.strm` 内的 `api_key`。
+pub async fn remote_emby_token_refresh_loop(pool: sqlx::PgPool) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        ticker.tick().await;
+        if let Err(error) = run_remote_emby_token_refresh_pass(&pool).await {
+            tracing::warn!(error = %error, "远端 Emby token 刷新批次失败");
+        }
+    }
 }
 
 fn build_local_proxy_url(
