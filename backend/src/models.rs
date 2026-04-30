@@ -2505,25 +2505,41 @@ where
     }
 }
 
-/// 宽松反序列化 `Option<bool>`：空字符串 / 无值 → `None`，支持 "true"/"false"/"1"/"0"。
-/// Emby 客户端经常发送 `IsFavorite=` 或 `IsPlayed=`（空值表示不筛选）。
+/// 宽松反序列化 `Option<bool>`：接受原生 JSON bool、字符串 "true"/"false"/"1"/"0"、
+/// 数值 1/0、空字符串(→None)、null(→None)。
+/// Emby 客户端在查询参数中发送字符串，在 JSON body 中发送原生 bool。
 pub(crate) fn deserialize_option_bool_lenient<'de, D>(
     deserializer: D,
 ) -> Result<Option<bool>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let opt: Option<String> = Option::deserialize(deserializer)?;
-    match opt {
-        None => Ok(None),
-        Some(s) if s.trim().is_empty() => Ok(None),
-        Some(s) => match s.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" => Ok(Some(true)),
-            "false" | "0" => Ok(Some(false)),
-            other => Err(serde::de::Error::custom(format!(
-                "无法将 '{other}' 解析为布尔值"
-            ))),
-        },
+    let val = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match val {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(b)),
+        Some(serde_json::Value::Number(n)) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Some(i != 0))
+            } else {
+                Ok(Some(true))
+            }
+        }
+        Some(serde_json::Value::String(s)) => {
+            if s.trim().is_empty() {
+                return Ok(None);
+            }
+            match s.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" => Ok(Some(true)),
+                "false" | "0" => Ok(Some(false)),
+                other => Err(serde::de::Error::custom(format!(
+                    "无法将 '{other}' 解析为布尔值"
+                ))),
+            }
+        }
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "无法将 {other} 解析为布尔值"
+        ))),
     }
 }
 
