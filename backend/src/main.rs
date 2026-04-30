@@ -67,7 +67,9 @@ async fn main() -> Result<()> {
     let static_dir = config.static_dir.clone();
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
+        .min_connections(config.database_max_connections.min(5))
         .acquire_timeout(std::time::Duration::from_secs(15))
+        .idle_timeout(std::time::Duration::from_secs(600))
         .connect(&config.database_url)
         .await
         .context("连接 PostgreSQL 失败，请检查 DATABASE_URL")?;
@@ -154,6 +156,9 @@ async fn main() -> Result<()> {
     // 返回裸的 Axum 404。例如 `/library/abc` 未命中任何 API，则交由 ServeDir + SPA fallback。
     let app = routes::router(state.clone())
         .fallback_service(spa)
+        .layer(tower_http::compression::CompressionLayer::new()
+            .gzip(true)
+            .br(true))
         .layer(http_trace)
         .layer(build_cors_layer(&state.config));
 

@@ -8932,12 +8932,17 @@ pub async fn get_additional_parts_for_item(
     let total_record_count = grouped_items.len() as i64;
     let start = start_index.max(0) as usize;
     let take = limit.clamp(1, 200) as usize;
-    let page_items = grouped_items.into_iter().skip(start).take(take);
+    let page_items: Vec<_> = grouped_items.into_iter().skip(start).take(take).collect();
 
-    let mut items = Vec::new();
-    for candidate in page_items {
-        items.push(media_item_to_dto(pool, &candidate, Some(user_id), server_id).await?);
-    }
+    let row_ids: Vec<Uuid> = page_items.iter().map(|r| r.id).collect();
+    let user_data_map = get_user_item_data_batch(pool, user_id, &row_ids).await?;
+    let items: Vec<BaseItemDto> = page_items
+        .iter()
+        .map(|item| {
+            let prefetched = Some(user_data_map.get(&item.id).cloned());
+            media_item_to_dto_for_list(item, server_id, prefetched, DtoCountPrefetch::default())
+        })
+        .collect();
 
     Ok(QueryResult {
         items,

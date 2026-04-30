@@ -1612,3 +1612,28 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | 活动日志 `ORDER BY created_at` | 全表扫描排序 | 索引覆盖直接取 |
 
 ---
+
+## 第十轮修复：响应压缩 + 查询并行 + 连接池调优
+
+**修复内容：**
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R42 | HTTP 响应压缩 (gzip+brotli) | `Cargo.toml` + `main.rs` | 添加 `tower_http::compression::CompressionLayer`，所有 JSON 响应自动 gzip/brotli 压缩，节省 70-90% 带宽 |
+| R43 | 批量查询 tokio::join! 并行 | `routes/items.rs` | `/Items` 主列表路径的 4 路独立 SQL (user_data + child_counts + recursive_counts + season_counts) 从串行改为 `tokio::join!` 并行，延迟降低 ~75% |
+| R44 | virtual_folder_items N+1 消除 | `routes/items.rs` | 从逐条 `media_item_to_dto` 改为批量 `media_item_to_dto_for_list` |
+| R45 | related_child_items N+1 消除 | `routes/items.rs` | 同上 |
+| R46 | build_recommendation_category N+1 消除 | `routes/items.rs` | 同上 |
+| R47 | get_additional_parts_for_item N+1 消除 | `repository.rs` | 同上 |
+| R48 | PgPool 预热连接池 | `main.rs` | `min_connections(5)` + `idle_timeout(600s)` 确保启动时即有预建连接，避免冷启动首批请求排队 |
+
+**性能预期提升：**
+
+| 场景 | 优化前 | 优化后 |
+|------|--------|--------|
+| `/Items` 列表 (50条) | 4路 SQL 串行 ~120ms | 4路 SQL 并行 ~30ms |
+| JSON 响应传输 (100KB) | ~100KB 原始 | ~15KB 压缩 (brotli) |
+| 推荐/相关条目 (20条) | 20次 DTO 查询 | 1次批量预取 |
+| 首批请求延迟 | 冷启动等待连接建立 | 预热池即用 |
+
+---

@@ -601,18 +601,22 @@ async fn virtual_folder_items(
     }
 
     let result = repository::list_media_items(&state.pool, options).await?;
-    let mut items = Vec::with_capacity(result.items.len());
-    for item in result.items {
-        items.push(
-            repository::media_item_to_dto(
-                &state.pool,
-                &item,
-                Some(user_id),
+    let row_ids: Vec<uuid::Uuid> = result.items.iter().map(|r| r.id).collect();
+    let user_data_map =
+        repository::get_user_item_data_batch(&state.pool, user_id, &row_ids).await?;
+    let items: Vec<BaseItemDto> = result
+        .items
+        .iter()
+        .map(|item| {
+            let prefetched = Some(user_data_map.get(&item.id).cloned());
+            repository::media_item_to_dto_for_list(
+                item,
                 state.config.server_id,
+                prefetched,
+                repository::DtoCountPrefetch::default(),
             )
-            .await?,
-        );
-    }
+        })
+        .collect();
     Ok(Json(items))
 }
 
@@ -1150,28 +1154,32 @@ async fn media_items_to_dto_result(
     result: QueryResult<crate::models::DbMediaItem>,
     query: &ItemsQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    // 列表接口的 N+1 优化：一次查 user_data、一次查 Folder 子代计数、一次查剧集的季数，
-    // 替代原本 1 条 item = 3~5 次独立 SQL 的模式（50 条列表大约从 150~250 次调用降到 3 次）。
+    // 列表接口的 N+1 优化：4 路批量查询并行执行（tokio::join!），
+    // 替代原本 1 条 item = 3~5 次独立 SQL 的模式。
     let item_ids: Vec<uuid::Uuid> = result.items.iter().map(|item| item.id).collect();
-    let user_data_map =
-        repository::get_user_item_data_batch(&state.pool, user_id, &item_ids).await?;
-
     let folder_ids: Vec<uuid::Uuid> = result
         .items
         .iter()
         .filter(|item| repository::is_folder_item_public(item))
         .map(|item| item.id)
         .collect();
-    let child_counts = repository::count_item_children_batch(&state.pool, &folder_ids).await?;
-    let recursive_counts =
-        repository::count_recursive_children_batch(&state.pool, &folder_ids).await?;
     let series_ids: Vec<uuid::Uuid> = result
         .items
         .iter()
         .filter(|item| item.item_type.eq_ignore_ascii_case("Series"))
         .map(|item| item.id)
         .collect();
-    let season_counts = repository::count_series_seasons_batch(&state.pool, &series_ids).await?;
+
+    let (user_data_map, child_counts, recursive_counts, season_counts) = tokio::join!(
+        repository::get_user_item_data_batch(&state.pool, user_id, &item_ids),
+        repository::count_item_children_batch(&state.pool, &folder_ids),
+        repository::count_recursive_children_batch(&state.pool, &folder_ids),
+        repository::count_series_seasons_batch(&state.pool, &series_ids),
+    );
+    let user_data_map = user_data_map?;
+    let child_counts = child_counts?;
+    let recursive_counts = recursive_counts?;
+    let season_counts = season_counts?;
 
     let mut items = Vec::with_capacity(result.items.len());
     for item in result.items {
@@ -3156,18 +3164,22 @@ async fn related_child_items(
     )
     .await?;
 
-    let mut items = Vec::with_capacity(result.items.len());
-    for item in result.items {
-        items.push(
-            repository::media_item_to_dto(
-                &state.pool,
-                &item,
-                Some(user_id),
+    let row_ids: Vec<uuid::Uuid> = result.items.iter().map(|r| r.id).collect();
+    let user_data_map =
+        repository::get_user_item_data_batch(&state.pool, user_id, &row_ids).await?;
+    let items: Vec<BaseItemDto> = result
+        .items
+        .iter()
+        .map(|item| {
+            let prefetched = Some(user_data_map.get(&item.id).cloned());
+            repository::media_item_to_dto_for_list(
+                item,
                 state.config.server_id,
+                prefetched,
+                repository::DtoCountPrefetch::default(),
             )
-            .await?,
-        );
-    }
+        })
+        .collect();
 
     Ok(items)
 }
@@ -5862,18 +5874,21 @@ async fn build_recommendation_category(
     category_name: &str,
     items: Vec<crate::models::DbMediaItem>,
 ) -> Result<serde_json::Value, AppError> {
-    let mut dtos = Vec::with_capacity(items.len());
-    for item in items {
-        dtos.push(
-            repository::media_item_to_dto(
-                &state.pool,
-                &item,
-                Some(user_id),
+    let row_ids: Vec<uuid::Uuid> = items.iter().map(|r| r.id).collect();
+    let user_data_map =
+        repository::get_user_item_data_batch(&state.pool, user_id, &row_ids).await?;
+    let dtos: Vec<BaseItemDto> = items
+        .iter()
+        .map(|item| {
+            let prefetched = Some(user_data_map.get(&item.id).cloned());
+            repository::media_item_to_dto_for_list(
+                item,
                 state.config.server_id,
+                prefetched,
+                repository::DtoCountPrefetch::default(),
             )
-            .await?,
-        );
-    }
+        })
+        .collect();
     Ok(serde_json::json!({
         "Items": dtos,
         "RecommendationType": recommendation_type,
