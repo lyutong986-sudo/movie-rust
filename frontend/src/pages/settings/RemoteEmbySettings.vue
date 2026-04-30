@@ -405,6 +405,7 @@ async function saveEditor() {
       SyncMetadata: boolean;
       SyncSubtitles: boolean;
       TokenRefreshIntervalSecs: number;
+      ProxyMode: 'proxy' | 'redirect';
     } = {
       Name: p.name.trim(),
       ServerUrl: p.serverUrl.trim(),
