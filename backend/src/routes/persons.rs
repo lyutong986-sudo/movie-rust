@@ -93,7 +93,7 @@ pub async fn get_person_items(
     Ok(Json(items))
 }
 
-fn person_to_base_item(person: PersonDto, server_id: Uuid) -> BaseItemDto {
+pub(crate) fn person_to_base_item(person: PersonDto, server_id: Uuid) -> BaseItemDto {
     let mut item = repository::root_item_dto(server_id);
     let mut image_tags = BTreeMap::new();
     if let Some(tag) = person.primary_image_tag.clone() {

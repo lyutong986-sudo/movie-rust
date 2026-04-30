@@ -3334,9 +3334,17 @@ async fn item_dto(
         ));
     }
 
-    let item = repository::get_media_item(&state.pool, item_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
+        // AfuseKt / Hills 等在「参演人员」等界面用 `/Users/.../Items/{id}` 拉人物详情；
+        // ID 指向 `persons` 而非 `media_items`，与官方 Emby 行为一致。
+        if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
+            return Ok(Json(crate::routes::persons::person_to_base_item(
+                person,
+                state.config.server_id,
+            )));
+        }
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    };
 
     if !is_admin && !repository::user_can_access_item(&state.pool, user_id, item_id).await? {
         return Err(AppError::NotFound("媒体条目不存在".to_string()));

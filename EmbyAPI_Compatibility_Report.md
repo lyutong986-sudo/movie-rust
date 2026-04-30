@@ -132,6 +132,7 @@
 | `PublicSystemInfo.WanAddress` 固定输出 | 未配置公网地址时回退 `LocalAddress`，避免 SDK 字段缺失 | ✅ 已修复 |
 | 播放上报不存在 Item 容错 | `/Sessions/Playing*` 对不存在媒体条目返回 404，不再触发外键 500 | ✅ 已修复 |
 | 前端 TypeScript 构建修复 | 补齐 `BaseItemDto.Status`、`NextUpQueryOptions.seriesId?`、集合查询类型、识别菜单 ref 用法 | ✅ 已修复 |
+| **`/Users/{id}/Items/{personId}` 人物详情** | AfuseKt/Hills 等从「参演人员」进入时用 Items 路径拉 **Person**；`item_dto` 在 `media_items` 无记录时回退 `persons` 表，复用 `person_to_base_item` | ✅ 已修复 |
 
 ---
 
