@@ -13,15 +13,21 @@ use crate::{
 use axum::{
     body::{Body, Bytes},
     extract::{Path, Query, Request, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     response::Response,
     routing::{get, post},
     Json, Router,
 };
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
+use image::{ExtendedColorType, GenericImageView, ImageEncoder, ImageFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::hash_map::DefaultHasher,
     collections::HashMap,
+    hash::{Hash, Hasher},
+    io::Cursor,
     path::PathBuf,
 };
 use tokio::fs;
@@ -1107,10 +1113,11 @@ async fn serve_person_image(
     image_type: String,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
+    let image_query = parse_item_image_query(request.uri());
     let path = resolve_person_image_path(&state, &name, &image_type)
         .await?
         .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
-    serve_image(&path, request).await
+    serve_image(&path, request, &image_query).await
 }
 
 async fn upload_item_image_impl(
@@ -1259,10 +1266,11 @@ async fn serve_genre_image(
     image_type: String,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
+    let image_query = parse_item_image_query(request.uri());
     let path = repository::get_genre_image_path(&state.pool, &name, &image_type)
         .await?
         .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
-    serve_image(&path, request).await
+    serve_image(&path, request, &image_query).await
 }
 
 async fn serve_item_image(
@@ -1273,6 +1281,7 @@ async fn serve_item_image(
     image_index: Option<i32>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
+    let image_query = parse_item_image_query(request.uri());
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
 
@@ -1286,19 +1295,19 @@ async fn serve_item_image(
         let path = chapter
             .image_path
             .ok_or_else(|| AppError::NotFound("章节图片不存在".to_string()))?;
-        return serve_image(&path, request).await;
+        return serve_image(&path, request, &image_query).await;
     }
 
     if let Some(path) =
         repository::get_missing_episode_image_path(&state.pool, item_id, &image_type).await?
     {
-        return serve_image(&path, request).await;
+        return serve_image(&path, request, &image_query).await;
     }
 
     let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
         if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
             if let Some(path) = resolve_person_image_path(&state, &person.id, &image_type).await? {
-                return serve_image(&path, request).await;
+                return serve_image(&path, request, &image_query).await;
             }
             return Err(AppError::NotFound("图片不存在".to_string()));
         }
@@ -1307,13 +1316,13 @@ async fn serve_item_image(
             if normalized.eq_ignore_ascii_case("Primary") {
                 if let Some(path) = library.primary_image_path.as_ref() {
                     if !path.trim().is_empty() {
-                        return serve_image(path, request).await;
+                        return serve_image(path, request, &image_query).await;
                     }
                 }
                 if let Some((_, child_path, _)) =
                     repository::first_library_child_image(&state.pool, library.id).await?
                 {
-                    return serve_image(&child_path, request).await;
+                    return serve_image(&child_path, request, &image_query).await;
                 }
             }
             return Err(AppError::NotFound("图片不存在".to_string()));
@@ -1337,7 +1346,8 @@ async fn serve_item_image(
     .filter(|p| !p.trim().is_empty());
 
     if let Some(path) = path_opt {
-        let result = serve_image(&path, request).await;
+        let method = request.method().clone();
+        let result = serve_image(&path, request, &image_query).await;
         if let Err(AppError::NotFound(_)) = &result {
             if !path.starts_with("http://") && !path.starts_with("https://") {
                 if let Some(fallback_url) =
@@ -1349,9 +1359,10 @@ async fn serve_item_image(
                         "本地图片文件不存在，回退到 TMDB 远程代理"
                     );
                     let fallback_req = Request::builder()
+                        .method(method)
                         .body(Body::empty())
                         .unwrap_or_default();
-                    return serve_remote_image(&fallback_url, fallback_req).await;
+                    return serve_remote_image(&fallback_url, &image_query, fallback_req).await;
                 }
             }
         }
@@ -1365,9 +1376,10 @@ async fn serve_item_image(
             "数据库未配置图片路径，回退到 TMDB 远程代理"
         );
         let fallback_req = Request::builder()
+            .method(request.method().clone())
             .body(Body::empty())
             .unwrap_or_default();
-        return serve_remote_image(&fallback_url, fallback_req).await;
+        return serve_remote_image(&fallback_url, &image_query, fallback_req).await;
     }
 
     Err(AppError::NotFound("图片不存在".to_string()))
@@ -1516,7 +1528,8 @@ async fn serve_user_image(
         .await?
         .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
 
-    serve_image(&path, request).await
+    let image_query = parse_item_image_query(request.uri());
+    serve_image(&path, request, &image_query).await
 }
 
 async fn upload_user_image(
@@ -1591,7 +1604,8 @@ async fn get_remote_image(
         .get("ImageUrl")
         .ok_or_else(|| AppError::BadRequest("缺少 ImageUrl 参数".to_string()))?;
 
-    serve_remote_image(image_url, request).await
+    let image_query = parse_item_image_query(request.uri());
+    serve_remote_image(image_url, &image_query, request).await
 }
 
 fn normalized_user_image_type(image_type: &str) -> String {
@@ -1714,15 +1728,167 @@ async fn resolve_person_image_path(
     Ok(Some(local_path_text))
 }
 
-async fn serve_image(path: &str, request: Request<Body>) -> Result<Response, AppError> {
-    if path.starts_with("http://") || path.starts_with("https://") {
-        serve_remote_image(path, request).await
-    } else {
-        serve_local_path(PathBuf::from(path), request).await
+/// Emby / Jellyfin 风格图片查询：`maxWidth`、`maxHeight`、`quality`、`format` 等。
+#[derive(Debug, Default, Clone)]
+struct ItemImageQuery {
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    width: Option<u32>,
+    height: Option<u32>,
+    quality: Option<u8>,
+    format: Option<String>,
+}
+
+fn parse_item_image_query(uri: &axum::http::Uri) -> ItemImageQuery {
+    let mut q = ItemImageQuery::default();
+    let Some(query_str) = uri.query() else {
+        return q;
+    };
+    for (key, value) in url::form_urlencoded::parse(query_str.as_bytes()) {
+        let k = key.to_ascii_lowercase();
+        match k.as_str() {
+            "maxwidth" => q.max_width = value.parse().ok(),
+            "maxheight" => q.max_height = value.parse().ok(),
+            "width" => q.width = value.parse().ok(),
+            "height" => q.height = value.parse().ok(),
+            "quality" => q.quality = value.parse().ok(),
+            "format" => {
+                let s = value.into_owned();
+                if !s.trim().is_empty() {
+                    q.format = Some(s);
+                }
+            }
+            _ => {}
+        }
+    }
+    q
+}
+
+impl ItemImageQuery {
+    fn needs_processing(&self) -> bool {
+        if self.max_width.is_some()
+            || self.max_height.is_some()
+            || self.width.is_some()
+            || self.height.is_some()
+        {
+            return true;
+        }
+        if let Some(quality) = self.quality {
+            if quality < 100 {
+                return true;
+            }
+        }
+        if let Some(ref f) = self.format {
+            let f = f.trim().to_ascii_lowercase();
+            if matches!(f.as_str(), "png" | "webp" | "jpg" | "jpeg") {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn etag_suffix(&self) -> String {
+        if !self.needs_processing() {
+            return String::new();
+        }
+        let mut h = DefaultHasher::new();
+        self.max_width.hash(&mut h);
+        self.max_height.hash(&mut h);
+        self.width.hash(&mut h);
+        self.height.hash(&mut h);
+        self.quality.hash(&mut h);
+        if let Some(ref f) = self.format {
+            f.to_ascii_lowercase().hash(&mut h);
+        }
+        format!("-t{:x}", h.finish())
     }
 }
 
-async fn serve_local_path(path: PathBuf, request: Request<Body>) -> Result<Response, AppError> {
+fn scale_to_fit(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
+    if w <= max_w && h <= max_h {
+        return (w, h);
+    }
+    let rw = max_w as f64 / w.max(1) as f64;
+    let rh = max_h as f64 / h.max(1) as f64;
+    let r = rw.min(rh).min(1.0);
+    let nw = ((w as f64 * r).round() as u32).max(1);
+    let nh = ((h as f64 * r).round() as u32).max(1);
+    (nw, nh)
+}
+
+fn resolve_target_size(w: u32, h: u32, query: &ItemImageQuery) -> Option<(u32, u32)> {
+    let max_w = query.max_width.or(query.width);
+    let max_h = query.max_height.or(query.height);
+    if max_w.is_none() && max_h.is_none() {
+        return None;
+    }
+    let max_w = max_w.unwrap_or(u32::MAX);
+    let max_h = max_h.unwrap_or(u32::MAX);
+    Some(scale_to_fit(w, h, max_w.max(1), max_h.max(1)))
+}
+
+fn apply_item_image_transform(
+    bytes: &[u8],
+    query: &ItemImageQuery,
+) -> Result<Option<(Vec<u8>, String)>, AppError> {
+    if !query.needs_processing() {
+        return Ok(None);
+    }
+    let img = image::load_from_memory(bytes).map_err(|_| {
+        AppError::Internal("图片解码失败，无法按 Emby 参数缩放或重编码".to_string())
+    })?;
+    let (w, h) = img.dimensions();
+    let img = if let Some((tw, th)) = resolve_target_size(w, h, query) {
+        if tw != w || th != h {
+            img.resize(tw, th, FilterType::Lanczos3)
+        } else {
+            img
+        }
+    } else {
+        img
+    };
+
+    let fmt = query
+        .format
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase());
+    let want_png = matches!(fmt.as_deref(), Some("png"));
+
+    if want_png {
+        let mut out = Vec::new();
+        let mut cursor = Cursor::new(&mut out);
+        img.write_to(&mut cursor, ImageFormat::Png)
+            .map_err(|e| AppError::Internal(format!("PNG 编码失败: {e}")))?;
+        return Ok(Some((out, "image/png".to_string())));
+    }
+
+    let quality = query.quality.unwrap_or(90).clamp(1, 100);
+    let mut out = Vec::new();
+    let rgb = img.to_rgb8();
+    let encoder = JpegEncoder::new_with_quality(&mut out, quality);
+    encoder
+        .write_image(rgb.as_raw(), rgb.width(), rgb.height(), ExtendedColorType::Rgb8)
+        .map_err(|e| AppError::Internal(format!("JPEG 编码失败: {e}")))?;
+    Ok(Some((out, "image/jpeg".to_string())))
+}
+
+async fn serve_image(
+    path: &str,
+    request: Request<Body>,
+    image_query: &ItemImageQuery,
+) -> Result<Response, AppError> {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        serve_remote_image(path, image_query, request).await
+    } else {
+        serve_local_path(PathBuf::from(path), request, image_query).await
+    }
+}
+
+async fn serve_local_path(
+    path: PathBuf,
+    request: Request<Body>,
+    image_query: &ItemImageQuery,
+) -> Result<Response, AppError> {
     let metadata = tokio::fs::metadata(&path).await.map_err(|_| {
         AppError::NotFound("文件不存在".to_string())
     })?;
@@ -1731,14 +1897,11 @@ async fn serve_local_path(path: PathBuf, request: Request<Body>) -> Result<Respo
         .modified()
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
     let size = metadata.len();
-    let etag_raw = format!(
-        "{:x}-{:x}",
-        mtime
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-        size
-    );
+    let mtime_secs = mtime
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let etag_raw = format!("{:x}-{:x}{}", mtime_secs, size, image_query.etag_suffix());
     let etag = format!("\"{}\"", etag_raw);
 
     if let Some(if_none_match) = request.headers().get(header::IF_NONE_MATCH) {
@@ -1754,24 +1917,42 @@ async fn serve_local_path(path: PathBuf, request: Request<Body>) -> Result<Respo
         }
     }
 
-    let content_type = mime_guess::from_path(&path)
+    let declared_type = mime_guess::from_path(&path)
         .first_or_octet_stream()
         .to_string();
     let body_bytes = tokio::fs::read(&path).await.map_err(|e| {
         AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
     })?;
 
+    let (final_bytes, content_type) =
+        match apply_item_image_transform(&body_bytes, image_query)? {
+            Some((b, ct)) => (b, ct),
+            None => (body_bytes, declared_type),
+        };
+
+    let is_head = request.method() == Method::HEAD;
+    let final_len = final_bytes.len();
+    let body = if is_head {
+        Body::empty()
+    } else {
+        Body::from(final_bytes)
+    };
+
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::ETAG, &etag)
         .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
-        .header(header::CONTENT_LENGTH, body_bytes.len())
-        .body(Body::from(body_bytes))
+        .header(header::CONTENT_LENGTH, final_len)
+        .body(body)
         .unwrap())
 }
 
-async fn serve_remote_image(url: &str, _request: Request<Body>) -> Result<Response, AppError> {
+async fn serve_remote_image(
+    url: &str,
+    image_query: &ItemImageQuery,
+    request: Request<Body>,
+) -> Result<Response, AppError> {
     let response = SHARED_HTTP_CLIENT
         .get(url)
         .send()
@@ -1783,7 +1964,7 @@ async fn serve_remote_image(url: &str, _request: Request<Body>) -> Result<Respon
         return Err(AppError::NotFound(format!("远程图片不存在: {status}")));
     }
 
-    let content_type = response
+    let declared_content_type = response
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -1794,13 +1975,27 @@ async fn serve_remote_image(url: &str, _request: Request<Body>) -> Result<Respon
         .bytes()
         .await
         .map_err(|e| AppError::Internal(format!("读取远程图片失败: {e}")))?;
+    let slice = body_bytes.as_ref();
 
-    let response = Response::builder()
+    let (final_bytes, content_type) =
+        match apply_item_image_transform(slice, image_query)? {
+            Some((b, ct)) => (b, ct),
+            None => (body_bytes.to_vec(), declared_content_type),
+        };
+
+    let is_head = request.method() == Method::HEAD;
+    let final_len = final_bytes.len();
+    let body = if is_head {
+        Body::empty()
+    } else {
+        Body::from(final_bytes)
+    };
+
+    Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CACHE_CONTROL, "public, max-age=86400")
-        .body(Body::from(body_bytes))
-        .map_err(|e| AppError::Internal(format!("构建图片响应失败: {e}")))?;
-
-    Ok(response)
+        .header(header::CONTENT_LENGTH, final_len)
+        .body(body)
+        .map_err(|e| AppError::Internal(format!("构建图片响应失败: {e}")))?)
 }

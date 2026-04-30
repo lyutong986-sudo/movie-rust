@@ -113,7 +113,7 @@
 | `fetchPlaybackInfo()` | `POST /Items/{id}/PlaybackInfo` + `GET /Items/{id}/PlaybackInfo` | ✅ 已存在 |
 | 播放上报 | `POST /Sessions/Playing` + `/Progress` + `/Stopped` | ✅ 已存在 |
 | 收藏 | `POST/DELETE /Users/{id}/FavoriteItems/{id}` | ✅ 已存在 |
-| 图片 | `GET /Items/{id}/Images/{type}` | ✅ 已存在 |
+| 图片 | `GET /Items/{id}/Images/{type}?maxWidth&maxHeight&quality&format` | ✅ 已支持 Emby 风格缩放与 JPEG 质量 |
 | 剧季 | `GET /Shows/{id}/Seasons` | ✅ 已存在 |
 
 ---
@@ -133,6 +133,7 @@
 | 播放上报不存在 Item 容错 | `/Sessions/Playing*` 对不存在媒体条目返回 404，不再触发外键 500 | ✅ 已修复 |
 | 前端 TypeScript 构建修复 | 补齐 `BaseItemDto.Status`、`NextUpQueryOptions.seriesId?`、集合查询类型、识别菜单 ref 用法 | ✅ 已修复 |
 | **`/Users/{id}/Items/{personId}` 人物详情** | AfuseKt/Hills 等从「参演人员」进入时用 Items 路径拉 **Person**；`item_dto` 在 `media_items` 无记录时回退 `persons` 表，复用 `person_to_base_item` | ✅ 已修复 |
+| **图片查询参数 + TMDB 回退** | AfuseKt 等请求 `GET /Items/{id}/Images/Primary?maxHeight=&maxWidth=&quality=` 时：解析 `maxWidth`/`maxHeight`/`width`/`height`/`quality`/`format`，按 Emby 约定等比缩放、JPEG 质量重编码（`format=png` 输出 PNG）；本地文件缺失走 TMDB 代理时 **保留** 上述查询并同样处理；`HEAD` 返回正确 `Content-Length`、空 body | ✅ 已修复 |
 
 ---
 
