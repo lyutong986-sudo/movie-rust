@@ -5616,7 +5616,7 @@ fn build_direct_stream_url(
     serializer.append_pair("api_key", access_token);
 
     format!(
-        "/videos/{item_emby_id}/original.{container}?{}",
+        "/videos/{item_emby_id}/stream.{container}?Static=true&{}",
         serializer.finish()
     )
 }

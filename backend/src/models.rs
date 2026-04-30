@@ -1444,9 +1444,16 @@ pub struct MediaSourceDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_probing: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iso_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub video_3d_format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
+    pub ignore_dts: bool,
+    pub ignore_index: bool,
+    pub gen_pts_input: bool,
     pub required_http_headers: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub add_api_key_to_direct_stream_url: Option<bool>,
@@ -1465,6 +1472,7 @@ pub struct MediaSourceDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_id: Option<String>,
     pub media_streams: Vec<MediaStreamDto>,
+    pub media_attachments: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]

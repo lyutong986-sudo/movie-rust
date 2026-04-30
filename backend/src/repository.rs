@@ -9101,8 +9101,13 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         buffer_ms: None,
         requires_looping: Some(false),
         supports_probing: Some(true),
+        video_type: Some("VideoFile".to_string()),
+        iso_type: None,
         video_3d_format: None,
-        timestamp: None,
+        timestamp: infer_timestamp(&container),
+        ignore_dts: false,
+        ignore_index: false,
+        gen_pts_input: false,
         required_http_headers: BTreeMap::new(),
         add_api_key_to_direct_stream_url: Some(false),
         transcoding_url: None,
@@ -9113,6 +9118,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         item_id: Some(item_emby_id),
         server_id: None,
         media_streams: Vec::new(),
+        media_attachments: Vec::new(),
     }
 }
 
@@ -9418,7 +9424,7 @@ fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
                 is_external_url: None,
                 is_hearing_impaired: None,
                 is_interlaced: None,
-                is_text_subtitle_stream: None,
+                is_text_subtitle_stream: Some(is_text_based_subtitle(&subtitle.format)),
                 level: None,
                 pixel_format: None,
                 profile: None,
@@ -10120,6 +10126,20 @@ fn first_container(value: &str) -> String {
         .to_string()
 }
 
+fn infer_timestamp(container: &str) -> Option<String> {
+    match container.to_ascii_lowercase().as_str() {
+        "ts" | "m2ts" | "mts" | "mpegts" | "mpeg" | "mpg" => Some("None".to_string()),
+        _ => None,
+    }
+}
+
+fn is_text_based_subtitle(codec: &str) -> bool {
+    matches!(
+        codec.to_ascii_lowercase().as_str(),
+        "srt" | "subrip" | "vtt" | "webvtt" | "ass" | "ssa" | "smi" | "ttml" | "sub" | "lrc"
+    )
+}
+
 fn media_source_name(item: &DbMediaItem, strm_target: Option<&str>) -> String {
     let local_stem = item_file_name(item)
         .and_then(|file_name| {
@@ -10582,6 +10602,7 @@ pub async fn get_media_source_with_streams(
             "subtitle" => "Subtitle".to_string(),
             _ => stream.stream_type.clone(),
         };
+        let is_subtitle_type = stream_type == "Subtitle";
 
         let display_language = display_language(stream.language.as_deref());
         let display_title =
@@ -10633,7 +10654,11 @@ pub async fn get_media_source_with_streams(
             delivery_method,
             delivery_url,
             is_chunked_response: Some(false),
-            supports_external_stream: stream.is_external,
+            supports_external_stream: if stream.is_external {
+                true
+            } else {
+                stream.codec.as_deref().map_or(false, is_text_based_subtitle)
+            },
             path: None,
             aspect_ratio: stream.aspect_ratio.clone(),
             attachment_size: stream.attachment_size,
@@ -10651,7 +10676,13 @@ pub async fn get_media_source_with_streams(
             is_external_url: stream.is_external_url.clone(),
             is_hearing_impaired: Some(stream.is_hearing_impaired),
             is_interlaced: Some(stream.is_interlaced),
-            is_text_subtitle_stream: stream.is_text_subtitle_stream,
+            is_text_subtitle_stream: stream.is_text_subtitle_stream.or_else(|| {
+                if is_subtitle_type {
+                    Some(stream.codec.as_deref().map_or(false, is_text_based_subtitle))
+                } else {
+                    None
+                }
+            }),
             level: stream.level,
             pixel_format: stream.pixel_format.clone(),
             profile: stream.profile.clone(),
@@ -10751,8 +10782,13 @@ pub async fn get_media_source_with_streams(
         buffer_ms: None,
         requires_looping: Some(false),
         supports_probing: Some(true),
+        video_type: Some("VideoFile".to_string()),
+        iso_type: None,
         video_3d_format: None,
-        timestamp: None,
+        timestamp: infer_timestamp(&container),
+        ignore_dts: false,
+        ignore_index: false,
+        gen_pts_input: false,
         required_http_headers: BTreeMap::from([("Accept-Ranges".to_string(), "bytes".to_string())]),
         add_api_key_to_direct_stream_url: Some(false),
         transcoding_url: None,
@@ -10763,6 +10799,7 @@ pub async fn get_media_source_with_streams(
         item_id: Some(item_emby_id),
         server_id: Some(uuid_to_emby_guid(&server_id)),
         media_streams,
+        media_attachments: Vec::new(),
     })
 }
 

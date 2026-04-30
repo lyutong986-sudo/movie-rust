@@ -1821,3 +1821,22 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | R117 | 中 | UserItemData.PlayedPercentage | `repository.rs` | 新增 `user_item_data_to_dto_with_runtime` 函数，在两处主要 DTO 构建路径传入 `runtime_ticks` 计算百分比（含 100% 上限），嵌套 UserData 不再始终 None |
 
 ---
+
+## 第十八轮修复：PlaybackInfo 响应字段对齐 Emby/Jellyfin（8 项）
+
+**审计方法：** 逐项对比 Jellyfin `MediaSourceInfo` 与 Emby SDK `MediaSourceDto`，找出 movie-rust 缺失或错误的字段。
+
+**修复内容：**
+
+| # | 优先级 | 修复 | 文件 | 说明 |
+|---|--------|------|------|------|
+| R118 | 高 | MediaSourceDto 新增 VideoType 字段 | `models.rs` + `repository.rs` | 新增 `video_type: Option<String>`，普通视频文件填 `"VideoFile"`，对齐 Emby/Jellyfin 的 `VideoType` 枚举 |
+| R119 | 高 | MediaSourceDto 新增 IsoType 字段 | `models.rs` | 新增 `iso_type: Option<String>`，用于 DVD/BluRay ISO 影像标识，当前默认 `None` |
+| R120 | 高 | MediaSourceDto 新增 IgnoreDts/IgnoreIndex/GenPtsInput | `models.rs` + `repository.rs` | 新增三个 `bool` 字段，默认 `false`，对齐 Jellyfin 的 ffmpeg 输入参数控制 |
+| R121 | 高 | MediaSourceDto 新增 MediaAttachments | `models.rs` + `repository.rs` | 新增 `media_attachments: Vec<Value>`，默认空数组，对齐 Jellyfin 的附件列表（如字体文件） |
+| R122 | 中 | Timestamp 按容器推断填充 | `repository.rs` | 新增 `infer_timestamp()` 函数，TS/M2TS/MPEG 等容器填 `"None"`（TransportStreamTimestamp 枚举值），其余不输出 |
+| R123 | 中 | IsTextSubtitleStream 智能填充 | `repository.rs` | 外挂字幕根据 codec 调用 `is_text_based_subtitle()` 判断；内部流若 DB 值缺失也自动推导 |
+| R124 | 中 | SupportsExternalStream 逻辑修正 | `repository.rs` | 内嵌字幕的 `supports_external_stream` 从仅 `is_external` 改为按 codec 判断文本字幕支持外送 |
+| R125 | 中 | DirectStreamUrl 格式对齐 Emby | `items.rs` | URL 从 `/videos/{id}/original.{container}?...` 改为 `/videos/{id}/stream.{container}?Static=true&...`，与 Emby 标准一致 |
+
+---
