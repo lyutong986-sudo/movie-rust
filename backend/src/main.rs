@@ -672,6 +672,19 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             ADD COLUMN IF NOT EXISTS metadata_synced_at TIMESTAMPTZ
         "#,
         // -------------------------------------------------------------------
+        // session_play_queue：播放状态扩展列。
+        // -------------------------------------------------------------------
+        r#"
+        ALTER TABLE session_play_queue
+            ADD COLUMN IF NOT EXISTS audio_stream_index    integer,
+            ADD COLUMN IF NOT EXISTS subtitle_stream_index integer,
+            ADD COLUMN IF NOT EXISTS play_method           text,
+            ADD COLUMN IF NOT EXISTS media_source_id       text,
+            ADD COLUMN IF NOT EXISTS volume_level          integer,
+            ADD COLUMN IF NOT EXISTS repeat_mode           text,
+            ADD COLUMN IF NOT EXISTS playback_rate         double precision
+        "#,
+        // -------------------------------------------------------------------
         // session_commands：老库只有 0018 建表但没 consumed_at。
         // -------------------------------------------------------------------
         r#"ALTER TABLE session_commands ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMPTZ"#,

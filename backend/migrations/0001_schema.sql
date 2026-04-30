@@ -736,9 +736,25 @@ CREATE TABLE IF NOT EXISTS session_play_queue (
     position_ticks   bigint,
     is_paused        boolean,
     play_state       text NOT NULL DEFAULT 'Playing',
+    audio_stream_index    integer,
+    subtitle_stream_index integer,
+    play_method      text,
+    media_source_id  text,
+    volume_level     integer,
+    repeat_mode      text,
+    playback_rate    double precision,
     updated_at       timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (session_id, item_id)
 );
+
+ALTER TABLE session_play_queue
+    ADD COLUMN IF NOT EXISTS audio_stream_index    integer,
+    ADD COLUMN IF NOT EXISTS subtitle_stream_index integer,
+    ADD COLUMN IF NOT EXISTS play_method           text,
+    ADD COLUMN IF NOT EXISTS media_source_id       text,
+    ADD COLUMN IF NOT EXISTS volume_level          integer,
+    ADD COLUMN IF NOT EXISTS repeat_mode           text,
+    ADD COLUMN IF NOT EXISTS playback_rate         double precision;
 
 CREATE INDEX IF NOT EXISTS idx_session_play_queue_session
     ON session_play_queue(session_id, sort_index);

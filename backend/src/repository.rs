@@ -48,6 +48,7 @@ struct SessionCommandRow {
 pub struct SessionRuntimeState {
     pub now_playing_item: BaseItemDto,
     pub play_state: Value,
+    pub now_playing_queue: Vec<Value>,
 }
 
 pub async fn user_count(pool: &sqlx::PgPool) -> Result<i64, AppError> {
@@ -6611,6 +6612,16 @@ pub async fn update_user_item_data(
     Ok(user_item_data_to_dto_for_item(data, item_id))
 }
 
+pub struct PlaybackEventExtras {
+    pub audio_stream_index: Option<i32>,
+    pub subtitle_stream_index: Option<i32>,
+    pub play_method: Option<String>,
+    pub media_source_id: Option<String>,
+    pub volume_level: Option<i32>,
+    pub repeat_mode: Option<String>,
+    pub playback_rate: Option<f64>,
+}
+
 pub async fn record_playback_event(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -6620,6 +6631,7 @@ pub async fn record_playback_event(
     position_ticks: Option<i64>,
     is_paused: Option<bool>,
     played_to_completion: Option<bool>,
+    extras: &PlaybackEventExtras,
 ) -> Result<(), AppError> {
     sqlx::query(
         r#"
@@ -6645,14 +6657,25 @@ pub async fn record_playback_event(
                 sqlx::query(
                     r#"
                     INSERT INTO session_play_queue
-                        (session_id, item_id, sort_index, position_ticks, is_paused, play_state, updated_at)
-                    SELECT $1, $2, 0, $3, $4, CASE WHEN COALESCE($4, false) THEN 'Paused' ELSE 'Playing' END, now()
+                        (session_id, item_id, sort_index, position_ticks, is_paused, play_state,
+                         audio_stream_index, subtitle_stream_index, play_method,
+                         media_source_id, volume_level, repeat_mode, playback_rate, updated_at)
+                    SELECT $1, $2, 0, $3, $4,
+                           CASE WHEN COALESCE($4, false) THEN 'Paused' ELSE 'Playing' END,
+                           $5, $6, $7, $8, $9, $10, $11, now()
                     WHERE EXISTS (SELECT 1 FROM sessions WHERE access_token = $1)
                     ON CONFLICT (session_id, item_id)
                     DO UPDATE SET
                         position_ticks = COALESCE(EXCLUDED.position_ticks, session_play_queue.position_ticks),
                         is_paused = COALESCE(EXCLUDED.is_paused, session_play_queue.is_paused),
                         play_state = COALESCE(EXCLUDED.play_state, session_play_queue.play_state),
+                        audio_stream_index = COALESCE(EXCLUDED.audio_stream_index, session_play_queue.audio_stream_index),
+                        subtitle_stream_index = COALESCE(EXCLUDED.subtitle_stream_index, session_play_queue.subtitle_stream_index),
+                        play_method = COALESCE(EXCLUDED.play_method, session_play_queue.play_method),
+                        media_source_id = COALESCE(EXCLUDED.media_source_id, session_play_queue.media_source_id),
+                        volume_level = COALESCE(EXCLUDED.volume_level, session_play_queue.volume_level),
+                        repeat_mode = COALESCE(EXCLUDED.repeat_mode, session_play_queue.repeat_mode),
+                        playback_rate = COALESCE(EXCLUDED.playback_rate, session_play_queue.playback_rate),
                         updated_at = now()
                     "#,
                 )
@@ -6660,6 +6683,13 @@ pub async fn record_playback_event(
                 .bind(item_id)
                 .bind(position_ticks)
                 .bind(is_paused)
+                .bind(&extras.audio_stream_index)
+                .bind(&extras.subtitle_stream_index)
+                .bind(&extras.play_method)
+                .bind(&extras.media_source_id)
+                .bind(&extras.volume_level)
+                .bind(&extras.repeat_mode)
+                .bind(&extras.playback_rate)
                 .execute(pool)
                 .await?;
             } else if event_type == "Stopped" {
@@ -6830,6 +6860,14 @@ pub async fn session_runtime_state(
             q.is_paused AS queue_is_paused,
             q.play_state AS queue_play_state,
             q.updated_at AS queue_updated_at,
+            q.audio_stream_index AS queue_audio_stream_index,
+            q.subtitle_stream_index AS queue_subtitle_stream_index,
+            q.play_method AS queue_play_method,
+            q.media_source_id AS queue_media_source_id,
+            q.volume_level AS queue_volume_level,
+            q.repeat_mode AS queue_repeat_mode,
+            q.playback_rate AS queue_playback_rate,
+            q.playlist_item_id AS queue_playlist_item_id,
             mi.id, mi.parent_id, mi.name, mi.original_title, mi.sort_name, mi.item_type,
             mi.media_type, mi.path, mi.container, mi.overview, mi.production_year,
             mi.official_rating, mi.community_rating, mi.critic_rating, mi.runtime_ticks,
@@ -6863,38 +6901,74 @@ pub async fn session_runtime_state(
     let dto = media_item_to_dto(pool, &item, Some(user_id), server_id).await?;
     let position_ticks: Option<i64> = row.try_get("queue_position_ticks")?;
     let is_paused: Option<bool> = row.try_get("queue_is_paused")?;
-    let play_state: Option<String> = row.try_get("queue_play_state")?;
-    let media_source_id = dto
-        .media_sources
-        .first()
-        .map(|source| source.id.clone())
-        .unwrap_or_else(|| format!("mediasource_{}", dto.id));
-    let play_method = dto
-        .media_sources
-        .first()
-        .map(|source| {
-            if source.transcoding_url.is_some() {
-                "Transcode"
-            } else if source.is_remote {
-                "DirectStream"
-            } else {
-                "DirectPlay"
-            }
+    let _play_state_str: Option<String> = row.try_get("queue_play_state")?;
+    let audio_stream_index: Option<i32> = row.try_get("queue_audio_stream_index")?;
+    let subtitle_stream_index: Option<i32> = row.try_get("queue_subtitle_stream_index")?;
+    let stored_play_method: Option<String> = row.try_get("queue_play_method")?;
+    let stored_media_source_id: Option<String> = row.try_get("queue_media_source_id")?;
+    let volume_level: Option<i32> = row.try_get("queue_volume_level")?;
+    let stored_repeat_mode: Option<String> = row.try_get("queue_repeat_mode")?;
+    let playback_rate: Option<f64> = row.try_get("queue_playback_rate")?;
+    let playlist_item_id: Option<String> = row.try_get("queue_playlist_item_id")?;
+
+    let media_source_id = stored_media_source_id
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            dto.media_sources
+                .first()
+                .map(|source| source.id.clone())
         })
-        .unwrap_or("DirectPlay");
+        .unwrap_or_else(|| format!("mediasource_{}", dto.id));
+
+    let play_method = stored_play_method
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| {
+            dto.media_sources
+                .first()
+                .map(|source| {
+                    if source.transcoding_url.is_some() {
+                        "Transcode".to_string()
+                    } else if source.is_remote {
+                        "DirectStream".to_string()
+                    } else {
+                        "DirectPlay".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "DirectPlay".to_string())
+        });
+
+    let repeat_mode = stored_repeat_mode
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "RepeatNone".to_string());
+
+    let mut play_state_json = json!({
+        "PositionTicks": position_ticks.unwrap_or(0),
+        "CanSeek": true,
+        "IsPaused": is_paused.unwrap_or(false),
+        "IsMuted": false,
+        "VolumeLevel": volume_level.unwrap_or(100),
+        "PlayMethod": play_method,
+        "RepeatMode": repeat_mode,
+        "MediaSourceId": media_source_id,
+        "PlaybackRate": playback_rate.unwrap_or(1.0),
+    });
+    if let Some(idx) = audio_stream_index {
+        play_state_json["AudioStreamIndex"] = json!(idx);
+    }
+    if let Some(idx) = subtitle_stream_index {
+        play_state_json["SubtitleStreamIndex"] = json!(idx);
+    }
+
+    let item_emby_id = dto.id.clone();
+    let now_playing_queue = vec![json!({
+        "Id": item_emby_id,
+        "PlaylistItemId": playlist_item_id.unwrap_or_else(|| item_emby_id.clone()),
+    })];
 
     Ok(Some(SessionRuntimeState {
         now_playing_item: dto,
-        play_state: json!({
-            "PositionTicks": position_ticks.unwrap_or(0),
-            "CanSeek": true,
-            "IsPaused": is_paused.unwrap_or(false),
-            "IsMuted": false,
-            "PlayMethod": play_method,
-            "RepeatMode": "RepeatNone",
-            "MediaSourceId": media_source_id,
-            "State": play_state.unwrap_or_else(|| "Playing".to_string())
-        }),
+        play_state: play_state_json,
+        now_playing_queue,
     }))
 }
 

@@ -142,6 +142,7 @@ async fn list_sessions(
         {
             dto.now_playing_item = Some(runtime.now_playing_item);
             dto.play_state = Some(runtime.play_state);
+            dto.now_playing_queue = runtime.now_playing_queue;
         }
         if let Some(summary) =
             repository::get_session_state_summary(&state.pool, &session.access_token).await?
@@ -569,6 +570,15 @@ async fn record_report(
         .as_deref()
         .or(Some(session.access_token.as_str()))
         .map(ToOwned::to_owned);
+    let extras = repository::PlaybackEventExtras {
+        audio_stream_index: report.audio_stream_index,
+        subtitle_stream_index: report.subtitle_stream_index,
+        play_method: report.play_method.clone(),
+        media_source_id: report.media_source_id.clone(),
+        volume_level: report.volume_level,
+        repeat_mode: report.repeat_mode.clone(),
+        playback_rate: report.playback_rate,
+    };
     repository::record_playback_event(
         &state.pool,
         user_id,
@@ -578,10 +588,11 @@ async fn record_report(
         report.position_ticks,
         report.is_paused,
         report.played_to_completion,
+        &extras,
     )
     .await?;
 
-    // UserDataChanged WebSocket push for playback progress/state changes
+    // UserDataChanged + SessionsChanged WebSocket push
     if let Some(item_id) = report.item_id {
         if matches!(event_type, "Started" | "Progress" | "Stopped") {
             if let Ok(Some(ud)) = repository::get_user_item_data(&state.pool, user_id, item_id).await {
@@ -599,6 +610,10 @@ async fn record_report(
                 });
             }
         }
+    }
+
+    if matches!(event_type, "Started" | "Progress" | "Stopped") {
+        let _ = state.event_tx.send(crate::state::ServerEvent::SessionsChanged);
     }
 
     // 出向 webhook：playback.start / playback.progress / playback.stop
@@ -725,6 +740,15 @@ async fn record_legacy_for_user(
     // Legacy 接口不传 played_to_completion，交给 record_playback_event 的 90% 自动判定
     let played_to_completion = false;
 
+    let extras = repository::PlaybackEventExtras {
+        audio_stream_index: None,
+        subtitle_stream_index: None,
+        play_method: None,
+        media_source_id: query.media_source_id.clone(),
+        volume_level: None,
+        repeat_mode: None,
+        playback_rate: None,
+    };
     repository::record_playback_event(
         &state.pool,
         user_id,
@@ -738,6 +762,7 @@ async fn record_legacy_for_user(
         query.position_ticks,
         query.is_paused,
         Some(played_to_completion),
+        &extras,
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)

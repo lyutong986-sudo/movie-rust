@@ -1991,6 +1991,18 @@ pub struct PlaybackReport {
     pub can_seek: Option<bool>,
     #[serde(default)]
     pub event_name: Option<String>,
+    #[serde(default)]
+    pub audio_stream_index: Option<i32>,
+    #[serde(default)]
+    pub subtitle_stream_index: Option<i32>,
+    #[serde(default)]
+    pub play_method: Option<String>,
+    #[serde(default)]
+    pub volume_level: Option<i32>,
+    #[serde(default)]
+    pub repeat_mode: Option<String>,
+    #[serde(default)]
+    pub playback_rate: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]

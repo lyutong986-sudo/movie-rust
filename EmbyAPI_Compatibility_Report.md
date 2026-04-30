@@ -1931,3 +1931,32 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | R150 | 低 | TMDB credit 匹配查询缺少 `series_id` | `repository.rs` | 同上 |
 
 ---
+
+## 第二十三轮修复：会话系统完整性 & PlaybackReport 字段补全
+
+**审计时间**: 2026-04-30
+
+通过对比本地播放器模板 (`emby_api.dart` / `playback_source_builder.dart`) 和 EmbySDK 的 `Sessions/Playing*` 接口定义，发现会话(Session)系统存在多个字段缺失和功能断裂。
+
+| 编号 | 严重 | 问题 | 文件 | 修复方案 |
+|------|------|------|------|----------|
+| R151 | 高 | `PlaybackReport` 缺少 `AudioStreamIndex`/`SubtitleStreamIndex`/`PlayMethod`/`VolumeLevel`/`RepeatMode`/`PlaybackRate` 字段 | `models.rs` | 为 `PlaybackReport` 结构体添加 6 个新字段 |
+| R152 | 高 | `session_play_queue` 表缺少播放状态扩展列 | `0001_schema.sql`、`main.rs` | 添加 `audio_stream_index`/`subtitle_stream_index`/`play_method`/`media_source_id`/`volume_level`/`repeat_mode`/`playback_rate` 7 列 |
+| R153 | 高 | `record_playback_event` 不保存播放状态扩展字段到 session_play_queue | `repository.rs` | 引入 `PlaybackEventExtras` 结构体，INSERT/UPSERT 时包含所有新字段 |
+| R154 | 高 | `session_runtime_state` 的 PlayState JSON 缺少 `AudioStreamIndex`/`SubtitleStreamIndex`/`VolumeLevel`/`PlaybackRate` | `repository.rs` | 从 DB 读取新字段并动态构建完整 PlayState JSON |
+| R155 | 高 | `record_report` 不发送 `SessionsChanged` WebSocket 事件 | `sessions.rs` | 在 Started/Progress/Stopped 事件后发送 `ServerEvent::SessionsChanged` |
+| R156 | 高 | `PlayMethod` 为推断而非客户端上报 | `repository.rs`、`sessions.rs` | 优先使用客户端上报的 `PlayMethod`，仅在未提供时降级推断 |
+| R157 | 高 | `MediaSourceId` 为推断而非客户端上报 | `repository.rs`、`sessions.rs` | 优先使用客户端上报的 `MediaSourceId`，仅在未提供时降级推断 |
+| R158 | 中 | `NowPlayingQueue` 在会话列表中始终为空数组 | `sessions.rs`、`repository.rs` | `session_runtime_state` 返回含 `{Id, PlaylistItemId}` 的 queue，`list_sessions` 赋值到 DTO |
+
+### 已知保留项
+
+| 问题 | 严重 | 说明 |
+|------|------|------|
+| 附件流用封面图兜底，无法提供 ASS 字体 | 高 | 需要实现 MKV 容器内附件提取（ffmpeg -dump_attachment） |
+| 字幕无 SRT→VTT 格式转换 | 中 | 浏览器/WebView 需要 VTT 格式，需实现转换逻辑 |
+| `Static=true` 未参与 `serve_media_item` 分支决策 | 中 | 应根据 Static 参数强制直连 |
+| WebSocket 不主动发送周期性 KeepAlive | 低 | 当前仅响应客户端 KeepAlive |
+| `SessionsChanged` WebSocket 发送空 Data 而非会话列表 | 低 | 轻量级通知足够，客户端可通过 GET /Sessions 获取完整数据 |
+
+---
