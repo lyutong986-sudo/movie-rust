@@ -5616,7 +5616,7 @@ fn build_direct_stream_url(
     serializer.append_pair("api_key", access_token);
 
     format!(
-        "/videos/{item_emby_id}/stream.{container}?Static=true&{}",
+        "/Videos/{item_emby_id}/stream.{container}?Static=true&{}",
         serializer.finish()
     )
 }
@@ -6362,7 +6362,7 @@ mod tests {
             Some("DEVICEID"),
         );
 
-        assert!(url.starts_with("/videos/ITEMID/original.mkv?"));
+        assert!(url.starts_with("/Videos/ITEMID/original.mkv?"));
         assert!(url.contains("MediaSourceId=mediasource_ITEMID"));
         assert!(url.contains("PlaySessionId=PLAYSESSION"));
         assert!(url.contains("api_key=TOKEN"));

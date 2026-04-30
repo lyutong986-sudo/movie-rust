@@ -1140,7 +1140,7 @@ pub async fn get_items_by_genre(
                 premiere_date, status, end_date, air_days, air_time, series_name, season_name,
                 index_number, index_number_end, parent_index_number, provider_ids, genres,
                 studios, tags, production_locations,
-                width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+                width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
                 date_created, date_modified, image_blur_hashes, 0::bigint AS total_count
             FROM media_items
@@ -1159,7 +1159,7 @@ pub async fn get_items_by_genre(
                 premiere_date, status, end_date, air_days, air_time, series_name, season_name,
                 index_number, index_number_end, parent_index_number, provider_ids, genres,
                 studios, tags, production_locations,
-                width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+                width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
                 date_created, date_modified, image_blur_hashes, 0::bigint AS total_count
             FROM media_items
@@ -1484,7 +1484,7 @@ pub async fn get_items_by_person(
                 mi.premiere_date, mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
                 mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids, mi.genres,
                 mi.studios, mi.tags, mi.production_locations,
-                mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
+                mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
                 mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
                 mi.date_created, mi.date_modified, mi.image_blur_hashes, 0::bigint AS total_count
             FROM media_items mi
@@ -1513,7 +1513,7 @@ pub async fn get_items_by_person(
                 mi.premiere_date, mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
                 mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids, mi.genres,
                 mi.studios, mi.tags, mi.production_locations,
-                mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
+                mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
                 mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
                 mi.date_created, mi.date_modified, mi.image_blur_hashes, 0::bigint AS total_count
             FROM media_items mi
@@ -4473,7 +4473,7 @@ pub async fn list_media_items(
             premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
-            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
             date_created, date_modified, image_blur_hashes, 0::bigint AS total_count
         FROM media_items
@@ -5394,7 +5394,7 @@ pub async fn get_next_up_episodes(
                 mi.index_number, mi.index_number_end, mi.parent_index_number,
                 mi.provider_ids, mi.genres, mi.studios, mi.tags,
                 mi.production_locations, mi.width, mi.height,
-                mi.bit_rate, mi.video_codec, mi.audio_codec,
+                mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec,
                 mi.image_primary_path, mi.backdrop_path, mi.logo_path,
                 mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path,
                 mi.backdrop_paths, mi.remote_trailers,
@@ -5421,7 +5421,7 @@ pub async fn get_next_up_episodes(
             status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids,
             genres, studios, tags, production_locations, width, height,
-            bit_rate, video_codec, audio_codec, image_primary_path,
+            bit_rate, size, video_codec, audio_codec, image_primary_path,
             backdrop_path, logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
             date_created, date_modified, image_blur_hashes, series_id
         FROM ranked
@@ -5527,7 +5527,7 @@ pub async fn get_upcoming_episodes(
             mi.status, mi.end_date, mi.air_days, mi.air_time, mi.series_name, mi.season_name,
             mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
             mi.genres, mi.studios, mi.tags, mi.production_locations, mi.width, mi.height,
-            mi.bit_rate, mi.video_codec, mi.audio_codec, mi.image_primary_path,
+            mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path,
             mi.backdrop_path, mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
             mi.date_created, mi.date_modified, mi.image_blur_hashes
         FROM media_items mi
@@ -6304,7 +6304,7 @@ pub async fn get_media_item(
             premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
-            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
             date_created, date_modified, image_blur_hashes
         FROM media_items
@@ -6328,7 +6328,7 @@ pub async fn list_media_item_children(
             premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
-            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
             date_created, date_modified, image_blur_hashes
         FROM media_items
@@ -6360,7 +6360,7 @@ pub async fn find_items_for_external_person_credit(
             premiere_date, status, end_date, air_days, air_time, series_name, season_name,
             index_number, index_number_end, parent_index_number, provider_ids, genres,
             studios, tags, production_locations,
-            width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+            width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
             date_created, date_modified, image_blur_hashes
         FROM media_items
@@ -6765,7 +6765,7 @@ pub async fn session_play_queue(
             mi.series_name, mi.season_name,
             mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
             mi.genres, mi.studios, mi.tags, mi.production_locations,
-            mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec,
+            mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
             mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
             mi.date_created, mi.date_modified, mi.image_blur_hashes
@@ -6822,7 +6822,7 @@ pub async fn session_runtime_state(
             mi.series_name, mi.season_name,
             mi.index_number, mi.index_number_end, mi.parent_index_number, mi.provider_ids,
             mi.genres, mi.studios, mi.tags, mi.production_locations,
-            mi.width, mi.height, mi.bit_rate, mi.video_codec, mi.audio_codec,
+            mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
             mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
             mi.date_created, mi.date_modified, mi.image_blur_hashes
@@ -9191,7 +9191,7 @@ async fn version_group_items_for_item(
                 premiere_date, status, end_date, air_days, air_time, series_name, season_name,
                 index_number, index_number_end, parent_index_number, provider_ids, genres,
                 studios, tags, production_locations,
-                width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+                width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
                 date_created, date_modified, image_blur_hashes
             FROM media_items
@@ -9248,7 +9248,7 @@ async fn version_group_items_for_item(
                 premiere_date, status, end_date, air_days, air_time, series_name, season_name,
                 index_number, index_number_end, parent_index_number, provider_ids, genres,
                 studios, tags, production_locations,
-                width, height, bit_rate, video_codec, audio_codec, image_primary_path, backdrop_path,
+                width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
                 date_created, date_modified, image_blur_hashes
             FROM media_items
@@ -9440,11 +9440,24 @@ fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
                 channel_layout: None,
                 item_id: Some(item_emby_id.clone()),
                 server_id: None,
-                mime_type: Some("text/vtt".to_string()),
+                mime_type: Some(subtitle_mime_type(&subtitle.format)),
                 subtitle_location_type: Some("External".to_string()),
             }
         })
         .collect()
+}
+
+fn subtitle_mime_type(codec: &str) -> String {
+    match codec.to_ascii_lowercase().as_str() {
+        "srt" | "subrip" => "application/x-subrip".to_string(),
+        "ass" | "ssa" => "text/x-ssa".to_string(),
+        "vtt" | "webvtt" => "text/vtt".to_string(),
+        "sub" => "text/x-microdvd".to_string(),
+        "smi" => "application/smil".to_string(),
+        "ttml" => "application/ttml+xml".to_string(),
+        "lrc" => "application/x-lyrics".to_string(),
+        _ => "application/octet-stream".to_string(),
+    }
 }
 
 fn infer_primary_image_aspect_ratio(
@@ -10051,6 +10064,10 @@ fn item_size(item: &DbMediaItem, is_folder: bool) -> i64 {
         return 0;
     }
 
+    if let Some(size) = item.size.filter(|&s| s > 0) {
+        return size;
+    }
+
     if naming::is_strm(Path::new(&item.path)) {
         return estimated_media_size(item).unwrap_or(0);
     }
@@ -10079,8 +10096,12 @@ fn estimated_media_size(item: &DbMediaItem) -> Option<i64> {
 }
 
 fn media_source_size(item: &DbMediaItem, is_remote: bool) -> Option<i64> {
+    if let Some(size) = item.size.filter(|&s| s > 0) {
+        return Some(size);
+    }
+
     if is_remote {
-        return estimated_media_size(item).or(Some(0));
+        return estimated_media_size(item);
     }
 
     std::fs::metadata(&item.path)
@@ -10118,12 +10139,12 @@ fn effective_container_from_target(item: &DbMediaItem, strm_target: Option<&str>
 }
 
 fn first_container(value: &str) -> String {
-    value
+    let v = value
         .split([',', '|', ';'])
         .next()
         .unwrap_or("mp4")
-        .trim()
-        .to_string()
+        .trim();
+    if v.is_empty() { "mp4".to_string() } else { v.to_string() }
 }
 
 fn infer_timestamp(container: &str) -> Option<String> {
@@ -10317,6 +10338,10 @@ pub async fn update_media_item_metadata(
         .bit_rate
         .as_deref()
         .and_then(|br| br.parse::<i64>().ok());
+    let file_size = format
+        .size
+        .as_deref()
+        .and_then(|s| s.parse::<i64>().ok());
 
     sqlx::query(
         r#"
@@ -10327,8 +10352,9 @@ pub async fn update_media_item_metadata(
             height = COALESCE($4, height),
             runtime_ticks = COALESCE($5, runtime_ticks),
             bit_rate = COALESCE($6, bit_rate),
+            size = COALESCE($7, size),
             date_modified = now()
-        WHERE id = $7
+        WHERE id = $8
         "#,
     )
     .bind(video_codec)
@@ -10337,6 +10363,7 @@ pub async fn update_media_item_metadata(
     .bind(height)
     .bind(runtime_ticks)
     .bind(bit_rate)
+    .bind(file_size)
     .bind(item_id)
     .execute(pool)
     .await?;
@@ -10593,6 +10620,16 @@ pub async fn get_media_source_with_streams(
     let db_streams = get_media_streams(pool, item.id).await?;
     let db_chapters = get_media_chapters(pool, item.id).await?;
 
+    let local_path_early = Path::new(&item.path);
+    let normalized_path_early = item.path.replace('\\', "/");
+    let is_virtual_remote_early = normalized_path_early
+        .to_ascii_uppercase()
+        .starts_with("REMOTE_EMBY/");
+    let strm_target_early = naming::is_strm(local_path_early)
+        .then(|| naming::read_strm_target(local_path_early))
+        .flatten();
+    let is_remote_early = strm_target_early.is_some() || is_virtual_remote_early;
+
     // 转换DbMediaStream为MediaStreamDto
     let mut media_streams = Vec::new();
     for stream in db_streams.iter() {
@@ -10686,7 +10723,7 @@ pub async fn get_media_source_with_streams(
             level: stream.level,
             pixel_format: stream.pixel_format.clone(),
             profile: stream.profile.clone(),
-            protocol: Some("File".to_string()),
+            protocol: Some(if is_remote_early { "Http" } else { "File" }.to_string()),
             real_frame_rate: stream.real_frame_rate,
             ref_frames: stream.ref_frames,
             rotation: stream.rotation,
@@ -10711,16 +10748,8 @@ pub async fn get_media_source_with_streams(
         return Ok(dto);
     }
 
-    let local_path = Path::new(&item.path);
-    let normalized_path = item.path.replace('\\', "/");
-    let is_virtual_remote = normalized_path
-        .to_ascii_uppercase()
-        .starts_with("REMOTE_EMBY/");
-    let strm_target = naming::is_strm(local_path)
-        .then(|| naming::read_strm_target(local_path))
-        .flatten();
-    let container = effective_container_from_target(item, strm_target.as_deref());
-    let is_remote = strm_target.is_some() || is_virtual_remote;
+    let container = effective_container_from_target(item, strm_target_early.as_deref());
+    let is_remote = is_remote_early;
     let size = media_source_size(item, is_remote);
 
     let item_emby_id = uuid_to_emby_guid(&item.id);
@@ -10729,11 +10758,11 @@ pub async fn get_media_source_with_streams(
     Ok(MediaSourceDto {
         chapters: db_chapters.iter().map(chapter_to_value).collect(),
         id: media_source_id.clone(),
-        path: strm_target.clone().unwrap_or_else(|| item.path.clone()),
+        path: strm_target_early.clone().unwrap_or_else(|| item.path.clone()),
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),
         container: container.clone(),
-        name: media_source_name(item, strm_target.as_deref()),
+        name: media_source_name(item, strm_target_early.as_deref()),
         sort_name: None,
         is_remote,
         encoder_path: None,
@@ -10765,13 +10794,7 @@ pub async fn get_media_source_with_streams(
         default_subtitle_stream_index: media_streams
             .iter()
             .find(|s| s.stream_type == "Subtitle" && s.is_default)
-            .map(|s| s.index)
-            .or_else(|| {
-                media_streams
-                    .iter()
-                    .find(|s| s.stream_type == "Subtitle")
-                    .map(|s| s.index)
-            }),
+            .map(|s| s.index),
         run_time_ticks: item.runtime_ticks,
         container_start_time_ticks: None,
         is_infinite_stream: Some(false),

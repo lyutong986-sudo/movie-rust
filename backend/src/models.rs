@@ -103,6 +103,8 @@ pub struct DbMediaItem {
     pub width: Option<i32>,
     pub height: Option<i32>,
     pub bit_rate: Option<i64>,
+    #[sqlx(default)]
+    pub size: Option<i64>,
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     pub image_primary_path: Option<String>,
@@ -247,6 +249,8 @@ pub struct MediaItemRow {
     pub width: Option<i32>,
     pub height: Option<i32>,
     pub bit_rate: Option<i64>,
+    #[sqlx(default)]
+    pub size: Option<i64>,
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     pub image_primary_path: Option<String>,
@@ -302,6 +306,7 @@ impl From<MediaItemRow> for DbMediaItem {
             width: value.width,
             height: value.height,
             bit_rate: value.bit_rate,
+            size: value.size,
             video_codec: value.video_codec,
             audio_codec: value.audio_codec,
             image_primary_path: value.image_primary_path,

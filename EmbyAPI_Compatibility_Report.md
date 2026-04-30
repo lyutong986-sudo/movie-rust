@@ -1800,7 +1800,7 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | # | 修复 | 文件 | 说明 |
 |---|------|------|------|
 | R105 | Http 远程源 SupportsDirectPlay = false | `items.rs` | PlaybackInfo 中对 `is_remote && Protocol=="Http"` 的 MediaSource 设 `supports_direct_play = false`，迫使客户端使用 DirectStream（通过服务器代理）而非 HTTP DirectPlay |
-| R106 | 保留 Size 估算用于 UI 展示 | `repository.rs` | `media_source_size()` 对远程文件仍返回估算值（码率×时长/8），库列表中正常展示文件大小 |
+| R106 | Size 使用 ffprobe 真实值 | `models.rs` + `repository.rs` | `DbMediaItem` 新增 `size: Option<i64>`，`update_media_item_metadata` 保存 `format.size`（ffprobe 探测的真实字节数）；`media_source_size()` 优先使用数据库真实值，仅在无值时对远程文件回退到码率×时长估算 |
 
 ---
 
@@ -1842,5 +1842,22 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | R123 | 中 | IsTextSubtitleStream 智能填充 | `repository.rs` | 外挂字幕根据 codec 调用 `is_text_based_subtitle()` 判断；内部流若 DB 值缺失也自动推导 |
 | R124 | 中 | SupportsExternalStream 逻辑修正 | `repository.rs` | 内嵌字幕的 `supports_external_stream` 从仅 `is_external` 改为按 codec 判断文本字幕支持外送 |
 | R125 | 中 | DirectStreamUrl 格式对齐 Emby | `items.rs` | URL 从 `/videos/{id}/original.{container}?...` 改为 `/videos/{id}/stream.{container}?Static=true&...`，与 Emby 标准一致 |
+
+---
+
+## 第十九轮修复：PlaybackInfo / MediaSource / BaseItemDto 综合审计
+
+**审计时间**: 2026-04-30
+
+通过对比 Emby/Jellyfin 模板，发现并修复以下 6 个遗留问题：
+
+| 编号 | 严重 | 问题 | 文件 | 修复方案 |
+|------|------|------|------|----------|
+| R126 | 高 | `item_size()` 未优先使用数据库 `item.size`，与 `media_source_size()` 逻辑不一致 | `repository.rs` | `item_size()` 新增优先读取 `item.size`（FFprobe 写入的真实大小），仅在 DB 无值时 fallback 到文件系统/估算，与 `media_source_size()` 逻辑对齐 |
+| R127 | 中 | 外挂字幕 `MimeType` 写死 `text/vtt`，SRT/ASS 等格式不正确 | `repository.rs` | 新增 `subtitle_mime_type()` 函数，按 codec 返回正确 MIME：`srt→application/x-subrip`，`ass/ssa→text/x-ssa`，`vtt→text/vtt` 等 |
+| R128 | 中 | `MediaStream.Protocol` 一律为 `File`，远程 HTTP 源应为 `Http` | `repository.rs` | `get_media_source_with_streams` 中将 `is_remote` 判定提前到流循环之前，远程源的 `MediaStream.protocol` 改为 `Http` |
+| R129 | 中 | 无默认字幕时取第一条字幕轨，客户端期望 None/-1（关闭字幕） | `repository.rs` | `default_subtitle_stream_index` 移除 `or_else` 回退逻辑，无 `is_default=true` 的字幕时返回 `None` |
+| R130 | 中 | `first_container()` 在 trim 后可能返回空字符串 | `repository.rs` | 新增空字符串检查，空值时 fallback 到 `"mp4"` |
+| R131 | 低 | `DirectStreamUrl` 使用小写 `/videos/` 不符合 Emby 大写惯例 | `items.rs` | `build_direct_stream_url` 改为 `/Videos/{id}/stream.{container}?Static=true&...` |
 
 ---
