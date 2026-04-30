@@ -408,6 +408,10 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         ALTER TABLE remote_emby_sources
             ADD COLUMN IF NOT EXISTS view_library_map JSONB NOT NULL DEFAULT '{}'::jsonb
         "#,
+        r#"
+        ALTER TABLE remote_emby_sources
+            ADD COLUMN IF NOT EXISTS proxy_mode TEXT NOT NULL DEFAULT 'proxy'
+        "#,
         r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique ON remote_emby_sources (lower(name))"#,
         r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_library ON remote_emby_sources(target_library_id)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_enabled ON remote_emby_sources(enabled)"#,

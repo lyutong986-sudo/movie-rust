@@ -39,7 +39,8 @@ const form = ref({
   strmOutputPath: '',
   syncMetadata: true,
   syncSubtitles: true,
-  tokenRefreshIntervalSecs: 3600
+  tokenRefreshIntervalSecs: 3600,
+  proxyMode: 'proxy' as 'proxy' | 'redirect'
 });
 
 const editOpen = ref(false);
@@ -59,6 +60,7 @@ const editForm = ref({
   syncMetadata: true,
   syncSubtitles: true,
   tokenRefreshIntervalSecs: 3600,
+  proxyMode: 'proxy' as 'proxy' | 'redirect',
   mergedRemoteViews: [] as RemoteEmbyView[]
 });
 
@@ -351,6 +353,7 @@ function openEditor(source: RemoteEmbySource) {
     syncMetadata: source.SyncMetadata !== false,
     syncSubtitles: source.SyncSubtitles !== false,
     tokenRefreshIntervalSecs: source.TokenRefreshIntervalSecs ?? 3600,
+    proxyMode: (source.ProxyMode === 'redirect' ? 'redirect' : 'proxy') as 'proxy' | 'redirect',
     mergedRemoteViews: [...merged.values()]
   };
   editOpen.value = true;
@@ -418,7 +421,8 @@ async function saveEditor() {
       TokenRefreshIntervalSecs: Math.min(
         Math.max(Number(p.tokenRefreshIntervalSecs) || 3600, 300),
         86400 * 30
-      )
+      ),
+      ProxyMode: p.proxyMode
     };
     if (p.password.trim()) {
       payload.Password = p.password;
@@ -501,7 +505,8 @@ async function createSource() {
       TokenRefreshIntervalSecs: Math.min(
         Math.max(Number(payload.tokenRefreshIntervalSecs) || 3600, 300),
         86400 * 30
-      )
+      ),
+      ProxyMode: payload.proxyMode
     });
     saved.value = `已创建远端源：${payload.name.trim()}`;
     form.value.name = '';
@@ -758,6 +763,28 @@ onBeforeUnmount(() => {
           <UFormField label="下载外挂字幕">
             <USwitch v-model="form.syncSubtitles" />
           </UFormField>
+          <UFormField class="lg:col-span-2" label="流量模式">
+            <div class="flex flex-col gap-2">
+              <div class="flex items-start gap-3">
+                <label class="flex cursor-pointer items-center gap-2">
+                  <input type="radio" v-model="form.proxyMode" value="proxy" class="accent-primary" />
+                  <div>
+                    <span class="font-medium text-sm">本地中转（推荐）</span>
+                    <p class="text-muted text-xs">所有媒体流通过本地服务器转发，客户端无需访问远端服务器</p>
+                  </div>
+                </label>
+              </div>
+              <div class="flex items-start gap-3">
+                <label class="flex cursor-pointer items-center gap-2">
+                  <input type="radio" v-model="form.proxyMode" value="redirect" class="accent-primary" />
+                  <div>
+                    <span class="font-medium text-sm">302 直链重定向</span>
+                    <p class="text-muted text-xs">返回 302 重定向到远端直链，节省本地带宽；客户端需能直接访问远端 Emby 服务器</p>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </UFormField>
           <UFormField class="lg:col-span-2" label="远端令牌刷新间隔（秒）">
             <UInput v-model.number="form.tokenRefreshIntervalSecs" type="number" class="w-full max-w-xs" :min="300" />
             <p class="text-muted mt-1 text-xs">
@@ -869,6 +896,12 @@ onBeforeUnmount(() => {
                 侧车：元数据 {{ source.SyncMetadata !== false ? '开' : '关' }} · 外挂字幕
                 {{ source.SyncSubtitles !== false ? '开' : '关' }} · 远端令牌刷新 {{ source.TokenRefreshIntervalSecs ?? 3600 }}
                 秒
+              </p>
+              <p class="text-muted mt-1 text-xs">
+                流量模式：
+                <span :class="source.ProxyMode === 'redirect' ? 'text-warning font-medium' : 'text-success font-medium'">
+                  {{ source.ProxyMode === 'redirect' ? '302 直链重定向（节省带宽）' : '本地中转（默认）' }}
+                </span>
               </p>
               <p v-if="source.LastTokenRefreshAt" class="text-muted text-xs">
                 上次远端令牌刷新：{{ formatDate(source.LastTokenRefreshAt) }}
@@ -1012,6 +1045,28 @@ onBeforeUnmount(() => {
             </UFormField>
             <UFormField label="外挂字幕下载">
               <USwitch v-model="editForm.syncSubtitles" />
+            </UFormField>
+            <UFormField class="lg:col-span-2" label="流量模式">
+              <div class="flex flex-col gap-2">
+                <div class="flex items-start gap-3">
+                  <label class="flex cursor-pointer items-center gap-2">
+                    <input type="radio" v-model="editForm.proxyMode" value="proxy" class="accent-primary" />
+                    <div>
+                      <span class="font-medium text-sm">本地中转（推荐）</span>
+                      <p class="text-muted text-xs">所有媒体流通过本地服务器转发，客户端无需访问远端服务器</p>
+                    </div>
+                  </label>
+                </div>
+                <div class="flex items-start gap-3">
+                  <label class="flex cursor-pointer items-center gap-2">
+                    <input type="radio" v-model="editForm.proxyMode" value="redirect" class="accent-primary" />
+                    <div>
+                      <span class="font-medium text-sm">302 直链重定向</span>
+                      <p class="text-muted text-xs">返回 302 重定向到远端直链，节省本地带宽；客户端需能直接访问远端 Emby 服务器</p>
+                    </div>
+                  </label>
+                </div>
+              </div>
             </UFormField>
             <UFormField class="lg:col-span-2" label="远端令牌刷新间隔（秒）">
               <UInput v-model.number="editForm.tokenRefreshIntervalSecs" type="number" class="max-w-xs" :min="300" />

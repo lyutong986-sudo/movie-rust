@@ -76,8 +76,18 @@ pub struct DbRemoteEmbySource {
     pub last_token_refresh_at: Option<DateTime<Utc>>,
     #[sqlx(default)]
     pub view_library_map: Value,
+    /// 流量模式：`"proxy"`（本地中转，默认）或 `"redirect"`（302 直链，客户端直连远端，节省带宽）
+    #[sqlx(default)]
+    pub proxy_mode: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl DbRemoteEmbySource {
+    /// 是否为直链重定向模式（302 redirect，客户端直连远端）
+    pub fn is_redirect_mode(&self) -> bool {
+        self.proxy_mode.trim().eq_ignore_ascii_case("redirect")
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]

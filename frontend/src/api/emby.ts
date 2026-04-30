@@ -568,6 +568,12 @@ export interface RemoteEmbySource {
   LastTokenRefreshAt?: string;
   /** 独立显示模式下 view_id → 本地库 id 的映射 */
   ViewLibraryMap?: Record<string, string>;
+  /**
+   * 流量模式：
+   * - `"proxy"`（默认）：本地服务器中转所有流量，客户端无需直连远端
+   * - `"redirect"`：返回 302 重定向到远端直链，节省本地带宽（要求客户端能直连远端）
+   */
+  ProxyMode: 'proxy' | 'redirect' | string;
   CreatedAt: string;
   UpdatedAt: string;
 }
@@ -1537,6 +1543,7 @@ export class EmbyApi {
     SyncMetadata?: boolean;
     SyncSubtitles?: boolean;
     TokenRefreshIntervalSecs?: number;
+    ProxyMode?: 'proxy' | 'redirect';
   }) {
     return this.request<RemoteEmbySource>('/api/admin/remote-emby/sources', {
       method: 'POST',
@@ -1561,6 +1568,7 @@ export class EmbyApi {
       SyncMetadata?: boolean;
       SyncSubtitles?: boolean;
       TokenRefreshIntervalSecs?: number;
+      ProxyMode?: 'proxy' | 'redirect';
     }
   ) {
     return this.request<RemoteEmbySource>(`/api/admin/remote-emby/sources/${encodeURIComponent(sourceId)}`, {

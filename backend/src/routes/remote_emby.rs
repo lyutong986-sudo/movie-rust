@@ -92,6 +92,9 @@ struct CreateRemoteEmbySourceRequest {
     sync_subtitles: Option<bool>,
     #[serde(default, alias = "tokenRefreshIntervalSecs", alias = "token_refresh_interval_secs")]
     token_refresh_interval_secs: Option<i32>,
+    /// 流量模式：`"proxy"`（本地中转，默认）或 `"redirect"`（302 直链）
+    #[serde(default, alias = "proxyMode", alias = "proxy_mode")]
+    proxy_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +139,9 @@ struct UpdateRemoteEmbySourceRequest {
     sync_subtitles: Option<bool>,
     #[serde(default, alias = "tokenRefreshIntervalSecs", alias = "token_refresh_interval_secs")]
     token_refresh_interval_secs: Option<i32>,
+    /// 流量模式：`"proxy"`（本地中转，默认）或 `"redirect"`（302 直链）
+    #[serde(default, alias = "proxyMode", alias = "proxy_mode")]
+    proxy_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -186,6 +192,8 @@ struct RemoteEmbySourceDto {
     last_token_refresh_at: Option<String>,
     /// view_id -> local_library_id 映射（separate 模式下自动创建的视图库）
     view_library_map: serde_json::Value,
+    /// 流量模式：`"proxy"`（本地中转）或 `"redirect"`（302 直链）
+    proxy_mode: String,
     created_at: String,
     updated_at: String,
 }
@@ -368,6 +376,7 @@ async fn create_remote_emby_source(
         payload.sync_metadata.unwrap_or(true),
         payload.sync_subtitles.unwrap_or(true),
         payload.token_refresh_interval_secs.unwrap_or(3600),
+        payload.proxy_mode.as_deref().unwrap_or("proxy"),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))
@@ -409,6 +418,7 @@ async fn update_remote_emby_source(
         payload.sync_metadata.unwrap_or(true),
         payload.sync_subtitles.unwrap_or(true),
         payload.token_refresh_interval_secs.unwrap_or(3600),
+        payload.proxy_mode.as_deref().unwrap_or("proxy"),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))
@@ -745,6 +755,11 @@ fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> Remot
             .last_token_refresh_at
             .map(|value| value.to_rfc3339()),
         view_library_map: source.view_library_map,
+        proxy_mode: if source.proxy_mode.trim().is_empty() {
+            "proxy".to_string()
+        } else {
+            source.proxy_mode
+        },
         created_at: source.created_at.to_rfc3339(),
         updated_at: source.updated_at.to_rfc3339(),
     }

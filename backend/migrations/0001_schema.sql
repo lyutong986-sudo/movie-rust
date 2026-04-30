@@ -731,6 +731,9 @@ ALTER TABLE remote_emby_sources
     ADD COLUMN IF NOT EXISTS last_token_refresh_at TIMESTAMPTZ;
 ALTER TABLE remote_emby_sources
     ADD COLUMN IF NOT EXISTS view_library_map jsonb NOT NULL DEFAULT '{}'::jsonb;
+-- proxy_mode: 'proxy'（本地中转，默认）或 'redirect'（302 直链，节省带宽）
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS proxy_mode TEXT NOT NULL DEFAULT 'proxy';
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique
     ON remote_emby_sources(lower(name));

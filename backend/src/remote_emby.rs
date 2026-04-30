@@ -1150,6 +1150,20 @@ async fn proxy_item_stream_internal_with_source(
     method: Method,
     headers: &HeaderMap,
 ) -> Result<Response, AppError> {
+    // --- redirect 模式：302 直链重定向，客户端直连远端，节省本地带宽 ---
+    if source.is_redirect_mode() {
+        let token = ensure_authenticated(&state.pool, source, false).await?;
+        let redirect_url =
+            build_remote_stream_redirect_url(source, remote_item_id, media_source_id, &token);
+        return Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::LOCATION, redirect_url.as_str())
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::empty())
+            .map_err(|e| AppError::Internal(format!("构建重定向响应失败: {e}")));
+    }
+
+    // --- proxy 模式（默认）：本地中转流量 ---
     let remote_response = send_remote_stream_request(
         &state.pool,
         source,
@@ -1181,6 +1195,24 @@ async fn proxy_item_stream_internal_with_source(
     response_builder
         .body(body)
         .map_err(|error| AppError::Internal(format!("构建远端代理响应失败: {error}")))
+}
+
+/// 为 redirect 模式构建远端直播流 URL（含 api_key / MediaSourceId）
+fn build_remote_stream_redirect_url(
+    source: &DbRemoteEmbySource,
+    remote_item_id: &str,
+    media_source_id: Option<&str>,
+    token: &str,
+) -> String {
+    let base = source.server_url.trim_end_matches('/');
+    let mut url = format!(
+        "{base}/emby/Videos/{remote_item_id}/stream?Static=true&api_key={token}"
+    );
+    if let Some(msid) = media_source_id.filter(|s| !s.trim().is_empty()) {
+        url.push_str("&MediaSourceId=");
+        url.push_str(msid);
+    }
+    url
 }
 
 fn source_root_path(library: &DbLibrary, source: &DbRemoteEmbySource) -> PathBuf {
@@ -3004,16 +3036,20 @@ async fn write_remote_strm_bundle(
             .map_err(|e| AppError::Internal(format!("创建 STRM 目录失败: {e}")))?;
     }
 
-    // 写入本地代理 URL：所有流量通过本地 Movie Rust 代理后端转发到远端，
-    // 用户不需要能直接访问远端 Emby 服务器。
-    let signature = build_proxy_signature(source.source_secret, item.item.id.as_str(), media_source_id);
-    let stream_line = build_local_proxy_url(
-        &state.config,
-        source.id,
-        item.item.id.as_str(),
-        media_source_id,
-        signature.as_str(),
-    );
+    // redirect 模式：写入远端直链 URL（含 api_key），客户端直连远端，不消耗本地带宽。
+    // proxy 模式（默认）：写入本地代理 URL，所有流量通过本地 Movie Rust 转发。
+    let stream_line = if source.is_redirect_mode() {
+        build_remote_stream_redirect_url(source, item.item.id.as_str(), media_source_id, playback_token)
+    } else {
+        let signature = build_proxy_signature(source.source_secret, item.item.id.as_str(), media_source_id);
+        build_local_proxy_url(
+            &state.config,
+            source.id,
+            item.item.id.as_str(),
+            media_source_id,
+            signature.as_str(),
+        )
+    };
     tokio::fs::write(&strm_path, format!("{}\n", stream_line.trim()))
         .await
         .map_err(|e| AppError::Internal(format!("写入 STRM 失败: {e}")))?;

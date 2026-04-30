@@ -3321,6 +3321,7 @@ pub async fn create_remote_emby_source(
     sync_metadata: bool,
     sync_subtitles: bool,
     token_refresh_interval_secs: i32,
+    proxy_mode: &str,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
     let server_url = server_url.trim().trim_end_matches('/');
@@ -3418,6 +3419,10 @@ pub async fn create_remote_emby_source(
     }
     let strm_output_path = strm_output_path.map(|s| s.trim()).filter(|s| !s.is_empty());
     let token_refresh_interval_secs = token_refresh_interval_secs.clamp(300, 86400 * 30);
+    let proxy_mode = match proxy_mode.trim().to_ascii_lowercase().as_str() {
+        "redirect" => "redirect",
+        _ => "proxy",
+    };
     let source_secret = Uuid::new_v4();
     let row_id = Uuid::new_v4();
     // remote_views 列类型为 jsonb（单个 JSON 数组），必须 wrap 成 Value::Array
@@ -3427,9 +3432,9 @@ pub async fn create_remote_emby_source(
         INSERT INTO remote_emby_sources (
             id, name, server_url, username, password, spoofed_user_agent, target_library_id,
             display_mode, remote_view_ids, remote_views, enabled, source_secret,
-            strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs
+            strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, proxy_mode
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         "#,
     )
     .bind(row_id)
@@ -3448,6 +3453,7 @@ pub async fn create_remote_emby_source(
     .bind(sync_metadata)
     .bind(sync_subtitles)
     .bind(token_refresh_interval_secs)
+    .bind(proxy_mode)
     .execute(pool)
     .await?;
 
@@ -3485,6 +3491,7 @@ pub async fn update_remote_emby_source(
     sync_metadata: bool,
     sync_subtitles: bool,
     token_refresh_interval_secs: i32,
+    proxy_mode: &str,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
     let server_url = server_url.trim().trim_end_matches('/');
@@ -3583,6 +3590,10 @@ pub async fn update_remote_emby_source(
     let strm_trim = strm_output_path.unwrap_or("").trim();
     let strm_binding: Option<&str> = (!strm_trim.is_empty()).then_some(strm_trim);
     let token_refresh_interval_secs = token_refresh_interval_secs.clamp(300, 86400 * 30);
+    let proxy_mode = match proxy_mode.trim().to_ascii_lowercase().as_str() {
+        "redirect" => "redirect",
+        _ => "proxy",
+    };
 
     let rows = if let Some(pw) = password.filter(|p| !p.trim().is_empty()) {
         sqlx::query(
@@ -3592,7 +3603,7 @@ pub async fn update_remote_emby_source(
                 spoofed_user_agent = $6, target_library_id = $7, display_mode = $8,
                 remote_view_ids = $9, remote_views = $10, enabled = $11,
                 strm_output_path = $12, sync_metadata = $13, sync_subtitles = $14,
-                token_refresh_interval_secs = $15, updated_at = now()
+                token_refresh_interval_secs = $15, proxy_mode = $16, updated_at = now()
             WHERE id = $1
             "#,
         )
@@ -3611,6 +3622,7 @@ pub async fn update_remote_emby_source(
         .bind(sync_metadata)
         .bind(sync_subtitles)
         .bind(token_refresh_interval_secs)
+        .bind(proxy_mode)
         .execute(pool)
         .await?
     } else {
@@ -3621,7 +3633,7 @@ pub async fn update_remote_emby_source(
                 spoofed_user_agent = $5, target_library_id = $6, display_mode = $7,
                 remote_view_ids = $8, remote_views = $9, enabled = $10,
                 strm_output_path = $11, sync_metadata = $12, sync_subtitles = $13,
-                token_refresh_interval_secs = $14, updated_at = now()
+                token_refresh_interval_secs = $14, proxy_mode = $15, updated_at = now()
             WHERE id = $1
             "#,
         )
@@ -3639,6 +3651,7 @@ pub async fn update_remote_emby_source(
         .bind(sync_metadata)
         .bind(sync_subtitles)
         .bind(token_refresh_interval_secs)
+        .bind(proxy_mode)
         .execute(pool)
         .await?
     };
