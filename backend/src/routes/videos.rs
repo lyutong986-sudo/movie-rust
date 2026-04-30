@@ -435,7 +435,7 @@ async fn subtitles_playlist(
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
     let subtitle_index = query.subtitle_stream_index.unwrap_or(0);
 
-    let subtitle_path = repository::subtitle_path_for_stream_index(&item, subtitle_index);
+    let subtitle_path = repository::subtitle_path_for_stream_index(&state.pool, &item, subtitle_index).await;
     let codec = subtitle_path
         .as_deref()
         .and_then(StdPath::extension)
@@ -513,6 +513,12 @@ async fn serve_media_item(
         return proxy_remote_stream(&target, request).await;
     }
 
+    let is_static = query
+        .as_ref()
+        .and_then(|q| q.static_param)
+        .unwrap_or(false);
+
+    if !is_static {
     if let Some(ref q) = query {
         let has_transcoding_params = q.video_codec.is_some()
             || q.audio_codec.is_some()
@@ -627,6 +633,7 @@ async fn serve_media_item(
             }
         }
     }
+    } // end if !is_static
 
     ServeFile::new(path)
         .oneshot(request)
@@ -684,7 +691,7 @@ async fn subtitle_stream(
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
-    serve_subtitle(&state, item_id, path.index, request).await
+    serve_subtitle(&state, item_id, path.index, Some(&path._format), request).await
 }
 
 async fn subtitle_stream_legacy(
@@ -696,7 +703,7 @@ async fn subtitle_stream_legacy(
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
-    serve_subtitle(&state, item_id, path.index, request).await
+    serve_subtitle(&state, item_id, path.index, Some(&path._format), request).await
 }
 
 async fn subtitle_stream_with_start(
@@ -708,7 +715,7 @@ async fn subtitle_stream_with_start(
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
-    serve_subtitle(&state, item_id, path.index, request).await
+    serve_subtitle(&state, item_id, path.index, Some(&path._format), request).await
 }
 
 async fn subtitle_stream_with_start_legacy(
@@ -720,7 +727,7 @@ async fn subtitle_stream_with_start_legacy(
         .map_err(|_| AppError::BadRequest(format!("无效的项目 ID 格式: {}", path.item_id)))?;
     let session = auth::require_auth(&state, request.headers(), request.uri().query()).await?;
     auth::ensure_item_access(&state, &session, item_id, MediaAccessKind::Playback).await?;
-    serve_subtitle(&state, item_id, path.index, request).await
+    serve_subtitle(&state, item_id, path.index, Some(&path._format), request).await
 }
 
 async fn subtitle_descriptor(
@@ -1188,16 +1195,43 @@ async fn serve_subtitle(
     state: &AppState,
     item_id: Uuid,
     stream_index: i32,
+    requested_format: Option<&str>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-    let path = repository::subtitle_path_for_stream_index(&item, stream_index)
+    let path = repository::subtitle_path_for_stream_index(&state.pool, &item, stream_index)
+        .await
         .ok_or_else(|| AppError::NotFound("字幕不存在".to_string()))?;
 
     if !path.exists() {
         return Err(AppError::NotFound("字幕文件不存在".to_string()));
+    }
+
+    let source_ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let target_fmt = requested_format
+        .map(|f| f.to_ascii_lowercase())
+        .unwrap_or_else(|| source_ext.clone());
+
+    let needs_srt_to_vtt = (target_fmt == "vtt" || target_fmt == "webvtt")
+        && (source_ext == "srt" || source_ext == "subrip");
+
+    if needs_srt_to_vtt {
+        let raw = tokio::fs::read(&path).await.map_err(AppError::Io)?;
+        let text = String::from_utf8_lossy(&raw);
+        let vtt = srt_to_vtt(&text);
+        let body = axum::body::Body::from(vtt.into_bytes());
+        return Ok(axum::http::Response::builder()
+            .status(200)
+            .header("Content-Type", "text/vtt; charset=utf-8")
+            .body(body)
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .into_response());
     }
 
     let content_type = subtitle_content_type_from_path(&path);
@@ -1212,12 +1246,33 @@ async fn serve_subtitle(
     Ok(response)
 }
 
+fn srt_to_vtt(srt: &str) -> String {
+    let mut out = String::with_capacity(srt.len() + 32);
+    out.push_str("WEBVTT\n\n");
+    for line in srt.lines() {
+        if let Some(replaced) = line
+            .find(" --> ")
+            .and_then(|arrow_pos| {
+                let ts = line.replace(',', ".");
+                if ts.len() >= arrow_pos + 5 { Some(ts) } else { None }
+            })
+        {
+            out.push_str(&replaced);
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
 fn subtitle_content_type_from_path(path: &std::path::Path) -> String {
     match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "vtt" | "webvtt" => "text/vtt; charset=utf-8".to_string(),
         "srt" => "application/x-subrip; charset=utf-8".to_string(),
         "ass" | "ssa" => "text/x-ssa; charset=utf-8".to_string(),
-        "sub" => "text/plain; charset=utf-8".to_string(),
+        "sub" => "text/x-microdvd; charset=utf-8".to_string(),
+        "smi" => "application/smil; charset=utf-8".to_string(),
         "ttml" => "application/ttml+xml; charset=utf-8".to_string(),
         _ => "text/plain; charset=utf-8".to_string(),
     }

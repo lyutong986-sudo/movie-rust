@@ -2474,7 +2474,7 @@ async fn remote_search_subtitles_apply(
     // `<媒体目录>/<stem>.<lang>.<format>`，重新枚举 sidecar 字幕，按 path 匹配
     // 最新写入的文件返回其在 MediaStreams 序列中的 index；失败时回退为 -1，
     // 与 Emby 服务端"未确定"的兜底语义一致。
-    let new_index = repository::sidecar_subtitle_stream_index(&item, &sub_path).unwrap_or(-1);
+    let new_index = repository::sidecar_subtitle_stream_index(&state.pool, &item, &sub_path).await.unwrap_or(-1);
 
     Ok((StatusCode::OK, Json(json!({ "NewIndex": new_index }))))
 }

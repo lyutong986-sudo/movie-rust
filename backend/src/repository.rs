@@ -5122,11 +5122,20 @@ pub async fn list_media_items(
         builder.push(" ").push(sort_order).push(" NULLS LAST");
     }
 
+    let effective_limit = options.limit.max(0).min(1_000);
+    if effective_limit == 0 {
+        return Ok(QueryResult {
+            items: Vec::new(),
+            total_record_count,
+            start_index: Some(options.start_index.max(0)),
+        });
+    }
+
     builder
         .push(" OFFSET ")
         .push_bind(options.start_index.max(0))
         .push(" LIMIT ")
-        .push_bind(options.limit.clamp(1, 1_000));
+        .push_bind(effective_limit);
 
     let start_index = options.start_index;
     let rows = builder
@@ -9440,101 +9449,54 @@ pub async fn get_media_sources_for_item(
 ) -> Result<Vec<MediaSourceDto>, AppError> {
     media_sources_for_item(pool, item, server_id).await
 }
-pub fn subtitle_path_for_stream_index(item: &DbMediaItem, stream_index: i32) -> Option<PathBuf> {
-    subtitle_streams_for_item(item)
-        .into_iter()
-        .find(|stream| stream.index == stream_index)
-        .and_then(|stream| stream.path)
-        .map(PathBuf::from)
+pub async fn subtitle_path_for_stream_index(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+    stream_index: i32,
+) -> Option<PathBuf> {
+    let max_db_index: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(index), 0) FROM media_streams WHERE media_item_id = $1",
+    )
+    .bind(item.id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+
+    let sidecar_start_index = max_db_index + 1;
+    let sidecars = naming::sidecar_subtitles(Path::new(&item.path));
+    let offset = stream_index - sidecar_start_index;
+    if offset >= 0 && (offset as usize) < sidecars.len() {
+        Some(sidecars[offset as usize].path.clone())
+    } else {
+        None
+    }
 }
 
 /// 根据已写入磁盘的 sidecar 字幕路径，反查它在 Emby `MediaStreams` 序列中的
 /// 索引（视频路径同目录扫描，按完整 path 匹配）。供字幕下载完成后回填
 /// `SubtitleDownloadResult.NewIndex` 使用。
-pub fn sidecar_subtitle_stream_index(item: &DbMediaItem, sub_path: &Path) -> Option<i32> {
-    let canonical = sub_path.to_string_lossy().to_string();
-    subtitle_streams_for_item(item)
-        .into_iter()
-        .find(|stream| {
-            stream
-                .path
-                .as_deref()
-                .map(|path| path == canonical)
-                .unwrap_or(false)
-        })
-        .map(|stream| stream.index)
-}
+pub async fn sidecar_subtitle_stream_index(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+    sub_path: &Path,
+) -> Option<i32> {
+    let max_db_index: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(index), 0) FROM media_streams WHERE media_item_id = $1",
+    )
+    .bind(item.id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
 
-fn subtitle_streams_for_item(item: &DbMediaItem) -> Vec<MediaStreamDto> {
-    let video_path = Path::new(&item.path);
-    let item_emby_id = uuid_to_emby_guid(&item.id);
-    let media_source_id = format!("mediasource_{item_emby_id}");
-    naming::sidecar_subtitles(video_path)
+    let sidecar_start_index = max_db_index + 1;
+    let canonical = sub_path.to_string_lossy().to_string();
+    naming::sidecar_subtitles(Path::new(&item.path))
         .into_iter()
         .enumerate()
-        .map(|(offset, subtitle)| {
-            let index = 2 + offset as i32;
-            MediaStreamDto {
-                index,
-                stream_type: "Subtitle".to_string(),
-                codec: Some(subtitle.format.clone()),
-                codec_tag: None,
-                language: subtitle.language,
-                display_title: Some(subtitle.title),
-                is_default: false,
-                is_forced: false,
-                width: None,
-                height: None,
-                bit_rate: None,
-                channels: None,
-                sample_rate: None,
-                is_external: true,
-                delivery_method: Some("External".to_string()),
-                delivery_url: Some(format!(
-                    "/Videos/{}/{}/Subtitles/{}/Stream.{}",
-                    item_emby_id, media_source_id, index, subtitle.format
-                )),
-                is_chunked_response: Some(false),
-                supports_external_stream: true,
-                path: Some(subtitle.path.to_string_lossy().to_string()),
-                aspect_ratio: None,
-                attachment_size: None,
-                average_frame_rate: None,
-                bit_depth: None,
-                color_primaries: None,
-                color_space: None,
-                color_transfer: None,
-                display_language: None,
-                extended_video_sub_type: None,
-                extended_video_sub_type_description: None,
-                extended_video_type: None,
-                is_anamorphic: None,
-                is_avc: None,
-                is_external_url: None,
-                is_hearing_impaired: None,
-                is_interlaced: None,
-                is_text_subtitle_stream: Some(is_text_based_subtitle(&subtitle.format)),
-                level: None,
-                pixel_format: None,
-                profile: None,
-                protocol: Some("File".to_string()),
-                real_frame_rate: None,
-                ref_frames: None,
-                rotation: None,
-                stream_start_time_ticks: None,
-                time_base: None,
-                title: None,
-                comment: None,
-                video_range: None,
-                channel_layout: None,
-                item_id: Some(item_emby_id.clone()),
-                server_id: None,
-                mime_type: Some(subtitle_mime_type(&subtitle.format)),
-                subtitle_location_type: Some("External".to_string()),
-            }
-        })
-        .collect()
+        .find(|(_, s)| s.path.to_string_lossy() == canonical)
+        .map(|(offset, _)| sidecar_start_index + offset as i32)
 }
+
 
 fn subtitle_mime_type(codec: &str) -> String {
     match codec.to_ascii_lowercase().as_str() {
@@ -10835,6 +10797,73 @@ pub async fn get_media_source_with_streams(
         dto.server_id = Some(uuid_to_emby_guid(&server_id));
         dto.chapters = db_chapters.iter().map(chapter_to_value).collect();
         return Ok(dto);
+    }
+
+    // Append external sidecar subtitles with index starting after DB streams
+    let max_db_index = media_streams.iter().map(|s| s.index).max().unwrap_or(0);
+    let sidecar_start_index = max_db_index + 1;
+    let item_emby_id_for_subs = uuid_to_emby_guid(&item.id);
+    let media_source_id_for_subs = format!("mediasource_{item_emby_id_for_subs}");
+    for (offset, subtitle) in naming::sidecar_subtitles(Path::new(&item.path)).into_iter().enumerate() {
+        let idx = sidecar_start_index + offset as i32;
+        media_streams.push(MediaStreamDto {
+            index: idx,
+            stream_type: "Subtitle".to_string(),
+            codec: Some(subtitle.format.clone()),
+            codec_tag: None,
+            language: subtitle.language.clone(),
+            display_title: Some(subtitle.title.clone()),
+            is_default: false,
+            is_forced: false,
+            width: None,
+            height: None,
+            bit_rate: None,
+            channels: None,
+            sample_rate: None,
+            is_external: true,
+            delivery_method: Some("External".to_string()),
+            delivery_url: Some(format!(
+                "/Videos/{}/{}/Subtitles/{}/Stream.{}",
+                item_emby_id_for_subs, media_source_id_for_subs, idx, subtitle.format
+            )),
+            is_chunked_response: Some(false),
+            supports_external_stream: true,
+            path: None,
+            aspect_ratio: None,
+            attachment_size: None,
+            average_frame_rate: None,
+            bit_depth: None,
+            color_primaries: None,
+            color_space: None,
+            color_transfer: None,
+            display_language: None,
+            extended_video_sub_type: None,
+            extended_video_sub_type_description: None,
+            extended_video_type: None,
+            is_anamorphic: None,
+            is_avc: None,
+            is_external_url: None,
+            is_hearing_impaired: None,
+            is_interlaced: None,
+            is_text_subtitle_stream: Some(is_text_based_subtitle(&subtitle.format)),
+            level: None,
+            pixel_format: None,
+            profile: None,
+            protocol: Some("File".to_string()),
+            real_frame_rate: None,
+            ref_frames: None,
+            rotation: None,
+            stream_start_time_ticks: None,
+            time_base: None,
+            title: None,
+            comment: None,
+            video_range: None,
+            channel_layout: None,
+            item_id: Some(item_emby_id_for_subs.clone()),
+            server_id: Some(uuid_to_emby_guid(&server_id)),
+            mime_type: Some(subtitle_mime_type(&subtitle.format)),
+            subtitle_location_type: Some("External".to_string()),
+        });
     }
 
     let container = effective_container_from_target(item, strm_target_early.as_deref());

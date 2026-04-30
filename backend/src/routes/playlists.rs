@@ -77,7 +77,11 @@ impl PlaylistDto {
             child_count,
             date_created: playlist.created_at.to_rfc3339(),
             date_modified: playlist.updated_at.to_rfc3339(),
-            primary_image_tag: playlist.image_primary_path.clone(),
+            primary_image_tag: playlist
+                .image_primary_path
+                .as_ref()
+                .filter(|p| !p.is_empty())
+                .map(|_| playlist.updated_at.timestamp().to_string()),
         }
     }
 }

@@ -1949,14 +1949,74 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | R157 | 高 | `MediaSourceId` 为推断而非客户端上报 | `repository.rs`、`sessions.rs` | 优先使用客户端上报的 `MediaSourceId`，仅在未提供时降级推断 |
 | R158 | 中 | `NowPlayingQueue` 在会话列表中始终为空数组 | `sessions.rs`、`repository.rs` | `session_runtime_state` 返回含 `{Id, PlaylistItemId}` 的 queue，`list_sessions` 赋值到 DTO |
 
+---
+
+## 第二十四轮修复：视频流 Static=true + 播放列表封面 + 前后端对齐
+
+**审计时间**: 2026-04-30
+
+通过对比前端 `emby.ts` API 调用与后端路由返回、以及视频流处理逻辑的深度审计，发现以下问题。
+
+| 编号 | 严重 | 问题 | 文件 | 修复方案 |
+|------|------|------|------|----------|
+| R159 | 高 | `Static=true` 参数不参与 `serve_media_item` 直连/转码分支决策 | `videos.rs` | 在转码检查前判断 `static_param == Some(true)`，跳过整个转码分支直接 `ServeFile` |
+| R160 | 中 | `PlaylistDto.PrimaryImageTag` 赋值为文件路径而非缓存标签 | `playlists.rs` | 改为使用 `updated_at.timestamp()` 作为 tag，仅在 `image_primary_path` 非空时生成 |
+
+### 审计确认：前后端基本对齐的项目
+
+| 项目 | 状态 |
+|------|------|
+| `GET /Users/{id}/Views` - CollectionType、ImageTags、Type | 正常 |
+| `GET /Users/{id}/Items/{id}` - ExternalUrls、People、MediaSources、Chapters | 正常（DetailGet 会清空 DirectStreamUrl/TranscodingUrl，需配合 PlaybackInfo） |
+| 播放列表 CRUD 路由完整性 | 正常 |
+| 用户设置 GET/POST | 正常 |
+| 图片 URL 路由 + query 参数支持 | 正常 |
+| DisplayPreferences GET/POST | 正常 |
+| HTTP Range 请求（本地文件 via tower-http、STRM/远程代理） | 正常 |
+| HEAD 请求处理 | 正常 |
+| HLS m3u8 播放列表生成 + 分片路由 | 基本正常（需注意 ffmpeg 绝对 URL 输出场景） |
+
 ### 已知保留项
 
 | 问题 | 严重 | 说明 |
 |------|------|------|
 | 附件流用封面图兜底，无法提供 ASS 字体 | 高 | 需要实现 MKV 容器内附件提取（ffmpeg -dump_attachment） |
-| 字幕无 SRT→VTT 格式转换 | 中 | 浏览器/WebView 需要 VTT 格式，需实现转换逻辑 |
-| `Static=true` 未参与 `serve_media_item` 分支决策 | 中 | 应根据 Static 参数强制直连 |
+| 库视图缺 `BackdropImageTags` | 低 | DbLibrary 无 backdrop 字段，需扩展库表或从子项继承 |
 | WebSocket 不主动发送周期性 KeepAlive | 低 | 当前仅响应客户端 KeepAlive |
 | `SessionsChanged` WebSocket 发送空 Data 而非会话列表 | 低 | 轻量级通知足够，客户端可通过 GET /Sessions 获取完整数据 |
+| HLS playlist rewrite 对绝对 URL 的兼容 | 低 | 若 ffmpeg 输出绝对 URL，仅取文件名可能丢失参数 |
+| `Search/Hints` 返回字段少于官方 Emby | 低 | 当前前端不调用此端点，仅影响 SDK 客户端 |
+| `TotalRecordCount` 与列表查询条件不一致 | 中 | `fast_count_media_items` 的 WHERE 条件少于主查询，复杂筛选下计数可能偏大（待后续统一） |
+| `GenreIds`/`StudioIds` 语义混用名称与 UUID | 中 | 客户端传 UUID 时可能筛选失效，需要建立 genres/studios 独立表或做 UUID→name 映射 |
+
+---
+
+## 第二十五轮修复：字幕系统重构 + 分页 Limit=0 + SRT→VTT 转换
+
+**审计时间**: 2026-04-30
+
+通过对字幕交付链路与列表分页逻辑的深度审计，发现并修复以下严重/高优先问题。
+
+| 编号 | 严重 | 问题 | 文件 | 修复方案 |
+|------|------|------|------|----------|
+| R161 | 严重 | 外挂 sidecar 字幕不出现在 `MediaSources.MediaStreams` 中 | `repository.rs` | 在 `get_media_source_with_streams` 最后追加 sidecar 字幕到 `media_streams`，index 从 `max_db_index + 1` 起编 |
+| R162 | 严重 | 字幕索引不一致：`subtitle_path_for_stream_index` 使用 `2+offset` 硬编码索引，与 API 中 DB 流索引不匹配 → 404 或错字幕 | `repository.rs` | 重写为 async 函数，查询 DB 最大 stream index 后按 `max_db_index + 1 + offset` 定位 sidecar 文件 |
+| R163 | 高 | `Limit=0` 被 `clamp(1, 1000)` 强制为 1，客户端无法仅获取 `TotalRecordCount` | `repository.rs` | 当 `effective_limit == 0` 时直接返回空 items + total_record_count，不执行主查询 |
+| R164 | 高 | 无 SRT→VTT 在线转换，WebView/浏览器播放器无法使用 SRT 字幕 | `videos.rs` | 实现 `srt_to_vtt` 函数：当请求格式为 `.vtt` 且源文件为 `.srt` 时，读取文件内容，替换时间戳分隔符 `,` → `.`，添加 `WEBVTT` 头 |
+| R165 | 低 | `subtitle_content_type_from_path` 中 `.sub` 返回 `text/plain` 而非 `text/x-microdvd`，与 `repository::subtitle_mime_type` 不一致 | `videos.rs` | 统一 `.sub` → `text/x-microdvd; charset=utf-8`，新增 `.smi` → `application/smil; charset=utf-8` |
+
+### 字幕系统修复细节
+
+**修复前问题链**：
+1. FFprobe 扫描仅发现容器内嵌流 → 存入 `media_streams` 表（`is_external = false`）
+2. `get_media_source_with_streams` 只读 DB → 外挂 SRT/ASS 字幕不出现在 API 响应的 `MediaStreams` 列表
+3. `subtitle_path_for_stream_index` 使用 `2 + offset` 硬编码起始索引 → 与 API 展示的 ffprobe 索引不一致
+4. 客户端按 API 返回的索引请求字幕 → 404
+
+**修复后链路**：
+1. `get_media_source_with_streams` 在 DB 流之后追加 sidecar 字幕，index = `max_db_index + 1 + offset`
+2. `subtitle_path_for_stream_index` 异步查询 DB max index，用相同公式定位 sidecar 文件
+3. `sidecar_subtitle_stream_index` 同样异步查询 DB 保持一致
+4. URL 中的 `Stream.{format}` 现在会影响输出：请求 `.vtt` + 源文件 `.srt` → 自动转换
 
 ---
