@@ -179,6 +179,7 @@ function sourceStatus(source: RemoteEmbySource) {
     return `${operation.Phase || operation.Status} (${progress}%)`;
   }
   if (operation?.Done && operation.Status === 'Failed') return '任务失败';
+  if (operation?.Done && operation.Status === 'Cancelled') return '已中断';
   if (!source.Enabled) return '已禁用';
   if (source.LastSyncError) return '上次失败';
   if (source.LastSyncAt) return '最近成功';
@@ -189,6 +190,7 @@ function sourceStatusColor(source: RemoteEmbySource) {
   const operation = sourceOperation(source);
   if (operation && !operation.Done) return 'warning';
   if (operation?.Done && operation.Status === 'Failed') return 'error';
+  if (operation?.Done && operation.Status === 'Cancelled') return 'warning';
   if (!source.Enabled) return 'neutral';
   if (source.LastSyncError) return 'error';
   if (source.LastSyncAt) return 'success';
@@ -218,6 +220,10 @@ function sourceProgressText(source: RemoteEmbySource) {
   }
   if (operation.Status === 'Failed') {
     return `最近任务失败 · 已运行 ${runtime} 秒`;
+  }
+  if (operation.Status === 'Cancelled') {
+    const writtenFiles = operation.Result?.WrittenFiles ?? operation.WrittenFiles ?? 0;
+    return `任务已中断 · 已入库 ${writtenFiles} 个条目 · 运行 ${runtime} 秒`;
   }
   return '';
 }
@@ -621,6 +627,19 @@ async function syncSource(source: RemoteEmbySource) {
   }
 }
 
+async function cancelSync(source: RemoteEmbySource) {
+  const operation = sourceOperation(source);
+  if (!operation || operation.Done) return;
+  error.value = '';
+  try {
+    const updated = await api.cancelRemoteEmbySync(operation.Id);
+    operationBySourceId.value[source.Id] = updated;
+    saved.value = `已请求中断同步：${source.Name}`;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
 onMounted(load);
 onBeforeUnmount(() => {
   stopPolling();
@@ -838,11 +857,22 @@ onBeforeUnmount(() => {
                   variant="soft"
                   size="sm"
                   icon="i-lucide-refresh-ccw"
-                  :loading="isSourceSyncing(source)"
+                  :loading="isSourceSyncing(source) && !sourceOperation(source)?.CancelRequested"
                   :disabled="!canSyncSource(source)"
                   @click="syncSource(source)"
                 >
                   {{ isSourceSyncing(source) ? '同步中' : '立即同步' }}
+                </UButton>
+                <UButton
+                  v-if="isSourceSyncing(source)"
+                  color="warning"
+                  variant="soft"
+                  size="sm"
+                  icon="i-lucide-circle-stop"
+                  :loading="sourceOperation(source)?.CancelRequested"
+                  @click="cancelSync(source)"
+                >
+                  {{ sourceOperation(source)?.CancelRequested ? '取消中…' : '中断同步' }}
                 </UButton>
                 <UButton
                   color="error"

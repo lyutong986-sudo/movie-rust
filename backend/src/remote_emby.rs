@@ -110,6 +110,7 @@ pub struct RemoteSyncProgressSnapshot {
 #[derive(Clone, Default)]
 pub struct RemoteSyncProgress {
     snapshot: Arc<RwLock<RemoteSyncProgressSnapshot>>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RemoteSyncProgress {
@@ -245,6 +246,14 @@ impl RemoteSyncProgress {
             guard.phase = phase;
             guard.progress = progress.clamp(70.0, 99.5);
         });
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn mark_completed(&self) {
@@ -711,6 +720,9 @@ pub async fn sync_source_with_progress(
 
     if let Some(handle) = &progress {
         handle.set_phase("Preparing", 1.0);
+        if handle.is_cancelled() {
+            return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+        }
     }
     let result = sync_source_inner(state, &mut source, progress.clone()).await;
     let sync_state_result = match &result {
@@ -929,6 +941,12 @@ async fn sync_source_inner(
 
         let mut start_index = 0i64;
         loop {
+            if let Some(handle) = &progress {
+                if handle.is_cancelled() {
+                    return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+                }
+            }
+
             let page = fetch_remote_items_page_for_view(
                 &state.pool,
                 source,
@@ -944,6 +962,11 @@ async fn sync_source_inner(
             }
 
             for base_item in page.items {
+                if let Some(handle) = &progress {
+                    if handle.is_cancelled() {
+                        return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+                    }
+                }
                 fetched_count = fetched_count.saturating_add(1);
                 let item = RemoteSyncItem {
                     item: base_item,

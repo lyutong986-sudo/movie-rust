@@ -1615,6 +1615,13 @@ export class EmbyApi {
     return this.request<RemoteEmbySyncOperation[]>(`/api/admin/remote-emby/sync/operations?${params}`);
   }
 
+  async cancelRemoteEmbySync(operationId: string) {
+    return this.request<RemoteEmbySyncOperation>(
+      `/api/admin/remote-emby/sync/operations/${encodeURIComponent(operationId)}/cancel`,
+      { method: 'POST' }
+    );
+  }
+
   async markFavorite(itemId: string, isFavorite: boolean) {
     const userId = this.requireUserId();
     return this.request<BaseItemDto['UserData']>(`/Users/${userId}/FavoriteItems/${itemId}`, {

@@ -45,6 +45,10 @@ pub fn router() -> Router<AppState> {
             get(get_remote_emby_sync_operation),
         )
         .route(
+            "/api/admin/remote-emby/sync/operations/{operation_id}/cancel",
+            post(cancel_remote_emby_sync_operation),
+        )
+        .route(
             "/api/remote-emby/proxy/{source_id}/{remote_item_id}",
             get(proxy_remote_emby_item).head(proxy_remote_emby_item),
         )
@@ -232,7 +236,7 @@ struct RemoteEmbySyncOperationDto {
     monitor_url: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct RemoteEmbySyncOperationState {
     id: Uuid,
     source_id: Uuid,
@@ -249,6 +253,7 @@ struct RemoteEmbySyncOperationState {
     completed_at: Option<DateTime<Utc>>,
     result: Option<RemoteEmbySyncResponse>,
     error: Option<String>,
+    sync_progress_handle: Option<remote_emby::RemoteSyncProgress>,
 }
 
 impl RemoteEmbySyncOperationState {
@@ -543,6 +548,39 @@ async fn get_remote_emby_sync_operation(
     Ok(response)
 }
 
+async fn cancel_remote_emby_sync_operation(
+    session: AuthSession,
+    Path(operation_id): Path<Uuid>,
+) -> Result<Json<RemoteEmbySyncOperationDto>, AppError> {
+    auth::require_admin(&session)?;
+    let mut registry = remote_emby_sync_registry().write().await;
+    let operation = registry
+        .operations
+        .get_mut(&operation_id)
+        .ok_or_else(|| AppError::NotFound("远端同步任务不存在".to_string()))?;
+    if operation.is_done() {
+        return Ok(Json(operation.to_dto()));
+    }
+    if operation.status == "Queued" {
+        operation.status = "Cancelled";
+        operation.phase = "Cancelled".to_string();
+        operation.progress = 100.0;
+        operation.completed_at = Some(Utc::now());
+        let source_id = operation.source_id;
+        let dto = operation.to_dto();
+        if registry.active_operation_ids.get(&source_id).copied() == Some(operation_id) {
+            registry.active_operation_ids.remove(&source_id);
+        }
+        return Ok(Json(dto));
+    }
+    operation.cancel_requested = true;
+    operation.status = "Cancelling";
+    if let Some(handle) = &operation.sync_progress_handle {
+        handle.request_cancel();
+    }
+    Ok(Json(operation.to_dto()))
+}
+
 async fn proxy_remote_emby_item(
     State(state): State<AppState>,
     Path((source_id, remote_item_id)): Path<(Uuid, String)>,
@@ -605,6 +643,7 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
                 completed_at: None,
                 result: None,
                 error: None,
+                sync_progress_handle: None,
             },
         );
 
@@ -642,6 +681,12 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
         }
 
         let progress = remote_emby::RemoteSyncProgress::new();
+        {
+            let mut registry = remote_emby_sync_registry().write().await;
+            if let Some(operation) = registry.operations.get_mut(&operation_id_for_task) {
+                operation.sync_progress_handle = Some(progress.clone());
+            }
+        }
         let poller_progress = progress.clone();
         let poller_operation_id = operation_id_for_task;
         let poller = tokio::spawn(async move {
@@ -654,6 +699,9 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
                 };
                 if operation.is_done() {
                     break;
+                }
+                if operation.cancel_requested {
+                    poller_progress.request_cancel();
                 }
                 operation.phase = if snap.phase.is_empty() {
                     "Running".to_string()
@@ -679,8 +727,13 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
         if let Some(operation) = registry.operations.get_mut(&operation_id_for_task) {
             match sync_result {
                 Ok(result) => {
-                    operation.status = "Succeeded";
-                    operation.phase = "Completed".to_string();
+                    if operation.cancel_requested {
+                        operation.status = "Cancelled";
+                        operation.phase = "Cancelled".to_string();
+                    } else {
+                        operation.status = "Succeeded";
+                        operation.phase = "Completed".to_string();
+                    }
                     operation.progress = 100.0;
                     operation.written_files = result.written_files as u64;
                     operation.result = Some(RemoteEmbySyncResponse {
@@ -694,13 +747,20 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
                     operation.completed_at = Some(Utc::now());
                 }
                 Err(error) => {
-                    operation.status = "Failed";
-                    operation.phase = "Failed".to_string();
+                    if operation.cancel_requested {
+                        operation.status = "Cancelled";
+                        operation.phase = "Cancelled".to_string();
+                        operation.error = None;
+                    } else {
+                        operation.status = "Failed";
+                        operation.phase = "Failed".to_string();
+                        operation.error = Some(error.to_string());
+                    }
                     operation.progress = 100.0;
-                    operation.error = Some(error.to_string());
                     operation.completed_at = Some(Utc::now());
                 }
             }
+            operation.sync_progress_handle = None;
         }
         if registry
             .active_operation_ids
