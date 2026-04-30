@@ -1783,7 +1783,7 @@ pub struct ItemsQuery {
     pub ids: Option<String>,
     #[serde(default, alias = "AnyProviderIdEquals", alias = "anyProviderIdEquals")]
     pub any_provider_id_equals: Option<String>,
-    #[serde(default, alias = "Recursive")]
+    #[serde(default, alias = "Recursive", deserialize_with = "deserialize_option_bool_lenient")]
     pub recursive: Option<bool>,
     #[serde(default, alias = "SearchTerm", alias = "searchTerm")]
     pub search_term: Option<String>,
@@ -1805,13 +1805,13 @@ pub struct ItemsQuery {
     pub filters: Option<String>,
     #[serde(default, alias = "Fields")]
     pub fields: Option<String>,
-    #[serde(default, alias = "EnableImages", alias = "enableImages")]
+    #[serde(default, alias = "EnableImages", alias = "enableImages", deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_images: Option<bool>,
     #[serde(default, alias = "ImageTypeLimit", alias = "imageTypeLimit")]
     pub image_type_limit: Option<i64>,
     #[serde(default, alias = "EnableImageTypes", alias = "enableImageTypes")]
     pub enable_image_types: Option<String>,
-    #[serde(default, alias = "EnableUserData", alias = "enableUserData")]
+    #[serde(default, alias = "EnableUserData", alias = "enableUserData", deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_user_data: Option<bool>,
     #[serde(default, alias = "StartIndex", alias = "startIndex")]
     pub start_index: Option<i64>,
@@ -1819,33 +1819,33 @@ pub struct ItemsQuery {
     pub limit: Option<i64>,
     #[serde(default, alias = "ListItemIds", alias = "listItemIds")]
     pub list_item_ids: Option<String>,
-    #[serde(default, alias = "IsPlayed", alias = "isPlayed")]
+    #[serde(default, alias = "IsPlayed", alias = "isPlayed", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_played: Option<bool>,
-    #[serde(default, alias = "IsFavorite", alias = "isFavorite")]
+    #[serde(default, alias = "IsFavorite", alias = "isFavorite", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_favorite: Option<bool>,
-    #[serde(default, alias = "IsMovie", alias = "isMovie")]
+    #[serde(default, alias = "IsMovie", alias = "isMovie", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_movie: Option<bool>,
-    #[serde(default, alias = "IsSeries", alias = "isSeries")]
+    #[serde(default, alias = "IsSeries", alias = "isSeries", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_series: Option<bool>,
-    #[serde(default, alias = "IsFolder", alias = "isFolder")]
+    #[serde(default, alias = "IsFolder", alias = "isFolder", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_folder: Option<bool>,
-    #[serde(default, alias = "IsHD", alias = "isHD", alias = "isHd")]
+    #[serde(default, alias = "IsHD", alias = "isHD", alias = "isHd", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_hd: Option<bool>,
-    #[serde(default, alias = "Is3D", alias = "is3D", alias = "is3d")]
+    #[serde(default, alias = "Is3D", alias = "is3D", alias = "is3d", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_3d: Option<bool>,
-    #[serde(default, alias = "IsLocked", alias = "isLocked")]
+    #[serde(default, alias = "IsLocked", alias = "isLocked", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_locked: Option<bool>,
-    #[serde(default, alias = "IsPlaceHolder", alias = "isPlaceHolder")]
+    #[serde(default, alias = "IsPlaceHolder", alias = "isPlaceHolder", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_place_holder: Option<bool>,
-    #[serde(default, alias = "HasOverview", alias = "hasOverview")]
+    #[serde(default, alias = "HasOverview", alias = "hasOverview", deserialize_with = "deserialize_option_bool_lenient")]
     pub has_overview: Option<bool>,
-    #[serde(default, alias = "HasSubtitles", alias = "hasSubtitles")]
+    #[serde(default, alias = "HasSubtitles", alias = "hasSubtitles", deserialize_with = "deserialize_option_bool_lenient")]
     pub has_subtitles: Option<bool>,
-    #[serde(default, alias = "HasTrailer", alias = "hasTrailer")]
+    #[serde(default, alias = "HasTrailer", alias = "hasTrailer", deserialize_with = "deserialize_option_bool_lenient")]
     pub has_trailer: Option<bool>,
-    #[serde(default, alias = "HasThemeSong", alias = "hasThemeSong")]
+    #[serde(default, alias = "HasThemeSong", alias = "hasThemeSong", deserialize_with = "deserialize_option_bool_lenient")]
     pub has_theme_song: Option<bool>,
-    #[serde(default, alias = "HasThemeVideo", alias = "hasThemeVideo")]
+    #[serde(default, alias = "HasThemeVideo", alias = "hasThemeVideo", deserialize_with = "deserialize_option_bool_lenient")]
     pub has_theme_video: Option<bool>,
     #[serde(default, alias = "HasSpecialFeature", alias = "hasSpecialFeature")]
     pub has_special_feature: Option<bool>,
@@ -2380,9 +2380,9 @@ pub struct EpisodesQuery {
     pub genres: Option<String>,
     #[serde(default, alias = "OfficialRatings", alias = "officialRatings")]
     pub official_ratings: Option<String>,
-    #[serde(default, alias = "IsPlayed", alias = "isPlayed")]
+    #[serde(default, alias = "IsPlayed", alias = "isPlayed", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_played: Option<bool>,
-    #[serde(default, alias = "IsFavorite", alias = "isFavorite")]
+    #[serde(default, alias = "IsFavorite", alias = "isFavorite", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_favorite: Option<bool>,
     #[serde(default, alias = "Years", alias = "years")]
     pub years: Option<String>,
@@ -2461,6 +2461,28 @@ where
                 .map_err(serde::de::Error::custom)
         }
         None => Ok(None),
+    }
+}
+
+/// 宽松反序列化 `Option<bool>`：空字符串 / 无值 → `None`，支持 "true"/"false"/"1"/"0"。
+/// Emby 客户端经常发送 `IsFavorite=` 或 `IsPlayed=`（空值表示不筛选）。
+pub(crate) fn deserialize_option_bool_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(s) if s.trim().is_empty() => Ok(None),
+        Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Ok(Some(true)),
+            "false" | "0" => Ok(Some(false)),
+            other => Err(serde::de::Error::custom(format!(
+                "无法将 '{other}' 解析为布尔值"
+            ))),
+        },
     }
 }
 
