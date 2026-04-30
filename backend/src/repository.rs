@@ -3252,6 +3252,32 @@ pub async fn list_libraries(pool: &sqlx::PgPool) -> Result<Vec<DbLibrary>, AppEr
     .await?)
 }
 
+/// 返回所有 ExcludeFromSearch=true 的媒体库 ID 列表
+pub async fn search_excluded_library_ids(pool: &sqlx::PgPool) -> Result<Vec<Uuid>, AppError> {
+    let libs = list_libraries(pool).await?;
+    let mut excluded = Vec::new();
+    for lib in &libs {
+        let opts = library_options(lib);
+        if opts.exclude_from_search {
+            excluded.push(lib.id);
+        }
+    }
+    Ok(excluded)
+}
+
+/// 返回所有 ImportMissingEpisodes=true 的媒体库 ID 列表
+pub async fn missing_episodes_enabled_library_ids(pool: &sqlx::PgPool) -> Result<Vec<Uuid>, AppError> {
+    let libs = list_libraries(pool).await?;
+    let mut enabled = Vec::new();
+    for lib in &libs {
+        let opts = library_options(lib);
+        if opts.import_missing_episodes {
+            enabled.push(lib.id);
+        }
+    }
+    Ok(enabled)
+}
+
 pub async fn get_library(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<DbLibrary>, AppError> {
     Ok(sqlx::query_as::<_, DbLibrary>(
         r#"
@@ -4391,6 +4417,8 @@ pub struct ItemListOptions {
     pub policy_blocked_tags: Vec<String>,
     /// 由 list_media_items 根据用户策略自动注入：排除未分级的特定类型
     pub policy_block_unrated_items: Vec<String>,
+    /// 当搜索时自动注入：exclude_from_search=true 的媒体库 ID 列表
+    pub excluded_library_ids: Vec<Uuid>,
 }
 
 impl Default for ItemListOptions {
@@ -4471,6 +4499,7 @@ impl Default for ItemListOptions {
             policy_max_parental_rating: None,
             policy_blocked_tags: Vec::new(),
             policy_block_unrated_items: Vec::new(),
+            excluded_library_ids: Vec::new(),
         }
     }
 }
@@ -4624,7 +4653,7 @@ async fn fast_count_media_items(
     }
 
     let has_search = options.search_term.as_ref().map_or(false, |s| !s.trim().is_empty());
-    if has_search && !has_user_library_filter {
+    if has_search && !has_user_library_filter && options.excluded_library_ids.is_empty() {
         let search_term = options.search_term.as_ref().unwrap().trim();
         let pattern = format!("%{}%", search_term);
         let probe_limit = options.start_index.max(0) + options.limit.clamp(1, 200) + 1;
@@ -4811,6 +4840,13 @@ fn apply_item_where_conditions(
             .push_bind(lowercase_list(&options.policy_block_unrated_items))
             .push("))");
     }
+
+    if !options.excluded_library_ids.is_empty() {
+        builder
+            .push(" AND (library_id IS NULL OR NOT (library_id = ANY(")
+            .push_bind(options.excluded_library_ids.clone())
+            .push(")))");
+    }
 }
 
 pub async fn list_media_items(
@@ -4835,6 +4871,13 @@ pub async fn list_media_items(
                 }
             }
         }
+    }
+
+    // 搜索请求时自动排除 exclude_from_search=true 的媒体库
+    if options.excluded_library_ids.is_empty()
+        && options.search_term.as_ref().is_some_and(|s| !s.trim().is_empty())
+    {
+        options.excluded_library_ids = search_excluded_library_ids(pool).await?;
     }
 
     if check_allowed_library_short_circuit(&options) {
@@ -6096,12 +6139,23 @@ pub async fn get_missing_episodes(
     start_index: i64,
     limit: i64,
 ) -> Result<QueryResult<BaseItemDto>, AppError> {
+    // 收集启用了 import_missing_episodes 的媒体库 ID
+    let enabled_lib_ids = missing_episodes_enabled_library_ids(pool).await?;
+    if enabled_lib_ids.is_empty() {
+        return Ok(QueryResult {
+            items: Vec::new(),
+            total_record_count: 0,
+            start_index: Some(start_index),
+        });
+    }
+
     let total_record_count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)
         FROM series_episode_catalog sec
         INNER JOIN media_items series ON series.id = sec.series_id
         WHERE (sec.premiere_date IS NULL OR sec.premiere_date <= CURRENT_DATE)
+          AND series.library_id = ANY($2)
           AND (
               $1::uuid IS NULL
               OR sec.series_id = $1
@@ -6129,6 +6183,7 @@ pub async fn get_missing_episodes(
         "#,
     )
     .bind(parent_id)
+    .bind(&enabled_lib_ids)
     .fetch_one(pool)
     .await?;
 
@@ -6161,6 +6216,7 @@ pub async fn get_missing_episodes(
         FROM series_episode_catalog sec
         INNER JOIN media_items series ON series.id = sec.series_id
         WHERE (sec.premiere_date IS NULL OR sec.premiere_date <= CURRENT_DATE)
+          AND series.library_id = ANY($4)
           AND (
               $1::uuid IS NULL
               OR sec.series_id = $1
@@ -6196,6 +6252,7 @@ pub async fn get_missing_episodes(
     .bind(parent_id)
     .bind(start_index.max(0))
     .bind(limit.clamp(1, 200))
+    .bind(&enabled_lib_ids)
     .fetch_all(pool)
     .await?;
 

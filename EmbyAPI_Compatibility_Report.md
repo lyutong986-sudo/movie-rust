@@ -2239,3 +2239,75 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 - `/Videos/{id}/{msid}/Subtitles/{index}/Stream.{ext}`：现支持代理远端字幕（无需本地文件）
 
 ---
+
+## 2026-05-01 — LibraryOptions 功能生效修复
+
+### 问题描述
+
+`/settings/libraries` 编辑媒体库选项后，设置能正确保存到数据库（`library_options` jsonb 列），但后端功能层从未读取/使用这些选项，导致用户感觉"编辑没有生效"。
+
+### 修复内容
+
+#### 1. 扫描器：`EnableInternetProviders` 控制互联网元数据查询
+
+**文件:** `backend/src/scanner.rs`
+
+- 电影入库时：`refresh_remote_people` / `refresh_movie_remote_metadata` / `cache_remote_images_for_item` 三个调用均加上 `if library_options.enable_internet_providers` 门控
+- 电视剧入库时：`refresh_remote_people` / `refresh_series_remote_metadata` / `refresh_series_episode_catalog` 三个调用加 `enable_internet_providers` 门控
+- `download_images_in_advance`（Movie/Series/Season/Episode）改为 `enable_internet_providers && download_images_in_advance` 双条件
+- 手动刷新元数据 (`items.rs` → `refresh_item_metadata_inner`)：加 `enable_internet_providers` 检查
+
+| 选项 | 修复前 | 修复后 |
+|------|--------|--------|
+| EnableInternetProviders=false | 仍然查询 TMDb | 跳过所有远程元数据/图片 |
+| DownloadImagesInAdvance=true | 不论 EnableInternetProviders | 需同时启用互联网元数据 |
+
+#### 2. 搜索：`ExcludeFromSearch` 过滤
+
+**文件:** `backend/src/repository.rs`
+
+- 新增 `search_excluded_library_ids()` — 查询所有 `exclude_from_search=true` 的媒体库 ID
+- `ItemListOptions` 新增 `excluded_library_ids: Vec<Uuid>` 字段
+- `list_media_items` — 当存在搜索词时自动注入排除库 ID
+- `apply_item_where_conditions` — 追加 `AND library_id NOT IN (...)` SQL 条件
+- 搜索计数快路径也检查排除条件
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| 库 ExcludeFromSearch=true + 搜索 | 返回结果 | 被排除 |
+| 库 ExcludeFromSearch=false + 搜索 | 返回结果 | 返回结果 |
+| SearchHints（/Search/Hints） | 不过滤 | 自动排除 |
+
+#### 3. 缺失剧集：`ImportMissingEpisodes` 过滤
+
+**文件:** `backend/src/repository.rs`
+
+- 新增 `missing_episodes_enabled_library_ids()` — 查询所有 `import_missing_episodes=true` 的媒体库 ID
+- `get_missing_episodes` 查询增加 `series.library_id = ANY($enabled_lib_ids)` 条件
+- 若无库启用此选项，直接返回空结果
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| 库 ImportMissingEpisodes=false | 返回缺失剧集 | 空 |
+| 库 ImportMissingEpisodes=true | 返回缺失剧集 | 返回缺失剧集 |
+
+### 已有功能（无需修复）
+
+| 选项 | 状态 | 位置 |
+|------|------|------|
+| SaveLocalMetadata | ✅ 已生效 | scanner.rs → `save_local_metadata`；items.rs → NFO 写入 |
+| DownloadImagesInAdvance | ✅ 已生效 | scanner.rs → `cache_remote_images_for_item` |
+| PreferredMetadataLanguage | ✅ 已生效 | scanner.rs/items.rs → TMDb provider 语言设置 |
+| MetadataCountryCode | ✅ 已生效 | 同上 |
+| IgnoreHiddenFiles | ✅ 已生效 | scanner.rs → 文件收集 |
+
+### 暂未实现（存储但无后端逻辑）
+
+| 选项 | 说明 |
+|------|------|
+| EnableRealtimeMonitor | 需要文件系统 watcher（inotify/FSEvents），属于大功能 |
+| ImportCollections | 需要基于 TMDb collection 信息自动创建 BoxSet，属于大功能 |
+| EnableChapterImageExtraction | 需要 ffmpeg 提取章节缩略图 |
+| EnableAutomaticSeriesGrouping | 需要跨目录合并同名 Series |
+
+---

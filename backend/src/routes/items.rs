@@ -3785,6 +3785,13 @@ pub(crate) async fn do_refresh_item_metadata_with(
         return Ok(());
     };
     let library_options = item_library_options(state, item.id).await?;
+    if !library_options.enable_internet_providers {
+        tracing::debug!(
+            item_id = %item.id,
+            "跳过远程元数据刷新：该媒体库已禁用互联网元数据"
+        );
+        return Ok(());
+    }
     let Some(provider) = item_tmdb_provider(state, metadata_manager, &library_options) else {
         tracing::debug!(
             item_id = %item.id,

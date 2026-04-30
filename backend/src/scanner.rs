@@ -687,28 +687,30 @@ async fn import_movie_file(
     .await?;
     notify_item_added(pool, config, movie_id, movie_was_new, "Movie", name, None);
     sync_nfo_people(pool, movie_id, &nfo.people).await?;
-    refresh_remote_people(
-        pool,
-        metadata_manager,
-        config,
-        runtime,
-        library_options,
-        movie_id,
-        "movie",
-        &provider_ids,
-    )
-    .await;
-    refresh_movie_remote_metadata(
-        pool,
-        metadata_manager,
-        config,
-        runtime,
-        library_options,
-        movie_id,
-        &provider_ids,
-    )
-    .await;
-    if library_options.download_images_in_advance {
+    if library_options.enable_internet_providers {
+        refresh_remote_people(
+            pool,
+            metadata_manager,
+            config,
+            runtime,
+            library_options,
+            movie_id,
+            "movie",
+            &provider_ids,
+        )
+        .await;
+        refresh_movie_remote_metadata(
+            pool,
+            metadata_manager,
+            config,
+            runtime,
+            library_options,
+            movie_id,
+            &provider_ids,
+        )
+        .await;
+    }
+    if library_options.enable_internet_providers && library_options.download_images_in_advance {
         cache_remote_images_for_item(
             pool,
             metadata_manager,
@@ -980,38 +982,40 @@ async fn import_tv_file(
         Some(&series_name),
     );
     sync_nfo_people(pool, series_id, &series_nfo.people).await?;
-    refresh_remote_people(
-        pool,
-        metadata_manager,
-        config,
-        runtime,
-        library_options,
-        series_id,
-        "tv",
-        &series_provider_ids,
-    )
-    .await;
-    refresh_series_remote_metadata(
-        pool,
-        metadata_manager,
-        config,
-        runtime,
-        library_options,
-        series_id,
-        &series_provider_ids,
-    )
-    .await;
-    refresh_series_episode_catalog(
-        pool,
-        metadata_manager,
-        config,
-        runtime,
-        library_options,
-        series_id,
-        &series_provider_ids,
-    )
-    .await;
-    if library_options.download_images_in_advance {
+    if library_options.enable_internet_providers {
+        refresh_remote_people(
+            pool,
+            metadata_manager,
+            config,
+            runtime,
+            library_options,
+            series_id,
+            "tv",
+            &series_provider_ids,
+        )
+        .await;
+        refresh_series_remote_metadata(
+            pool,
+            metadata_manager,
+            config,
+            runtime,
+            library_options,
+            series_id,
+            &series_provider_ids,
+        )
+        .await;
+        refresh_series_episode_catalog(
+            pool,
+            metadata_manager,
+            config,
+            runtime,
+            library_options,
+            series_id,
+            &series_provider_ids,
+        )
+        .await;
+    }
+    if library_options.enable_internet_providers && library_options.download_images_in_advance {
         cache_remote_images_for_item(
             pool,
             metadata_manager,
@@ -1117,7 +1121,7 @@ async fn import_tv_file(
         &season_name,
         Some(&series_name),
     );
-    if library_options.download_images_in_advance {
+    if library_options.enable_internet_providers && library_options.download_images_in_advance {
         cache_remote_images_for_item(
             pool,
             metadata_manager,
@@ -1294,7 +1298,7 @@ async fn import_tv_file(
         episode_name,
         Some(&series_name),
     );
-    if library_options.download_images_in_advance {
+    if library_options.enable_internet_providers && library_options.download_images_in_advance {
         cache_remote_images_for_item(
             pool,
             metadata_manager,
