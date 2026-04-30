@@ -18,11 +18,55 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Instant,
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 const REMOTE_PAGE_SIZE: i64 = 200;
+const PLAYBACK_INFO_CACHE_TTL_SECS: u64 = 300;
+const PLAYBACK_INFO_CACHE_MAX_ENTRIES: usize = 512;
+
+struct CachedPlaybackInfo {
+    info: RemotePlaybackInfo,
+    inserted_at: Instant,
+}
+
+static PLAYBACK_INFO_CACHE: std::sync::LazyLock<RwLock<HashMap<String, CachedPlaybackInfo>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+fn playback_info_cache_key(source_id: Uuid, remote_item_id: &str, media_source_id: Option<&str>) -> String {
+    format!("{}:{}:{}", source_id, remote_item_id, media_source_id.unwrap_or(""))
+}
+
+async fn get_cached_playback_info(key: &str) -> Option<RemotePlaybackInfo> {
+    let cache = PLAYBACK_INFO_CACHE.read().await;
+    cache.get(key).and_then(|entry| {
+        if entry.inserted_at.elapsed().as_secs() < PLAYBACK_INFO_CACHE_TTL_SECS {
+            Some(entry.info.clone())
+        } else {
+            None
+        }
+    })
+}
+
+async fn set_cached_playback_info(key: String, info: RemotePlaybackInfo) {
+    let mut cache = PLAYBACK_INFO_CACHE.write().await;
+    if cache.len() >= PLAYBACK_INFO_CACHE_MAX_ENTRIES {
+        let cutoff = Instant::now() - std::time::Duration::from_secs(PLAYBACK_INFO_CACHE_TTL_SECS);
+        cache.retain(|_, v| v.inserted_at > cutoff);
+        if cache.len() >= PLAYBACK_INFO_CACHE_MAX_ENTRIES {
+            if let Some(oldest_key) = cache
+                .iter()
+                .min_by_key(|(_, v)| v.inserted_at)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest_key);
+            }
+        }
+    }
+    cache.insert(key, CachedPlaybackInfo { info, inserted_at: Instant::now() });
+}
 const DEFAULT_SPOOFED_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) EmbyTheater/3.0.20 Chrome/124.0.0.0 Safari/537.36";
 const REMOTE_DISPLAY_MODE_SEPARATE: &str = "separate";
 const REMOTE_DISPLAY_MODE_MERGE: &str = "merge";
@@ -349,7 +393,7 @@ struct RemoteMediaSource {
     id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct RemotePlaybackInfo {
     #[serde(default)]
@@ -1659,40 +1703,36 @@ async fn send_remote_stream_request(
             .clone()
             .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
         let server_url = normalize_server_url(&source.server_url);
-        let playback_info = fetch_remote_playback_info(
-            pool,
-            source,
-            user_id.as_str(),
-            remote_item_id,
-            media_source_id,
-            false,
-        )
-        .await?;
+
+        let cache_key = playback_info_cache_key(source.id, remote_item_id, media_source_id);
+        let playback_info = if let Some(cached) = get_cached_playback_info(&cache_key).await {
+            cached
+        } else {
+            let fresh = fetch_remote_playback_info(
+                pool,
+                source,
+                user_id.as_str(),
+                remote_item_id,
+                media_source_id,
+                false,
+            )
+            .await?;
+            set_cached_playback_info(cache_key.clone(), fresh.clone()).await;
+            fresh
+        };
+
         let media_source = select_remote_playback_media_source(
             playback_info.media_sources.as_slice(),
             media_source_id,
         )
         .ok_or_else(|| AppError::BadRequest("远端 PlaybackInfo 未返回可用媒体源".to_string()))?;
 
-        let stream_path = media_source
-            .direct_stream_url
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                media_source
-                    .transcoding_url
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .ok_or_else(|| AppError::BadRequest("远端 PlaybackInfo 未提供可播放流".to_string()))?;
-        let mut endpoint = absolutize_remote_url(server_url.as_str(), stream_path);
-        if media_source
-            .add_api_key_to_direct_stream_url
-            .unwrap_or(false)
-            && !endpoint.contains("api_key=")
-        {
-            endpoint = append_query_pair(endpoint.as_str(), "api_key", token.as_str());
-        }
+        let endpoint = resolve_remote_stream_endpoint(
+            &server_url,
+            &token,
+            remote_item_id,
+            media_source,
+        );
 
         let mut builder = if normalized_method == Method::HEAD {
             client.head(&endpoint)
@@ -1737,20 +1777,73 @@ async fn send_remote_stream_request(
         }
 
         let response = builder.send().await?;
+        let status = response.status();
         if matches!(
-            response.status(),
+            status,
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
         ) && attempt == 0
         {
+            {
+                let mut cache = PLAYBACK_INFO_CACHE.write().await;
+                cache.remove(&cache_key);
+            }
             repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
             source.access_token = None;
             source.remote_user_id = None;
+            continue;
+        }
+        if status == reqwest::StatusCode::NOT_FOUND && attempt == 0 {
+            {
+                let mut cache = PLAYBACK_INFO_CACHE.write().await;
+                cache.remove(&cache_key);
+            }
             continue;
         }
         return Ok(response);
     }
 
     Err(AppError::Unauthorized)
+}
+
+fn resolve_remote_stream_endpoint(
+    server_url: &str,
+    token: &str,
+    remote_item_id: &str,
+    media_source: &RemotePlaybackMediaSource,
+) -> String {
+    if let Some(direct_url) = media_source
+        .direct_stream_url
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+    {
+        let mut endpoint = absolutize_remote_url(server_url, direct_url);
+        if media_source
+            .add_api_key_to_direct_stream_url
+            .unwrap_or(false)
+            && !endpoint.contains("api_key=")
+        {
+            endpoint = append_query_pair(&endpoint, "api_key", token);
+        }
+        return endpoint;
+    }
+    if let Some(transcoding_url) = media_source
+        .transcoding_url
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+    {
+        return absolutize_remote_url(server_url, transcoding_url);
+    }
+    let msid = media_source
+        .id
+        .as_deref()
+        .unwrap_or(remote_item_id);
+    format!(
+        "{}/Videos/{}/stream?Static=true&MediaSourceId={}&api_key={}",
+        server_url.trim_end_matches('/'),
+        remote_item_id,
+        msid,
+        token
+    )
 }
 
 async fn get_json_with_retry<T: serde::de::DeserializeOwned>(

@@ -2065,3 +2065,44 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | 错误响应携带远端 body 全文 | 低 | 生产环境有信息泄露风险，可截断 |
 
 ---
+
+## 第二十七轮修复：远端 Emby 起播速度优化
+
+**审计时间**: 2026-04-30
+
+### 起播慢根因分析
+
+原有流程中，**每次客户端请求代理流** (`proxy_item_stream`) 都会触发：
+1. `ensure_authenticated` — 检查/获取 token（通常缓存命中，快）
+2. **`fetch_remote_playback_info`** — 向远端 Emby 发 HTTP 请求获取 PlaybackInfo（**网络往返 #1，慢**）
+3. 从 PlaybackInfo 取 `DirectStreamUrl`/`TranscodingUrl`
+4. **向远端 Emby 发起流请求** (`GET {stream_url}`)（**网络往返 #2**）
+5. 代理流回客户端
+
+客户端每次 seek、暂停恢复、或多次请求（Range 请求）都会重复步骤 2，造成明显延迟。
+
+### 优化方案
+
+| 编号 | 优化 | 文件 | 效果 |
+|------|------|------|------|
+| R170 | PlaybackInfo 内存缓存（5 分钟 TTL，最多 512 条） | `remote_emby.rs` | 同一个 item 的 PlaybackInfo 在缓存有效期内直接返回，跳过远端 HTTP 往返 |
+| R171 | 缓存失效策略：401/403/404 时自动清除缓存并重试 | `remote_emby.rs` | 远端 token 过期或 URL 失效时自动回退到新鲜请求 |
+| R172 | Static URL 兜底：PlaybackInfo 无 DirectStreamUrl/TranscodingUrl 时，构造 `Videos/{id}/stream?Static=true` | `remote_emby.rs` | 即使 PlaybackInfo 不返回直链，也有一条可播放路径 |
+
+### 缓存机制细节
+
+- **缓存键**：`{source_id}:{remote_item_id}:{media_source_id}`
+- **TTL**：300 秒（5 分钟），覆盖一个播放会话中的频繁 Range/Seek 请求
+- **容量**：最多 512 条，超限时先清理过期条目，再驱逐最旧条目
+- **失效**：401/403（认证失败）或 404（URL 过期）时立即驱逐缓存并重试
+
+### 预期效果
+
+| 场景 | 优化前 | 优化后 |
+|------|--------|--------|
+| 首次起播 | 2 次远端往返（PlaybackInfo + stream） | 2 次远端往返（不变，需要首次获取） |
+| Seek/Range 请求 | 2 次远端往返 | 1 次远端往返（PlaybackInfo 缓存命中） |
+| 暂停后恢复 | 2 次远端往返 | 1 次远端往返（5分钟内缓存有效） |
+| 连续播放同剧集 | 每集 2 次远端往返 | 每集 1 次远端往返（不同 item 无缓存） |
+
+---
