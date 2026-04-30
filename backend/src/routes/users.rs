@@ -1081,7 +1081,7 @@ async fn user_track_selection_delete(
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct RatingQuery {
-    #[serde(default, alias = "likes")]
+    #[serde(default, alias = "likes", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     likes: Option<bool>,
     #[serde(default, alias = "rating")]
     rating: Option<f64>,

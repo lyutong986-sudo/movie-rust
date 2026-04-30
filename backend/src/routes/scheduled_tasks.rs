@@ -43,7 +43,7 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct TaskListQuery {
-    #[serde(default, alias = "isHidden", alias = "IsHidden")]
+    #[serde(default, alias = "isHidden", alias = "IsHidden", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     is_hidden: Option<bool>,
 }
 

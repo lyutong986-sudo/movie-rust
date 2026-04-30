@@ -71,7 +71,7 @@ struct CreateRemoteEmbySourceRequest {
     remote_views: Vec<CreateRemoteEmbySourceRemoteView>,
     #[serde(default, alias = "spoofedUserAgent", alias = "UserAgent")]
     spoofed_user_agent: Option<String>,
-    #[serde(default, alias = "isEnabled")]
+    #[serde(default, alias = "isEnabled", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     enabled: Option<bool>,
 }
 

@@ -49,7 +49,7 @@ struct CreateCollectionQuery {
     ids: Option<String>,
     #[serde(default, alias = "parentId", alias = "ParentId")]
     parent_id: Option<String>,
-    #[serde(default, alias = "isLocked", alias = "IsLocked")]
+    #[serde(default, alias = "isLocked", alias = "IsLocked", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     is_locked: Option<bool>,
 }
 

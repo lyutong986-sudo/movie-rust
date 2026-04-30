@@ -33,7 +33,7 @@ pub fn router() -> Router<AppState> {
 struct DeviceQuery {
     #[serde(default, alias = "id", alias = "Id", alias = "deviceId")]
     id: Option<String>,
-    #[serde(default, alias = "supportsSync", alias = "SupportsSync")]
+    #[serde(default, alias = "supportsSync", alias = "SupportsSync", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     supports_sync: Option<bool>,
 }
 

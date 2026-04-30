@@ -1622,7 +1622,7 @@ pub struct TranscodingInfoDto {
 pub struct VideoStreamQuery {
     #[serde(default, alias = "container")]
     pub container: Option<String>,
-    #[serde(default, rename = "Static", alias = "static")]
+    #[serde(default, rename = "Static", alias = "static", deserialize_with = "deserialize_option_bool_lenient")]
     pub static_param: Option<bool>,
     #[serde(default, rename = "MediaSourceId", alias = "mediaSourceId")]
     pub media_source_id: Option<String>,
@@ -1666,7 +1666,7 @@ pub struct VideoStreamQuery {
     pub audio_sample_rate: Option<i32>,
     #[serde(default, rename = "PlaySessionId", alias = "playSessionId")]
     pub play_session_id: Option<String>,
-    #[serde(default, alias = "copyTimestamps")]
+    #[serde(default, alias = "copyTimestamps", deserialize_with = "deserialize_option_bool_lenient")]
     pub copy_timestamps: Option<bool>,
     #[serde(default, alias = "startTimeTicks")]
     pub start_time_ticks: Option<i64>,
@@ -1685,11 +1685,11 @@ pub struct VideoStreamQuery {
     pub max_streaming_bitrate: Option<i64>,
     #[serde(default, alias = "subtitleMethod")]
     pub subtitle_method: Option<String>,
-    #[serde(default, alias = "requireAvc")]
+    #[serde(default, alias = "requireAvc", deserialize_with = "deserialize_option_bool_lenient")]
     pub require_avc: Option<bool>,
-    #[serde(default, alias = "deInterlace")]
+    #[serde(default, alias = "deInterlace", deserialize_with = "deserialize_option_bool_lenient")]
     pub de_interlace: Option<bool>,
-    #[serde(default, alias = "requireNonAnamorphic")]
+    #[serde(default, alias = "requireNonAnamorphic", deserialize_with = "deserialize_option_bool_lenient")]
     pub require_non_anamorphic: Option<bool>,
     #[serde(default, alias = "transcodingMaxAudioChannels")]
     pub transcoding_max_audio_channels: Option<i32>,
@@ -1697,7 +1697,7 @@ pub struct VideoStreamQuery {
     pub cpu_core_limit: Option<i32>,
     #[serde(default, alias = "liveStreamId")]
     pub live_stream_id: Option<String>,
-    #[serde(default, alias = "enableMpegtsM2TsMode")]
+    #[serde(default, alias = "enableMpegtsM2TsMode", deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_mpegts_m2_ts_mode: Option<bool>,
     #[serde(default, alias = "videoStreamIndex")]
     pub video_stream_index: Option<i32>,
@@ -1709,7 +1709,7 @@ pub struct VideoStreamQuery {
     pub segment_length: Option<i32>,
     #[serde(default, alias = "minSegments")]
     pub min_segments: Option<i32>,
-    #[serde(default, alias = "breakOnNonKeyFrames")]
+    #[serde(default, alias = "breakOnNonKeyFrames", deserialize_with = "deserialize_option_bool_lenient")]
     pub break_on_non_key_frames: Option<bool>,
     #[serde(default, alias = "manifestSubtitles")]
     pub manifest_subtitles: Option<String>,
@@ -1720,9 +1720,9 @@ pub struct VideoStreamQuery {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ItemsQuery {
-    #[serde(default, alias = "UserId", alias = "userId")]
+    #[serde(default, alias = "UserId", alias = "userId", deserialize_with = "deserialize_optional_uuid")]
     pub user_id: Option<Uuid>,
-    #[serde(default, alias = "SeriesId", alias = "seriesId")]
+    #[serde(default, alias = "SeriesId", alias = "seriesId", deserialize_with = "deserialize_optional_uuid")]
     pub series_id: Option<Uuid>,
     #[serde(
         default,
@@ -1847,11 +1847,11 @@ pub struct ItemsQuery {
     pub has_theme_song: Option<bool>,
     #[serde(default, alias = "HasThemeVideo", alias = "hasThemeVideo", deserialize_with = "deserialize_option_bool_lenient")]
     pub has_theme_video: Option<bool>,
-    #[serde(default, alias = "HasSpecialFeature", alias = "hasSpecialFeature")]
+    #[serde(default, alias = "HasSpecialFeature", alias = "hasSpecialFeature", deserialize_with = "deserialize_option_bool_lenient")]
     pub has_special_feature: Option<bool>,
-    #[serde(default, alias = "HasTmdbId", alias = "hasTmdbId")]
+    #[serde(default, alias = "HasTmdbId", alias = "hasTmdbId", deserialize_with = "deserialize_option_bool_lenient")]
     pub has_tmdb_id: Option<bool>,
-    #[serde(default, alias = "HasImdbId", alias = "hasImdbId")]
+    #[serde(default, alias = "HasImdbId", alias = "hasImdbId", deserialize_with = "deserialize_option_bool_lenient")]
     pub has_imdb_id: Option<bool>,
     #[serde(default, alias = "SeriesStatus", alias = "seriesStatus")]
     pub series_status: Option<String>,
@@ -1889,18 +1889,20 @@ pub struct ItemsQuery {
     pub max_date_last_saved_for_user: Option<DateTime<Utc>>,
     #[serde(default, alias = "AiredDuringSeason", alias = "airedDuringSeason")]
     pub aired_during_season: Option<i32>,
-    #[serde(default, alias = "ProjectToMedia", alias = "projectToMedia")]
+    #[serde(default, alias = "ProjectToMedia", alias = "projectToMedia", deserialize_with = "deserialize_option_bool_lenient")]
     pub project_to_media: Option<bool>,
     #[serde(
         default,
         alias = "GroupItemsIntoCollections",
-        alias = "groupItemsIntoCollections"
+        alias = "groupItemsIntoCollections",
+        deserialize_with = "deserialize_option_bool_lenient"
     )]
     pub group_items_into_collections: Option<bool>,
     #[serde(
         default,
         alias = "EnableTotalRecordCount",
-        alias = "enableTotalRecordCount"
+        alias = "enableTotalRecordCount",
+        deserialize_with = "deserialize_option_bool_lenient"
     )]
     pub enable_total_record_count: Option<bool>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
@@ -2187,7 +2189,7 @@ pub struct VirtualFolderQuery {
     pub paths: Option<String>,
     #[serde(default, alias = "Path", alias = "path")]
     pub path: Option<String>,
-    #[serde(default, alias = "RefreshLibrary", alias = "refreshLibrary")]
+    #[serde(default, alias = "RefreshLibrary", alias = "refreshLibrary", deserialize_with = "deserialize_option_bool_lenient")]
     pub refresh_library: Option<bool>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
@@ -2285,19 +2287,19 @@ pub struct SeasonsQuery {
     pub series_id: Option<Uuid>,
     #[serde(default)]
     pub fields: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_bool_lenient")]
     pub is_special_season: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_bool_lenient")]
     pub is_missing: Option<bool>,
     #[serde(default)]
     pub adjacent_to: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_images: Option<bool>,
     #[serde(default)]
     pub image_type_limit: Option<i64>,
     #[serde(default)]
     pub enable_image_types: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_user_data: Option<bool>,
     #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
     pub _api_key: Option<String>,
@@ -2340,7 +2342,7 @@ pub struct EpisodesQuery {
     pub season: Option<i32>,
     #[serde(default)]
     pub season_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_bool_lenient")]
     pub is_missing: Option<bool>,
     #[serde(default)]
     pub adjacent_to: Option<String>,
@@ -2352,13 +2354,13 @@ pub struct EpisodesQuery {
     pub start_index: Option<i64>,
     #[serde(default)]
     pub limit: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_images: Option<bool>,
     #[serde(default)]
     pub image_type_limit: Option<i64>,
     #[serde(default)]
     pub enable_image_types: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_user_data: Option<bool>,
     #[serde(default)]
     pub sort_by: Option<String>,
@@ -2398,11 +2400,11 @@ pub struct EpisodesQuery {
     pub containers: Option<String>,
     #[serde(default, alias = "SearchTerm", alias = "searchTerm")]
     pub search_term: Option<String>,
-    #[serde(default, alias = "IsHD", alias = "isHD", alias = "isHd")]
+    #[serde(default, alias = "IsHD", alias = "isHD", alias = "isHd", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_hd: Option<bool>,
-    #[serde(default, alias = "HasSubtitles", alias = "hasSubtitles")]
+    #[serde(default, alias = "HasSubtitles", alias = "hasSubtitles", deserialize_with = "deserialize_option_bool_lenient")]
     pub has_subtitles: Option<bool>,
-    #[serde(default, alias = "HasTrailer", alias = "hasTrailer")]
+    #[serde(default, alias = "HasTrailer", alias = "hasTrailer", deserialize_with = "deserialize_option_bool_lenient")]
     pub has_trailer: Option<bool>,
     #[serde(default, alias = "MinPremiereDate", alias = "minPremiereDate")]
     pub min_premiere_date: Option<DateTime<Utc>>,
@@ -2439,7 +2441,7 @@ pub fn emby_id_to_uuid(id_str: &str) -> Result<Uuid, uuid::Error> {
 
     Uuid::parse_str(id_to_parse)
 }
-fn deserialize_optional_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
+pub(crate) fn deserialize_optional_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -2491,6 +2493,7 @@ where
 pub struct GetSimilarItems {
     #[serde(skip)]
     pub id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     pub user_id: Option<Uuid>,
     #[serde(default, alias = "Limit")]
     pub limit: Option<i64>,
@@ -2499,14 +2502,15 @@ pub struct GetSimilarItems {
     #[serde(
         default,
         alias = "GroupItemsIntoCollections",
-        alias = "groupItemsIntoCollections"
+        alias = "groupItemsIntoCollections",
+        deserialize_with = "deserialize_option_bool_lenient"
     )]
     pub group_items_into_collections: Option<bool>,
     #[serde(default, alias = "Fields")]
     pub fields: Option<String>,
-    #[serde(default, alias = "EnableImages", alias = "enableImages")]
+    #[serde(default, alias = "EnableImages", alias = "enableImages", deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_images: Option<bool>,
-    #[serde(default, alias = "EnableUserData", alias = "enableUserData")]
+    #[serde(default, alias = "EnableUserData", alias = "enableUserData", deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_user_data: Option<bool>,
     #[serde(default, alias = "ImageTypeLimit", alias = "imageTypeLimit")]
     pub image_type_limit: Option<i64>,
@@ -2537,21 +2541,21 @@ pub struct PlaybackInfoDto {
     pub live_stream_id: Option<String>,
     #[serde(default, alias = "deviceProfile")]
     pub device_profile: Option<DeviceProfile>,
-    #[serde(default, alias = "enableDirectPlay")]
+    #[serde(default, alias = "enableDirectPlay", deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_direct_play: Option<bool>,
-    #[serde(default, alias = "enableDirectStream")]
+    #[serde(default, alias = "enableDirectStream", deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_direct_stream: Option<bool>,
-    #[serde(default, alias = "enableTranscoding")]
+    #[serde(default, alias = "enableTranscoding", deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_transcoding: Option<bool>,
-    #[serde(default, alias = "allowInterlacedVideoStreamCopy")]
+    #[serde(default, alias = "allowInterlacedVideoStreamCopy", deserialize_with = "deserialize_option_bool_lenient")]
     pub allow_interlaced_video_stream_copy: Option<bool>,
-    #[serde(default, alias = "allowVideoStreamCopy")]
+    #[serde(default, alias = "allowVideoStreamCopy", deserialize_with = "deserialize_option_bool_lenient")]
     pub allow_video_stream_copy: Option<bool>,
-    #[serde(default, alias = "allowAudioStreamCopy")]
+    #[serde(default, alias = "allowAudioStreamCopy", deserialize_with = "deserialize_option_bool_lenient")]
     pub allow_audio_stream_copy: Option<bool>,
-    #[serde(default, alias = "isPlayback")]
+    #[serde(default, alias = "isPlayback", deserialize_with = "deserialize_option_bool_lenient")]
     pub is_playback: Option<bool>,
-    #[serde(default, alias = "autoOpenLiveStream")]
+    #[serde(default, alias = "autoOpenLiveStream", deserialize_with = "deserialize_option_bool_lenient")]
     pub auto_open_live_stream: Option<bool>,
     #[serde(default, alias = "currentPlaySessionId")]
     pub current_play_session_id: Option<String>,

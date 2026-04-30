@@ -344,11 +344,11 @@ struct RemoteImagesQuery {
     image_type: Option<String>,
     #[serde(default, alias = "providerName")]
     provider_name: Option<String>,
-    #[serde(default, alias = "includeAllLanguages")]
+    #[serde(default, alias = "includeAllLanguages", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     include_all_languages: Option<bool>,
     #[serde(default, alias = "Language", alias = "language")]
     language: Option<String>,
-    #[serde(default, alias = "enableSeriesImages")]
+    #[serde(default, alias = "enableSeriesImages", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     enable_series_images: Option<bool>,
     #[serde(default, alias = "StartIndex", alias = "startIndex")]
     start_index: Option<i32>,

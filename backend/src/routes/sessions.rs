@@ -115,7 +115,7 @@ struct SessionCommandQuery {
     start_index: Option<i64>,
     #[serde(default, alias = "limit")]
     limit: Option<i64>,
-    #[serde(default, alias = "consume")]
+    #[serde(default, alias = "consume", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     consume: Option<bool>,
 }
 

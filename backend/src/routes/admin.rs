@@ -1101,9 +1101,9 @@ async fn selectable_media_folders(
 struct DirectoryContentsQuery {
     #[serde(default, rename = "Path", alias = "path")]
     path: Option<String>,
-    #[serde(default, rename = "IncludeFiles", alias = "includeFiles")]
+    #[serde(default, rename = "IncludeFiles", alias = "includeFiles", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     include_files: Option<bool>,
-    #[serde(default, rename = "IncludeDirectories", alias = "includeDirectories")]
+    #[serde(default, rename = "IncludeDirectories", alias = "includeDirectories", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     include_directories: Option<bool>,
 }
 
@@ -1125,7 +1125,8 @@ struct ScanLibrariesQuery {
         default,
         rename = "WaitForCompletion",
         alias = "waitForCompletion",
-        alias = "wait_for_completion"
+        alias = "wait_for_completion",
+        deserialize_with = "crate::models::deserialize_option_bool_lenient"
     )]
     wait_for_completion: Option<bool>,
     #[serde(

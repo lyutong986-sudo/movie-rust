@@ -26,7 +26,7 @@ pub struct GetGenresQuery {
     parent_id: Option<String>,
     #[serde(default, alias = "IncludeItemTypes", alias = "includeItemTypes")]
     include_item_types: Option<String>,
-    #[serde(default, alias = "Recursive", alias = "recursive")]
+    #[serde(default, alias = "Recursive", alias = "recursive", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     recursive: Option<bool>,
 }
 

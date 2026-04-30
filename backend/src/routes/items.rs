@@ -2110,11 +2110,11 @@ async fn delete_item_tag(
 struct SubtitleSearchQuery {
     #[serde(alias = "MediaSourceId")]
     media_source_id: Option<String>,
-    #[serde(alias = "IsPerfectMatch")]
+    #[serde(alias = "IsPerfectMatch", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     is_perfect_match: Option<bool>,
-    #[serde(alias = "IsForced")]
+    #[serde(alias = "IsForced", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     is_forced: Option<bool>,
-    #[serde(alias = "IsHearingImpaired")]
+    #[serde(alias = "IsHearingImpaired", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     is_hearing_impaired: Option<bool>,
 }
 
@@ -2926,7 +2926,7 @@ struct RemoteSearchImageBody {
     image_type: Option<String>,
     #[serde(alias = "provider_name", alias = "ProviderName")]
     _provider_name: Option<String>,
-    #[serde(alias = "include_all_languages", alias = "IncludeAllLanguages")]
+    #[serde(alias = "include_all_languages", alias = "IncludeAllLanguages", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     include_all_languages: Option<bool>,
 }
 
@@ -3243,7 +3243,7 @@ fn marker_ticks(chapters: &[crate::models::DbMediaChapter], marker_type: &str) -
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct HideFromResumeQuery {
-    #[serde(default, alias = "hide")]
+    #[serde(default, alias = "hide", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     hide: Option<bool>,
 }
 
@@ -5766,9 +5766,9 @@ async fn trailers(
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct MovieRecommendationsQuery {
-    #[serde(default, alias = "userId")]
+    #[serde(default, alias = "userId", deserialize_with = "crate::models::deserialize_optional_uuid")]
     user_id: Option<Uuid>,
-    #[serde(default, alias = "parentId")]
+    #[serde(default, alias = "parentId", deserialize_with = "crate::models::deserialize_optional_uuid")]
     parent_id: Option<Uuid>,
     #[serde(default, alias = "categoryLimit")]
     category_limit: Option<i32>,
