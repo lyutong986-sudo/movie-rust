@@ -379,11 +379,13 @@ async fn set_progress(pool: &sqlx::PgPool, task_id: &str, pct: f64) {
 async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
     match task_id {
         "library-scan" => {
-            crate::scanner::scan_all_libraries(
+            crate::scanner::scan_all_libraries_with_db_semaphore(
                 &state.pool,
                 state.metadata_manager.clone(),
                 &state.config,
                 state.work_limiters.clone(),
+                None,
+                Some(state.scan_db_semaphore.clone()),
             )
             .await?;
             set_progress(&state.pool, task_id, 100.0).await;

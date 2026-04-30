@@ -288,6 +288,7 @@ async fn enqueue_library_scan(
     let metadata_manager = state.metadata_manager.clone();
     let config = state.config.clone();
     let work_limiters = state.work_limiters.clone();
+    let db_semaphore = Some(state.scan_db_semaphore.clone());
     let trigger = trigger.to_string();
     let scope_key_for_task = scope_key.clone();
     let library_id_for_task = library_id;
@@ -379,24 +380,27 @@ async fn enqueue_library_scan(
                 let config = config.clone();
                 let work_limiters = work_limiters.clone();
                 let progress = progress.clone();
+                let db_semaphore = db_semaphore.clone();
                 async move {
                     if let Some(scan_library_id) = library_id_for_task {
-                        scanner::scan_single_library_with_progress(
+                        scanner::scan_single_library_with_db_semaphore(
                             &pool,
                             metadata_manager,
                             &config,
                             work_limiters,
                             scan_library_id,
                             Some(progress),
+                            db_semaphore,
                         )
                         .await
                     } else {
-                        scanner::scan_all_libraries_with_progress(
+                        scanner::scan_all_libraries_with_db_semaphore(
                             &pool,
                             metadata_manager,
                             &config,
                             work_limiters,
                             Some(progress),
+                            db_semaphore,
                         )
                         .await
                     }
@@ -787,21 +791,26 @@ async fn scan_libraries(
 ) -> Result<Response, AppError> {
     auth::require_admin(&session)?;
     if query.wait_for_completion.unwrap_or(false) {
+        let db_sem = Some(state.scan_db_semaphore.clone());
         let summary = if let Some(library_id) = query.library_id {
-            scanner::scan_single_library(
+            scanner::scan_single_library_with_db_semaphore(
                 &state.pool,
                 state.metadata_manager.clone(),
                 &state.config,
                 state.work_limiters.clone(),
                 library_id,
+                None,
+                db_sem,
             )
             .await?
         } else {
-            scanner::scan_all_libraries(
+            scanner::scan_all_libraries_with_db_semaphore(
                 &state.pool,
                 state.metadata_manager.clone(),
                 &state.config,
                 state.work_limiters.clone(),
+                None,
+                db_sem,
             )
             .await?
         };

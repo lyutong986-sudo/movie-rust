@@ -5,6 +5,7 @@ use crate::{
 use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
@@ -18,4 +19,7 @@ pub struct AppState {
     pub task_tokens: Arc<tokio::sync::RwLock<std::collections::HashMap<String, CancellationToken>>>,
     /// Shared HTTP client for all outbound requests (connection pooling)
     pub http_client: reqwest::Client,
+    /// Limits how many DB connections the scanner/sync background tasks can hold
+    /// simultaneously, reserving the rest for API requests.
+    pub scan_db_semaphore: Arc<Semaphore>,
 }

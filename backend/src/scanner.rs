@@ -164,6 +164,7 @@ impl ScanProgress {
 struct ScanRuntime {
     work_limiters: WorkLimiters,
     refreshed_series: Arc<Mutex<HashSet<uuid::Uuid>>>,
+    db_semaphore: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl ScanRuntime {
@@ -171,11 +172,24 @@ impl ScanRuntime {
         Self {
             work_limiters,
             refreshed_series: Arc::new(Mutex::new(HashSet::new())),
+            db_semaphore: None,
         }
+    }
+
+    fn with_db_semaphore(mut self, sem: Arc<tokio::sync::Semaphore>) -> Self {
+        self.db_semaphore = Some(sem);
+        self
     }
 
     async fn acquire(&self, kind: WorkLimiterKind) -> crate::work_limiter::WorkPermit {
         self.work_limiters.acquire(kind).await
+    }
+
+    async fn acquire_db_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        match &self.db_semaphore {
+            Some(sem) => Some(sem.clone().acquire_owned().await.ok()?),
+            None => None,
+        }
     }
 }
 
@@ -225,52 +239,29 @@ struct NfoPerson {
     primary_image: Option<PathBuf>,
 }
 
+#[allow(dead_code)]
 pub async fn scan_all_libraries(
     pool: &sqlx::PgPool,
     metadata_manager: Option<Arc<MetadataProviderManager>>,
     config: &Config,
     work_limiters: WorkLimiters,
 ) -> Result<ScanSummary, AppError> {
-    scan_all_libraries_with_progress(pool, metadata_manager, config, work_limiters, None).await
+    scan_all_libraries_with_db_semaphore(pool, metadata_manager, config, work_limiters, None, None).await
 }
 
-pub async fn scan_all_libraries_with_progress(
+pub async fn scan_all_libraries_with_db_semaphore(
     pool: &sqlx::PgPool,
     metadata_manager: Option<Arc<MetadataProviderManager>>,
     config: &Config,
     work_limiters: WorkLimiters,
     progress: Option<ScanProgress>,
+    db_semaphore: Option<Arc<tokio::sync::Semaphore>>,
 ) -> Result<ScanSummary, AppError> {
     let libraries = repository::list_libraries(pool).await?;
-    scan_libraries(
-        pool,
-        metadata_manager,
-        config,
-        work_limiters,
-        libraries,
-        progress,
-    )
-    .await
+    scan_libraries(pool, metadata_manager, config, work_limiters, libraries, progress, db_semaphore).await
 }
 
-pub async fn scan_single_library(
-    pool: &sqlx::PgPool,
-    metadata_manager: Option<Arc<MetadataProviderManager>>,
-    config: &Config,
-    work_limiters: WorkLimiters,
-    library_id: uuid::Uuid,
-) -> Result<ScanSummary, AppError> {
-    scan_single_library_with_progress(
-        pool,
-        metadata_manager,
-        config,
-        work_limiters,
-        library_id,
-        None,
-    )
-    .await
-}
-
+#[allow(dead_code)]
 pub async fn scan_single_library_with_progress(
     pool: &sqlx::PgPool,
     metadata_manager: Option<Arc<MetadataProviderManager>>,
@@ -278,6 +269,29 @@ pub async fn scan_single_library_with_progress(
     work_limiters: WorkLimiters,
     library_id: uuid::Uuid,
     progress: Option<ScanProgress>,
+) -> Result<ScanSummary, AppError> {
+    scan_single_library_with_db_semaphore(pool, metadata_manager, config, work_limiters, library_id, progress, None).await
+}
+
+#[allow(dead_code)]
+pub async fn scan_single_library(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<Arc<MetadataProviderManager>>,
+    config: &Config,
+    work_limiters: WorkLimiters,
+    library_id: uuid::Uuid,
+) -> Result<ScanSummary, AppError> {
+    scan_single_library_with_db_semaphore(pool, metadata_manager, config, work_limiters, library_id, None, None).await
+}
+
+pub async fn scan_single_library_with_db_semaphore(
+    pool: &sqlx::PgPool,
+    metadata_manager: Option<Arc<MetadataProviderManager>>,
+    config: &Config,
+    work_limiters: WorkLimiters,
+    library_id: uuid::Uuid,
+    progress: Option<ScanProgress>,
+    db_semaphore: Option<Arc<tokio::sync::Semaphore>>,
 ) -> Result<ScanSummary, AppError> {
     let library = repository::get_library(pool, library_id)
         .await?
@@ -289,6 +303,7 @@ pub async fn scan_single_library_with_progress(
         work_limiters,
         vec![library],
         progress,
+        db_semaphore,
     )
     .await
 }
@@ -300,6 +315,7 @@ async fn scan_libraries(
     work_limiters: WorkLimiters,
     libraries: Vec<DbLibrary>,
     progress: Option<ScanProgress>,
+    db_semaphore: Option<Arc<tokio::sync::Semaphore>>,
 ) -> Result<ScanSummary, AppError> {
     let startup = repository::startup_configuration(pool, config).await?;
     let limits = WorkLimiterConfig {
@@ -308,7 +324,10 @@ async fn scan_libraries(
         tmdb_metadata_limit: startup.tmdb_metadata_thread_count.max(1) as u32,
     };
     work_limiters.configure(limits).await;
-    let runtime = ScanRuntime::new(work_limiters);
+    let runtime = match db_semaphore {
+        Some(sem) => ScanRuntime::new(work_limiters).with_db_semaphore(sem),
+        None => ScanRuntime::new(work_limiters),
+    };
     let mut scanned_files = 0_i64;
     let mut imported_items = 0_i64;
 
@@ -384,6 +403,7 @@ async fn scan_libraries(
 
             tasks.spawn(async move {
                 let _scan_permit = runtime.acquire(WorkLimiterKind::LibraryScan).await;
+                let _db_permit = runtime.acquire_db_permit().await;
                 if library.collection_type.eq_ignore_ascii_case("tvshows") {
                     import_tv_file(
                         &pool,

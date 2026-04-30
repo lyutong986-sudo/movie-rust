@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
 
     let config = bootstrap_config;
     let static_dir = config.static_dir.clone();
+    let state_config_max_conns = config.database_max_connections;
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
         .min_connections(config.database_max_connections.min(5))
@@ -119,6 +120,8 @@ async fn main() -> Result<()> {
         .build()
         .expect("failed to build HTTP client");
 
+    let max_conns = state_config_max_conns;
+    let scan_db_permits = (max_conns as usize).saturating_sub(8).max(2);
     let state = AppState {
         pool,
         config,
@@ -128,6 +131,7 @@ async fn main() -> Result<()> {
         work_limiters,
         task_tokens: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         http_client,
+        scan_db_semaphore: Arc::new(tokio::sync::Semaphore::new(scan_db_permits)),
     };
 
     // SPA 入口：
@@ -156,7 +160,8 @@ async fn main() -> Result<()> {
         .layer(tower_http::compression::CompressionLayer::new()
             .gzip(true)
             .br(true))
-        .layer(http_trace);
+        .layer(http_trace)
+        .layer(axum::middleware::from_fn(request_timeout_middleware));
 
     let app = api_router
         .fallback_service(spa)
@@ -169,6 +174,30 @@ async fn main() -> Result<()> {
 
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
+}
+
+async fn request_timeout_middleware(
+    req: axum::http::Request<Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    const TIMEOUT_SECS: u64 = 300;
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(TIMEOUT_SECS),
+        next.run(req),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_elapsed) => {
+            tracing::warn!("请求处理超时（{TIMEOUT_SECS}s），返回 503");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "application/json")],
+                r#"{"error":"Service Unavailable","message":"请求超时，服务器负载过高，请稍后重试"}"#,
+            )
+                .into_response()
+        }
+    }
 }
 
 /// 读取 `index.html` 并作为 `200 OK text/html; charset=utf-8` 返回。
