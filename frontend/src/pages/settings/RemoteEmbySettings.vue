@@ -77,11 +77,15 @@ const displayModeItems = [
   { label: '单独显示（按远端源分组）', value: 'separate' },
   { label: '并入项目媒体库', value: 'merge' }
 ];
+/** 本地媒体库下拉项：排除内部虚拟中转库（不应让用户手动选择/删除） */
+const TRANSIT_LIB_NAME = '远端 Emby 中转'
 const localLibraryItems = computed(() =>
-  localLibraries.value.map((folder) => ({
-    label: `${folder.Name} · ${collectionTypeLabel(folder.CollectionType)}`,
-    value: folder.ItemId
-  }))
+  localLibraries.value
+    .filter((folder) => folder.Name !== TRANSIT_LIB_NAME)
+    .map((folder) => ({
+      label: `${folder.Name} · ${collectionTypeLabel(folder.CollectionType)}`,
+      value: folder.ItemId
+    }))
 );
 const remoteViewItems = computed(() =>
   remoteViews.value.map((view) => ({
@@ -132,7 +136,12 @@ function displayModeLabel(mode?: string) {
 
 function targetLibraryName(libraryId?: string) {
   if (!libraryId) return '-';
-  return localLibraryNameMap.value.get(libraryId.toLowerCase()) || libraryId;
+  const name = localLibraryNameMap.value.get(libraryId.toLowerCase());
+  if (name === TRANSIT_LIB_NAME || name == null) {
+    // 中转库或未在本地库列表中：用 ID 缩写显示
+    return name === TRANSIT_LIB_NAME ? '（自动中转库）' : libraryId;
+  }
+  return name;
 }
 
 function sourceRemoteViewsText(source: RemoteEmbySource) {
