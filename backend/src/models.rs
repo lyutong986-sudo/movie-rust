@@ -2281,6 +2281,8 @@ pub struct PersonDto {
     pub provider_ids: Option<std::collections::HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub favorite: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backdrop_image_tag: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

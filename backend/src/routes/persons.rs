@@ -99,6 +99,15 @@ pub(crate) fn person_to_base_item(person: PersonDto, server_id: Uuid) -> BaseIte
     if let Some(tag) = person.primary_image_tag.clone() {
         image_tags.insert("Primary".to_string(), tag);
     }
+    if let Some(ref tag) = person.backdrop_image_tag {
+        image_tags.insert("Backdrop".to_string(), tag.clone());
+    }
+
+    let backdrop_image_tags = person
+        .backdrop_image_tag
+        .clone()
+        .map(|tag| vec![tag])
+        .unwrap_or_default();
 
     item.name = person.name.clone();
     item.id = person.id.clone();
@@ -114,7 +123,8 @@ pub(crate) fn person_to_base_item(person: PersonDto, server_id: Uuid) -> BaseIte
         .sort_name
         .or_else(|| Some(person.name.to_lowercase()));
     item.forced_sort_name = item.sort_name.clone();
-    item.primary_image_tag = person.primary_image_tag;
+    item.primary_image_tag = person.primary_image_tag.clone();
+    item.primary_image_item_id = person.primary_image_tag.as_ref().map(|_| person.id.clone());
     item.overview = person.overview;
     item.premiere_date = person
         .premiere_date
@@ -149,6 +159,7 @@ pub(crate) fn person_to_base_item(person: PersonDto, server_id: Uuid) -> BaseIte
     item.size = None;
     item.special_feature_count = None;
     item.image_tags = image_tags;
+    item.backdrop_image_tags = backdrop_image_tags;
     item.provider_ids = person
         .provider_ids
         .unwrap_or_default()

@@ -1211,9 +1211,16 @@ pub(crate) fn db_person_to_dto(person: DbPerson) -> PersonDto {
         .primary_image_path
         .as_ref()
         .map(|_| person.updated_at.timestamp().to_string());
+    let backdrop_image_tag = person
+        .backdrop_image_path
+        .as_ref()
+        .map(|_| person.updated_at.timestamp().to_string());
     let image_tags = primary_image_tag.as_ref().map(|tag| {
         let mut tags = std::collections::HashMap::new();
         tags.insert("Primary".to_string(), tag.clone());
+        if backdrop_image_tag.is_some() {
+            tags.insert("Backdrop".to_string(), backdrop_image_tag.clone().unwrap());
+        }
         tags
     });
 
@@ -1240,6 +1247,7 @@ pub(crate) fn db_person_to_dto(person: DbPerson) -> PersonDto {
         image_tags,
         provider_ids,
         favorite: None,
+        backdrop_image_tag,
     }
 }
 
@@ -9915,6 +9923,7 @@ async fn get_item_people(pool: &sqlx::PgPool, item_id: Uuid) -> Result<Vec<Perso
                 image_tags,
                 provider_ids,
                 favorite: Some(row.favorite_count > 0),
+                backdrop_image_tag: None,
             }
         })
         .collect())

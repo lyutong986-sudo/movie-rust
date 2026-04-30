@@ -1726,5 +1726,8 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | R84 | DbMediaItem 增加 series_id 字段 | `models.rs` | `#[sqlx(default)] pub series_id: Option<Uuid>` |
 | R85 | NextUp SELECT 包含 series_id | `repository.rs` | CTE 与外层 SELECT 均输出 series_id 供 DTO 使用 |
 | R86 | media_item_to_dto_for_list 使用 series_id | `repository.rs` | Episode 从 `item.series_id` 获取 SeriesId，Season 优先使用 `item.series_id` 再 fallback 到 `parent_id` |
+| R87 | Person DTO 补充 BackdropImageTag | `models.rs` + `repository.rs` | `PersonDto` 新增 `backdrop_image_tag` 字段，从 `DbPerson.backdrop_image_path` 生成 |
+| R88 | person_to_base_item 填充 BackdropImageTags | `routes/persons.rs` | 当人物有 backdrop 图时设置 `BackdropImageTags` 和 `ImageTags["Backdrop"]`，支持客户端拼接背景图 URL |
+| R89 | person_to_base_item 设置 PrimaryImageItemId | `routes/persons.rs` | 设置 `primary_image_item_id` 使客户端能正确定位图片所属条目 |
 
 ---
