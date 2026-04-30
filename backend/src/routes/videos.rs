@@ -13,7 +13,6 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use reqwest::Client;
 use serde::Deserialize;
 use std::{
     path::{Path as StdPath, PathBuf},
@@ -1113,7 +1112,7 @@ fn rewrite_hls_playlist(
 
 async fn proxy_remote_stream(url: &str, request: Request<Body>) -> Result<Response, AppError> {
     let method = request.method().clone();
-    let client = Client::new();
+    let client = &*crate::http_client::SHARED;
     let mut remote_request = if method == Method::HEAD {
         client.head(url)
     } else {

@@ -1,10 +1,12 @@
 mod auth;
 mod config;
 mod error;
+pub mod http_client;
 mod media_analyzer;
 mod metadata;
 mod models;
 mod naming;
+pub mod refresh_queue;
 mod remote_emby;
 mod repository;
 mod routes;
@@ -107,6 +109,13 @@ async fn main() -> Result<()> {
         media_analysis_limit: 8,
         tmdb_metadata_limit: 4,
     });
+    let http_client = reqwest::Client::builder()
+        .pool_max_idle_per_host(32)
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("failed to build HTTP client");
+
     let state = AppState {
         pool,
         config,
@@ -115,6 +124,7 @@ async fn main() -> Result<()> {
         transcoder,
         work_limiters,
         task_tokens: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        http_client,
     };
 
     // SPA 入口：

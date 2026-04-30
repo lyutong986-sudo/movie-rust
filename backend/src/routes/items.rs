@@ -3311,12 +3311,18 @@ async fn refresh_item_metadata(
     }
 
     // Emby 标准行为：立即返回 204，后台异步执行刷新。
-    // 这样不会阻塞 HTTP 连接和数据库连接池，避免其他请求（如 /Users/Public）被拖慢。
+    // 去重：如果同一 item_id 已在刷新中则直接跳过。
+    if !crate::refresh_queue::try_begin_refresh(item_id) {
+        tracing::debug!(item_id = %item_id, "刷新已在进行中，跳过重复请求");
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
     let replace_images = params.replace_all_images;
     let recursive = params.recursive;
     tokio::spawn(async move {
         if let Err(e) = do_refresh_item_metadata_with(&state, item_id, replace_images).await {
             tracing::warn!(item_id = %item_id, ?e, "后台刷新元数据失败");
+            crate::refresh_queue::end_refresh(item_id);
             return;
         }
 
@@ -3337,6 +3343,8 @@ async fn refresh_item_metadata(
                 }
             }
         }
+
+        crate::refresh_queue::end_refresh(item_id);
         tracing::info!(item_id = %item_id, "后台刷新元数据完成");
     });
 
@@ -3808,8 +3816,7 @@ async fn download_and_save_image(
     image_url: &str,
     backdrop_index: Option<i32>,
 ) -> Result<(), AppError> {
-    let client = reqwest::Client::new();
-    let response = client
+    let response = crate::http_client::SHARED
         .get(image_url)
         .send()
         .await

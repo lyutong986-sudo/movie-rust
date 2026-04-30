@@ -1015,12 +1015,18 @@ pub async fn update_media_item_provider_ids(
 
 pub async fn get_genres(
     pool: &sqlx::PgPool,
-    _start_index: Option<i32>,
-    _limit: Option<i32>,
+    start_index: Option<i32>,
+    limit: Option<i32>,
 ) -> Result<Vec<GenreDto>, AppError> {
-    let query = "SELECT DISTINCT unnest(genres) as name FROM media_items WHERE array_length(genres, 1) > 0 ORDER BY name";
+    let offset = start_index.unwrap_or(0).max(0) as i64;
+    let cap = limit.unwrap_or(200).clamp(1, 500) as i64;
+    let query = "SELECT DISTINCT unnest(genres) as name FROM media_items WHERE array_length(genres, 1) > 0 ORDER BY name OFFSET $1 LIMIT $2";
 
-    let rows = sqlx::query(query).fetch_all(pool).await?;
+    let rows = sqlx::query(query)
+        .bind(offset)
+        .bind(cap)
+        .fetch_all(pool)
+        .await?;
 
     let genres: Vec<GenreDto> = rows
         .iter()
@@ -1055,11 +1061,10 @@ pub async fn get_items_by_genre(
         .fetch_all(pool)
         .await?;
 
-    let mut item_dtos = Vec::new();
-    for item in items {
-        let dto = media_item_to_dto(pool, &item, None, server_id).await?;
-        item_dtos.push(dto);
-    }
+    let item_dtos: Vec<BaseItemDto> = items
+        .iter()
+        .map(|item| media_item_to_dto_for_list(item, server_id, None, DtoCountPrefetch::default()))
+        .collect();
 
     Ok(item_dtos)
 }
@@ -1333,10 +1338,10 @@ pub async fn get_items_by_person(
     .fetch_all(pool)
     .await?;
 
-    let mut items = Vec::with_capacity(rows.len());
-    for item in rows {
-        items.push(media_item_to_dto(pool, &item, None, server_id).await?);
-    }
+    let items: Vec<BaseItemDto> = rows
+        .iter()
+        .map(|item| media_item_to_dto_for_list(item, server_id, None, DtoCountPrefetch::default()))
+        .collect();
 
     Ok(items)
 }
@@ -6398,10 +6403,15 @@ pub async fn session_play_queue(
     .await?;
 
     let total_record_count = rows.len() as i64;
-    let mut items = Vec::with_capacity(rows.len());
-    for row in rows {
-        items.push(media_item_to_dto(pool, &row, Some(user_id), server_id).await?);
-    }
+    let row_ids: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let user_data_map = get_user_item_data_batch(pool, user_id, &row_ids).await?;
+    let items: Vec<BaseItemDto> = rows
+        .iter()
+        .map(|row| {
+            let prefetched = Some(user_data_map.get(&row.id).cloned());
+            media_item_to_dto_for_list(row, server_id, prefetched, DtoCountPrefetch::default())
+        })
+        .collect();
 
     Ok(QueryResult {
         items,

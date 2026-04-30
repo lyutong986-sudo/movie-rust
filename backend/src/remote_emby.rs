@@ -12,7 +12,6 @@ use axum::{
     response::Response,
 };
 use chrono::NaiveDate;
-use reqwest::Client;
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::{
@@ -493,7 +492,7 @@ pub async fn preview_remote_views(
 
     let source_id = Uuid::new_v4();
     let device_id = format!("movie-rust-preview-{}", source_id.simple());
-    let client = Client::new();
+    let client = &*crate::http_client::SHARED;
     let auth_endpoint = format!("{server_url}/Users/AuthenticateByName");
     let login_response = client
         .post(&auth_endpoint)
@@ -1599,7 +1598,7 @@ async fn send_remote_stream_request(
     method: &Method,
     request_headers: &HeaderMap,
 ) -> Result<reqwest::Response, AppError> {
-    let client = Client::new();
+    let client = &*crate::http_client::SHARED;
     let normalized_method = if *method == Method::HEAD {
         Method::HEAD
     } else {
@@ -1713,7 +1712,7 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
     endpoint: &str,
     query: &[(String, String)],
 ) -> Result<T, AppError> {
-    let client = Client::new();
+    let client = &*crate::http_client::SHARED;
     for attempt in 0..2 {
         let _user_id = ensure_authenticated(pool, source, attempt > 0).await?;
         let token = source
@@ -2111,7 +2110,7 @@ async fn ensure_authenticated(
 }
 
 async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse, AppError> {
-    let client = Client::new();
+    let client = &*crate::http_client::SHARED;
     let endpoint = format!(
         "{}/Users/AuthenticateByName",
         normalize_server_url(&source.server_url)

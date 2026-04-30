@@ -1,10 +1,14 @@
 use crate::error::AppError;
 use async_trait::async_trait;
 use chrono::Datelike;
+use moka::future::Cache;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use super::{
     models::{
@@ -48,6 +52,8 @@ pub struct TmdbProvider {
     config: TmdbConfig,
     client: Client,
     key_counter: AtomicUsize,
+    /// In-memory response cache (TTL=1h, max 10000 entries)
+    json_cache: Arc<Cache<String, JsonValue>>,
 }
 
 impl TmdbProvider {
@@ -99,10 +105,17 @@ impl TmdbProvider {
 
     /// 使用配置创建TMDB提供者
     pub fn with_config(config: TmdbConfig) -> Self {
+        let json_cache = Arc::new(
+            Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(3600))
+                .build(),
+        );
         Self {
             config,
-            client: Client::new(),
+            client: crate::http_client::SHARED.clone(),
             key_counter: AtomicUsize::new(0),
+            json_cache,
         }
     }
 
@@ -151,6 +164,34 @@ impl TmdbProvider {
         }
     }
 
+    /// Cached GET: check moka cache first, on miss perform HTTP GET and store 2xx responses.
+    async fn cached_get<T: serde::de::DeserializeOwned>(
+        &self,
+        cache_key: &str,
+        url: &str,
+        params: &HashMap<String, String>,
+    ) -> Result<T, AppError> {
+        if let Some(cached) = self.json_cache.get(cache_key).await {
+            return serde_json::from_value(cached)
+                .map_err(|e| AppError::Internal(format!("cache deser: {e}")));
+        }
+
+        let response = self
+            .auth_get(url)
+            .query(params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let json_val: JsonValue = response.json().await?;
+        self.json_cache
+            .insert(cache_key.to_string(), json_val.clone())
+            .await;
+
+        serde_json::from_value(json_val)
+            .map_err(|e| AppError::Internal(format!("tmdb deser: {e}")))
+    }
+
     /// 搜索人物
     async fn search_person_internal(
         &self,
@@ -181,15 +222,8 @@ impl TmdbProvider {
         self.add_api_key(&mut params);
 
         let url = self.build_url(&format!("/person/{}", person_id));
-        let response = self
-            .auth_get(&url)
-            .query(&params)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        let person_details: TmdbPersonDetails = response.json().await?;
-        Ok(person_details)
+        let cache_key = format!("person:{person_id}");
+        self.cached_get(&cache_key, &url, &params).await
     }
 
     /// 取人物详情时，若用户首选语言（如 zh-CN）下 biography 为空字符串，
@@ -289,14 +323,8 @@ impl TmdbProvider {
         );
 
         let url = self.build_url(&format!("/movie/{movie_id}"));
-        let response = self
-            .auth_get(&url)
-            .query(&params)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Ok(response.json().await?)
+        let cache_key = format!("movie:{movie_id}");
+        self.cached_get(&cache_key, &url, &params).await
     }
 
     async fn get_tv_details_internal(&self, tv_id: &str) -> Result<TmdbTvDetails, AppError> {
@@ -305,14 +333,8 @@ impl TmdbProvider {
         params.insert("append_to_response".to_string(), "external_ids".to_string());
 
         let url = self.build_url(&format!("/tv/{}", tv_id));
-        let response = self
-            .auth_get(&url)
-            .query(&params)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Ok(response.json().await?)
+        let cache_key = format!("tv:{tv_id}");
+        self.cached_get(&cache_key, &url, &params).await
     }
 
     async fn get_movie_images_internal(
@@ -327,14 +349,8 @@ impl TmdbProvider {
         );
 
         let url = self.build_url(&format!("/movie/{movie_id}/images"));
-        let response = self
-            .auth_get(&url)
-            .query(&params)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Ok(response.json().await?)
+        let cache_key = format!("movie_img:{movie_id}");
+        self.cached_get(&cache_key, &url, &params).await
     }
 
     async fn get_tv_images_internal(&self, tv_id: &str) -> Result<TmdbImageCollection, AppError> {
@@ -346,14 +362,8 @@ impl TmdbProvider {
         );
 
         let url = self.build_url(&format!("/tv/{tv_id}/images"));
-        let response = self
-            .auth_get(&url)
-            .query(&params)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Ok(response.json().await?)
+        let cache_key = format!("tv_img:{tv_id}");
+        self.cached_get(&cache_key, &url, &params).await
     }
 
     async fn get_tv_season_details_internal(
@@ -365,14 +375,8 @@ impl TmdbProvider {
         self.add_api_key(&mut params);
 
         let url = self.build_url(&format!("/tv/{tv_id}/season/{season_number}"));
-        let response = self
-            .auth_get(&url)
-            .query(&params)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Ok(response.json().await?)
+        let cache_key = format!("tv_season:{tv_id}:{season_number}");
+        self.cached_get(&cache_key, &url, &params).await
     }
 
     async fn get_movie_credits_internal(
@@ -383,14 +387,8 @@ impl TmdbProvider {
         self.add_api_key(&mut params);
 
         let url = self.build_url(&format!("/movie/{movie_id}/credits"));
-        let response = self
-            .auth_get(&url)
-            .query(&params)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Ok(response.json().await?)
+        let cache_key = format!("movie_credits:{movie_id}");
+        self.cached_get(&cache_key, &url, &params).await
     }
 
     async fn get_tv_credits_internal(&self, tv_id: &str) -> Result<TmdbItemCredits, AppError> {
@@ -398,14 +396,8 @@ impl TmdbProvider {
         self.add_api_key(&mut params);
 
         let url = self.build_url(&format!("/tv/{tv_id}/credits"));
-        let response = self
-            .auth_get(&url)
-            .query(&params)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        Ok(response.json().await?)
+        let cache_key = format!("tv_credits:{tv_id}");
+        self.cached_get(&cache_key, &url, &params).await
     }
 
     async fn search_movie_internal(

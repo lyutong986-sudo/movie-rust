@@ -19,4 +19,6 @@ pub struct AppState {
     pub transcoder: Transcoder,
     pub work_limiters: WorkLimiters,
     pub task_tokens: Arc<tokio::sync::RwLock<std::collections::HashMap<String, CancellationToken>>>,
+    /// Shared HTTP client for all outbound requests (connection pooling)
+    pub http_client: reqwest::Client,
 }

@@ -1534,3 +1534,42 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | `tests/sakura_full_simulation.py` | Sakura_embyboss 全功能模拟（57 项） |
 
 ---
+
+## 第八轮修复：全功能链路最优化审计
+
+**对比基准**: Jellyfin 后端模板 + 2026 Rust 生态最佳实践
+
+**修复内容：**
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R23 | HTTP ETag + 304 + Cache-Control | `routes/images.rs` | 本地图片基于 mtime+size 生成 ETag，支持 If-None-Match 条件请求返回 304，Cache-Control: public, max-age=604800, immutable |
+| R24 | TMDB 内存缓存 (moka TTL=1h) | `metadata/tmdb.rs` | 新增 `moka::future::Cache<String, JsonValue>` 缓存所有 TMDB 响应（movie/tv/person/images/credits/season），max_capacity=10000，避免同一 Series 重复请求 |
+| R25 | N+1 查询清零 (3处残余) | `repository.rs` | `get_items_by_genre`/`get_items_by_person`/`session_play_queue` 从逐条 `media_item_to_dto` 改为批量 `media_item_to_dto_for_list` |
+| R26 | get_genres 分页 | `repository.rs` | 实际使用 `start_index`/`limit` 参数，OFFSET+LIMIT 封顶 500，避免百万级数据返回上千种类型 |
+| R27 | 全局共享 reqwest::Client | `http_client.rs` + 全部出站模块 | 新增 `http_client::SHARED` (LazyLock)，替换 tmdb.rs/images.rs/scanner.rs/items.rs/videos.rs/remote_emby.rs 中 11 处 `Client::new()`，TCP 连接池全局复用 |
+| R28 | 图片下载 URL 去重 + 字节缓存 | `http_client.rs` | `download_image_bytes()` 使用 DashMap 做 in-flight 合并 + moka 10s TTL 字节缓存，同一 URL 并发只下载一次 |
+| R29 | 元数据刷新去重 | `refresh_queue.rs` + `routes/items.rs` | DashSet 追踪正在刷新的 item_id，重复请求直接返回 204 跳过 |
+| R30 | 跨库并行扫描 | `scanner.rs` | 将外层 `for library in library_files` 串行循环改为统一 JoinSet 并发入库，多库文件交错处理，由 work_limiter 统一控流 |
+
+**架构改进对照表：**
+
+| 维度 | Jellyfin 模式 | 修复前 | 修复后 |
+|------|--------------|--------|--------|
+| HTTP ETag/304 | ImageCacheTag + 条件请求 | 仅远程图片有 Cache-Control | ETag + If-None-Match + 304 + 7天缓存 |
+| 元数据缓存 | IMemoryCache 1h TTL | 无缓存 | moka 1h TTL，10000 条目 |
+| 图片下载去重 | AsyncKeyedLock + 10s cache | 每次独立下载 | broadcast 合并 + 10s TTL |
+| 列表查询 N+1 | 批量预取 | 3处残余 | 全部 0 额外查询 |
+| HTTP Client 复用 | IHttpClientFactory 单例 | 11处 Client::new() | 全局 LazyLock 共享 |
+| 刷新队列去重 | PriorityQueue + 去重 | tokio::spawn 无去重 | DashSet 去重 |
+| 扫描并发模型 | Channel 跨库扇出 | 库间串行 | 统一 JoinSet 跨库并行 |
+
+**新增依赖：**
+
+| 依赖 | 版本 | 用途 |
+|------|------|------|
+| moka | 0.12 (feature: future) | TMDB 响应缓存 + 图片字节缓存 |
+| dashmap | 6 | 图片下载 in-flight 去重 + 刷新队列去重 |
+| bytes | 1 | 图片下载字节传递 |
+
+---

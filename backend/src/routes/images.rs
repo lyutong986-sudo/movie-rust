@@ -14,20 +14,19 @@ use axum::{
     body::{Body, Bytes},
     extract::{Path, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    path::{Path as StdPath, PathBuf},
+    path::PathBuf,
 };
 use tokio::fs;
-use tower::ServiceExt;
-use tower_http::services::ServeFile;
+
+use crate::http_client::SHARED as SHARED_HTTP_CLIENT;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -391,7 +390,7 @@ async fn download_item_remote_image(
         .work_limiters
         .acquire(WorkLimiterKind::TmdbMetadata)
         .await;
-    let response = Client::new()
+    let response = SHARED_HTTP_CLIENT
         .get(image_url)
         .send()
         .await
@@ -1410,7 +1409,7 @@ async fn find_tmdb_image_fallback(
         let api_url = format!(
             "https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_no}?api_key=abd3e7934eb6563b06b34934e7fa31c6"
         );
-        let resp = reqwest::Client::new().get(&api_url).send().await.ok()?;
+        let resp = SHARED_HTTP_CLIENT.get(&api_url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
         }
@@ -1425,7 +1424,7 @@ async fn find_tmdb_image_fallback(
         let api_url = format!(
             "https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key=abd3e7934eb6563b06b34934e7fa31c6"
         );
-        let resp = reqwest::Client::new().get(&api_url).send().await.ok()?;
+        let resp = SHARED_HTTP_CLIENT.get(&api_url).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
         }
@@ -1651,8 +1650,7 @@ async fn resolve_person_image_path(
     .ok_or_else(|| AppError::NotFound("人物不存在".to_string()))?;
 
     let normalized = normalized_item_image_type(image_type);
-    let client = Client::new();
-    let response = client
+    let response = SHARED_HTTP_CLIENT
         .get(&path)
         .send()
         .await
@@ -1710,20 +1708,56 @@ async fn serve_image(path: &str, request: Request<Body>) -> Result<Response, App
 }
 
 async fn serve_local_path(path: PathBuf, request: Request<Body>) -> Result<Response, AppError> {
-    if !path.exists() {
-        return Err(AppError::NotFound("文件不存在".to_string()));
+    let metadata = tokio::fs::metadata(&path).await.map_err(|_| {
+        AppError::NotFound("文件不存在".to_string())
+    })?;
+
+    let mtime = metadata
+        .modified()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let size = metadata.len();
+    let etag_raw = format!(
+        "{:x}-{:x}",
+        mtime
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        size
+    );
+    let etag = format!("\"{}\"", etag_raw);
+
+    if let Some(if_none_match) = request.headers().get(header::IF_NONE_MATCH) {
+        if let Ok(val) = if_none_match.to_str() {
+            if val == etag || val == format!("W/{}", etag) || val == "*" {
+                return Ok(Response::builder()
+                    .status(StatusCode::NOT_MODIFIED)
+                    .header(header::ETAG, &etag)
+                    .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
+                    .body(Body::empty())
+                    .unwrap());
+            }
+        }
     }
 
-    ServeFile::new(StdPath::new(&path))
-        .oneshot(request)
-        .await
-        .map(IntoResponse::into_response)
-        .map_err(|error| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, error)))
+    let content_type = mime_guess::from_path(&path)
+        .first_or_octet_stream()
+        .to_string();
+    let body_bytes = tokio::fs::read(&path).await.map_err(|e| {
+        AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+    })?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ETAG, &etag)
+        .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
+        .header(header::CONTENT_LENGTH, body_bytes.len())
+        .body(Body::from(body_bytes))
+        .unwrap())
 }
 
 async fn serve_remote_image(url: &str, _request: Request<Body>) -> Result<Response, AppError> {
-    let client = Client::new();
-    let response = client
+    let response = SHARED_HTTP_CLIENT
         .get(url)
         .send()
         .await

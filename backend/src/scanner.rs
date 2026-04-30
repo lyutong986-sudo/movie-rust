@@ -13,7 +13,6 @@ use crate::{
 };
 use chrono::NaiveDate;
 use regex::Regex;
-use reqwest::Client;
 use serde_json::{json, Map, Value};
 use std::{
     collections::HashSet,
@@ -340,16 +339,13 @@ async fn scan_libraries(
     }
 
     // ---- Phase B：入库（Jellyfin 的 RootFolder.ValidateChildren 等价物）
+    // 跨库并行：所有库的文件统一进入 JoinSet，由 work_limiter 控制并发上限。
     if let Some(p) = &progress {
         p.set_phase("Importing");
     }
 
+    let mut tasks = JoinSet::new();
     for (library, library_options, path, files) in library_files {
-        if let Some(p) = &progress {
-            p.set_current_library(Some(library.name.clone()));
-        }
-
-        let mut tasks = JoinSet::new();
         for file in files {
             while tasks.len() >= limits.library_scan_limit as usize {
                 match tasks.join_next().await {
@@ -416,27 +412,27 @@ async fn scan_libraries(
                 Ok::<(), AppError>(())
             });
         }
+    }
 
-        while let Some(joined) = tasks.join_next().await {
-            match joined {
-                Ok(Ok(())) => {
-                    imported_items += 1;
-                    if let Some(p) = &progress {
-                        p.inc_scanned();
-                        p.inc_imported();
-                    }
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok(())) => {
+                imported_items += 1;
+                if let Some(p) = &progress {
+                    p.inc_scanned();
+                    p.inc_imported();
                 }
-                Ok(Err(error)) => {
-                    tracing::error!("文件扫描失败（跳过继续）: {error}");
-                    if let Some(p) = &progress {
-                        p.inc_scanned();
-                    }
+            }
+            Ok(Err(error)) => {
+                tracing::error!("文件扫描失败（跳过继续）: {error}");
+                if let Some(p) = &progress {
+                    p.inc_scanned();
                 }
-                Err(error) => {
-                    tracing::error!("扫描任务 panic: {error}");
-                    if let Some(p) = &progress {
-                        p.inc_scanned();
-                    }
+            }
+            Err(error) => {
+                tracing::error!("扫描任务 panic: {error}");
+                if let Some(p) = &progress {
+                    p.inc_scanned();
                 }
             }
         }
@@ -2060,22 +2056,7 @@ fn cache_target_path(dir: &Path, stem: &str, image_type: &str, image_url: &str) 
 }
 
 async fn download_image_to_path(path: &Path, image_url: &str) -> Result<(), AppError> {
-    let client = Client::new();
-    let response = client
-        .get(image_url)
-        .send()
-        .await
-        .map_err(|error| AppError::Internal(format!("下载远程图片失败: {error}")))?;
-    if !response.status().is_success() {
-        return Err(AppError::NotFound(format!(
-            "远程图片不存在: {}",
-            response.status()
-        )));
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| AppError::Internal(format!("读取远程图片失败: {error}")))?;
+    let bytes = crate::http_client::download_image_bytes(image_url).await?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
