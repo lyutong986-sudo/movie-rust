@@ -3356,12 +3356,20 @@ async fn refresh_item_metadata(
             .await
             .unwrap_or_default();
 
+            let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+            let mut handles = Vec::with_capacity(child_ids.len());
             for (child_id,) in child_ids {
-                if let Err(e) =
-                    do_refresh_item_metadata_with(&state, child_id, replace_images).await
-                {
-                    tracing::warn!(child_id = %child_id, ?e, "递归刷新子条目失败");
-                }
+                let permit = sem.clone().acquire_owned().await;
+                let st = state.clone();
+                handles.push(tokio::spawn(async move {
+                    let _permit = permit;
+                    if let Err(e) = do_refresh_item_metadata_with(&st, child_id, replace_images).await {
+                        tracing::warn!(child_id = %child_id, ?e, "递归刷新子条目失败");
+                    }
+                }));
+            }
+            for h in handles {
+                let _ = h.await;
             }
         }
 

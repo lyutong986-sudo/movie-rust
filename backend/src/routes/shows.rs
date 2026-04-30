@@ -888,11 +888,23 @@ async fn get_episodes_by_season(
     )
     .await?;
 
-    let mut episode_dtos = Vec::with_capacity(episodes.items.len());
-    for episode in episodes.items {
-        let dto = episode_to_dto(&state, user_id, &episode).await?;
-        episode_dtos.push(apply_episode_response_shape(dto, &query));
-    }
+    let row_ids: Vec<uuid::Uuid> = episodes.items.iter().map(|r| r.id).collect();
+    let user_data_map =
+        repository::get_user_item_data_batch(&state.pool, user_id, &row_ids).await?;
+    let episode_dtos: Vec<BaseItemDto> = episodes
+        .items
+        .iter()
+        .map(|item| {
+            let prefetched = Some(user_data_map.get(&item.id).cloned());
+            let dto = repository::media_item_to_dto_for_list(
+                item,
+                state.config.server_id,
+                prefetched,
+                repository::DtoCountPrefetch::default(),
+            );
+            apply_episode_response_shape(dto, &query)
+        })
+        .collect();
 
     Ok(Json(QueryResult {
         items: episode_dtos,

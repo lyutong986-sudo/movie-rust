@@ -710,7 +710,7 @@ fn normalize_encoding_options(options: &mut EncodingOptionsDto, config: &Config)
     options.max_transcode_sessions = options.max_transcode_sessions.clamp(1, 64);
 }
 
-async fn get_system_setting(pool: &sqlx::PgPool, key: &str) -> Result<Option<Value>, AppError> {
+pub async fn get_system_setting(pool: &sqlx::PgPool, key: &str) -> Result<Option<Value>, AppError> {
     Ok(
         sqlx::query_scalar::<_, Value>("SELECT value FROM system_settings WHERE key = $1")
             .bind(key)
@@ -1210,26 +1210,23 @@ pub async fn get_person_image_path(
     person_id_or_name: &str,
     image_type: &str,
 ) -> Result<Option<String>, AppError> {
+    #[derive(sqlx::FromRow)]
+    struct PersonImagePaths {
+        primary_image_path: Option<String>,
+        backdrop_image_path: Option<String>,
+        logo_image_path: Option<String>,
+    }
+
     let person = if let Ok(person_id) = emby_id_to_uuid(person_id_or_name) {
-        sqlx::query_as::<_, DbPerson>(
-            r#"
-            SELECT *
-            FROM persons
-            WHERE id = $1
-            LIMIT 1
-            "#,
+        sqlx::query_as::<_, PersonImagePaths>(
+            "SELECT primary_image_path, backdrop_image_path, logo_image_path FROM persons WHERE id = $1 LIMIT 1",
         )
         .bind(person_id)
         .fetch_optional(pool)
         .await?
     } else {
-        sqlx::query_as::<_, DbPerson>(
-            r#"
-            SELECT *
-            FROM persons
-            WHERE name = $1
-            LIMIT 1
-            "#,
+        sqlx::query_as::<_, PersonImagePaths>(
+            "SELECT primary_image_path, backdrop_image_path, logo_image_path FROM persons WHERE name = $1 LIMIT 1",
         )
         .bind(person_id_or_name)
         .fetch_optional(pool)
@@ -1332,10 +1329,13 @@ pub async fn get_items_by_person(
 
     let rows = sqlx::query_as::<_, DbMediaItem>(
         r#"
-        SELECT DISTINCT mi.*
-        FROM person_roles pr
-        INNER JOIN media_items mi ON mi.id = pr.media_item_id
-        WHERE pr.person_id = $1
+        SELECT mi.*
+        FROM media_items mi
+        WHERE mi.id IN (
+            SELECT DISTINCT pr.media_item_id
+            FROM person_roles pr
+            WHERE pr.person_id = $1
+        )
         ORDER BY mi.sort_name
         OFFSET $2 LIMIT $3
         "#,
@@ -4014,10 +4014,12 @@ async fn fast_count_media_items(
     if has_search && !has_user_library_filter {
         let search_term = options.search_term.as_ref().unwrap().trim();
         let pattern = format!("%{}%", search_term);
+        let probe_limit = options.start_index.max(0) + options.limit.clamp(1, 200) + 1;
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM media_items WHERE name ILIKE $1 OR sort_name ILIKE $1 LIMIT 10000) t"
+            "SELECT COUNT(*) FROM (SELECT 1 FROM media_items WHERE name ILIKE $1 OR sort_name ILIKE $1 LIMIT $2) t"
         )
         .bind(&pattern)
+        .bind(probe_limit)
         .fetch_one(pool)
         .await?;
         return Ok(count);
@@ -7689,13 +7691,8 @@ pub fn media_item_to_dto_for_list(
     }
 
     let backdrop_tag = item.date_modified.timestamp().to_string();
-    let mut backdrop_image_tags: Vec<String> = Vec::new();
-    if item.backdrop_path.is_some() {
-        backdrop_image_tags.push(backdrop_tag.clone());
-    }
-    for _ in &item.backdrop_paths {
-        backdrop_image_tags.push(backdrop_tag.clone());
-    }
+    let backdrop_count = item.backdrop_path.is_some() as usize + item.backdrop_paths.len();
+    let backdrop_image_tags: Vec<String> = vec![backdrop_tag.clone(); backdrop_count];
 
     let mut user_data = match prefetched_user_data {
         Some(Some(data)) => user_item_data_to_dto_for_item(data, item.id),
@@ -7886,13 +7883,8 @@ async fn media_item_to_dto_inner(
     }
 
     let backdrop_tag = item.date_modified.timestamp().to_string();
-    let mut backdrop_image_tags: Vec<String> = Vec::new();
-    if item.backdrop_path.is_some() {
-        backdrop_image_tags.push(backdrop_tag.clone());
-    }
-    for _ in &item.backdrop_paths {
-        backdrop_image_tags.push(backdrop_tag.clone());
-    }
+    let backdrop_count = item.backdrop_path.is_some() as usize + item.backdrop_paths.len();
+    let backdrop_image_tags: Vec<String> = vec![backdrop_tag.clone(); backdrop_count];
 
     let mut user_data = match (user_id, prefetched_user_data) {
         (_, Some(Some(data))) => user_item_data_to_dto_for_item(data, item.id),
@@ -8348,7 +8340,7 @@ fn emby_extra_fields(
 async fn metadata_preferences_from_settings(
     pool: &sqlx::PgPool,
 ) -> Result<Option<StartupConfiguration>, AppError> {
-    let Some(value) = get_system_setting(pool, "startup_configuration").await? else {
+    let Some(value) = crate::repo_cache::cached_system_setting(pool, "startup_configuration").await? else {
         return Ok(None);
     };
     Ok(serde_json::from_value::<StartupConfiguration>(value).ok())

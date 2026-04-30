@@ -492,17 +492,17 @@ async fn scan_libraries(
             if let Some(segments) = crate::routes::media_segments::detect_segments(
                 &ffmpeg, &path, runtime_ticks,
             ).await {
-                for (seg_type, start, end) in segments {
-                    let _ = sqlx::query(
-                        r#"INSERT INTO media_segments (item_id, segment_type, start_ticks, end_ticks)
-                           VALUES ($1, $2, $3, $4)"#,
-                    )
-                    .bind(item_id)
-                    .bind(&seg_type)
-                    .bind(start)
-                    .bind(end)
-                    .execute(&pool_post)
-                    .await;
+                if !segments.is_empty() {
+                    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+                        "INSERT INTO media_segments (item_id, segment_type, start_ticks, end_ticks) "
+                    );
+                    qb.push_values(&segments, |mut b, (seg_type, start, end)| {
+                        b.push_bind(item_id)
+                            .push_bind(seg_type)
+                            .push_bind(*start)
+                            .push_bind(*end);
+                    });
+                    let _ = qb.build().execute(&pool_post).await;
                 }
             }
         }

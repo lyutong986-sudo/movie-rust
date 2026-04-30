@@ -29,6 +29,17 @@ static IMAGE_CACHE: LazyLock<Cache<String, Bytes>> = LazyLock::new(|| {
 static INFLIGHT: LazyLock<DashMap<String, Arc<broadcast::Sender<Result<Bytes, String>>>>> =
     LazyLock::new(DashMap::new);
 
+/// RAII guard that removes the INFLIGHT entry on drop, preventing leaks on panic/cancel
+struct InflightGuard {
+    key: String,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        INFLIGHT.remove(&self.key);
+    }
+}
+
 /// Download image bytes with URL deduplication.
 /// If the same URL is currently being fetched, callers wait for the shared result.
 /// Successfully fetched bytes are cached for 10s.
@@ -52,6 +63,8 @@ pub async fn download_image_bytes(url: &str) -> Result<Bytes, AppError> {
     let tx = Arc::new(tx);
     INFLIGHT.insert(url.to_string(), tx.clone());
 
+    let _guard = InflightGuard { key: url.to_string() };
+
     let result = async {
         let response = SHARED
             .get(url)
@@ -68,19 +81,15 @@ pub async fn download_image_bytes(url: &str) -> Result<Bytes, AppError> {
     }
     .await;
 
-    INFLIGHT.remove(url);
-
-    match &result {
+    match result {
         Ok(bytes) => {
-            IMAGE_CACHE
-                .insert(url.to_string(), bytes.clone())
-                .await;
+            IMAGE_CACHE.insert(url.to_string(), bytes.clone()).await;
             let _ = tx.send(Ok(bytes.clone()));
-            Ok(bytes.clone())
+            Ok(bytes)
         }
         Err(e) => {
             let _ = tx.send(Err(e.clone()));
-            Err(AppError::Internal(e.clone()))
+            Err(AppError::Internal(e))
         }
     }
 }

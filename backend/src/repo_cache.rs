@@ -1,4 +1,5 @@
 use moka::future::Cache;
+use serde_json::Value;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -58,9 +59,33 @@ pub async fn cached_aggregate_array_values(
     Ok(result)
 }
 
+/// Cached system_settings lookup (10s TTL) — avoids per-item DB hit for startup_configuration
+static SYSTEM_SETTING_CACHE: LazyLock<Cache<String, Option<Value>>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(20)
+        .time_to_live(Duration::from_secs(10))
+        .build()
+});
+
+pub async fn cached_system_setting(
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<Option<Value>, AppError> {
+    let cache_key = key.to_string();
+    if let Some(cached) = SYSTEM_SETTING_CACHE.get(&cache_key).await {
+        return Ok(cached);
+    }
+    let result = super::repository::get_system_setting(pool, key).await?;
+    SYSTEM_SETTING_CACHE
+        .insert(cache_key, result.clone())
+        .await;
+    Ok(result)
+}
+
 /// Invalidate all aggregate caches (call after scan/import completes)
 pub async fn invalidate_all() {
     ITEM_COUNTS_CACHE.invalidate_all();
     YEARS_CACHE.invalidate_all();
     ARRAY_VALUES_CACHE.invalidate_all();
+    SYSTEM_SETTING_CACHE.invalidate_all();
 }

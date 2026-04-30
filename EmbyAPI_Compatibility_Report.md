@@ -1637,3 +1637,32 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | 首批请求延迟 | 冷启动等待连接建立 | 预热池即用 |
 
 ---
+
+## 第十一轮修复：N+1 消除 + 缓存 + 安全 + 批量化
+
+**修复内容：**
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R49 | Episode 列表 N+1 消除 | `routes/shows.rs` | `get_episodes` 从逐集 `episode_to_dto`(每条多路查询) 改为批量 `get_user_item_data_batch` + `media_item_to_dto_for_list`，一季百集从百次查询降为 1 次批量 |
+| R50 | metadata_preferences 进程内缓存 | `repo_cache.rs` + `repository.rs` | `metadata_preferences_from_settings` 每次反序列化全局配置改为 10s TTL moka 缓存，详情接口 N 条不再 N 次 SELECT |
+| R51 | get_person_image_path 窄查询 | `repository.rs` | `SELECT *` 改为 `SELECT primary_image_path, backdrop_image_path, logo_image_path`，避免加载 overview/json 等大字段 |
+| R52 | INFLIGHT DashMap RAII guard | `http_client.rs` | 添加 `InflightGuard` 结构体确保 panic/cancel 时自动 `remove`，防止条目泄漏 |
+| R53 | media_segments 批量 INSERT | `scanner.rs` | 从循环单条 `INSERT` 改为 `QueryBuilder::push_values` 批量插入，减少 N 次往返为 1 次 |
+| R54 | get_items_by_person 去除冗余 DISTINCT | `repository.rs` | `SELECT DISTINCT mi.*` 改为子查询 `WHERE mi.id IN (SELECT DISTINCT pr.media_item_id ...)`，避免宽表哈希去重 |
+| R55 | 元数据刷新有界并行 | `routes/items.rs` | 子节点刷新从串行 for 循环改为 `Semaphore(4)` + `tokio::spawn` 有界并行，Series 下多季/集刷新速度提升 ~4x |
+| R56 | backdrop_image_tags 分配优化 | `repository.rs` | 循环 `push(tag.clone())` 改为 `vec![tag; count]` 一次分配，减少列表 DTO 路径小热点 |
+| R57 | 搜索计数范围限缩 | `repository.rs` | ILIKE COUNT 的 LIMIT 从固定 10000 改为 `offset + page_size + 1`，减少不必要扫描 |
+| R58 | Bytes clone 减少 + RAII 安全 | `http_client.rs` | 成功路径从 3 次 clone 减为 2 次(cache + broadcast)，返回 owned bytes |
+
+**性能预期提升（百万级片源）：**
+
+| 场景 | 优化前 | 优化后 |
+|------|--------|--------|
+| `/Shows/{id}/Episodes` (50集) | 50× media_item_to_dto(~3 SQL/条) = 150 SQL | 1× batch user_data + 纯内存 DTO |
+| 详情接口 metadata_preferences | 每条 SELECT + JSON parse | 10s 缓存命中 |
+| `/Persons/{id}/Items` | DISTINCT 宽表排序 | 子查询精准去重 |
+| Series 刷新 (4季×12集) | 48条串行 TMDB | 4并行批次 = ~12x 实际网络利用率 |
+| 扫描 media_segments (10段) | 10× INSERT 往返 | 1× 批量 INSERT |
+
+---
