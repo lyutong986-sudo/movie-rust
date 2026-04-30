@@ -3311,6 +3311,8 @@ pub async fn create_remote_emby_source(
     let token_refresh_interval_secs = token_refresh_interval_secs.clamp(300, 86400 * 30);
     let source_secret = Uuid::new_v4();
     let row_id = Uuid::new_v4();
+    // remote_views 列类型为 jsonb（单个 JSON 数组），必须 wrap 成 Value::Array
+    let remote_views_json = Value::Array(sanitized_remote_views);
     sqlx::query(
         r#"
         INSERT INTO remote_emby_sources (
@@ -3330,7 +3332,7 @@ pub async fn create_remote_emby_source(
     .bind(target_library_id)
     .bind(display_mode)
     .bind(sanitized_remote_view_ids)
-    .bind(sanitized_remote_views)
+    .bind(&remote_views_json)
     .bind(enabled)
     .bind(source_secret)
     .bind(strm_output_path)
