@@ -500,6 +500,41 @@ async fn serve_media_item(
     }
 
     if naming::is_strm(&path) {
+        // STRM 关联了远端 Emby 源 → 走 remote_emby 代理/重定向逻辑（支持 302 redirect 模式）
+        if let Some(source_id_str) = item
+            .provider_ids
+            .get("RemoteEmbySourceId")
+            .and_then(|v| v.as_str())
+        {
+            if let Ok(source_id) = uuid::Uuid::parse_str(source_id_str) {
+                let remote_item_id = item
+                    .provider_ids
+                    .get("RemoteEmbyItemId")
+                    .and_then(|v| v.as_str());
+                if let Some(remote_item_id) = remote_item_id {
+                    let media_source_id = query
+                        .as_ref()
+                        .and_then(|v| v.media_source_id.as_deref())
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty());
+                    let default_msid =
+                        remote_emby::remote_default_media_source_id(&item.provider_ids);
+                    let effective_msid = media_source_id
+                        .map(ToOwned::to_owned)
+                        .or(default_msid);
+                    return remote_emby::proxy_item_stream_internal(
+                        state,
+                        source_id,
+                        remote_item_id,
+                        effective_msid.as_deref(),
+                        request.method().clone(),
+                        request.headers(),
+                    )
+                    .await;
+                }
+            }
+        }
+
         let content = tokio::fs::read_to_string(&path).await?;
         let target = naming::strm_target_from_text(&content)
             .ok_or_else(|| AppError::BadRequest("STRM 文件没有有效的远程播放地址".to_string()))?;
