@@ -1325,18 +1325,121 @@ async fn serve_item_image(
     let normalized = normalized_item_image_type(&image_type);
     let idx = image_index.unwrap_or(0);
     let path = match normalized.as_str() {
-        "Backdrop" if idx == 0 => item.backdrop_path,
+        "Backdrop" if idx == 0 => item.backdrop_path.clone(),
         "Backdrop" if idx > 0 => item.backdrop_paths.get((idx - 1) as usize).cloned(),
-        "Logo" => item.logo_path,
-        "Thumb" => item.thumb_path.or(item.backdrop_path.clone()),
-        "Banner" => item.banner_path,
-        "Disc" => item.disc_path,
-        "Art" => item.art_path,
-        _ => item.image_primary_path,
+        "Logo" => item.logo_path.clone(),
+        "Thumb" => item.thumb_path.clone().or(item.backdrop_path.clone()),
+        "Banner" => item.banner_path.clone(),
+        "Disc" => item.disc_path.clone(),
+        "Art" => item.art_path.clone(),
+        _ => item.image_primary_path.clone(),
     }
     .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
 
-    serve_image(&path, request).await
+    let result = serve_image(&path, request).await;
+
+    if let Err(AppError::NotFound(_)) = &result {
+        if !path.starts_with("http://") && !path.starts_with("https://") {
+            if let Some(fallback_url) =
+                find_tmdb_image_fallback(&state.pool, &item, &normalized).await
+            {
+                tracing::debug!(
+                    item_id = %item.id,
+                    image_type = normalized.as_str(),
+                    "本地图片文件不存在，回退到 TMDB 远程代理"
+                );
+                let fallback_req = Request::builder()
+                    .body(Body::empty())
+                    .unwrap_or_default();
+                return serve_remote_image(&fallback_url, fallback_req).await;
+            }
+        }
+    }
+
+    result
+}
+
+/// 当本地图片文件不存在时，尝试从 series_episode_catalog 或 TMDB API 构建回退 URL。
+async fn find_tmdb_image_fallback(
+    pool: &sqlx::PgPool,
+    item: &crate::models::DbMediaItem,
+    image_type: &str,
+) -> Option<String> {
+    let kind = item.item_type.as_str();
+
+    if kind.eq_ignore_ascii_case("Episode") {
+        if image_type.eq_ignore_ascii_case("Primary") || image_type.eq_ignore_ascii_case("Thumb") {
+            let season_no = item.parent_index_number?;
+            let ep_no = item.index_number?;
+            // Episode -> parent_id=Season -> parent_id=Series
+            let season_id = item.parent_id?;
+            let row: Option<(Option<uuid::Uuid>,)> = sqlx::query_as(
+                "SELECT parent_id FROM media_items WHERE id = $1",
+            )
+            .bind(season_id)
+            .fetch_optional(pool)
+            .await
+            .ok()?;
+            let series_id = row?.0?;
+            let catalog_row: Option<(Option<String>,)> = sqlx::query_as(
+                "SELECT image_path FROM series_episode_catalog \
+                 WHERE series_id = $1 AND season_number = $2 AND episode_number = $3 LIMIT 1",
+            )
+            .bind(series_id)
+            .bind(season_no)
+            .bind(ep_no)
+            .fetch_optional(pool)
+            .await
+            .ok()?;
+            return catalog_row?.0;
+        }
+    }
+
+    if kind.eq_ignore_ascii_case("Season") {
+        let series_id = item.parent_id?;
+        let season_no = item.index_number.unwrap_or(1);
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT provider_ids FROM media_items WHERE id = $1",
+        )
+        .bind(series_id)
+        .fetch_optional(pool)
+        .await
+        .ok()?;
+        let series_providers = row?.0;
+        let tmdb_id = series_providers.get("Tmdb")?.as_str()?;
+        let api_url = format!(
+            "https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_no}?api_key=abd3e7934eb6563b06b34934e7fa31c6"
+        );
+        let resp = reqwest::Client::new().get(&api_url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let json: serde_json::Value = resp.json().await.ok()?;
+        let poster = json.get("poster_path")?.as_str()?;
+        return Some(format!("https://image.tmdb.org/t/p/original{poster}"));
+    }
+
+    if kind.eq_ignore_ascii_case("Series") || kind.eq_ignore_ascii_case("Movie") {
+        let tmdb_id = item.provider_ids.get("Tmdb")?.as_str()?;
+        let media_type = if kind.eq_ignore_ascii_case("Series") { "tv" } else { "movie" };
+        let api_url = format!(
+            "https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key=abd3e7934eb6563b06b34934e7fa31c6"
+        );
+        let resp = reqwest::Client::new().get(&api_url).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let json: serde_json::Value = resp.json().await.ok()?;
+        let path_field = match image_type.to_ascii_lowercase().as_str() {
+            "backdrop" => "backdrop_path",
+            "logo" => return None,
+            _ => "poster_path",
+        };
+        let img_path = json.get(path_field)?.as_str()?;
+        return Some(format!("https://image.tmdb.org/t/p/original{img_path}"));
+    }
+
+    None
 }
 
 #[derive(Debug, Serialize)]

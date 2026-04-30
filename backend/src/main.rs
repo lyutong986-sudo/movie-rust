@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
     let static_dir = config.static_dir.clone();
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
+        .acquire_timeout(std::time::Duration::from_secs(15))
         .connect(&config.database_url)
         .await
         .context("连接 PostgreSQL 失败，请检查 DATABASE_URL")?;

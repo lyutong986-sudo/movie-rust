@@ -1432,7 +1432,24 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 | R1 | `GET /Search/Hints` 端点 | `backend/src/routes/items.rs` | 新增 Emby 搜索提示 API，返回 `SearchHints` + `TotalRecordCount` |
 | R2 | `DELETE /Collections/{id}` 端点 | `backend/src/routes/collections.rs` | 新增合集删除路由 |
 
-### 6. 测试脚本清单
+### 6. 第四轮修复：Season/Episode 元数据回写 + 用户管理页面优化
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R3 | Season/Episode 元数据回写 | `backend/src/repository.rs` | 新增 `backfill_season_episode_metadata_from_catalog` 函数，刷新 Series 时从 `series_episode_catalog` 表把 name/overview/premiere_date 回写到 Season/Episode 的 `media_items` 行 |
+| R4 | Series 刷新流程调用回写 | `backend/src/routes/items.rs` | 在 `replace_series_episode_catalog` 后调用 backfill，确保 NFO 写入前数据已更新 |
+| R5 | Scanner 同步也回写 | `backend/src/scanner.rs` | 库扫描时同步 catalog 后也执行 backfill |
+| R6 | TmdbSeasonDetails 扩展 | `backend/src/metadata/tmdb.rs` | 新增 `name`/`overview`/`air_date` 字段解析 |
+| R7 | 用户管理分页 + 搜索 | `frontend/src/pages/settings/UsersSettings.vue` | 添加搜索框（按用户名/ID 过滤）、每页 20 条分页、翻页控件 |
+
+**验证结果：**
+- ✅ 点击"刷新元数据"后 Episode 获得 TMDB 中文标题和剧情简介（如"悔婚""药老""灵液"等）
+- ✅ Episode NFO 包含 `<title>`, `<plot>`, `<aired>` 等完整字段
+- ✅ Season `premiere_date` 从 catalog 自动回填
+- ✅ 用户管理页面显示搜索框，支持实时过滤（2405 用户中搜索 "testadmin" 精确命中 1 个）
+- ✅ 用户列表分页（121 页 × 20 条/页），翻页控件正常工作
+
+### 7. 测试脚本清单
 
 | 文件 | 用途 |
 |------|------|

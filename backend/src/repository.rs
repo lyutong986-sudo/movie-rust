@@ -9876,6 +9876,56 @@ pub async fn update_media_item_movie_metadata(
     Ok(())
 }
 
+/// 利用 `series_episode_catalog` 中的 TMDB 数据回写到 Season/Episode `media_items` 行。
+/// 只更新 name、overview、premiere_date 字段（仅当远程数据非空时）。
+pub async fn backfill_season_episode_metadata_from_catalog(
+    pool: &sqlx::PgPool,
+    series_id: Uuid,
+) -> Result<(), AppError> {
+    // Episode: 按 season_number + episode_number 匹配
+    sqlx::query(
+        r#"
+        UPDATE media_items ep
+        SET name       = COALESCE(NULLIF(cat.name, ''), ep.name),
+            overview   = COALESCE(NULLIF(cat.overview, ''), ep.overview),
+            premiere_date = COALESCE(cat.premiere_date, ep.premiere_date),
+            date_modified = now()
+        FROM series_episode_catalog cat
+        WHERE cat.series_id = $1
+          AND ep.item_type = 'Episode'
+          AND ep.series_id = $1
+          AND ep.parent_index_number = cat.season_number
+          AND ep.index_number = cat.episode_number
+        "#,
+    )
+    .bind(series_id)
+    .execute(pool)
+    .await?;
+
+    // Season: 用 catalog 中按 season_number 分组的最早 premiere_date 更新
+    sqlx::query(
+        r#"
+        UPDATE media_items season
+        SET premiere_date = COALESCE(agg.first_air, season.premiere_date),
+            date_modified = now()
+        FROM (
+            SELECT season_number, MIN(premiere_date) AS first_air
+            FROM series_episode_catalog
+            WHERE series_id = $1 AND premiere_date IS NOT NULL
+            GROUP BY season_number
+        ) agg
+        WHERE season.item_type = 'Season'
+          AND season.parent_id = $1
+          AND season.index_number = agg.season_number
+        "#,
+    )
+    .bind(series_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn get_media_streams(
     pool: &sqlx::PgPool,
     media_item_id: Uuid,

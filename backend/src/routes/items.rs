@@ -3310,25 +3310,35 @@ async fn refresh_item_metadata(
         return Ok(StatusCode::NO_CONTENT);
     }
 
-    do_refresh_item_metadata_with(&state, item_id, params.replace_all_images).await?;
+    // Emby 标准行为：立即返回 204，后台异步执行刷新。
+    // 这样不会阻塞 HTTP 连接和数据库连接池，避免其他请求（如 /Users/Public）被拖慢。
+    let replace_images = params.replace_all_images;
+    let recursive = params.recursive;
+    tokio::spawn(async move {
+        if let Err(e) = do_refresh_item_metadata_with(&state, item_id, replace_images).await {
+            tracing::warn!(item_id = %item_id, ?e, "后台刷新元数据失败");
+            return;
+        }
 
-    if params.recursive {
-        let child_ids: Vec<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM media_items WHERE parent_id = $1"
-        )
-        .bind(item_id)
-        .fetch_all(&state.pool)
-        .await
-        .unwrap_or_default();
+        if recursive {
+            let child_ids: Vec<(Uuid,)> = sqlx::query_as(
+                "SELECT id FROM media_items WHERE parent_id = $1"
+            )
+            .bind(item_id)
+            .fetch_all(&state.pool)
+            .await
+            .unwrap_or_default();
 
-        for (child_id,) in child_ids {
-            if let Err(e) =
-                do_refresh_item_metadata_with(&state, child_id, params.replace_all_images).await
-            {
-                tracing::warn!(child_id = %child_id, ?e, "递归刷新子条目失败");
+            for (child_id,) in child_ids {
+                if let Err(e) =
+                    do_refresh_item_metadata_with(&state, child_id, replace_images).await
+                {
+                    tracing::warn!(child_id = %child_id, ?e, "递归刷新子条目失败");
+                }
             }
         }
-    }
+        tracing::info!(item_id = %item_id, "后台刷新元数据完成");
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -3484,6 +3494,7 @@ pub(crate) async fn do_refresh_item_metadata_with(
         let catalog = provider.get_series_episode_catalog(&tmdb_id).await?;
         drop(_tmdb_permit);
         repository::replace_series_episode_catalog(&state.pool, item.id, &catalog).await?;
+        repository::backfill_season_episode_metadata_from_catalog(&state.pool, item.id).await?;
     } else if is_movie {
         let _tmdb_permit = state
             .work_limiters

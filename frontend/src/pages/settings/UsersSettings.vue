@@ -17,6 +17,10 @@ const error = ref('');
 const saving = ref(false);
 const authProviderOptions = ref<string[]>(['Default']);
 
+const userSearch = ref('');
+const userPage = ref(1);
+const usersPerPage = 20;
+
 const policyForm = reactive<UserPolicy>({
   IsAdministrator: false,
   IsHidden: false,
@@ -79,6 +83,18 @@ const scheduleForm = reactive<AccessSchedule>({
   EndHour: 24
 });
 
+const filteredUsers = computed(() => {
+  const q = userSearch.value.trim().toLowerCase();
+  if (!q) return adminUsers.value;
+  return adminUsers.value.filter(
+    (u) => u.Name?.toLowerCase().includes(q) || u.Id?.toLowerCase().includes(q)
+  );
+});
+const totalUserPages = computed(() => Math.max(1, Math.ceil(filteredUsers.value.length / usersPerPage)));
+const pagedUsers = computed(() => {
+  const start = (userPage.value - 1) * usersPerPage;
+  return filteredUsers.value.slice(start, start + usersPerPage);
+});
 const selectedUser = computed(() =>
   adminUsers.value.find((u) => u.Id === selectedUserId.value)
 );
@@ -105,6 +121,10 @@ const copyFromOptions = computed(() => [
   { label: '从默认结构创建', value: '' },
   ...adminUsers.value.map((a) => ({ label: `复制 ${a.Name}`, value: a.Id }))
 ]);
+
+watch(userSearch, () => {
+  userPage.value = 1;
+});
 
 watch(
   selectedUser,
@@ -376,10 +396,22 @@ function userStatus(account: UserDto) {
         </div>
       </UCard>
 
-      <div class="grid gap-4 lg:grid-cols-[260px_1fr]">
+      <div class="grid gap-4 lg:grid-cols-[280px_1fr]">
         <aside class="space-y-2">
+          <UInput
+            v-model="userSearch"
+            icon="i-lucide-search"
+            placeholder="搜索用户…"
+            class="w-full"
+          />
+          <p class="text-muted text-xs">
+            共 {{ filteredUsers.length }} 个用户
+            <template v-if="totalUserPages > 1">
+              · 第 {{ userPage }}/{{ totalUserPages }} 页
+            </template>
+          </p>
           <div
-            v-for="account in adminUsers"
+            v-for="account in pagedUsers"
             :key="account.Id"
             class="flex w-full items-center gap-3 rounded-lg border border-default p-3 transition"
             :class="
@@ -405,6 +437,23 @@ function userStatus(account: UserDto) {
               size="xs"
               title="查看详情"
               @click="router.push(`/settings/users/${account.Id}`)"
+            />
+          </div>
+          <div v-if="totalUserPages > 1" class="flex items-center justify-center gap-1 pt-1">
+            <UButton
+              size="xs"
+              variant="ghost"
+              icon="i-lucide-chevron-left"
+              :disabled="userPage <= 1"
+              @click="userPage = Math.max(1, userPage - 1)"
+            />
+            <span class="text-muted text-xs tabular-nums">{{ userPage }} / {{ totalUserPages }}</span>
+            <UButton
+              size="xs"
+              variant="ghost"
+              icon="i-lucide-chevron-right"
+              :disabled="userPage >= totalUserPages"
+              @click="userPage = Math.min(totalUserPages, userPage + 1)"
             />
           </div>
         </aside>

@@ -44,7 +44,7 @@ impl Config {
             database_max_connections: env::var("DATABASE_MAX_CONNECTIONS")
                 .ok()
                 .and_then(|value| value.parse().ok())
-                .unwrap_or(8),
+                .unwrap_or(20),
             host: env::var("APP_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
             port: env::var("APP_PORT")
                 .ok()

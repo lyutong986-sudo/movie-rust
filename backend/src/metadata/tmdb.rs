@@ -1432,6 +1432,9 @@ struct TmdbSeasonStub {
 struct TmdbSeasonDetails {
     id: Option<i32>,
     season_number: i32,
+    name: Option<String>,
+    overview: Option<String>,
+    air_date: Option<String>,
     poster_path: Option<String>,
     #[serde(default)]
     episodes: Vec<TmdbSeasonEpisode>,

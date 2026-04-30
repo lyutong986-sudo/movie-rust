@@ -1407,6 +1407,15 @@ async fn refresh_series_episode_catalog(
                     "同步远程剧集目录失败"
                 );
             }
+            if let Err(error) =
+                repository::backfill_season_episode_metadata_from_catalog(pool, series_id).await
+            {
+                tracing::warn!(
+                    series_id = %series_id,
+                    ?error,
+                    "从 catalog 回写 Season/Episode 元数据失败"
+                );
+            }
         }
         Err(error) => {
             tracing::warn!(series_id = %series_id, tmdb_id = %tmdb_id, error = %error, "获取远程剧集目录失败");
