@@ -122,6 +122,7 @@ async fn main() -> Result<()> {
 
     let max_conns = state_config_max_conns;
     let scan_db_permits = (max_conns as usize).saturating_sub(8).max(2);
+    let (event_tx, _) = tokio::sync::broadcast::channel::<crate::state::ServerEvent>(256);
     let state = AppState {
         pool,
         config,
@@ -132,6 +133,7 @@ async fn main() -> Result<()> {
         task_tokens: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         http_client,
         scan_db_semaphore: Arc::new(tokio::sync::Semaphore::new(scan_db_permits)),
+        event_tx,
     };
 
     // SPA 入口：

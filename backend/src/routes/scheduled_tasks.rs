@@ -455,6 +455,16 @@ pub async fn run_scheduler(state: AppState) {
     loop {
         interval.tick().await;
         check_and_fire_triggers(&state).await;
+        // Emby/Jellyfin: 空闲会话检测 — 清理超过 5 分钟无心跳的 NowPlaying 条目
+        match crate::repository::cleanup_stale_play_queue(&state.pool, 5).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(cleaned = n, "清理了 {n} 条超时的播放队列条目");
+            }
+            Err(err) => {
+                tracing::warn!(?err, "清理超时播放队列失败");
+            }
+            _ => {}
+        }
     }
 }
 

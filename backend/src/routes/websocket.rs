@@ -83,48 +83,79 @@ async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: 
         "WebSocket connection opened"
     );
 
+    let mut event_rx = state.event_tx.subscribe();
     let mut close_reason = None;
 
     loop {
-        match tokio::time::timeout(Duration::from_secs(1), socket.recv()).await {
-            Ok(Some(Ok(message))) => match message {
-                axum::extract::ws::Message::Text(text) => {
-                    tracing::trace!(session_id = %session_id, "received WebSocket message");
-                    let payload = format!(r#"{{"MessageType":"KeepAlive","Data":{}}}"#, serde_json::to_string(&*text).unwrap_or_else(|_| "null".to_string()));
-                    if socket
-                        .send(axum::extract::ws::Message::Text(payload.into()))
-                        .await
-                        .is_err()
-                    {
-                        close_reason = Some("send failed".to_string());
+        tokio::select! {
+            msg = tokio::time::timeout(Duration::from_secs(1), socket.recv()) => {
+                match msg {
+                    Ok(Some(Ok(message))) => match message {
+                        axum::extract::ws::Message::Text(text) => {
+                            tracing::trace!(session_id = %session_id, "received WebSocket message");
+                            let payload = format!(
+                                r#"{{"MessageType":"KeepAlive","Data":{}}}"#,
+                                serde_json::to_string(&*text).unwrap_or_else(|_| "null".to_string())
+                            );
+                            if socket
+                                .send(axum::extract::ws::Message::Text(payload.into()))
+                                .await
+                                .is_err()
+                            {
+                                close_reason = Some("send failed".to_string());
+                                break;
+                            }
+                        }
+                        axum::extract::ws::Message::Ping(bytes) => {
+                            if socket
+                                .send(axum::extract::ws::Message::Pong(bytes))
+                                .await
+                                .is_err()
+                            {
+                                close_reason = Some("pong failed".to_string());
+                                break;
+                            }
+                        }
+                        axum::extract::ws::Message::Close(frame) => {
+                            close_reason = frame.map(|frame| frame.reason.to_string());
+                            break;
+                        }
+                        _ => {}
+                    },
+                    Ok(Some(Err(error))) => {
+                        tracing::error!(session_id = %session_id, error = %error, "WebSocket receive failed");
+                        close_reason = Some(error.to_string());
                         break;
                     }
+                    Ok(None) => break,
+                    Err(_) => {} // timeout, continue to command poll + event check
                 }
-                axum::extract::ws::Message::Ping(bytes) => {
-                    if socket
-                        .send(axum::extract::ws::Message::Pong(bytes))
-                        .await
-                        .is_err()
-                    {
-                        close_reason = Some("pong failed".to_string());
-                        break;
-                    }
-                }
-                axum::extract::ws::Message::Close(frame) => {
-                    close_reason = frame.map(|frame| frame.reason.to_string());
-                    break;
-                }
-                _ => {}
-            },
-            Ok(Some(Err(error))) => {
-                tracing::error!(session_id = %session_id, error = %error, "WebSocket receive failed");
-                close_reason = Some(error.to_string());
-                break;
             }
-            Ok(None) => break,
-            Err(_) => {}
+            event = event_rx.recv() => {
+                match event {
+                    Ok(ref server_event) => {
+                        if let Some(payload) = format_event_for_user(server_event, session.user_id) {
+                            if socket
+                                .send(axum::extract::ws::Message::Text(payload.into()))
+                                .await
+                                .is_err()
+                            {
+                                close_reason = Some("event push failed".to_string());
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(session_id = %session_id, lagged = n, "WebSocket event receiver lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
         }
 
+        // Poll session commands (only when timeout branch fires, i.e. no WS message/event)
         if let (Some(access_token), Some(user_id)) = (&session.access_token, session.user_id) {
             match crate::repository::get_session(&state.pool, access_token).await {
                 Ok(Some(_)) => {}
@@ -182,4 +213,42 @@ async fn handle_socket(mut socket: WebSocket, session: WebSocketSession, state: 
 
     sessions.remove(&session_id);
     tracing::info!(session_id = %session_id, reason = ?close_reason, "WebSocket connection closed");
+}
+
+/// Format a ServerEvent into an Emby-compatible JSON message, filtered by user.
+fn format_event_for_user(event: &crate::state::ServerEvent, ws_user_id: Option<Uuid>) -> Option<String> {
+    use crate::state::ServerEvent;
+    match event {
+        ServerEvent::UserDataChanged { user_id, user_data_list } => {
+            if ws_user_id != Some(*user_id) {
+                return None;
+            }
+            let payload = serde_json::json!({
+                "MessageType": "UserDataChanged",
+                "Data": {
+                    "UserId": crate::models::uuid_to_emby_guid(user_id),
+                    "UserDataList": user_data_list
+                }
+            });
+            Some(payload.to_string())
+        }
+        ServerEvent::LibraryChanged { items_added, items_updated, items_removed } => {
+            let payload = serde_json::json!({
+                "MessageType": "LibraryChanged",
+                "Data": {
+                    "ItemsAdded": items_added,
+                    "ItemsUpdated": items_updated,
+                    "ItemsRemoved": items_removed
+                }
+            });
+            Some(payload.to_string())
+        }
+        ServerEvent::SessionsChanged => {
+            let payload = serde_json::json!({
+                "MessageType": "Sessions",
+                "Data": []
+            });
+            Some(payload.to_string())
+        }
+    }
 }

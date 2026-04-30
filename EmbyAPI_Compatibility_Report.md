@@ -1758,3 +1758,23 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 3. 失败静默：刷新失败不影响接口返回，返回当前已有数据
 
 ---
+
+## 第十五轮修复：Emby/Jellyfin 核心行为逻辑对齐
+
+**修复内容：**
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R94 | 播放进度 ≥90% 自动标记已看 | `repository.rs` | `record_playback_event` 中当 `position_ticks / runtime_ticks >= 0.9` 时自动视为已看完，无需客户端传 `played_to_completion` |
+| R95 | PlayCount 去重 | `repository.rs` | SQL 条件改为 `WHEN EXCLUDED.is_played AND NOT user_item_data.is_played` 才 +1，防止重复 Progress 上报累加 |
+| R96 | Legacy Stopped 修复 | `sessions.rs` | 移除 `position > 0 => played_to_completion` 错误逻辑，交由服务端 90% 规则判定 |
+| R97 | Ping 刷新会话队列 | `repository.rs` | `session_play_queue` 的 UPSERT 条件从 `Started/Progress` 扩展为 `Started/Progress/Ping`，保持 `updated_at` 活跃 |
+| R98 | 空闲会话自动清理 | `scheduled_tasks.rs` + `repository.rs` | 新增 `cleanup_stale_play_queue` 函数，调度器每 60 秒清理超过 5 分钟未更新的播放队列条目 |
+| R99 | WebSocket 事件广播架构 | `state.rs` + `websocket.rs` + `main.rs` | `AppState` 增加 `event_tx: broadcast::Sender<ServerEvent>`；WebSocket 循环 `select!` 同时监听客户端消息与广播事件 |
+| R100 | UserDataChanged 推送 | `items.rs` + `sessions.rs` | `set_favorite`/`set_played`/`record_report` 完成后通过 broadcast 发送 `UserDataChanged` 事件，WebSocket 按 user_id 过滤推送 |
+| R101 | ServerEvent 类型定义 | `state.rs` | 定义 `UserDataChanged`/`LibraryChanged`/`SessionsChanged` 三种事件枚举 |
+| R102 | 相似推荐 Emby 加权算法 | `repository.rs` | `find_similar_items` 改为应用层打分：OfficialRating +10、Genre/Tag 各 +10、Studio +3、Director +5、Actor +3、Writer +2、年份接近 +2/+4，阈值 >2 |
+| R103 | GET /Items/Filters2 端点 | `items.rs` | 新增端点，Genres/Tags 返回带确定性 UUID 的 `{Name, Id}` 对象数组 |
+| R104 | CollapseBoxSetItems 参数 | `models.rs` + `items.rs` + `repository.rs` | `ItemsQuery` 增加 `collapse_box_set_items` 字段；列表结果中将合集成员替换为 BoxSet 条目（去重） |
+
+---

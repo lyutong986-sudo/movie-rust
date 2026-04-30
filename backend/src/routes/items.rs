@@ -38,6 +38,7 @@ pub fn router() -> Router<AppState> {
         .route("/Items/Counts", get(item_counts))
         .route("/Users/{user_id}/Items/Counts", get(user_item_counts))
         .route("/Items/Filters", get(item_filters))
+        .route("/Items/Filters2", get(item_filters2))
         .route("/Artists", get(artists))
         .route("/Artists/{name}", get(artist))
         .route("/Artists/{name}/Items", get(artist_items))
@@ -975,6 +976,105 @@ async fn item_filters_for_query(
     })))
 }
 
+/// Emby `GET /Items/Filters2` — returns genres/tags as objects with deterministic Id.
+async fn item_filters2(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Query(mut query): Query<ItemsQuery>,
+) -> Result<Json<Value>, AppError> {
+    let user_id = query.user_id.unwrap_or(session.user_id);
+    ensure_user_access(&session, user_id)?;
+    query.user_id = Some(user_id);
+
+    let parent_is_user_root = query.parent_id == Some(user_id);
+    if parent_is_user_root {
+        query.parent_id = None;
+    }
+    let mut requested_item_ids = parse_emby_uuid_list(query.list_item_ids.as_deref());
+    requested_item_ids.extend(parse_emby_uuid_list(query.ids.as_deref()));
+    requested_item_ids.sort_unstable();
+    requested_item_ids.dedup();
+
+    let include_types = parse_include_types(query.include_item_types.as_deref());
+    let recursive = if parent_is_user_root { true } else { query.recursive.unwrap_or(true) };
+    query.start_index = Some(0);
+    query.limit = Some(10_000);
+
+    let (library_id, parent_id, include_types) = if let Some(parent_id) = query.parent_id {
+        if let Some(library) = repository::get_library(&state.pool, parent_id).await? {
+            let mut include_types = include_types;
+            if include_types.is_empty() && library.collection_type.eq_ignore_ascii_case("tvshows") {
+                include_types = vec!["Series".to_string()];
+            }
+            (Some(library.id), None, include_types)
+        } else {
+            (None, Some(parent_id), include_types)
+        }
+    } else {
+        (None, None, include_types)
+    };
+
+    let result = repository::list_media_items(
+        &state.pool,
+        item_list_options_from_query(
+            &query,
+            user_id,
+            library_id,
+            parent_id,
+            requested_item_ids,
+            include_types,
+            recursive,
+        ),
+    )
+    .await?;
+
+    let mut genres = BTreeSet::new();
+    let mut tags = BTreeSet::new();
+    let mut official_ratings = BTreeSet::new();
+    let mut years = BTreeSet::new();
+
+    for item in &result.items {
+        for genre in &item.genres {
+            if !genre.trim().is_empty() {
+                genres.insert(genre.clone());
+            }
+        }
+        for tag in &item.tags {
+            if !tag.trim().is_empty() {
+                tags.insert(tag.clone());
+            }
+        }
+        if let Some(rating) = item.official_rating.as_ref().filter(|v| !v.trim().is_empty()) {
+            official_ratings.insert(rating.clone());
+        }
+        if let Some(year) = item.production_year {
+            years.insert(year);
+        }
+    }
+
+    let genre_items: Vec<Value> = genres
+        .into_iter()
+        .map(|name| {
+            let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, name.as_bytes());
+            json!({ "Name": name, "Id": crate::models::uuid_to_emby_guid(&id) })
+        })
+        .collect();
+    let tag_items: Vec<Value> = tags
+        .into_iter()
+        .map(|name| {
+            let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("tag:{name}").as_bytes());
+            json!({ "Name": name, "Id": crate::models::uuid_to_emby_guid(&id) })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "Genres": genre_items,
+        "Tags": tag_items,
+        "OfficialRatings": official_ratings.into_iter().collect::<Vec<_>>(),
+        "Years": years.into_iter().collect::<Vec<i32>>(),
+    })))
+}
+
 fn item_list_options_from_query(
     query: &ItemsQuery,
     user_id: Uuid,
@@ -1100,6 +1200,7 @@ fn item_list_options_from_query(
         start_index: query.start_index.unwrap_or(0),
         limit: query.limit.unwrap_or(100),
         group_items_into_collections: query.group_items_into_collections.unwrap_or(true),
+        collapse_box_set_items: query.collapse_box_set_items.unwrap_or(false),
         enable_total_record_count: query.enable_total_record_count.unwrap_or(true),
         ..ItemListOptions::default()
     }
@@ -1154,8 +1255,15 @@ async fn media_items_to_dto_result(
     result: QueryResult<crate::models::DbMediaItem>,
     query: &ItemsQuery,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    // 列表接口的 N+1 优化：4 路批量查询并行执行（tokio::join!），
-    // 替代原本 1 条 item = 3~5 次独立 SQL 的模式。
+    let collapse = query.collapse_box_set_items.unwrap_or(false);
+
+    // CollapseBoxSetItems: build reverse index (item_id -> collection BoxSet DTO)
+    let collection_map: std::collections::HashMap<Uuid, BaseItemDto> = if collapse {
+        build_collection_collapse_map(state).await
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let item_ids: Vec<uuid::Uuid> = result.items.iter().map(|item| item.id).collect();
     let folder_ids: Vec<uuid::Uuid> = result
         .items
@@ -1182,7 +1290,23 @@ async fn media_items_to_dto_result(
     let season_counts = season_counts?;
 
     let mut items = Vec::with_capacity(result.items.len());
+    let mut seen_collections: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+
     for item in result.items {
+        // CollapseBoxSetItems: replace item with its collection BoxSet
+        if collapse {
+            if let Some(boxset_dto) = collection_map.get(&item.id) {
+                let collection_id = crate::models::emby_id_to_uuid(
+                    boxset_dto.id.as_str()
+                ).unwrap_or(Uuid::nil());
+                if !seen_collections.insert(collection_id) {
+                    continue;
+                }
+                items.push(apply_item_response_shape(boxset_dto.clone(), query));
+                continue;
+            }
+        }
+
         let prefetched_user = Some(user_data_map.get(&item.id).cloned());
         let counts = repository::DtoCountPrefetch {
             child_count: child_counts.get(&item.id).copied(),
@@ -1203,6 +1327,51 @@ async fn media_items_to_dto_result(
         total_record_count: result.total_record_count,
         start_index: result.start_index,
     }))
+}
+
+/// Build a map of item_id -> BoxSet DTO for CollapseBoxSetItems.
+/// Reads all collections from system_settings and creates the reverse index.
+async fn build_collection_collapse_map(
+    state: &AppState,
+) -> std::collections::HashMap<Uuid, BaseItemDto> {
+    use crate::models::{emby_id_to_uuid, uuid_to_emby_guid};
+
+    let mut map = std::collections::HashMap::new();
+    let collections: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
+        "SELECT key, value FROM system_settings WHERE key LIKE 'collection:%'"
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    for (_key, value_str) in collections {
+        let Ok(coll) = serde_json::from_str::<serde_json::Value>(&value_str) else {
+            continue;
+        };
+        let coll_id_str = coll.get("Id").and_then(|v| v.as_str()).unwrap_or("");
+        let coll_name = coll.get("Name").and_then(|v| v.as_str()).unwrap_or("Collection");
+        let item_ids_arr = coll.get("ItemIds").and_then(|v| v.as_array());
+
+        let Some(item_ids) = item_ids_arr else { continue };
+        let coll_uuid = emby_id_to_uuid(coll_id_str).unwrap_or(Uuid::nil());
+
+        let mut boxset_dto = repository::root_item_dto(state.config.server_id);
+        boxset_dto.id = uuid_to_emby_guid(&coll_uuid);
+        boxset_dto.name = coll_name.to_string();
+        boxset_dto.item_type = "BoxSet".to_string();
+        boxset_dto.is_folder = true;
+        boxset_dto.collection_type = Some("movies".to_string());
+        boxset_dto.child_count = Some(item_ids.len() as i64);
+
+        for id_val in item_ids {
+            if let Some(id_str) = id_val.as_str() {
+                if let Ok(item_uuid) = emby_id_to_uuid(id_str) {
+                    map.insert(item_uuid, boxset_dto.clone());
+                }
+            }
+        }
+    }
+    map
 }
 
 async fn user_item_data(
@@ -1384,6 +1553,8 @@ async fn set_favorite_for_user(
     }
     let dto = repository::set_user_favorite(&state.pool, user_id, item_id, is_favorite).await?;
 
+    emit_user_data_changed(state, user_id, item_id, &dto);
+
     let user = repository::get_user_by_id(&state.pool, user_id).await.ok().flatten();
     let item = repository::get_media_item(&state.pool, item_id).await.ok().flatten();
     let event = if is_favorite {
@@ -1424,9 +1595,28 @@ async fn set_played_for_user(
     if !session.is_admin {
         ensure_user_can_access_item(state, user_id, item_id).await?;
     }
-    Ok(Json(
-        repository::set_user_played(&state.pool, user_id, item_id, is_played, date_played).await?,
-    ))
+    let dto = repository::set_user_played(&state.pool, user_id, item_id, is_played, date_played).await?;
+    emit_user_data_changed(state, user_id, item_id, &dto);
+    Ok(Json(dto))
+}
+
+/// Emit a UserDataChanged event to the broadcast channel for WebSocket push.
+fn emit_user_data_changed(state: &AppState, user_id: Uuid, item_id: Uuid, dto: &crate::models::UserItemDataDto) {
+    use crate::models::uuid_to_emby_guid;
+    use crate::state::ServerEvent;
+
+    let user_data_entry = serde_json::json!({
+        "ItemId": uuid_to_emby_guid(&item_id),
+        "PlaybackPositionTicks": dto.playback_position_ticks,
+        "PlayCount": dto.play_count,
+        "IsFavorite": dto.is_favorite,
+        "Played": dto.played,
+        "LastPlayedDate": dto.last_played_date,
+    });
+    let _ = state.event_tx.send(ServerEvent::UserDataChanged {
+        user_id,
+        user_data_list: vec![user_data_entry],
+    });
 }
 
 async fn ensure_user_can_access_item(

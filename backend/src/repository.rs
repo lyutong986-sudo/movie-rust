@@ -3978,6 +3978,7 @@ pub struct ItemListOptions {
     pub start_index: i64,
     pub limit: i64,
     pub group_items_into_collections: bool,
+    pub collapse_box_set_items: bool,
     pub enable_total_record_count: bool,
     /// 由 list_media_items 入口自动注入：当请求来自普通用户且其 `EnableAllFolders=false`
     /// 时，这里会被填成"该用户允许访问的 library_id 白名单"；为空表示用户什么都看不到，
@@ -4063,6 +4064,7 @@ impl Default for ItemListOptions {
             start_index: 0,
             limit: 100,
             group_items_into_collections: true,
+            collapse_box_set_items: false,
             enable_total_record_count: true,
             allowed_library_ids: None,
             policy_max_parental_rating: None,
@@ -6613,7 +6615,7 @@ pub async fn record_playback_event(
 
     if let Some(item_id) = item_id {
         if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
-            if matches!(event_type, "Started" | "Progress") {
+            if matches!(event_type, "Started" | "Progress" | "Ping") {
                 sqlx::query(
                     r#"
                     INSERT INTO session_play_queue
@@ -6623,8 +6625,8 @@ pub async fn record_playback_event(
                     ON CONFLICT (session_id, item_id)
                     DO UPDATE SET
                         position_ticks = COALESCE(EXCLUDED.position_ticks, session_play_queue.position_ticks),
-                        is_paused = EXCLUDED.is_paused,
-                        play_state = EXCLUDED.play_state,
+                        is_paused = COALESCE(EXCLUDED.is_paused, session_play_queue.is_paused),
+                        play_state = COALESCE(EXCLUDED.play_state, session_play_queue.play_state),
                         updated_at = now()
                     "#,
                 )
@@ -6648,12 +6650,32 @@ pub async fn record_playback_event(
             }
         }
 
-        // Started / Progress / Stopped 都应更新 user_item_data：
-        // - Started: 初始化/刷新 last_played_date，便于 "继续观看" 按最近播放排序；
-        // - Progress: 持续刷新 position_ticks + last_played_date；
-        // - Stopped: 同上，并在 played_to_completion=true 时标记 is_played + 累加 play_count。
         if matches!(event_type, "Started" | "Progress" | "Stopped") {
-            let is_played = played_to_completion.unwrap_or(false);
+            // Emby/Jellyfin: 服务端根据进度比例自动判定是否已看完（>= 90%）
+            let client_says_completed = played_to_completion.unwrap_or(false);
+            let auto_completed = if !client_says_completed {
+                if let Some(pos) = position_ticks.filter(|&p| p > 0) {
+                    let runtime: Option<i64> = sqlx::query_scalar(
+                        "SELECT runtime_ticks FROM media_items WHERE id = $1",
+                    )
+                    .bind(item_id)
+                    .fetch_optional(pool)
+                    .await?
+                    .flatten();
+                    runtime
+                        .filter(|&rt| rt > 0)
+                        .map(|rt| (pos as f64 / rt as f64) >= 0.9)
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            let is_completed = client_says_completed || auto_completed;
+
+            // PlayCount 去重：仅当 is_played 从 false 转为 true 时 +1
+            // 使用 SQL 条件确保已经是 played 状态时不再累加
             sqlx::query(
                 r#"
                 INSERT INTO user_item_data
@@ -6663,7 +6685,11 @@ pub async fn record_playback_event(
                 DO UPDATE SET
                     playback_position_ticks = COALESCE(EXCLUDED.playback_position_ticks, user_item_data.playback_position_ticks),
                     is_played = CASE WHEN EXCLUDED.is_played THEN true ELSE user_item_data.is_played END,
-                    play_count = CASE WHEN EXCLUDED.is_played THEN user_item_data.play_count + 1 ELSE user_item_data.play_count END,
+                    play_count = CASE
+                        WHEN EXCLUDED.is_played AND NOT user_item_data.is_played
+                        THEN user_item_data.play_count + 1
+                        ELSE user_item_data.play_count
+                    END,
                     last_played_date = now(),
                     updated_at = now()
                 "#,
@@ -6671,13 +6697,28 @@ pub async fn record_playback_event(
             .bind(user_id)
             .bind(item_id)
             .bind(position_ticks)
-            .bind(is_played)
+            .bind(is_completed)
             .execute(pool)
             .await?;
         }
     }
 
     Ok(())
+}
+
+/// 清理超过 `timeout_minutes` 分钟未更新的 session_play_queue 条目（空闲会话检测）。
+/// 返回被清理的行数。
+pub async fn cleanup_stale_play_queue(pool: &sqlx::PgPool, timeout_minutes: i64) -> Result<u64, AppError> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM session_play_queue
+        WHERE updated_at < now() - make_interval(mins => $1)
+        "#,
+    )
+    .bind(timeout_minutes as f64)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 fn deduplicate_media_items(items: Vec<DbMediaItem>) -> Vec<DbMediaItem> {
@@ -11055,82 +11096,154 @@ pub async fn find_similar_items(
     }
 
     let target_identity = item_identity_key(target_item, &provider_ids_for_item(target_item));
-    let fetch_limit = limit.saturating_mul(3).min(200);
 
-    let similar_items = if target_item.genres.is_empty() {
-        let lib_filter = if allowed_library_ids.is_some() {
-            "AND library_id = ANY($5)"
-        } else {
-            "AND ($5::uuid[] IS NULL OR TRUE)"
-        };
-        let sql = format!(
-            r#"
-            SELECT id, parent_id, name, original_title, sort_name, item_type,
-                   media_type, path, container, overview, production_year,
-                   official_rating, community_rating, critic_rating, runtime_ticks,
-                   premiere_date, status, end_date, air_days, air_time,
-                   series_name, season_name, index_number, index_number_end,
-                   parent_index_number, provider_ids, genres, studios, tags,
-                   production_locations, width, height, bit_rate, video_codec,
-                   audio_codec, image_primary_path, backdrop_path, logo_path,
-                   thumb_path, art_path, banner_path, disc_path, backdrop_paths,
-                   remote_trailers, date_created, date_modified, image_blur_hashes
-            FROM media_items
-            WHERE id != $1 AND item_type = $2
-            {lib_filter}
-            ORDER BY ABS(COALESCE(production_year, 0) - COALESCE($3, 0)) ASC
-            LIMIT $4
-            "#
-        );
-        sqlx::query_as::<_, DbMediaItem>(&sql)
-            .bind(&target_item.id)
-            .bind(&target_item.item_type)
-            .bind(target_item.production_year)
-            .bind(fetch_limit)
-            .bind(allowed_library_ids.as_deref())
-            .fetch_all(pool)
-            .await?
+    // Emby algorithm: fetch a broad candidate set, then score in-app
+    let candidate_limit: i64 = 500;
+    let lib_filter = if allowed_library_ids.is_some() {
+        "AND library_id = ANY($4)"
     } else {
-        let lib_filter = if allowed_library_ids.is_some() {
-            "AND library_id = ANY($6)"
-        } else {
-            "AND ($6::uuid[] IS NULL OR TRUE)"
-        };
-        let sql = format!(
-            r#"
-            SELECT id, parent_id, name, original_title, sort_name, item_type,
-                   media_type, path, container, overview, production_year,
-                   official_rating, community_rating, critic_rating, runtime_ticks,
-                   premiere_date, status, end_date, air_days, air_time,
-                   series_name, season_name, index_number, index_number_end,
-                   parent_index_number, provider_ids, genres, studios, tags,
-                   production_locations, width, height, bit_rate, video_codec,
-                   audio_codec, image_primary_path, backdrop_path, logo_path,
-                   thumb_path, art_path, banner_path, disc_path, backdrop_paths,
-                   remote_trailers, date_created, date_modified, image_blur_hashes
-            FROM media_items
-            WHERE id != $1 AND item_type = $2 AND genres && $3
-            {lib_filter}
-            ORDER BY
-                cardinality(
-                    ARRAY(SELECT unnest(genres) INTERSECT SELECT unnest($3::text[]))
-                ) DESC,
-                ABS(COALESCE(production_year, 0) - COALESCE($4, 0)) ASC
-            LIMIT $5
-            "#
-        );
-        sqlx::query_as::<_, DbMediaItem>(&sql)
-            .bind(&target_item.id)
-            .bind(&target_item.item_type)
-            .bind(&target_item.genres)
-            .bind(target_item.production_year)
-            .bind(fetch_limit)
-            .bind(allowed_library_ids.as_deref())
-            .fetch_all(pool)
-            .await?
+        "AND ($4::uuid[] IS NULL OR TRUE)"
     };
+    let sql = format!(
+        r#"
+        SELECT id, parent_id, name, original_title, sort_name, item_type,
+               media_type, path, container, overview, production_year,
+               official_rating, community_rating, critic_rating, runtime_ticks,
+               premiere_date, status, end_date, air_days, air_time,
+               series_name, season_name, index_number, index_number_end,
+               parent_index_number, provider_ids, genres, studios, tags,
+               production_locations, width, height, bit_rate, video_codec,
+               audio_codec, image_primary_path, backdrop_path, logo_path,
+               thumb_path, art_path, banner_path, disc_path, backdrop_paths,
+               remote_trailers, date_created, date_modified, image_blur_hashes
+        FROM media_items
+        WHERE id != $1 AND item_type = $2
+        {lib_filter}
+        ORDER BY random()
+        LIMIT $3
+        "#
+    );
+    let candidates: Vec<DbMediaItem> = sqlx::query_as::<_, DbMediaItem>(&sql)
+        .bind(&target_item.id)
+        .bind(&target_item.item_type)
+        .bind(candidate_limit)
+        .bind(allowed_library_ids.as_deref())
+        .fetch_all(pool)
+        .await?;
 
-    let row_ids: Vec<Uuid> = similar_items.iter().map(|r| r.id).collect();
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Fetch people for target item
+    let target_people: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
+        "SELECT p.name, pr.role_type FROM person_roles pr JOIN persons p ON p.id = pr.person_id WHERE pr.media_item_id = $1"
+    )
+    .bind(target_item.id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    // Batch-fetch people for all candidate items
+    let candidate_ids: Vec<Uuid> = candidates.iter().map(|c| c.id).collect();
+    let all_people: Vec<(Uuid, String, String)> = sqlx::query_as::<_, (Uuid, String, String)>(
+        "SELECT pr.media_item_id, p.name, pr.role_type FROM person_roles pr JOIN persons p ON p.id = pr.person_id WHERE pr.media_item_id = ANY($1)"
+    )
+    .bind(&candidate_ids)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    // Index people by item_id
+    let mut people_by_item: std::collections::HashMap<Uuid, Vec<(String, String)>> = std::collections::HashMap::new();
+    for (item_id, name, role_type) in all_people {
+        people_by_item.entry(item_id).or_default().push((name, role_type));
+    }
+
+    // Build target sets for O(1) lookup
+    let target_genres: std::collections::HashSet<&str> = target_item.genres.iter().map(|s| s.as_str()).collect();
+    let target_tags: std::collections::HashSet<&str> = target_item.tags.iter().map(|s| s.as_str()).collect();
+    let target_studios: std::collections::HashSet<&str> = target_item.studios.iter().map(|s| s.as_str()).collect();
+    let target_rating = target_item.official_rating.as_deref().unwrap_or("");
+    let target_people_set: std::collections::HashSet<&str> = target_people.iter().map(|(name, _)| name.as_str()).collect();
+
+    // Score each candidate using Emby's formula
+    let mut scored: Vec<(i32, usize)> = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, candidate)| {
+            if same_item_identity(target_identity.as_deref(), candidate) {
+                return None;
+            }
+            let mut score: i32 = 0;
+
+            // OfficialRating match: +10
+            if !target_rating.is_empty() {
+                if let Some(ref cr) = candidate.official_rating {
+                    if cr.eq_ignore_ascii_case(target_rating) {
+                        score += 10;
+                    }
+                }
+            }
+
+            // Genres overlap: +10 each
+            for g in &candidate.genres {
+                if target_genres.contains(g.as_str()) {
+                    score += 10;
+                }
+            }
+
+            // Tags overlap: +10 each
+            for t in &candidate.tags {
+                if target_tags.contains(t.as_str()) {
+                    score += 10;
+                }
+            }
+
+            // Studios overlap: +3 each
+            for s in &candidate.studios {
+                if target_studios.contains(s.as_str()) {
+                    score += 3;
+                }
+            }
+
+            // People overlap with role-based weighting
+            if let Some(candidate_people) = people_by_item.get(&candidate.id) {
+                for (name, role_type) in candidate_people {
+                    if target_people_set.contains(name.as_str()) {
+                        score += match role_type.as_str() {
+                            "Director" => 5,
+                            "Actor" => 3,
+                            "Composer" => 3,
+                            "GuestStar" => 3,
+                            "Writer" => 2,
+                            _ => 1,
+                        };
+                    }
+                }
+            }
+
+            // Year proximity
+            if let (Some(ty), Some(cy)) = (target_item.production_year, candidate.production_year) {
+                let diff = (ty - cy).unsigned_abs();
+                if diff < 10 { score += 2; }
+                if diff < 5 { score += 2; }
+            }
+
+            // Emby threshold: only keep score > 2
+            if score > 2 {
+                Some((score, idx))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort by score descending
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Build result DTOs
+    let row_ids: Vec<Uuid> = scored.iter().map(|(_, idx)| candidates[*idx].id).collect();
     let user_data_map = if let Some(uid) = user_id {
         get_user_item_data_batch(pool, uid, &row_ids).await?
     } else {
@@ -11139,10 +11252,8 @@ pub async fn find_similar_items(
 
     let mut result = Vec::new();
     let mut seen_identity_keys = BTreeSet::new();
-    for item in &similar_items {
-        if same_item_identity(target_identity.as_deref(), item) {
-            continue;
-        }
+    for (_, idx) in &scored {
+        let item = &candidates[*idx];
         let identity_key = item_identity_key(item, &provider_ids_for_item(item))
             .unwrap_or_else(|| format!("item:{}", item.id));
         if group_items_into_collections && !seen_identity_keys.insert(identity_key) {

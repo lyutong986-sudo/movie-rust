@@ -1149,7 +1149,7 @@ pub struct StartupRemoteAccessRequest {
     pub enable_automatic_port_mapping: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct BaseItemDto {
     pub name: String,
@@ -1358,7 +1358,7 @@ pub struct NameLongIdDto {
     pub id: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct UserItemDataDto {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1905,6 +1905,13 @@ pub struct ItemsQuery {
     pub group_items_into_collections: Option<bool>,
     #[serde(
         default,
+        alias = "CollapseBoxSetItems",
+        alias = "collapseBoxSetItems",
+        deserialize_with = "deserialize_option_bool_lenient"
+    )]
+    pub collapse_box_set_items: Option<bool>,
+    #[serde(
+        default,
         alias = "EnableTotalRecordCount",
         alias = "enableTotalRecordCount",
         deserialize_with = "deserialize_option_bool_lenient"
@@ -2248,7 +2255,7 @@ pub struct GenreDto {
     pub image_tags: Option<std::collections::HashMap<String, String>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PersonDto {
     pub name: String,

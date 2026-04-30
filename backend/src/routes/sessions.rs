@@ -581,6 +581,26 @@ async fn record_report(
     )
     .await?;
 
+    // UserDataChanged WebSocket push for playback progress/state changes
+    if let Some(item_id) = report.item_id {
+        if matches!(event_type, "Started" | "Progress" | "Stopped") {
+            if let Ok(Some(ud)) = repository::get_user_item_data(&state.pool, user_id, item_id).await {
+                let user_data_entry = serde_json::json!({
+                    "ItemId": crate::models::uuid_to_emby_guid(&item_id),
+                    "PlaybackPositionTicks": ud.playback_position_ticks,
+                    "PlayCount": ud.play_count,
+                    "IsFavorite": ud.is_favorite,
+                    "Played": ud.is_played,
+                    "LastPlayedDate": ud.last_played_date,
+                });
+                let _ = state.event_tx.send(crate::state::ServerEvent::UserDataChanged {
+                    user_id,
+                    user_data_list: vec![user_data_entry],
+                });
+            }
+        }
+    }
+
     // 出向 webhook：playback.start / playback.progress / playback.stop
     let event_name = match event_type {
         "Started" => Some(crate::webhooks::events::PLAYBACK_START),
@@ -702,11 +722,8 @@ async fn record_legacy_for_user(
     if repository::get_media_item(&state.pool, item_id).await?.is_none() {
         return Err(AppError::NotFound("媒体条目不存在".to_string()));
     }
-    let played_to_completion = if event_type == "Stopped" {
-        query.position_ticks.is_none_or(|ticks| ticks > 0)
-    } else {
-        false
-    };
+    // Legacy 接口不传 played_to_completion，交给 record_playback_event 的 90% 自动判定
+    let played_to_completion = false;
 
     repository::record_playback_event(
         &state.pool,
