@@ -11,9 +11,9 @@ pub struct WorkLimiterConfig {
 impl WorkLimiterConfig {
     pub fn normalized(self) -> Self {
         Self {
-            library_scan_limit: self.library_scan_limit.clamp(1, 32),
-            media_analysis_limit: self.media_analysis_limit.clamp(1, 64),
-            tmdb_metadata_limit: self.tmdb_metadata_limit.clamp(1, 32),
+            library_scan_limit: self.library_scan_limit.max(1),
+            media_analysis_limit: self.media_analysis_limit.max(1),
+            tmdb_metadata_limit: self.tmdb_metadata_limit.max(1),
         }
     }
 }

@@ -143,6 +143,13 @@ export const state = reactive({
   strmAnalysisThreadCount: 8,
   tmdbMetadataThreadCount: 4,
   tmdbApiKey: '',
+  tmdbApiKeys: [] as string[],
+  fanartApiKeys: [] as string[],
+  subtitleApiKeys: [] as string[],
+  performanceTier: 'medium',
+  dbMaxConnections: 20,
+  imageDownloadThreads: 8,
+  backgroundTaskThreads: 4,
   allowRemoteAccess: false,
   enableUPNP: false,
   showWizardPassword: false,
@@ -329,6 +336,13 @@ export async function loadStartupWizard() {
     state.tmdbMetadataThreadCount =
       configuration.TmdbMetadataThreadCount || state.tmdbMetadataThreadCount;
     state.tmdbApiKey = configuration.TmdbApiKey || state.tmdbApiKey;
+    state.tmdbApiKeys = configuration.TmdbApiKeys || state.tmdbApiKeys;
+    state.fanartApiKeys = configuration.FanartApiKeys || state.fanartApiKeys;
+    state.subtitleApiKeys = configuration.SubtitleApiKeys || state.subtitleApiKeys;
+    state.performanceTier = configuration.PerformanceTier || state.performanceTier;
+    state.dbMaxConnections = configuration.DbMaxConnections || state.dbMaxConnections;
+    state.imageDownloadThreads = configuration.ImageDownloadThreads || state.imageDownloadThreads;
+    state.backgroundTaskThreads = configuration.BackgroundTaskThreads || state.backgroundTaskThreads;
 
     const firstUser = await api.firstStartupUser();
     if (firstUser) {
@@ -348,7 +362,14 @@ export function startupConfigurationPayload() {
     LibraryScanThreadCount: Number(state.libraryScanThreadCount) || 2,
     StrmAnalysisThreadCount: Number(state.strmAnalysisThreadCount) || 8,
     TmdbMetadataThreadCount: Number(state.tmdbMetadataThreadCount) || 4,
-    TmdbApiKey: state.tmdbApiKey || ''
+    TmdbApiKey: state.tmdbApiKey || '',
+    TmdbApiKeys: state.tmdbApiKeys.filter((k: string) => k.trim()),
+    FanartApiKeys: state.fanartApiKeys.filter((k: string) => k.trim()),
+    SubtitleApiKeys: state.subtitleApiKeys.filter((k: string) => k.trim()),
+    PerformanceTier: state.performanceTier || 'medium',
+    DbMaxConnections: Number(state.dbMaxConnections) || 20,
+    ImageDownloadThreads: Number(state.imageDownloadThreads) || 8,
+    BackgroundTaskThreads: Number(state.backgroundTaskThreads) || 4
   };
 }
 
@@ -789,6 +810,13 @@ export async function loadAdminData() {
     state.tmdbMetadataThreadCount =
       configuration.TmdbMetadataThreadCount || state.tmdbMetadataThreadCount;
     state.tmdbApiKey = configuration.TmdbApiKey || state.tmdbApiKey;
+    state.tmdbApiKeys = configuration.TmdbApiKeys || state.tmdbApiKeys;
+    state.fanartApiKeys = configuration.FanartApiKeys || state.fanartApiKeys;
+    state.subtitleApiKeys = configuration.SubtitleApiKeys || state.subtitleApiKeys;
+    state.performanceTier = configuration.PerformanceTier || state.performanceTier;
+    state.dbMaxConnections = configuration.DbMaxConnections || state.dbMaxConnections;
+    state.imageDownloadThreads = configuration.ImageDownloadThreads || state.imageDownloadThreads;
+    state.backgroundTaskThreads = configuration.BackgroundTaskThreads || state.backgroundTaskThreads;
     await loadVirtualFolders();
   });
 }

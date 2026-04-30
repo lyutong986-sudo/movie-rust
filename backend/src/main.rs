@@ -73,23 +73,28 @@ async fn main() -> Result<()> {
 
     let mut metadata_manager = metadata::provider::MetadataProviderManager::new();
 
+    let startup_cfg = repository::startup_configuration(&pool, &config).await.ok();
     let tmdb_api_key = match &config.tmdb_api_key {
         Some(key) => Some(key.clone()),
-        None => {
-            let startup = repository::startup_configuration(&pool, &config).await.ok();
-            startup
-                .map(|s| s.tmdb_api_key)
-                .filter(|k| !k.trim().is_empty())
-        }
+        None => startup_cfg
+            .as_ref()
+            .map(|s| s.tmdb_api_key.clone())
+            .filter(|k| !k.trim().is_empty()),
     };
+    let tmdb_extra_keys = startup_cfg
+        .as_ref()
+        .map(|s| s.tmdb_api_keys.clone())
+        .unwrap_or_default();
     if let Some(tmdb_api_key) = tmdb_api_key {
-        let tmdb_provider = metadata::tmdb::TmdbProvider::new_with_preferences(
+        let key_count = 1 + tmdb_extra_keys.len();
+        let tmdb_provider = metadata::tmdb::TmdbProvider::new_with_multi_keys(
             tmdb_api_key.clone(),
+            tmdb_extra_keys,
             &config.preferred_metadata_language,
             &config.metadata_country_code,
         );
         metadata_manager.register_provider(Box::new(tmdb_provider));
-        tracing::info!("TMDB 元数据提供者已注册");
+        tracing::info!("TMDB 元数据提供者已注册（{key_count} 个 API Key 轮询）");
     } else {
         tracing::warn!("未配置 TMDB API Key（设置 TMDB_API_KEY 环境变量或在系统设置中配置）");
     }

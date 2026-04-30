@@ -589,6 +589,13 @@ fn default_startup_configuration(config: &Config) -> StartupConfiguration {
         strm_analysis_thread_count: 8,
         tmdb_metadata_thread_count: 4,
         tmdb_api_key: config.tmdb_api_key.clone().unwrap_or_default(),
+        tmdb_api_keys: Vec::new(),
+        fanart_api_keys: Vec::new(),
+        subtitle_api_keys: Vec::new(),
+        performance_tier: "medium".to_string(),
+        db_max_connections: 20,
+        image_download_threads: 8,
+        background_task_threads: 4,
     }
 }
 
@@ -598,11 +605,68 @@ fn normalize_startup_configuration(configuration: &mut StartupConfiguration) {
     configuration.metadata_country_code = configuration.metadata_country_code.trim().to_string();
     configuration.preferred_metadata_language =
         configuration.preferred_metadata_language.trim().to_string();
-    configuration.library_scan_thread_count = configuration.library_scan_thread_count.clamp(1, 32);
-    configuration.strm_analysis_thread_count =
-        configuration.strm_analysis_thread_count.clamp(1, 64);
-    configuration.tmdb_metadata_thread_count =
-        configuration.tmdb_metadata_thread_count.clamp(1, 32);
+    configuration.library_scan_thread_count = configuration.library_scan_thread_count.max(1);
+    configuration.strm_analysis_thread_count = configuration.strm_analysis_thread_count.max(1);
+    configuration.tmdb_metadata_thread_count = configuration.tmdb_metadata_thread_count.max(1);
+    configuration.db_max_connections = configuration.db_max_connections.max(5);
+    configuration.image_download_threads = configuration.image_download_threads.max(1);
+    configuration.background_task_threads = configuration.background_task_threads.max(1);
+    configuration
+        .tmdb_api_keys
+        .retain(|k| !k.trim().is_empty());
+    configuration
+        .fanart_api_keys
+        .retain(|k| !k.trim().is_empty());
+    configuration
+        .subtitle_api_keys
+        .retain(|k| !k.trim().is_empty());
+
+    apply_performance_tier(configuration);
+}
+
+fn apply_performance_tier(configuration: &mut StartupConfiguration) {
+    match configuration.performance_tier.as_str() {
+        "low" => {
+            if configuration.library_scan_thread_count == 0 { configuration.library_scan_thread_count = 1; }
+            if configuration.strm_analysis_thread_count == 0 { configuration.strm_analysis_thread_count = 4; }
+            if configuration.tmdb_metadata_thread_count == 0 { configuration.tmdb_metadata_thread_count = 2; }
+            if configuration.db_max_connections == 0 { configuration.db_max_connections = 10; }
+            if configuration.image_download_threads == 0 { configuration.image_download_threads = 4; }
+            if configuration.background_task_threads == 0 { configuration.background_task_threads = 2; }
+        }
+        "high" => {
+            if configuration.library_scan_thread_count == 0 { configuration.library_scan_thread_count = 8; }
+            if configuration.strm_analysis_thread_count == 0 { configuration.strm_analysis_thread_count = 32; }
+            if configuration.tmdb_metadata_thread_count == 0 { configuration.tmdb_metadata_thread_count = 16; }
+            if configuration.db_max_connections == 0 { configuration.db_max_connections = 50; }
+            if configuration.image_download_threads == 0 { configuration.image_download_threads = 24; }
+            if configuration.background_task_threads == 0 { configuration.background_task_threads = 12; }
+        }
+        "ultra" => {
+            if configuration.library_scan_thread_count == 0 { configuration.library_scan_thread_count = 16; }
+            if configuration.strm_analysis_thread_count == 0 { configuration.strm_analysis_thread_count = 64; }
+            if configuration.tmdb_metadata_thread_count == 0 { configuration.tmdb_metadata_thread_count = 32; }
+            if configuration.db_max_connections == 0 { configuration.db_max_connections = 100; }
+            if configuration.image_download_threads == 0 { configuration.image_download_threads = 48; }
+            if configuration.background_task_threads == 0 { configuration.background_task_threads = 24; }
+        }
+        "extreme" => {
+            if configuration.library_scan_thread_count == 0 { configuration.library_scan_thread_count = 32; }
+            if configuration.strm_analysis_thread_count == 0 { configuration.strm_analysis_thread_count = 128; }
+            if configuration.tmdb_metadata_thread_count == 0 { configuration.tmdb_metadata_thread_count = 64; }
+            if configuration.db_max_connections == 0 { configuration.db_max_connections = 200; }
+            if configuration.image_download_threads == 0 { configuration.image_download_threads = 96; }
+            if configuration.background_task_threads == 0 { configuration.background_task_threads = 48; }
+        }
+        _ => { // "medium" (default)
+            if configuration.library_scan_thread_count == 0 { configuration.library_scan_thread_count = 2; }
+            if configuration.strm_analysis_thread_count == 0 { configuration.strm_analysis_thread_count = 8; }
+            if configuration.tmdb_metadata_thread_count == 0 { configuration.tmdb_metadata_thread_count = 4; }
+            if configuration.db_max_connections == 0 { configuration.db_max_connections = 20; }
+            if configuration.image_download_threads == 0 { configuration.image_download_threads = 8; }
+            if configuration.background_task_threads == 0 { configuration.background_task_threads = 4; }
+        }
+    }
 }
 
 fn normalize_encoding_options(options: &mut EncodingOptionsDto, config: &Config) {
@@ -756,14 +820,20 @@ pub async fn find_user_by_connect_user_id(
     if target.is_empty() {
         return Ok(None);
     }
-    let users = list_users(pool, false).await?;
-    for user in users {
-        let setting_key = format!("user_connect_link:{}", user.id);
-        let Some(payload) = get_setting_value(pool, &setting_key).await? else {
-            continue;
-        };
+    // 使用 SQL 直接在 JSONB 值中搜索，避免逐用户 O(n) 查询
+    let rows: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT key, value FROM system_settings \
+         WHERE key LIKE 'user_connect_link:%' AND value IS NOT NULL AND value != 'null'::jsonb",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for (key, payload) in rows {
         if connect_link_payload_matches_target(&payload, &target) {
-            return Ok(Some((user.id, payload)));
+            let id_str = key.strip_prefix("user_connect_link:").unwrap_or_default();
+            if let Ok(user_id) = Uuid::parse_str(id_str) {
+                return Ok(Some((user_id, payload)));
+            }
         }
     }
     Ok(None)

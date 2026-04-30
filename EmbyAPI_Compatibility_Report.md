@@ -1476,7 +1476,52 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 - ✅ 切换 Season 2 后所有 12 集图片正常加载（reqid 1972-1983 全部 200）
 - ✅ 页面可正常浏览，无明显卡顿
 
-### 8. 测试脚本清单
+### 8. 第六轮修复：全局性能优化（N+1 查询消除）
+
+**问题现象：** 多个端点存在类似的 O(n) 查询问题，2405 用户场景下性能差。
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R12 | startup first_user | `backend/src/routes/startup.rs` | 只需第一个用户，改用 `LIMIT 1` 而非加载全部 |
+| R13 | auth_providers SQL 化 | `backend/src/routes/sessions.rs` | 用 SQL `DISTINCT unnest` 直接从 policy JSONB 提取 provider IDs，避免加载 2405 用户再逐一反序列化 |
+| R14 | PIN 重置 SQL JOIN | `backend/src/routes/users.rs` | 用 `users JOIN system_settings` 一次查询匹配 PIN，消除 O(n) 逐用户 DB 调用 |
+| R15 | Connect 用户查找 SQL 化 | `backend/src/repository.rs` | 直接查 `system_settings WHERE key LIKE 'user_connect_link:%'` 再匹配，避免先加载所有用户 |
+| R16 | query_users SQL 分页 | `backend/src/routes/users.rs` | 搜索/分页下推到 SQL 层（`WHERE LOWER(name) LIKE` + `OFFSET/LIMIT`），不再加载全部到内存 |
+
+**效果：**
+- `GET /Startup/User`: 加载 1 条 vs 2405 条
+- `GET /Auth/Providers`: 1 条 SQL vs 2405 次 `user_to_dto` 反序列化
+- `POST /Users/ForgotPassword/Pin`: 1 条 SQL JOIN vs 2405 次 DB 查询
+- `GET /Users/Query`: SQL `OFFSET/LIMIT` vs 内存全量过滤
+
+### 9. 第七轮修复：性能增强 + 多 Key 轮询 + 重复字段修复
+
+**修复内容：**
+
+| # | 修复 | 说明 |
+|---|------|------|
+| R17 | SimultaneousStreamLimit 重复字段 | 去掉 `alias = "MaxActiveSessions"`，防止 JSON 同时包含两个字段名时 serde 报错 |
+| R18 | 五档性能预设 | 低/中/高/超高/极限，覆盖所有并发参数（无硬上限） |
+| R19 | TMDB 多 Key 轮询 | `AtomicUsize` 轮询多个 API Key，突破单 Key 40次/分钟限制 |
+| R20 | Fanart.tv/字幕 多 Key | 同样支持多 Key 管理 |
+| R21 | 去除 WorkLimiter 硬上限 | `.clamp(1, 32)` → `.max(1)`，不再限制高端硬件 |
+| R22 | 前端性能档位 UI | 服务器设置页增加性能预设选择、参数微调、多 Key 增删管理 |
+
+**性能档位对照表：**
+
+| 档位 | 扫描线程 | STRM | TMDB | DB连接池 | 图片下载 | 后台任务 |
+|------|---------|------|------|---------|---------|---------|
+| 低 | 1 | 4 | 2 | 10 | 4 | 2 |
+| 中 | 2 | 8 | 4 | 20 | 8 | 4 |
+| 高 | 8 | 32 | 16 | 50 | 24 | 12 |
+| 超高 | 16 | 64 | 32 | 100 | 48 | 24 |
+| 极限 | 32 | 128 | 64 | 200 | 96 | 48 |
+
+**多 Key 轮询验证：**
+- 启动日志: `TMDB 元数据提供者已注册（3 个 API Key 轮询）`
+- 百万级片库场景：3个 Key × 40次/min = 120次/min TMDB 请求吞吐
+
+### 10. 测试脚本清单
 
 | 文件 | 用途 |
 |------|------|

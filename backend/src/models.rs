@@ -470,7 +470,7 @@ pub struct UserPolicyDto {
     pub enable_user_preference_access: bool,
     pub max_parental_rating: Option<i32>,
     pub max_parental_sub_rating: Option<i32>,
-    #[serde(rename = "SimultaneousStreamLimit", alias = "MaxActiveSessions")]
+    #[serde(rename = "SimultaneousStreamLimit")]
     pub max_active_sessions: i32,
     pub invalid_login_attempt_count: i32,
     pub login_attempts_before_lockout: i32,
@@ -1086,6 +1086,20 @@ pub struct StartupConfiguration {
     pub tmdb_metadata_thread_count: i32,
     #[serde(default)]
     pub tmdb_api_key: String,
+    #[serde(default)]
+    pub tmdb_api_keys: Vec<String>,
+    #[serde(default)]
+    pub fanart_api_keys: Vec<String>,
+    #[serde(default)]
+    pub subtitle_api_keys: Vec<String>,
+    #[serde(default = "default_performance_tier")]
+    pub performance_tier: String,
+    #[serde(default = "default_db_max_connections")]
+    pub db_max_connections: i32,
+    #[serde(default = "default_image_download_threads")]
+    pub image_download_threads: i32,
+    #[serde(default = "default_background_task_threads")]
+    pub background_task_threads: i32,
 }
 
 fn default_library_scan_thread_count() -> i32 {
@@ -1097,6 +1111,22 @@ fn default_strm_analysis_thread_count() -> i32 {
 }
 
 fn default_tmdb_metadata_thread_count() -> i32 {
+    4
+}
+
+fn default_performance_tier() -> String {
+    "medium".to_string()
+}
+
+fn default_db_max_connections() -> i32 {
+    20
+}
+
+fn default_image_download_threads() -> i32 {
+    8
+}
+
+fn default_background_task_threads() -> i32 {
     4
 }
 

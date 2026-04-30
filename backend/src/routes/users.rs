@@ -140,30 +140,55 @@ async fn query_users(
     Query(query): Query<UserQuery>,
 ) -> Result<Json<Value>, AppError> {
     auth::require_admin(&session)?;
-    let users = repository::list_users(&state.pool, false).await?;
     let search_term = query
         .search_term
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase());
-    let filtered = users
-        .into_iter()
-        .filter(|user| {
-            search_term
-                .as_ref()
-                .is_none_or(|term| user.name.to_ascii_lowercase().contains(term))
-        })
-        .collect::<Vec<_>>();
-    let start_index = query.start_index.unwrap_or(0).max(0) as usize;
-    let limit = query.limit.unwrap_or(100).clamp(1, 1000) as usize;
-    let total_record_count = filtered.len() as i64;
-    let items = filtered
-        .into_iter()
-        .skip(start_index)
-        .take(limit)
-        .map(|user| repository::user_to_dto(&user, state.config.server_id))
-        .collect::<Vec<_>>();
+        .map(|value| format!("%{}%", value.to_ascii_lowercase()));
+    let start_index = query.start_index.unwrap_or(0).max(0);
+    let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+
+    let total_record_count: i64 = if let Some(ref term) = search_term {
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE LOWER(name) LIKE $1")
+            .bind(term)
+            .fetch_one(&state.pool)
+            .await?
+    } else {
+        sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(&state.pool)
+            .await?
+    };
+
+    let users: Vec<crate::models::DbUser> = if let Some(ref term) = search_term {
+        sqlx::query_as(
+            "SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy, \
+             configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified, \
+             easy_password_hash, created_at, legacy_password_format, legacy_password_hash \
+             FROM users WHERE LOWER(name) LIKE $1 ORDER BY name OFFSET $2 LIMIT $3",
+        )
+        .bind(term)
+        .bind(start_index)
+        .bind(limit)
+        .fetch_all(&state.pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy, \
+             configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified, \
+             easy_password_hash, created_at, legacy_password_format, legacy_password_hash \
+             FROM users ORDER BY name OFFSET $1 LIMIT $2",
+        )
+        .bind(start_index)
+        .bind(limit)
+        .fetch_all(&state.pool)
+        .await?
+    };
+
+    let items: Vec<_> = users
+        .iter()
+        .map(|user| repository::user_to_dto(user, state.config.server_id))
+        .collect();
     Ok(Json(serde_json::json!({
         "Items": items,
         "TotalRecordCount": total_record_count,
@@ -946,33 +971,37 @@ async fn forgot_password_pin(
         .filter(|value| value.len() >= 4)
         .ok_or_else(|| AppError::BadRequest("新密码至少 4 个字符".to_string()))?;
 
-    let users = repository::list_users(&state.pool, false).await?;
-    for user in users {
-        let key = format!("password_reset_pin:{}", user.id);
-        let Some(value) = repository::get_setting_value(&state.pool, &key).await? else {
-            continue;
-        };
-        let stored_pin = value.get("Pin").and_then(Value::as_str).unwrap_or_default();
-        let expires_at = value
-            .get("ExpiresAt")
-            .and_then(Value::as_str)
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|d| d.with_timezone(&chrono::Utc));
-        if stored_pin != entered_pin {
-            continue;
-        }
-        if expires_at.is_some_and(|value| value < chrono::Utc::now()) {
-            let _ = repository::set_setting_value(&state.pool, &key, serde_json::Value::Null).await;
-            return Err(AppError::BadRequest("PIN 已过期，请重新申请".to_string()));
-        }
-        repository::change_user_password(&state.pool, user.id, new_password).await?;
+    // 使用 SQL JOIN 一次性找到匹配 PIN 的用户，避免 O(n) 逐用户查询
+    let row: Option<(uuid::Uuid, Value)> = sqlx::query_as(
+        "SELECT u.id, s.value FROM users u \
+         INNER JOIN system_settings s ON s.key = 'password_reset_pin:' || u.id::text \
+         WHERE s.value->>'Pin' = $1 \
+         LIMIT 1",
+    )
+    .bind(entered_pin)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let Some((user_id, pin_value)) = row else {
+        return Err(AppError::BadRequest("PIN 无效或已过期".to_string()));
+    };
+
+    let expires_at = pin_value
+        .get("ExpiresAt")
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc));
+    let key = format!("password_reset_pin:{}", user_id);
+    if expires_at.is_some_and(|value| value < chrono::Utc::now()) {
         let _ = repository::set_setting_value(&state.pool, &key, serde_json::Value::Null).await;
-        return Ok(Json(serde_json::json!({
-            "Success": true,
-            "UsersReset": [uuid_to_emby_guid(&user.id)],
-        })));
+        return Err(AppError::BadRequest("PIN 已过期，请重新申请".to_string()));
     }
-    Err(AppError::BadRequest("PIN 无效或已过期".to_string()))
+    repository::change_user_password(&state.pool, user_id, new_password).await?;
+    let _ = repository::set_setting_value(&state.pool, &key, serde_json::Value::Null).await;
+    Ok(Json(serde_json::json!({
+        "Success": true,
+        "UsersReset": [uuid_to_emby_guid(&user_id)],
+    })))
 }
 
 async fn user_connect_link(

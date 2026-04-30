@@ -4,6 +4,7 @@ use chrono::Datelike;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
     models::{
@@ -20,6 +21,8 @@ use super::{
 pub struct TmdbConfig {
     /// TMDB API密钥
     pub api_key: String,
+    /// 额外 API 密钥列表（用于轮询以绕过速率限制）
+    pub api_keys: Vec<String>,
     /// 基础URL（默认为 https://api.themoviedb.org/3）
     pub base_url: String,
     /// 图片基础URL（默认为 https://image.tmdb.org/t/p）
@@ -32,6 +35,7 @@ impl Default for TmdbConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
+            api_keys: Vec::new(),
             base_url: "https://api.themoviedb.org/3".to_string(),
             image_base_url: "https://image.tmdb.org/t/p".to_string(),
             language: "en-US".to_string(),
@@ -43,6 +47,7 @@ impl Default for TmdbConfig {
 pub struct TmdbProvider {
     config: TmdbConfig,
     client: Client,
+    key_counter: AtomicUsize,
 }
 
 impl TmdbProvider {
@@ -68,11 +73,50 @@ impl TmdbProvider {
         })
     }
 
+    pub fn new_with_multi_keys(
+        api_key: String,
+        extra_keys: Vec<String>,
+        preferred_metadata_language: &str,
+        metadata_country_code: &str,
+    ) -> Self {
+        let normalized_language = preferred_metadata_language.trim();
+        let normalized_country = metadata_country_code.trim().to_ascii_uppercase();
+        let language = if normalized_language.is_empty() {
+            "en-US".to_string()
+        } else if normalized_country.is_empty() {
+            normalized_language.to_string()
+        } else {
+            format!("{normalized_language}-{normalized_country}")
+        };
+
+        Self::with_config(TmdbConfig {
+            api_key,
+            api_keys: extra_keys,
+            language,
+            ..Default::default()
+        })
+    }
+
     /// 使用配置创建TMDB提供者
     pub fn with_config(config: TmdbConfig) -> Self {
         Self {
             config,
             client: Client::new(),
+            key_counter: AtomicUsize::new(0),
+        }
+    }
+
+    /// 轮询获取下一个可用的 API Key
+    fn next_api_key(&self) -> &str {
+        if self.config.api_keys.is_empty() {
+            return &self.config.api_key;
+        }
+        let total = 1 + self.config.api_keys.len();
+        let idx = self.key_counter.fetch_add(1, Ordering::Relaxed) % total;
+        if idx == 0 {
+            &self.config.api_key
+        } else {
+            &self.config.api_keys[idx - 1]
         }
     }
 
@@ -81,21 +125,27 @@ impl TmdbProvider {
         format!("{}{}", self.config.base_url, endpoint)
     }
 
+    fn is_bearer_token_key(key: &str) -> bool {
+        key.len() > 40
+    }
+
     fn is_bearer_token(&self) -> bool {
-        self.config.api_key.len() > 40
+        Self::is_bearer_token_key(&self.config.api_key)
     }
 
     fn add_api_key(&self, params: &mut HashMap<String, String>) {
-        if !self.is_bearer_token() {
-            params.insert("api_key".to_string(), self.config.api_key.clone());
+        let key = self.next_api_key();
+        if !Self::is_bearer_token_key(key) {
+            params.insert("api_key".to_string(), key.to_string());
         }
         params.insert("language".to_string(), self.config.language.clone());
     }
 
     fn auth_get(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        let key = self.next_api_key();
         let r = self.client.get(url);
-        if self.is_bearer_token() {
-            r.bearer_auth(&self.config.api_key)
+        if Self::is_bearer_token_key(key) {
+            r.bearer_auth(key)
         } else {
             r
         }

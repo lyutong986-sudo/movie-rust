@@ -606,6 +606,13 @@ export interface StartupConfiguration {
   StrmAnalysisThreadCount: number;
   TmdbMetadataThreadCount: number;
   TmdbApiKey: string;
+  TmdbApiKeys: string[];
+  FanartApiKeys: string[];
+  SubtitleApiKeys: string[];
+  PerformanceTier: string;
+  DbMaxConnections: number;
+  ImageDownloadThreads: number;
+  BackgroundTaskThreads: number;
 }
 
 export interface UserSettingsResponse {

@@ -268,24 +268,22 @@ async fn auth_providers(
         return Err(AppError::Forbidden);
     }
 
-    let users = repository::list_users(&state.pool, false).await?;
+    let rows: Vec<(Option<String>,)> = sqlx::query_as(
+        "SELECT DISTINCT unnest(ARRAY[\
+            COALESCE(NULLIF(TRIM(policy->>'AuthenticationProviderId'), ''), 'Default'),\
+            COALESCE(NULLIF(TRIM(policy->>'PasswordResetProviderId'), ''), 'Default')\
+         ]) FROM users WHERE policy IS NOT NULL AND policy != 'null'::jsonb",
+    )
+    .fetch_all(&state.pool)
+    .await?;
     let mut provider_ids = std::collections::BTreeSet::new();
-    for user in users {
-        let policy = repository::user_to_dto(&user, state.config.server_id).policy;
-        let auth_id = policy.authentication_provider_id.trim();
-        let reset_id = policy.password_reset_provider_id.trim();
-        provider_ids.insert(if auth_id.is_empty() {
-            "Default".to_string()
-        } else {
-            auth_id.to_string()
-        });
-        provider_ids.insert(if reset_id.is_empty() {
-            "Default".to_string()
-        } else {
-            reset_id.to_string()
-        });
+    for (val,) in rows {
+        if let Some(v) = val {
+            if !v.trim().is_empty() {
+                provider_ids.insert(v);
+            }
+        }
     }
-
     if provider_ids.is_empty() {
         provider_ids.insert("Default".to_string());
     }

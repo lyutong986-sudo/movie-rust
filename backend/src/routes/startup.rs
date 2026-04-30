@@ -47,11 +47,16 @@ async fn first_user(
     State(state): State<AppState>,
 ) -> Result<Json<Option<PublicUserDto>>, AppError> {
     ensure_startup_access(&state, session.0.as_ref()).await?;
-    let users = repository::list_users(&state.pool, false).await?;
-    let user = users
-        .first()
-        .map(|user| repository::user_to_public_dto(user, state.config.server_id));
-    Ok(Json(user))
+    let user = sqlx::query_as::<_, crate::models::DbUser>(
+        "SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy, \
+         configuration, primary_image_path, backdrop_image_path, logo_image_path, date_modified, \
+         easy_password_hash, created_at, legacy_password_format, legacy_password_hash \
+         FROM users ORDER BY name LIMIT 1",
+    )
+    .fetch_optional(&state.pool)
+    .await?;
+    let dto = user.map(|u| repository::user_to_public_dto(&u, state.config.server_id));
+    Ok(Json(dto))
 }
 
 async fn create_first_user(
