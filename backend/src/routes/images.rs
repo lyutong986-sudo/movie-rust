@@ -1323,7 +1323,8 @@ async fn serve_item_image(
 
     let normalized = normalized_item_image_type(&image_type);
     let idx = image_index.unwrap_or(0);
-    let path = match normalized.as_str() {
+    // 空字符串与未配置路径同等对待（DB 中为 NULL / 空白时仍尝试 TMDB 等回退）
+    let path_opt = match normalized.as_str() {
         "Backdrop" if idx == 0 => item.backdrop_path.clone(),
         "Backdrop" if idx > 0 => item.backdrop_paths.get((idx - 1) as usize).cloned(),
         "Logo" => item.logo_path.clone(),
@@ -1333,32 +1334,46 @@ async fn serve_item_image(
         "Art" => item.art_path.clone(),
         _ => item.image_primary_path.clone(),
     }
-    .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
+    .filter(|p| !p.trim().is_empty());
 
-    let result = serve_image(&path, request).await;
-
-    if let Err(AppError::NotFound(_)) = &result {
-        if !path.starts_with("http://") && !path.starts_with("https://") {
-            if let Some(fallback_url) =
-                find_tmdb_image_fallback(&state.pool, &item, &normalized).await
-            {
-                tracing::debug!(
-                    item_id = %item.id,
-                    image_type = normalized.as_str(),
-                    "本地图片文件不存在，回退到 TMDB 远程代理"
-                );
-                let fallback_req = Request::builder()
-                    .body(Body::empty())
-                    .unwrap_or_default();
-                return serve_remote_image(&fallback_url, fallback_req).await;
+    if let Some(path) = path_opt {
+        let result = serve_image(&path, request).await;
+        if let Err(AppError::NotFound(_)) = &result {
+            if !path.starts_with("http://") && !path.starts_with("https://") {
+                if let Some(fallback_url) =
+                    find_tmdb_image_fallback(&state.pool, &item, &normalized).await
+                {
+                    tracing::debug!(
+                        item_id = %item.id,
+                        image_type = %normalized,
+                        "本地图片文件不存在，回退到 TMDB 远程代理"
+                    );
+                    let fallback_req = Request::builder()
+                        .body(Body::empty())
+                        .unwrap_or_default();
+                    return serve_remote_image(&fallback_url, fallback_req).await;
+                }
             }
         }
+        return result;
     }
 
-    result
+    if let Some(fallback_url) = find_tmdb_image_fallback(&state.pool, &item, &normalized).await {
+        tracing::debug!(
+            item_id = %item.id,
+            image_type = %normalized,
+            "数据库未配置图片路径，回退到 TMDB 远程代理"
+        );
+        let fallback_req = Request::builder()
+            .body(Body::empty())
+            .unwrap_or_default();
+        return serve_remote_image(&fallback_url, fallback_req).await;
+    }
+
+    Err(AppError::NotFound("图片不存在".to_string()))
 }
 
-/// 当本地图片文件不存在时，尝试从 series_episode_catalog 或 TMDB API 构建回退 URL。
+/// 数据库无路径 / 空白路径时，以及本地文件缺失时，尝试从 series_episode_catalog 或 TMDB API 构建回退 URL。
 async fn find_tmdb_image_fallback(
     pool: &sqlx::PgPool,
     item: &crate::models::DbMediaItem,
