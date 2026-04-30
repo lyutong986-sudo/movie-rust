@@ -1449,7 +1449,34 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 - ✅ 用户管理页面显示搜索框，支持实时过滤（2405 用户中搜索 "testadmin" 精确命中 1 个）
 - ✅ 用户列表分页（121 页 × 20 条/页），翻页控件正常工作
 
-### 7. 测试脚本清单
+### 7. 第五轮修复：页面加载性能 + 图片 Fallback
+
+**问题现象：**
+- `GET /Users/Public` 延迟高达 61115ms（61 秒），导致页面加载极慢
+- 刷新元数据时切换分季/集，图片可能出现 404
+
+**根因分析：**
+1. **Argon2 密码验证风暴**：`user_to_public_dto` / `user_to_dto` 对每个用户调用 `verify_password("", &hash)` 来判断是否设了密码。Argon2 验证每次约 50ms，2405 个用户 ≈ 120 秒！
+2. **同步阻塞的元数据刷新**：`refresh_item_metadata` 在 HTTP 请求内同步执行全部 TMDB 调用 + 图片下载（数分钟），占用 DB 连接导致其他请求排队。
+3. **图片文件缺失无回退**：当本地图片文件不存在时直接 404，没有 TMDB 远程代理回退。
+
+| # | 修复 | 文件 | 说明 |
+|---|------|------|------|
+| R8 | 消除密码验证风暴 | `backend/src/repository.rs` | `has_password` 改为检查 `password_hash` 是否为空字符串，不再调用 Argon2 verify |
+| R9 | 元数据刷新异步化 | `backend/src/routes/items.rs` | `refresh_item_metadata` 立即返回 204，实际工作 `tokio::spawn` 到后台执行 |
+| R10 | 图片 TMDB Fallback | `backend/src/routes/images.rs` | `serve_item_image` 本地文件 404 时，从 `series_episode_catalog` 或 TMDB API 获取远程 URL 代理返回 |
+| R11 | DB 连接池优化 | `backend/src/main.rs` + `backend/src/config.rs` | `max_connections` 8→20，新增 `acquire_timeout=15s` 防止连接池饥饿无限阻塞 |
+
+**验证结果：**
+- ✅ `GET /Users/Public` 延迟：61115ms → **64-169ms**（提升 ~400-900 倍）
+- ✅ 点击"刷新元数据"立即返回 204，后台异步下载
+- ✅ Series Primary/Backdrop 图片通过 TMDB fallback 返回 200
+- ✅ Season 图片通过 TMDB Season API fallback 返回 200
+- ✅ Episode 图片通过 `series_episode_catalog` fallback 返回 200
+- ✅ 切换 Season 2 后所有 12 集图片正常加载（reqid 1972-1983 全部 200）
+- ✅ 页面可正常浏览，无明显卡顿
+
+### 8. 测试脚本清单
 
 | 文件 | 用途 |
 |------|------|

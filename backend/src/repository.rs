@@ -7041,7 +7041,7 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
         UserConfigurationDto::default()
     };
 
-    let has_password = !security::verify_password(&user.password_hash, "");
+    let has_password = !user.password_hash.trim().is_empty();
     let has_easy_password = user
         .easy_password_hash
         .as_deref()
@@ -7070,7 +7070,7 @@ pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
 }
 
 pub fn user_to_public_dto(user: &DbUser, server_id: Uuid) -> PublicUserDto {
-    let has_password = !security::verify_password(&user.password_hash, "");
+    let has_password = !user.password_hash.trim().is_empty();
     let has_easy_password = user
         .easy_password_hash
         .as_deref()
