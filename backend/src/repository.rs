@@ -3244,6 +3244,7 @@ pub async fn list_libraries(pool: &sqlx::PgPool) -> Result<Vec<DbLibrary>, AppEr
         SELECT id, name, collection_type, path, library_options, created_at,
                primary_image_path, primary_image_tag
         FROM libraries
+        WHERE path <> '__remote_transit__'
         ORDER BY name
         "#,
     )

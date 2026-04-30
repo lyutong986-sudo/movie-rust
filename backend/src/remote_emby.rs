@@ -2815,11 +2815,12 @@ async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse
     parse_remote_json_response(response, endpoint.as_str()).await
 }
 
+/// 构建 STRM 在 view workspace 内的相对路径。
+/// 注意：view 子目录已由调用方（view_strm_workspace）提供，此处不再重复拼 view_name。
 fn build_relative_strm_path(item: &RemoteSyncItem) -> Option<PathBuf> {
     if item.item.id.trim().is_empty() || item.item.name.trim().is_empty() {
         return None;
     }
-    let view_folder = sanitize_segment(item.view_name.as_str());
     let item_type = item.item.item_type.trim().to_ascii_lowercase();
     if item_type == "movie" {
         let title = sanitize_segment(item.item.name.as_str());
@@ -2828,11 +2829,9 @@ fn build_relative_strm_path(item: &RemoteSyncItem) -> Option<PathBuf> {
             .production_year
             .map(|year| format!(" ({year})"))
             .unwrap_or_default();
-        let filename = format!(
-            "{title}{year_part} [{}].strm",
-            sanitize_segment(item.item.id.as_str())
-        );
-        return Some(PathBuf::from(view_folder).join(filename));
+        let movie_folder = format!("{title}{year_part}");
+        let filename = format!("{title}{year_part}.strm");
+        return Some(PathBuf::from(movie_folder).join(filename));
     }
 
     if item_type == "episode" {
@@ -2841,14 +2840,10 @@ fn build_relative_strm_path(item: &RemoteSyncItem) -> Option<PathBuf> {
         let season_number = item.item.parent_index_number.unwrap_or(0).clamp(0, 999);
         let episode_number = item.item.index_number.unwrap_or(0).clamp(0, 9999);
         let title = sanitize_segment(item.item.name.as_str());
-        let filename = format!(
-            "S{season_number:02}E{episode_number:02} - {title} [{}].strm",
-            sanitize_segment(item.item.id.as_str())
-        );
+        let filename = format!("S{season_number:02}E{episode_number:02} - {title}.strm");
         let season_folder = format!("Season {season_number:02}");
         return Some(
-            PathBuf::from(view_folder)
-                .join(series_name)
+            PathBuf::from(series_name)
                 .join(season_folder)
                 .join(filename),
         );
@@ -3066,41 +3061,75 @@ async fn write_remote_strm_bundle(
         .ok_or_else(|| AppError::Internal("STRM 缺父目录".into()))?;
 
     if source.sync_metadata {
-        if let Some(tag) = item
-            .item
-            .image_tags
-            .as_ref()
-            .and_then(|v| v.as_object())
-            .and_then(|m| m.get("Primary").and_then(Value::as_str))
+        // 下载 Primary 封面（poster）
         {
-            let url = append_remote_api_key_param(
-                remote_image_url(base.as_str(), item.item.id.as_str(), "Primary", tag).as_str(),
-                playback_token.trim(),
-            );
-            if let Ok(bytes) = emby_download_bytes(source, playback_token, url.as_str()).await {
-                let path = sidecar_dir.join("poster.jpg");
-                if tokio::fs::write(&path, &bytes).await.is_ok() {
-                    local_poster = Some(path);
+            let primary_tag = item
+                .item
+                .image_tags
+                .as_ref()
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.get("Primary").and_then(Value::as_str));
+            let url = if let Some(tag) = primary_tag {
+                append_remote_api_key_param(
+                    remote_image_url(base.as_str(), item.item.id.as_str(), "Primary", tag).as_str(),
+                    playback_token.trim(),
+                )
+            } else {
+                append_remote_api_key_param(
+                    &format!(
+                        "{}/emby/Items/{}/Images/Primary?quality=90&maxWidth=1920",
+                        base.trim_end_matches('/'),
+                        item.item.id
+                    ),
+                    playback_token.trim(),
+                )
+            };
+            match emby_download_bytes(source, playback_token, url.as_str()).await {
+                Ok(bytes) if !bytes.is_empty() => {
+                    let path = sidecar_dir.join("poster.jpg");
+                    if tokio::fs::write(&path, &bytes).await.is_ok() {
+                        local_poster = Some(path);
+                    }
                 }
+                _ => {}
             }
         }
-        if let Some(tag) = item.item.backdrop_image_tags.as_ref().and_then(|tags| match tags {
-            Value::Array(arr) => arr.first().and_then(Value::as_str),
-            Value::Object(map) => map.values().next().and_then(Value::as_str),
-            Value::String(s) => Some(s.as_str()),
-            _ => None,
-        }) {
-            let url = append_remote_api_key_param(
-                remote_image_url(base.as_str(), item.item.id.as_str(), "Backdrop", tag).as_str(),
-                playback_token.trim(),
-            );
-            if let Ok(bytes) = emby_download_bytes(source, playback_token, url.as_str()).await {
-                let path = sidecar_dir.join("backdrop.jpg");
-                if tokio::fs::write(&path, &bytes).await.is_ok() {
-                    local_backdrop = Some(path);
+
+        // 下载 Backdrop（背景图）
+        {
+            let backdrop_tag = item.item.backdrop_image_tags.as_ref().and_then(|tags| match tags {
+                Value::Array(arr) => arr.first().and_then(Value::as_str),
+                Value::Object(map) => map.values().next().and_then(Value::as_str),
+                Value::String(s) => Some(s.as_str()),
+                _ => None,
+            });
+            let url = if let Some(tag) = backdrop_tag {
+                append_remote_api_key_param(
+                    remote_image_url(base.as_str(), item.item.id.as_str(), "Backdrop", tag).as_str(),
+                    playback_token.trim(),
+                )
+            } else {
+                append_remote_api_key_param(
+                    &format!(
+                        "{}/emby/Items/{}/Images/Backdrop?quality=90&maxWidth=1920",
+                        base.trim_end_matches('/'),
+                        item.item.id
+                    ),
+                    playback_token.trim(),
+                )
+            };
+            match emby_download_bytes(source, playback_token, url.as_str()).await {
+                Ok(bytes) if !bytes.is_empty() => {
+                    let path = sidecar_dir.join("backdrop.jpg");
+                    if tokio::fs::write(&path, &bytes).await.is_ok() {
+                        local_backdrop = Some(path);
+                    }
                 }
+                _ => {}
             }
         }
+
+        // 下载 Logo
         if let Some(tag) = item
             .item
             .image_tags
