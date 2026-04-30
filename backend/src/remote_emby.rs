@@ -696,9 +696,12 @@ async fn sync_source_inner(
     source: &mut DbRemoteEmbySource,
     progress: Option<RemoteSyncProgress>,
 ) -> Result<RemoteEmbySyncResult, AppError> {
-    let target_library = repository::get_library(&state.pool, source.target_library_id)
-        .await?
-        .ok_or_else(|| AppError::BadRequest("目标媒体库不存在".to_string()))?;
+    // merge 模式仍需要 target_library；separate 模式每个 View 自建库
+    let display_mode_str = normalize_display_mode(source.display_mode.as_str());
+    let target_library_opt = repository::get_library(&state.pool, source.target_library_id).await?;
+    if display_mode_str == REMOTE_DISPLAY_MODE_MERGE && target_library_opt.is_none() {
+        return Err(AppError::BadRequest("合并模式下目标媒体库不存在".to_string()));
+    }
 
     if let Some(handle) = &progress {
         handle.set_phase("CountingRemoteItems", 3.0);
@@ -719,6 +722,41 @@ async fn sync_source_inner(
         }
     }
 
+    // ── separate 模式：为每个 View 确保存在独立本地库 ────────────────────
+    let mut view_library_id_map: HashMap<String, Uuid> = HashMap::new();
+    if display_mode_str == REMOTE_DISPLAY_MODE_SEPARATE {
+        let map_obj = source.view_library_map
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        for view in &views {
+            let existing_lib_id = map_obj
+                .get(&view.id)
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<Uuid>().ok());
+            let lib_id = repository::ensure_view_library(
+                &state.pool,
+                source.id,
+                &source.name,
+                &view.id,
+                &view.name,
+                view.collection_type.as_deref(),
+                existing_lib_id,
+            )
+            .await?;
+            view_library_id_map.insert(view.id.clone(), lib_id);
+        }
+        // 持久化
+        let updated_map: serde_json::Map<String, Value> = view_library_id_map
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.to_string())))
+            .collect();
+        let updated_map_value = Value::Object(updated_map);
+        source.view_library_map = updated_map_value.clone();
+        repository::update_source_view_library_map(&state.pool, source.id, &updated_map_value)
+            .await?;
+    }
+
     // 增量同步：有 last_sync_at 则仅同步变更条目；否则全量同步
     let incremental_since = source.last_sync_at;
     let is_incremental = incremental_since.is_some();
@@ -736,7 +774,12 @@ async fn sync_source_inner(
         total_items = total_items.saturating_add(view_count);
     }
 
-    let source_root = source_root_path(&target_library, source);
+    // merge 模式的 source_root（用于清理旧 STRM 路径）
+    let source_root = target_library_opt
+        .as_ref()
+        .map(|lib| source_root_path(lib, source))
+        .unwrap_or_else(|| PathBuf::from(format!("__nonexistent_{}", source.id.simple())));
+
     let playback_token = source
         .access_token
         .as_ref()
@@ -809,13 +852,7 @@ async fn sync_source_inner(
     }
 
     let mut tvshow_roots_written: HashSet<PathBuf> = HashSet::new();
-    let display_mode = normalize_display_mode(source.display_mode.as_str());
-    let root_item_id = if display_mode == REMOTE_DISPLAY_MODE_SEPARATE {
-        Some(upsert_virtual_root_item(&state.pool, source).await?)
-    } else {
-        None
-    };
-    let mut view_parent_map: HashMap<String, Uuid> = HashMap::new();
+    // separate 模式不再需要虚拟根目录文件夹（每个 View 已是独立库）
     let mut series_parent_map: HashMap<String, Uuid> = HashMap::new();
     let mut season_parent_map: HashMap<String, Uuid> = HashMap::new();
     let mut fetched_count = 0u64;
@@ -825,6 +862,15 @@ async fn sync_source_inner(
     }
 
     for view in &views {
+        // 确定该 View 对应的本地库 ID
+        let item_library_id = if display_mode_str == REMOTE_DISPLAY_MODE_SEPARATE {
+            *view_library_id_map.get(&view.id).ok_or_else(|| {
+                AppError::Internal(format!("View「{}」未找到对应本地库", view.name))
+            })?
+        } else {
+            source.target_library_id
+        };
+
         let mut start_index = 0i64;
         loop {
             let page = fetch_remote_items_page_for_view(
@@ -849,24 +895,11 @@ async fn sync_source_inner(
                     view_name: view.name.clone(),
                 };
 
-                let mut parent_id = if display_mode == REMOTE_DISPLAY_MODE_SEPARATE {
-                    let view_parent_id = ensure_virtual_view_folder(
-                        &state.pool,
-                        source,
-                        root_item_id.ok_or_else(|| {
-                            AppError::Internal("远端虚拟根目录不存在".to_string())
-                        })?,
-                        item.view_id.as_str(),
-                        item.view_name.as_str(),
-                        &mut view_parent_map,
-                    )
-                    .await?;
-                    Some(view_parent_id)
-                } else {
-                    None
-                };
+                // separate 模式：电影/剧集直接放在 View 库根层，无视图文件夹
+                let mut parent_id: Option<Uuid> = None;
+
                 if item.item.item_type.eq_ignore_ascii_case("Episode") {
-                    let series_view_scope = if display_mode == REMOTE_DISPLAY_MODE_SEPARATE {
+                    let series_view_scope = if display_mode_str == REMOTE_DISPLAY_MODE_SEPARATE {
                         item.view_id.as_str()
                     } else {
                         "_merged"
@@ -875,8 +908,9 @@ async fn sync_source_inner(
                         &state.pool,
                         source,
                         &item,
-                        parent_id,
+                        None,
                         series_view_scope,
+                        item_library_id,
                         &mut series_parent_map,
                     )
                     .await?;
@@ -886,6 +920,7 @@ async fn sync_source_inner(
                         source,
                         &item,
                         series_parent_id,
+                        item_library_id,
                         &mut season_parent_map,
                     )
                     .await?;
@@ -933,6 +968,7 @@ async fn sync_source_inner(
                     source,
                     &item,
                     parent_id,
+                    item_library_id,
                     media_source_id,
                     analysis.as_ref(),
                     strm_bundle
@@ -1242,26 +1278,25 @@ fn merge_provider_ids(base: &Value, markers: Value) -> Value {
 
 async fn cleanup_remote_source_items(
     pool: &sqlx::PgPool,
-    library_id: Uuid,
+    _library_id: Uuid,
     source_id: Uuid,
     legacy_source_root: &Path,
 ) -> Result<u64, AppError> {
     let virtual_prefix = format!("{}%", build_virtual_root_path(source_id));
     let virtual_prefix_windows = virtual_prefix.replace('/', "\\");
     let legacy_prefix = format!("{}%", legacy_source_root.to_string_lossy());
+    // 不再限制 library_id，支持 separate 模式下条目分散在多个库
     let result = sqlx::query(
         r#"
         DELETE FROM media_items
-        WHERE library_id = $1
-          AND (
-              provider_ids ->> 'RemoteEmbySourceId' = $2
-              OR path LIKE $3
-              OR path LIKE $4
-              OR path LIKE $5
-          )
+        WHERE (
+            provider_ids ->> 'RemoteEmbySourceId' = $1
+            OR path LIKE $2
+            OR path LIKE $3
+            OR path LIKE $4
+        )
         "#,
     )
-    .bind(library_id)
     .bind(source_id.to_string())
     .bind(virtual_prefix)
     .bind(virtual_prefix_windows)
@@ -1275,10 +1310,13 @@ pub async fn cleanup_source_mapped_items(
     pool: &sqlx::PgPool,
     source: &DbRemoteEmbySource,
 ) -> Result<u64, AppError> {
-    let Some(library) = repository::get_library(pool, source.target_library_id).await? else {
-        return Ok(0);
-    };
-    let source_root = source_root_path(&library, source);
+    // 清理时需要一个 source_root 路径（用于清理 legacy STRM 文件），从目标库或任意视图库取
+    let target_lib_opt = repository::get_library(pool, source.target_library_id).await?;
+    // 提供一个空路径占位，cleanup_remote_source_items 主要靠 RemoteEmbySourceId 识别
+    let source_root = target_lib_opt
+        .as_ref()
+        .map(|lib| source_root_path(lib, source))
+        .unwrap_or_else(|| PathBuf::from(format!("__nonexistent_{}", source.id.simple())));
     let deleted = cleanup_remote_source_items(
         pool,
         source.target_library_id,
@@ -1435,6 +1473,7 @@ async fn ensure_virtual_series_folder(
     item: &RemoteSyncItem,
     parent_id: Option<Uuid>,
     view_scope: &str,
+    library_id: Uuid,
     series_parent_map: &mut HashMap<String, Uuid>,
 ) -> Result<Uuid, AppError> {
     let raw_series_name = item
@@ -1454,7 +1493,7 @@ async fn ensure_virtual_series_folder(
     let (item_id, _was_new) = repository::upsert_media_item(
         pool,
         repository::UpsertMediaItem {
-            library_id: source.target_library_id,
+            library_id,
             parent_id,
             name: series_name.as_str(),
             item_type: "Series",
@@ -1509,6 +1548,7 @@ async fn ensure_virtual_season_folder(
     source: &DbRemoteEmbySource,
     item: &RemoteSyncItem,
     series_parent_id: Uuid,
+    library_id: Uuid,
     season_parent_map: &mut HashMap<String, Uuid>,
 ) -> Result<Uuid, AppError> {
     let season_number = item.item.parent_index_number.unwrap_or(0).clamp(0, 999);
@@ -1534,7 +1574,7 @@ async fn ensure_virtual_season_folder(
     let (item_id, _was_new) = repository::upsert_media_item(
         pool,
         repository::UpsertMediaItem {
-            library_id: source.target_library_id,
+            library_id,
             parent_id: Some(series_parent_id),
             name: season_name.as_str(),
             item_type: "Season",
@@ -1589,6 +1629,7 @@ async fn upsert_virtual_media_item(
     source: &DbRemoteEmbySource,
     item: &RemoteSyncItem,
     parent_id: Option<Uuid>,
+    library_id: Uuid,
     media_source_id: Option<&str>,
     analysis: Option<&MediaAnalysisResult>,
     path_override: Option<&Path>,
@@ -1656,7 +1697,7 @@ async fn upsert_virtual_media_item(
     repository::upsert_media_item(
         pool,
         repository::UpsertMediaItem {
-            library_id: source.target_library_id,
+            library_id,
             parent_id,
             name: item.item.name.as_str(),
             item_type,
@@ -1911,7 +1952,7 @@ async fn fetch_all_remote_item_ids(
 async fn delete_stale_items_for_source(
     pool: &sqlx::PgPool,
     source_id: Uuid,
-    library_id: Uuid,
+    _library_id: Uuid,
     remote_id_set: &HashSet<String>,
     strm_workspace: Option<&Path>,
 ) -> Result<u64, AppError> {
@@ -1921,16 +1962,15 @@ async fn delete_stale_items_for_source(
         path: Option<String>,
         remote_id: Option<String>,
     }
+    // 不再限制 library_id，支持 separate 模式下条目分散在多个库
     let rows: Vec<StaleRow> = sqlx::query(
         r#"
         SELECT id, path, provider_ids->>'RemoteEmbyItemId' AS remote_id
         FROM media_items
-        WHERE library_id = $1
-          AND provider_ids->>'RemoteEmbySourceId' = $2
+        WHERE provider_ids->>'RemoteEmbySourceId' = $1
           AND provider_ids->>'RemoteEmbyItemId' IS NOT NULL
         "#,
     )
-    .bind(library_id)
     .bind(&source_id_str)
     .fetch_all(pool)
     .await?

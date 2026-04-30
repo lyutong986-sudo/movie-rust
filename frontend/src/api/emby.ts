@@ -566,6 +566,8 @@ export interface RemoteEmbySource {
   SyncSubtitles?: boolean;
   TokenRefreshIntervalSecs?: number;
   LastTokenRefreshAt?: string;
+  /** 独立显示模式下 view_id → 本地库 id 的映射 */
+  ViewLibraryMap?: Record<string, string>;
   CreatedAt: string;
   UpdatedAt: string;
 }

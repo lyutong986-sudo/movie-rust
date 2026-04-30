@@ -729,6 +729,8 @@ ALTER TABLE remote_emby_sources
     ADD COLUMN IF NOT EXISTS token_refresh_interval_secs INTEGER NOT NULL DEFAULT 3600;
 ALTER TABLE remote_emby_sources
     ADD COLUMN IF NOT EXISTS last_token_refresh_at TIMESTAMPTZ;
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS view_library_map jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique
     ON remote_emby_sources(lower(name));

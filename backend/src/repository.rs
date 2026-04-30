@@ -3132,6 +3132,112 @@ pub async fn ensure_remote_transit_library(pool: &sqlx::PgPool) -> Result<DbLibr
         .ok_or_else(|| AppError::Internal("无法创建远端 Emby 中转库".to_string()))
 }
 
+/// 为远端 Emby 源的单个 View 确保存在对应的本地独立媒体库。
+/// - 优先使用 `existing_library_id`（来自 view_library_map）中已有库
+/// - 若不存在则以 `view_name` 为名创建（名称冲突时追加源名前缀）
+/// 返回库 ID。
+pub async fn ensure_view_library(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    source_name: &str,
+    view_id: &str,
+    view_name: &str,
+    collection_type: Option<&str>,
+    existing_library_id: Option<Uuid>,
+) -> Result<Uuid, AppError> {
+    // 1. 如果已有对应库且库仍然存在，直接返回
+    if let Some(lib_id) = existing_library_id {
+        if get_library(pool, lib_id).await?.is_some() {
+            return Ok(lib_id);
+        }
+    }
+
+    // 2. 根据 view_name 找或建库
+    //    优先用 view_name，冲突时用 "{source_name} - {view_name}"
+    let preferred_name = view_name.trim().to_string();
+    let fallback_name = format!("{} - {}", source_name.trim(), view_name.trim());
+
+    // 解析远端 collection_type → 本地 collection_type
+    let local_collection_type = match collection_type {
+        Some(t) if t.eq_ignore_ascii_case("tvshows") => "tvshows",
+        Some(t) if t.eq_ignore_ascii_case("movies") => "movies",
+        Some(t) if t.eq_ignore_ascii_case("homevideos") => "homevideos",
+        _ => "movies",
+    };
+
+    // 虚拟路径：__remote_view_{source_id}_{view_id}
+    let virtual_path = format!("__remote_view_{}_{}", source_id.simple(), view_id.trim());
+
+    let options_value = serde_json::json!({
+        "PathInfos": [{"Path": virtual_path}],
+        "EnableAutoBoxSets": false,
+        "EnableRealtimeMonitor": false,
+        "SkipSubtitlesIfEmbeddedSubtitlesPresent": false
+    });
+
+    // 尝试首选名称
+    {
+        let id = Uuid::new_v4();
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO libraries (id, name, collection_type, path, library_options, date_modified)
+            VALUES ($1, $2, $3, $4, $5, now())
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(id)
+        .bind(&preferred_name)
+        .bind(local_collection_type)
+        .bind(&virtual_path)
+        .bind(&options_value)
+        .execute(pool)
+        .await;
+        if let Some(lib) = get_library_by_name(pool, &preferred_name).await? {
+            return Ok(lib.id);
+        }
+    }
+    // 首选名被其他库占用，用回退名
+    {
+        let id = Uuid::new_v4();
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO libraries (id, name, collection_type, path, library_options, date_modified)
+            VALUES ($1, $2, $3, $4, $5, now())
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(id)
+        .bind(&fallback_name)
+        .bind(local_collection_type)
+        .bind(&virtual_path)
+        .bind(&options_value)
+        .execute(pool)
+        .await;
+        if let Some(lib) = get_library_by_name(pool, &fallback_name).await? {
+            return Ok(lib.id);
+        }
+    }
+    Err(AppError::Internal(format!(
+        "无法为远端 View「{view_name}」创建媒体库"
+    )))
+}
+
+/// 将 view_library_map 写回 remote_emby_sources
+pub async fn update_source_view_library_map(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    map: &serde_json::Value,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE remote_emby_sources SET view_library_map = $1, updated_at = now() WHERE id = $2",
+    )
+    .bind(map)
+    .bind(source_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn list_libraries(pool: &sqlx::PgPool) -> Result<Vec<DbLibrary>, AppError> {
     Ok(sqlx::query_as::<_, DbLibrary>(
         r#"
@@ -3168,6 +3274,7 @@ pub async fn list_remote_emby_sources(
             id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
+            view_library_map,
             created_at, updated_at
         FROM remote_emby_sources
         ORDER BY name
@@ -3187,6 +3294,7 @@ pub async fn get_remote_emby_source(
             id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
+            view_library_map,
             created_at, updated_at
         FROM remote_emby_sources
         WHERE id = $1

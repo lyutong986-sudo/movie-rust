@@ -74,8 +74,8 @@ const runningSyncCount = computed(
     ).length
 );
 const displayModeItems = [
-  { label: '单独显示（按远端源分组）', value: 'separate' },
-  { label: '并入项目媒体库', value: 'merge' }
+  { label: '独立媒体库（每个远端库单独建库）', value: 'separate' },
+  { label: '并入现有媒体库', value: 'merge' }
 ];
 /** 本地媒体库下拉项：排除内部虚拟中转库（不应让用户手动选择/删除） */
 const TRANSIT_LIB_NAME = '远端 Emby 中转'
@@ -131,7 +131,7 @@ function collectionTypeLabel(type?: string) {
 }
 
 function displayModeLabel(mode?: string) {
-  return mode === 'merge' ? '并入现有媒体库' : '单独显示';
+  return mode === 'merge' ? '并入现有媒体库' : '独立媒体库';
 }
 
 function targetLibraryName(libraryId?: string) {
@@ -715,8 +715,11 @@ onBeforeUnmount(() => {
               placeholder="选择项目本地媒体库"
             />
           </UFormField>
-          <UFormField v-else label="本地显示说明">
-            <p class="text-muted text-xs">单独显示模式：远端内容会按远端源分组显示，不并入现有本地媒体库分组。</p>
+          <UFormField v-else label="独立媒体库说明" class="lg:col-span-2">
+            <p class="text-muted text-xs leading-relaxed">
+              单独显示模式：同步时将为每个远端媒体库自动创建对应的本地独立媒体库，名称与远端媒体库相同。<br />
+              无需手动指定目标库，首次同步后可在「媒体库管理」中查看自动创建的媒体库。
+            </p>
           </UFormField>
           <UFormField label="启用状态">
             <USwitch v-model="form.enabled" />
@@ -962,7 +965,7 @@ onBeforeUnmount(() => {
             <UFormField label="显示方式（本地）">
               <USelect v-model="editForm.displayMode" :items="displayModeItems" value-key="value" class="w-full" />
             </UFormField>
-            <UFormField label="目标项目媒体库" class="lg:col-span-2">
+            <UFormField v-if="editForm.displayMode === 'merge'" label="并入项目媒体库" class="lg:col-span-2">
               <USelect
                 v-model="editForm.targetLibraryId"
                 :items="localLibraryItems"
@@ -970,7 +973,12 @@ onBeforeUnmount(() => {
                 class="w-full"
                 placeholder="选择本地库"
               />
-              <p class="text-muted mt-1 text-xs">单独显示与并入模式均需指定挂载媒体库。</p>
+            </UFormField>
+            <UFormField v-else label="独立媒体库说明" class="lg:col-span-2">
+              <p class="text-muted text-xs leading-relaxed">
+                单独显示模式：同步时将为每个远端媒体库自动创建对应的本地独立媒体库，名称与远端媒体库名相同。<br />
+                无需手动指定目标库，已同步的媒体库可在「媒体库管理」中查看。
+              </p>
             </UFormField>
             <UFormField label="启用">
               <USwitch v-model="editForm.enabled" />

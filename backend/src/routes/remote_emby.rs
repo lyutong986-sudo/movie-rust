@@ -184,6 +184,8 @@ struct RemoteEmbySourceDto {
     token_refresh_interval_secs: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_token_refresh_at: Option<String>,
+    /// view_id -> local_library_id 映射（separate 模式下自动创建的视图库）
+    view_library_map: serde_json::Value,
     created_at: String,
     updated_at: String,
 }
@@ -742,6 +744,7 @@ fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> Remot
         last_token_refresh_at: source
             .last_token_refresh_at
             .map(|value| value.to_rfc3339()),
+        view_library_map: source.view_library_map,
         created_at: source.created_at.to_rfc3339(),
         updated_at: source.updated_at.to_rfc3339(),
     }

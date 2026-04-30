@@ -74,6 +74,8 @@ pub struct DbRemoteEmbySource {
     pub token_refresh_interval_secs: i32,
     #[sqlx(default)]
     pub last_token_refresh_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub view_library_map: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
