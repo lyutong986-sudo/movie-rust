@@ -3317,10 +3317,17 @@ async fn item_dto(
         return Ok(Json(item));
     }
 
+    let is_admin = repository::get_user_by_id(&state.pool, user_id)
+        .await?
+        .map(|u| u.is_admin)
+        .unwrap_or(false);
+
     if let Some(library) = repository::get_library(&state.pool, item_id).await? {
-        let visible = repository::visible_library_ids_for_user(&state.pool, user_id).await?;
-        if !visible.contains(&library.id) {
-            return Err(AppError::NotFound("媒体条目不存在".to_string()));
+        if !is_admin {
+            let visible = repository::visible_library_ids_for_user(&state.pool, user_id).await?;
+            if !visible.contains(&library.id) {
+                return Err(AppError::NotFound("媒体条目不存在".to_string()));
+            }
         }
         return Ok(Json(
             repository::library_to_item_dto(&state.pool, &library, state.config.server_id).await?,
@@ -3331,7 +3338,7 @@ async fn item_dto(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
-    if !repository::user_can_access_item(&state.pool, user_id, item_id).await? {
+    if !is_admin && !repository::user_can_access_item(&state.pool, user_id, item_id).await? {
         return Err(AppError::NotFound("媒体条目不存在".to_string()));
     }
 
