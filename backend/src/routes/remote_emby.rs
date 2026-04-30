@@ -417,9 +417,9 @@ async fn update_remote_emby_source(
 async fn preview_remote_emby_views(
     session: AuthSession,
     Json(payload): Json<PreviewRemoteEmbyViewsRequest>,
-) -> Result<Json<Vec<remote_emby::RemoteViewPreview>>, AppError> {
+) -> Result<Json<remote_emby::RemotePreviewResult>, AppError> {
     auth::require_admin(&session)?;
-    let views = remote_emby::preview_remote_views(
+    let result = remote_emby::preview_remote_views(
         payload.server_url.as_str(),
         payload.username.as_str(),
         payload.password.as_str(),
@@ -430,7 +430,7 @@ async fn preview_remote_emby_views(
             .unwrap_or(remote_emby::default_spoofed_user_agent()),
     )
     .await?;
-    Ok(Json(views))
+    Ok(Json(result))
 }
 
 async fn delete_remote_emby_source(

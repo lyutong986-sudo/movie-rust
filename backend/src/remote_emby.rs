@@ -88,6 +88,15 @@ pub struct RemoteViewPreview {
     pub collection_type: Option<String>,
 }
 
+/// 预览远端 Emby 源时返回的结果，包含服务器名称和媒体库列表
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemotePreviewResult {
+    /// 远端 Emby 服务器名称（从 /System/Info 获取）
+    pub server_name: String,
+    pub views: Vec<RemoteViewPreview>,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct RemoteSyncProgressSnapshot {
@@ -264,6 +273,13 @@ struct RemoteLoginResponse {
 #[serde(rename_all = "PascalCase")]
 struct RemoteLoginUser {
     id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteSystemInfo {
+    #[serde(default)]
+    server_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -543,7 +559,7 @@ pub async fn preview_remote_views(
     username: &str,
     password: &str,
     spoofed_user_agent: &str,
-) -> Result<Vec<RemoteViewPreview>, AppError> {
+) -> Result<RemotePreviewResult, AppError> {
     let server_url = normalize_server_url(server_url);
     if server_url.trim().is_empty() {
         return Err(AppError::BadRequest("远端 Emby 地址不能为空".to_string()));
@@ -627,15 +643,44 @@ pub async fn preview_remote_views(
     views
         .items
         .retain(|view| !view.id.trim().is_empty() && !view.name.trim().is_empty());
-    Ok(views
-        .items
-        .into_iter()
-        .map(|view| RemoteViewPreview {
-            id: view.id,
-            name: view.name,
-            collection_type: view.collection_type,
-        })
-        .collect())
+
+    // 获取远端服务器名称（/System/Info 需要认证，/System/Info/Public 公开可访问）
+    let server_name = {
+        let info_endpoint = format!("{server_url}/System/Info");
+        let info_resp = client
+            .get(&info_endpoint)
+            .query(&[("api_key", login.access_token.as_str())])
+            .header(header::USER_AGENT.as_str(), spoofed_user_agent)
+            .header(header::ACCEPT.as_str(), "application/json")
+            .header(header::ACCEPT_ENCODING.as_str(), "identity")
+            .header("X-Emby-Token", login.access_token.as_str())
+            .send()
+            .await;
+        match info_resp {
+            Ok(resp) if resp.status().is_success() => {
+                let info: Result<RemoteSystemInfo, _> =
+                    parse_remote_json_response(resp, info_endpoint.as_str()).await;
+                match info {
+                    Ok(i) if !i.server_name.trim().is_empty() => i.server_name,
+                    _ => server_url.to_string(),
+                }
+            }
+            _ => server_url.to_string(),
+        }
+    };
+
+    Ok(RemotePreviewResult {
+        server_name,
+        views: views
+            .items
+            .into_iter()
+            .map(|view| RemoteViewPreview {
+                id: view.id,
+                name: view.name,
+                collection_type: view.collection_type,
+            })
+            .collect(),
+    })
 }
 
 fn normalize_display_mode(value: &str) -> &'static str {
@@ -871,6 +916,11 @@ async fn sync_source_inner(
             source.target_library_id
         };
 
+        // 每个 View 在源根目录下独占子目录：{strm_root}/{source_name}/{view_name}/
+        let view_strm_workspace: Option<PathBuf> = strm_workspace.as_ref().map(|w| {
+            w.join(sanitize_segment(view.name.as_str()))
+        });
+
         let mut start_index = 0i64;
         loop {
             let page = fetch_remote_items_page_for_view(
@@ -937,12 +987,12 @@ async fn sync_source_inner(
                 .await
                 .ok()
                 .flatten();
-                let strm_bundle = match &strm_workspace {
-                    Some(workspace) => {
+                let strm_bundle = match &view_strm_workspace {
+                    Some(view_ws) => {
                         match write_remote_strm_bundle(
                             state,
                             source,
-                            workspace.as_path(),
+                            view_ws.as_path(),
                             playback_token.as_str(),
                             &item,
                             media_source_id,
@@ -2762,19 +2812,14 @@ fn build_relative_strm_path(item: &RemoteSyncItem) -> Option<PathBuf> {
     None
 }
 
-/// 每个远端源独占子目录：`{STRM_OUTPUT_PATH}/{SanitizedName}.{source_simple_uuid}/`
+/// STRM 源根目录：`{STRM_OUTPUT_PATH}/{SanitizedSourceName}/`
+/// 每个远端媒体库（View）在此基础上再建子目录：`{source_root}/{SanitizedViewName}/`
 fn strm_workspace_for_source(source: &DbRemoteEmbySource) -> Option<PathBuf> {
     let raw = source.strm_output_path.as_deref()?.trim();
     if raw.is_empty() {
         return None;
     }
-    Some(
-        Path::new(raw).join(format!(
-            "{}.{}",
-            sanitize_segment(source.name.as_str()),
-            source.id.simple()
-        )),
-    )
+    Some(Path::new(raw).join(sanitize_segment(source.name.as_str())))
 }
 
 

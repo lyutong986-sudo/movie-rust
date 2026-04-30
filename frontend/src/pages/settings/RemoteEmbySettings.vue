@@ -535,16 +535,23 @@ async function previewRemoteViews() {
   error.value = '';
   saved.value = '';
   try {
-    const views = await api.previewRemoteEmbyViews({
+    const result = await api.previewRemoteEmbyViews({
       ServerUrl: payload.serverUrl.trim(),
       Username: payload.username.trim(),
       Password: payload.password,
       SpoofedUserAgent: payload.spoofedUserAgent.trim()
     });
+    const views = result.Views;
     remoteViews.value = views;
+
+    // 若源名称尚未填写，则自动使用远端服务器名称填充
+    if (!form.value.name.trim() && result.ServerName.trim()) {
+      form.value.name = result.ServerName.trim();
+    }
+
     if (!views.length) {
       form.value.remoteViewIds = [];
-      saved.value = '已连接远端，但未发现可同步媒体库';
+      saved.value = `已连接「${result.ServerName}」，但未发现可同步媒体库`;
       return;
     }
     const existed = new Set(views.map((view) => view.Id.toLowerCase()));
@@ -554,7 +561,7 @@ async function previewRemoteViews() {
     if (!form.value.remoteViewIds.length) {
       form.value.remoteViewIds = [views[0].Id];
     }
-    saved.value = `已获取远端媒体库：${views.length} 个`;
+    saved.value = `已连接「${result.ServerName}」，获取到 ${views.length} 个媒体库`;
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
     remoteViews.value = [];
@@ -736,10 +743,13 @@ onBeforeUnmount(() => {
             <UInput
               v-model="form.strmOutputPath"
               class="w-full"
-              placeholder="例如 D:\Media\remote-strm — 同步时在子目录 {源名}.{源Id} 内写 .strm / NFO / 图片"
+              placeholder="例如 D:\Media\remote-strm"
             />
             <p class="text-muted mt-1 text-xs">
-              留空则仅使用虚拟路径入库；填写后每次全量同步会先清空该源的独占子目录再重写文件。STRM 文件指向本地代理，与远端 api_key 无关。
+              留空则仅使用虚拟路径入库，不写磁盘文件。<br />
+              填写后，同步时将按以下层级结构写入 .strm / NFO / 图片：<br />
+              <code class="bg-muted px-1 rounded text-xs font-mono">{根目录}/{源名称}/{远端媒体库名称}/{影片}.strm</code><br />
+              "源名称"获取远端媒体库列表后会自动填充为对方服务器名，可手动修改。STRM 文件指向本地代理转发流量，无需直连远端服务器。
             </p>
           </UFormField>
           <UFormField label="同步元数据到侧车（NFO/图）">
@@ -990,9 +1000,12 @@ onBeforeUnmount(() => {
               <UInput
                 v-model="editForm.strmOutputPath"
                 class="w-full"
-                placeholder="留空可清空数据库中的路径（不写侧车）"
+                placeholder="留空则清除 STRM 根路径配置（不再写磁盘文件）"
               />
-              <p class="text-muted mt-1 text-xs">保存为空字符串即清除 STRM 根路径配置。</p>
+              <p class="text-muted mt-1 text-xs">
+                文件写入路径：<code class="bg-muted px-1 rounded text-xs font-mono">{根目录}/{源名称}/{远端媒体库名称}/{影片}.strm</code>。<br />
+                保存为空即清除配置，后续同步仅使用虚拟路径，不写磁盘文件。
+              </p>
             </UFormField>
             <UFormField label="同步侧车元数据">
               <USwitch v-model="editForm.syncMetadata" />

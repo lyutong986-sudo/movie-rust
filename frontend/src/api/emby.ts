@@ -578,6 +578,13 @@ export interface RemoteEmbyView {
   CollectionType?: string;
 }
 
+/** 预览远端 Emby 源时的返回结果 */
+export interface RemoteEmbyPreviewResult {
+  /** 远端服务器名称（从 /System/Info 获取，可用于自动填充"源名称"） */
+  ServerName: string;
+  Views: RemoteEmbyView[];
+}
+
 export interface RemoteEmbySyncResponse {
   SourceId: string;
   SourceName: string;
@@ -1568,7 +1575,7 @@ export class EmbyApi {
     Password: string;
     SpoofedUserAgent?: string;
   }) {
-    return this.request<RemoteEmbyView[]>('/api/admin/remote-emby/views/preview', {
+    return this.request<RemoteEmbyPreviewResult>('/api/admin/remote-emby/views/preview', {
       method: 'POST',
       body: payload
     });
