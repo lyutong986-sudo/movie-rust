@@ -2553,6 +2553,31 @@ where
     }
 }
 
+/// 将空字符串或 null 反序列化为 None，有效 UUID 字符串反序列化为 Some(Uuid)
+pub(crate) fn deserialize_optional_uuid<'de, D>(
+    deserializer: D,
+) -> Result<Option<uuid::Uuid>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match val {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return Ok(None);
+            }
+            s.parse::<uuid::Uuid>()
+                .map(Some)
+                .map_err(serde::de::Error::custom)
+        }
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "无法将 {other} 解析为 UUID"
+        ))),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct GetSimilarItems {

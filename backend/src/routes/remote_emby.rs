@@ -61,8 +61,8 @@ struct CreateRemoteEmbySourceRequest {
     username: String,
     #[serde(alias = "pw", alias = "pwd")]
     password: String,
-    /// 可选：separate 模式下可不填，后端会自动使用「远端 Emby 中转」库
-    #[serde(default, alias = "targetLibraryId")]
+    /// 可选：separate 模式下可不填，后端会自动使用「远端 Emby 中转」库；空字符串也视为未填
+    #[serde(default, alias = "targetLibraryId", deserialize_with = "crate::models::deserialize_optional_uuid")]
     target_library_id: Option<Uuid>,
     #[serde(default, alias = "displayMode")]
     display_mode: Option<String>,
@@ -105,8 +105,8 @@ struct UpdateRemoteEmbySourceRequest {
     username: String,
     #[serde(default, alias = "pw", alias = "pwd")]
     password: Option<String>,
-    /// 可选：separate 模式下可不填，后端会自动使用「远端 Emby 中转」库
-    #[serde(default, alias = "targetLibraryId")]
+    /// 可选：separate 模式下可不填，后端会自动使用「远端 Emby 中转」库；空字符串也视为未填
+    #[serde(default, alias = "targetLibraryId", deserialize_with = "crate::models::deserialize_optional_uuid")]
     target_library_id: Option<Uuid>,
     #[serde(default, alias = "displayMode")]
     display_mode: Option<String>,
