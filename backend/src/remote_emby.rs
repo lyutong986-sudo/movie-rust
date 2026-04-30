@@ -287,6 +287,10 @@ struct RemoteBaseItem {
     #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
     tags: Vec<String>,
     media_sources: Option<Vec<RemoteMediaSource>>,
+    #[serde(default)]
+    image_tags: Option<Value>,
+    #[serde(default)]
+    backdrop_image_tags: Option<Value>,
 }
 
 fn deserialize_string_list_lossy<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -988,6 +992,38 @@ fn build_virtual_item_path(source_id: Uuid, remote_item_id: &str) -> String {
     format!("REMOTE_EMBY/{}/items/{}", source_id, remote_item_id.trim())
 }
 
+fn remote_image_url(server_url: &str, remote_item_id: &str, image_type: &str, tag: &str) -> String {
+    let base = server_url.trim_end_matches('/');
+    format!(
+        "{base}/emby/Items/{remote_item_id}/Images/{image_type}?tag={tag}&quality=90&maxWidth=1920"
+    )
+}
+
+fn extract_remote_image_urls(
+    server_url: &str,
+    remote_item_id: &str,
+    image_tags: &Option<Value>,
+    backdrop_image_tags: &Option<Value>,
+) -> (Option<String>, Option<String>) {
+    let primary = image_tags.as_ref().and_then(|tags| {
+        let tag = match tags {
+            Value::Object(map) => map.get("Primary").and_then(Value::as_str),
+            _ => None,
+        };
+        tag.map(|t| remote_image_url(server_url, remote_item_id, "Primary", t))
+    });
+    let backdrop = backdrop_image_tags.as_ref().and_then(|tags| {
+        match tags {
+            Value::Array(arr) => arr.first().and_then(Value::as_str),
+            Value::Object(map) => map.values().next().and_then(Value::as_str),
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+        .map(|t| remote_image_url(server_url, remote_item_id, "Backdrop", t))
+    });
+    (primary, backdrop)
+}
+
 fn parse_remote_premiere_date(value: Option<&str>) -> Option<NaiveDate> {
     let raw = value?.trim();
     if raw.is_empty() {
@@ -1416,6 +1452,12 @@ async fn upsert_virtual_media_item(
                 .map(|seconds| (seconds * 10_000_000.0).round() as i64)
         })
     });
+    let (remote_primary, remote_backdrop) = extract_remote_image_urls(
+        source.server_url.as_str(),
+        item.item.id.as_str(),
+        &item.item.image_tags,
+        &item.item.backdrop_image_tags,
+    );
     let empty = Vec::<String>::new();
     let empty_backdrops = Vec::<String>::new();
     let empty_trailers = Vec::<String>::new();
@@ -1446,8 +1488,8 @@ async fn upsert_virtual_media_item(
             studios: &item.item.studios,
             tags: &item.item.tags,
             production_locations: &empty,
-            image_primary_path: None,
-            backdrop_path: None,
+            image_primary_path: remote_primary.as_deref().map(Path::new),
+            backdrop_path: remote_backdrop.as_deref().map(Path::new),
             logo_path: None,
             thumb_path: None,
             art_path: None,
@@ -1584,7 +1626,7 @@ async fn fetch_remote_items_page_for_view(
         ("IncludeItemTypes".to_string(), "Movie,Episode".to_string()),
         (
             "Fields".to_string(),
-            "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,ProviderIds,Genres,Studios,Tags,MediaSources".to_string(),
+            "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,ProviderIds,Genres,Studios,Tags,MediaSources,ImageTags,BackdropImageTags".to_string(),
         ),
         ("EnableTotalRecordCount".to_string(), "true".to_string()),
         ("SortBy".to_string(), "SortName".to_string()),
@@ -1821,7 +1863,7 @@ async fn fetch_remote_playback_info(
             if is_playback { "true" } else { "false" }.to_string(),
         ),
         ("AutoOpenLiveStream".to_string(), "false".to_string()),
-        ("MaxStreamingBitrate".to_string(), "6790000".to_string()),
+        ("MaxStreamingBitrate".to_string(), "200000000".to_string()),
         ("reqformat".to_string(), "json".to_string()),
     ];
     if let Some(value) = media_source_id {
@@ -2215,9 +2257,13 @@ fn build_local_proxy_url(
         serializer.finish()
     };
 
+    let base = config
+        .public_url
+        .as_deref()
+        .map(|u| u.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", config.port));
     format!(
-        "http://127.0.0.1:{}/api/remote-emby/proxy/{}/{remote_item_id}?{query}",
-        config.port, source_id
+        "{base}/api/remote-emby/proxy/{source_id}/{remote_item_id}?{query}"
     )
 }
 

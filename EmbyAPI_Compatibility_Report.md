@@ -2020,3 +2020,48 @@ Jellyfin 插件路由前缀 `user_usage_stats`，控制器 `PlaybackReportingAct
 4. URL 中的 `Stream.{format}` 现在会影响输出：请求 `.vtt` + 源文件 `.srt` → 自动转换
 
 ---
+
+## 第二十六轮修复：远端 Emby 连接 EmbySDK 端点对齐
+
+**审计时间**: 2026-04-30
+
+对照 EmbySDK（`EmbyPasswordAuthenticator`、`EmbyAuthInfo`、`AuthenticateUserByName`）审计远端 Emby 连接/同步模块，修复以下关键问题：
+
+| 编号 | 严重 | 问题 | 文件 | 修复方案 |
+|------|------|------|------|----------|
+| R167 | 严重 | `build_local_proxy_url` 写死 `http://127.0.0.1:{port}`，容器/跨机器播放无法访问 | `remote_emby.rs` | 优先使用 `config.public_url`（`APP_PUBLIC_URL` 环境变量），仅在未配置时回退到 `127.0.0.1` |
+| R168 | 高 | 远端同步条目的 `image_primary_path`/`backdrop_path` 全部为 `None`，远端海报/背景图不显示 | `remote_emby.rs` | `RemoteBaseItem` 新增 `ImageTags`/`BackdropImageTags` 字段解析；`fetch_remote_items_page_for_view` Fields 请求增加 `ImageTags,BackdropImageTags`；`upsert_virtual_media_item` 用 `extract_remote_image_urls` 构造远端图片 URL 并写入 |
+| R169 | 中 | `MaxStreamingBitrate=6790000` (≈6.8Mbps) 写死，远端高码率视频可能被不必要转码 | `remote_emby.rs` | 提升到 `200000000` (200Mbps)，确保远端优先返回 DirectStream |
+
+### 远端连接审计结论
+
+**认证流程** (`POST /Users/AuthenticateByName`)：
+- Body 使用 `{ Username, Pw, Password }` 双写密码字段，兼容新旧 Emby 版本，符合 SDK
+- `X-Emby-Authorization` 头格式 `MediaBrowser Client=..., Device=..., DeviceId=..., Version=...`，Emby 同时接受 `MediaBrowser` 和 `Emby` 前缀
+- 登录无 Token 时不发 Token 字段，登录后追加 `Token=...`——与 SDK 一致
+- 令牌复用：持久源存库（`access_token`, `remote_user_id`）；预览流程仅内存——合理
+
+**令牌刷新**：
+- 依靠 `get_json_with_retry` 的 401/403 重试机制，第一次失败后清空 token 并 `force_refresh` 重新登录
+- 无基于过期时间的主动刷新（低优先级优化）
+
+**Views 拉取** (`GET /Users/{userId}/Views`)：
+- Fields 包含 `CollectionType,ChildCount,RecursiveItemCount`，与 SDK 使用模式一致
+
+**Items 分页**：
+- 参数完整：`Recursive=true`, `ParentId`, `IncludeItemTypes`, `Fields`（含 `ImageTags,BackdropImageTags`）, `SortBy`, `SortOrder`, `StartIndex`, `Limit`
+- `REMOTE_PAGE_SIZE=200`，循环翻页直至 `start_index >= total_record_count`——合理
+
+**代理流**：
+- 运行时经 PlaybackInfo 获取 `DirectStreamUrl`/`TranscodingUrl`，动态代理——设计合理，避免 token/URL 过期
+- 透传 `Range`/`If-Range`/`Accept` 等头给远端——正确
+
+### 已知保留项更新
+
+| 问题 | 严重 | 说明 |
+|------|------|------|
+| 远端 Series/Season 虚拟条目无独立图片 | 中 | 当前从 Episode 推算创建 Series/Season 文件夹，不独立拉取 Series 级 ImageTags；如需完整海报需增加 `IncludeItemTypes=Series` 的独立请求 |
+| 预览用随机 DeviceId | 低 | 每次预览生成新 DeviceId，可能在远端增加设备记录 |
+| 错误响应携带远端 body 全文 | 低 | 生产环境有信息泄露风险，可截断 |
+
+---
