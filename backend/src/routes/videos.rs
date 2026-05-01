@@ -471,7 +471,7 @@ async fn serve_media_item(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
-    if let Some(virtual_ref) = remote_emby::parse_virtual_media_path(&item.path) {
+    if let Some(virtual_ref) = remote_emby::remote_marker_for_db_item(&item) {
         let local_media_source_id =
             format!("mediasource_{}", crate::models::uuid_to_emby_guid(&item.id));
         let requested_media_source_id = query
@@ -1023,7 +1023,7 @@ async fn transcoded_hls_playlist_response(
     // STRM 文件：读取里面的远程 URL，直接作为 ffmpeg 的 -i 输入，
     // 浏览器侧得到可解码的 HLS（fMP4/TS）片段，避免 MKV 直链无法原生解码。
     let effective_input = if let Some(virtual_ref) =
-        remote_emby::parse_virtual_media_path(&item.path)
+        remote_emby::remote_marker_for_db_item(&item)
     {
         let local_media_source_id =
             format!("mediasource_{}", crate::models::uuid_to_emby_guid(&item.id));

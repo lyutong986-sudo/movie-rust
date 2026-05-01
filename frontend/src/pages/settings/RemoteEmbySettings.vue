@@ -411,6 +411,10 @@ async function saveEditor() {
       return;
     }
   }
+  if (!p.strmOutputPath.trim()) {
+    error.value = '请填写 STRM 输出根目录（必填，远端 strm/元数据/字幕都将写入此目录）';
+    return;
+  }
   editSaving.value = true;
   error.value = '';
   saved.value = '';
@@ -504,6 +508,10 @@ async function createSource() {
     error.value = '请输入伪装 User-Agent';
     return;
   }
+  if (!payload.strmOutputPath.trim()) {
+    error.value = '请填写 STRM 输出根目录（必填，远端 strm/元数据/字幕都将写入此目录）';
+    return;
+  }
 
   const selectedLocalLibraryId =
     payload.targetLibraryId || localLibraries.value[0]?.ItemId || '';
@@ -527,7 +535,7 @@ async function createSource() {
       ViewLibraryMap: payload.viewLibraryMap,
       SpoofedUserAgent: payload.spoofedUserAgent.trim(),
       Enabled: payload.enabled,
-      StrmOutputPath: payload.strmOutputPath.trim() || undefined,
+      StrmOutputPath: payload.strmOutputPath.trim(),
       SyncMetadata: payload.syncMetadata,
       SyncSubtitles: payload.syncSubtitles,
       TokenRefreshIntervalSecs: Math.min(
@@ -811,15 +819,20 @@ onBeforeUnmount(() => {
               placeholder="填写你要用于远端请求的 UA"
             />
           </UFormField>
-          <UFormField class="lg:col-span-2" label="STRM 输出根目录（可选）">
+          <UFormField
+            class="lg:col-span-2"
+            label="STRM 输出根目录"
+            required
+            :error="!form.strmOutputPath.trim() ? '必填，远端 strm/元数据/字幕都将写入此目录' : undefined"
+          >
             <UInput
               v-model="form.strmOutputPath"
               class="w-full"
               placeholder="例如 D:\Media\remote-strm"
+              required
             />
             <p class="text-muted mt-1 text-xs">
-              留空则仅使用虚拟路径入库，不写磁盘文件。<br />
-              填写后，同步时将按以下层级结构写入 .strm / NFO / 图片：<br />
+              <strong>必填项：</strong>同步时将按以下层级结构写入 .strm / NFO / 图片 / 字幕：<br />
               <code class="bg-muted px-1 rounded text-xs font-mono">{根目录}/{源名称}/{远端媒体库名称}/{影片}.strm</code><br />
               "源名称"获取远端媒体库列表后会自动填充为对方服务器名，可手动修改。STRM 文件指向本地代理转发流量，无需直连远端服务器。
             </p>
@@ -968,7 +981,7 @@ onBeforeUnmount(() => {
             <div class="rounded-lg border border-default p-3 md:col-span-2">
               <p class="text-muted text-xs">STRM 文件 / 侧车同步</p>
               <p class="text-highlighted mt-1 break-all text-sm font-medium">
-                {{ source.StrmOutputPath || '未配置 STRM 根目录（仅虚拟路径入库）' }}
+                {{ source.StrmOutputPath || '未配置（请编辑该源补填 STRM 输出根目录后再同步）' }}
               </p>
               <p class="text-muted mt-1 text-xs">
                 侧车：元数据 {{ source.SyncMetadata !== false ? '开' : '关' }} · 外挂字幕
@@ -1137,15 +1150,20 @@ onBeforeUnmount(() => {
             <UFormField class="lg:col-span-2" label="伪装 User-Agent">
               <UTextarea v-model="editForm.spoofedUserAgent" :rows="2" class="w-full" />
             </UFormField>
-            <UFormField class="lg:col-span-2" label="STRM 输出根目录（可选）">
+            <UFormField
+              class="lg:col-span-2"
+              label="STRM 输出根目录"
+              required
+              :error="!editForm.strmOutputPath.trim() ? '必填，远端 strm/元数据/字幕都将写入此目录' : undefined"
+            >
               <UInput
                 v-model="editForm.strmOutputPath"
                 class="w-full"
-                placeholder="留空则清除 STRM 根路径配置（不再写磁盘文件）"
+                placeholder="例如 D:\Media\remote-strm"
+                required
               />
               <p class="text-muted mt-1 text-xs">
-                文件写入路径：<code class="bg-muted px-1 rounded text-xs font-mono">{根目录}/{源名称}/{远端媒体库名称}/{影片}.strm</code>。<br />
-                保存为空即清除配置，后续同步仅使用虚拟路径，不写磁盘文件。
+                <strong>必填项：</strong>文件写入路径：<code class="bg-muted px-1 rounded text-xs font-mono">{根目录}/{源名称}/{远端媒体库名称}/{影片}.strm</code>。
               </p>
             </UFormField>
             <UFormField label="同步侧车元数据">

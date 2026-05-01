@@ -3148,11 +3148,15 @@ pub async fn ensure_remote_transit_library(pool: &sqlx::PgPool) -> Result<DbLibr
     }
 
     let id = Uuid::new_v4();
+    // 远端绑定库默认开启 SaveLocalMetadata：所有 sidecar（图片、NFO、字幕）
+    // 直接落到 strm 同目录，与 write_remote_strm_bundle 一致，
+    // 同时让 POST /Items/{id}/Refresh 触发的元数据刷新也写真实物理路径。
     let options_value = serde_json::json!({
         "PathInfos": [{"Path": TRANSIT_LIB_PATH}],
         "EnableAutoBoxSets": false,
         "EnableRealtimeMonitor": false,
-        "SkipSubtitlesIfEmbeddedSubtitlesPresent": false
+        "SkipSubtitlesIfEmbeddedSubtitlesPresent": false,
+        "SaveLocalMetadata": true
     });
     // 同时处理两个唯一约束：name UNIQUE（精确）和 idx_libraries_name_unique（lower(name)）
     // 任何冲突都静默忽略，之后重查即可拿到已存在的行
@@ -3211,11 +3215,14 @@ pub async fn ensure_view_library(
     // 虚拟路径：__remote_view_{source_id}_{view_id}
     let virtual_path = format!("__remote_view_{}_{}", source_id.simple(), view_id.trim());
 
+    // 远端绑定库默认开启 SaveLocalMetadata：所有 sidecar（图片、NFO、字幕）
+    // 直接落到 strm 同目录，与 write_remote_strm_bundle 一致。
     let options_value = serde_json::json!({
         "PathInfos": [{"Path": virtual_path}],
         "EnableAutoBoxSets": false,
         "EnableRealtimeMonitor": false,
-        "SkipSubtitlesIfEmbeddedSubtitlesPresent": false
+        "SkipSubtitlesIfEmbeddedSubtitlesPresent": false,
+        "SaveLocalMetadata": true
     });
 
     // 尝试首选名称
@@ -3279,6 +3286,25 @@ pub async fn ensure_remote_view_path_in_library(
         None => return Ok(()),
     };
     let mut options: serde_json::Value = lib.library_options.clone();
+    let mut dirty = false;
+
+    // 远端绑定库必须开启 SaveLocalMetadata：所有 sidecar（图片、NFO、字幕）
+    // 才能落到 strm 同目录，与 write_remote_strm_bundle 一致。
+    // 旧库可能尚未带这个选项，每次同步顺便升级一次。
+    if let Some(obj) = options.as_object_mut() {
+        let needs_set = obj
+            .get("SaveLocalMetadata")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true);
+        if needs_set {
+            obj.insert(
+                "SaveLocalMetadata".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            dirty = true;
+        }
+    }
+
     let path_infos = options
         .as_object_mut()
         .and_then(|obj| obj.entry("PathInfos").or_insert_with(|| serde_json::json!([])).as_array_mut());
@@ -3288,12 +3314,16 @@ pub async fn ensure_remote_view_path_in_library(
         });
         if !already {
             arr.push(serde_json::json!({"Path": virtual_path}));
-            sqlx::query("UPDATE libraries SET library_options = $1, date_modified = now() WHERE id = $2")
-                .bind(&options)
-                .bind(library_id)
-                .execute(pool)
-                .await?;
+            dirty = true;
         }
+    }
+
+    if dirty {
+        sqlx::query("UPDATE libraries SET library_options = $1, date_modified = now() WHERE id = $2")
+            .bind(&options)
+            .bind(library_id)
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
@@ -9722,15 +9752,22 @@ impl From<MissingEpisodeDetailRow> for MissingEpisodeDtoSource {
 
 pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
     let local_path = Path::new(&item.path);
+    // 兼容旧虚拟路径数据：未触发再同步前 DB 中可能仍有 `REMOTE_EMBY/...` 行
     let normalized_path = item.path.replace('\\', "/");
-    let is_virtual_remote = normalized_path
+    let legacy_virtual_remote = normalized_path
         .to_ascii_uppercase()
         .starts_with("REMOTE_EMBY/");
     let strm_target = naming::is_strm(local_path)
         .then(|| naming::read_strm_target(local_path))
         .flatten();
     let container = effective_container_from_target(item, strm_target.as_deref());
-    let is_remote = strm_target.is_some() || is_virtual_remote;
+    let provider_remote = item
+        .provider_ids
+        .get("RemoteEmbySourceId")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let is_remote = strm_target.is_some() || legacy_virtual_remote || provider_remote;
     let size = media_source_size(item, is_remote);
     let item_emby_id = uuid_to_emby_guid(&item.id);
     let media_source_id = format!("mediasource_{item_emby_id}");
@@ -10161,15 +10198,27 @@ fn sort_name_for_item(input: &UpsertMediaItem<'_>) -> String {
 fn sanitize_item_path(item: &DbMediaItem) -> Option<String> {
     let normalized = item.path.replace('\\', "/");
     let is_strm = naming::is_strm(Path::new(&item.path));
-    let is_virtual_remote = normalized.to_ascii_uppercase().starts_with("REMOTE_EMBY/");
-    if is_strm || is_virtual_remote {
+    // 兼容旧虚拟路径数据
+    let legacy_virtual_remote = normalized.to_ascii_uppercase().starts_with("REMOTE_EMBY/");
+    // 任何被远端 Emby 源标记的条目（包括 Series/Season）都做 desensitize，
+    // 客户端不应看到本地落盘的物理路径，只看到 emby 风格的虚拟展示路径。
+    let provider_remote = item
+        .provider_ids
+        .get("RemoteEmbySourceId")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if is_strm || legacy_virtual_remote || provider_remote {
         let container = effective_container(item);
         let name = &item.name;
         let year = item
             .production_year
             .map(|y| format!(" ({y})"))
             .unwrap_or_default();
-        Some(format!("/{name}{year}/{name}{year}.{}", container.unwrap_or_else(|| "mkv".to_string())))
+        Some(format!(
+            "/{name}{year}/{name}{year}.{}",
+            container.unwrap_or_else(|| "mkv".to_string())
+        ))
     } else {
         Some(item.path.clone())
     }
@@ -11333,14 +11382,22 @@ pub async fn get_media_source_with_streams(
     let db_chapters = get_media_chapters(pool, item.id).await?;
 
     let local_path_early = Path::new(&item.path);
+    // 兼容旧虚拟路径数据：未触发再同步前 DB 中可能仍有 `REMOTE_EMBY/...` 行
     let normalized_path_early = item.path.replace('\\', "/");
-    let is_virtual_remote_early = normalized_path_early
+    let legacy_virtual_remote_early = normalized_path_early
         .to_ascii_uppercase()
         .starts_with("REMOTE_EMBY/");
     let strm_target_early = naming::is_strm(local_path_early)
         .then(|| naming::read_strm_target(local_path_early))
         .flatten();
-    let is_remote_early = strm_target_early.is_some() || is_virtual_remote_early;
+    let provider_remote_early = item
+        .provider_ids
+        .get("RemoteEmbySourceId")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let is_remote_early =
+        strm_target_early.is_some() || legacy_virtual_remote_early || provider_remote_early;
 
     // 转换DbMediaStream为MediaStreamDto
     let mut media_streams = Vec::new();

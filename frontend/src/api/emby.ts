@@ -560,7 +560,7 @@ export interface RemoteEmbySource {
   HasAccessToken: boolean;
   LastSyncAt?: string;
   LastSyncError?: string;
-  /** 本地 STRM 输出根目录；实际写入 `{根}/{SanitizedName}.{源Id}` 子目录 */
+  /** 本地 STRM 输出根目录（必填）。所有远端条目的 strm 文件、NFO、图片、字幕都会写入到 `{根}/{源名称}/{远端媒体库名}/...`。 */
   StrmOutputPath?: string;
   SyncMetadata?: boolean;
   SyncSubtitles?: boolean;

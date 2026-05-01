@@ -904,17 +904,14 @@ async fn sync_source_inner(
         .ok_or_else(|| AppError::Internal("远端令牌为空，无法写入 STRM/同步条目".into()))?
         .clone();
 
-    let strm_workspace = strm_workspace_for_source(source);
+    let strm_workspace = strm_workspace_for_source(source)?;
 
     if is_incremental {
         // ── 增量模式 ─────────────────────────────────────────────────────
-        // STRM 工作区保持现有内容，不整体清空
-        if let Some(ref workspace) = strm_workspace {
-            // 确保工作区目录存在（首次增量时可能还不存在）
-            tokio::fs::create_dir_all(workspace)
-                .await
-                .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
-        }
+        // STRM 工作区保持现有内容，不整体清空，但确保根目录存在（首次增量时可能还不存在）
+        tokio::fs::create_dir_all(&strm_workspace)
+            .await
+            .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
 
         if let Some(handle) = &progress {
             handle.set_phase("FetchingRemoteIndex", 4.0);
@@ -937,7 +934,7 @@ async fn sync_source_inner(
             source.id,
             source.target_library_id,
             &remote_id_set,
-            strm_workspace.as_deref(),
+            Some(strm_workspace.as_path()),
         )
         .await?;
         if deleted > 0 {
@@ -949,13 +946,11 @@ async fn sync_source_inner(
         }
     } else {
         // ── 全量模式 ─────────────────────────────────────────────────────
-        // 清空 STRM 工作区（如已配置）并清理 DB 中旧条目
-        if let Some(ref workspace) = strm_workspace {
-            let _ = tokio::fs::remove_dir_all(workspace).await.ok();
-            tokio::fs::create_dir_all(workspace)
-                .await
-                .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
-        }
+        // 清空 STRM 工作区并清理 DB 中旧条目
+        let _ = tokio::fs::remove_dir_all(&strm_workspace).await.ok();
+        tokio::fs::create_dir_all(&strm_workspace)
+            .await
+            .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
         if let Some(handle) = &progress {
             handle.set_phase("PreparingTargetLibrary", 5.0);
         }
@@ -984,9 +979,15 @@ async fn sync_source_inner(
         })?;
 
         // 每个 View 在源根目录下独占子目录：{strm_root}/{source_name}/{view_name}/
-        let view_strm_workspace: Option<PathBuf> = strm_workspace.as_ref().map(|w| {
-            w.join(sanitize_segment(view.name.as_str()))
-        });
+        let view_strm_workspace: PathBuf =
+            strm_workspace.join(sanitize_segment(view.name.as_str()));
+        if let Err(err) = tokio::fs::create_dir_all(&view_strm_workspace).await {
+            tracing::warn!(
+                view = %view.name,
+                error = %err,
+                "创建 View STRM 子目录失败，继续尝试同步"
+            );
+        }
 
         let mut start_index = 0i64;
         loop {
@@ -1029,23 +1030,25 @@ async fn sync_source_inner(
 
                 if item.item.item_type.eq_ignore_ascii_case("Episode") {
                     let series_view_scope = item.view_id.as_str();
-                    let series_parent_id = ensure_virtual_series_folder(
+                    let series_parent_id = ensure_remote_series_folder(
                         &state.pool,
                         source,
                         &item,
                         None,
                         series_view_scope,
+                        view_strm_workspace.as_path(),
                         item_library_id,
                         &mut series_parent_map,
                     )
                     .await?;
                     series_db_id = Some(series_parent_id);
 
-                    let season_parent_id = ensure_virtual_season_folder(
+                    let season_parent_id = ensure_remote_season_folder(
                         &state.pool,
                         source,
                         &item,
                         series_parent_id,
+                        view_strm_workspace.as_path(),
                         item_library_id,
                         &mut season_parent_map,
                     )
@@ -1063,33 +1066,31 @@ async fn sync_source_inner(
                 .await
                 .ok()
                 .flatten();
-                let strm_bundle = match &view_strm_workspace {
-                    Some(view_ws) => {
-                        match write_remote_strm_bundle(
-                            state,
-                            source,
-                            view_ws.as_path(),
-                            playback_token.as_str(),
-                            &item,
-                            media_source_id,
-                            &mut tvshow_roots_written,
-                        )
-                        .await
-                        {
-                            Ok(paths) => Some(paths),
-                            Err(error) => {
-                                tracing::warn!(
-                                    remote_item_id = %item.item.id,
-                                    error = %error,
-                                    "STRM 旁路写入失败，回退虚拟路径"
-                                );
-                                None
-                            }
-                        }
+                let strm_bundle = match write_remote_strm_bundle(
+                    state,
+                    source,
+                    view_strm_workspace.as_path(),
+                    playback_token.as_str(),
+                    &item,
+                    media_source_id,
+                    &mut tvshow_roots_written,
+                )
+                .await
+                {
+                    Ok(paths) => paths,
+                    Err(error) => {
+                        // 单条写盘失败不再降级到虚拟路径，跳过该条目继续处理下一项，
+                        // 避免一处磁盘异常污染整库 path 字段。
+                        tracing::warn!(
+                            remote_item_id = %item.item.id,
+                            error = %error,
+                            "STRM 旁路写入失败，跳过此条目"
+                        );
+                        continue;
                     }
-                    None => None,
                 };
-                let upserted = upsert_virtual_media_item(
+                let (strm_path, poster_path, backdrop_path, logo_path) = strm_bundle;
+                let upserted = upsert_remote_media_item(
                     &state.pool,
                     source,
                     &item,
@@ -1097,18 +1098,10 @@ async fn sync_source_inner(
                     item_library_id,
                     media_source_id,
                     analysis.as_ref(),
-                    strm_bundle
-                        .as_ref()
-                        .map(|(p, _, _, _)| p.as_path()),
-                    strm_bundle
-                        .as_ref()
-                        .and_then(|(_, a, _, _)| a.as_ref().map(|p| p.as_path())),
-                    strm_bundle
-                        .as_ref()
-                        .and_then(|(_, _, b, _)| b.as_ref().map(|p| p.as_path())),
-                    strm_bundle
-                        .as_ref()
-                        .and_then(|(_, _, _, l)| l.as_ref().map(|p| p.as_path())),
+                    strm_path.as_path(),
+                    poster_path.as_deref(),
+                    backdrop_path.as_deref(),
+                    logo_path.as_deref(),
                     series_db_id,
                 )
                 .await?;
@@ -1150,7 +1143,7 @@ async fn sync_source_inner(
         source_id: source.id,
         source_name: source.name.clone(),
         written_files,
-        source_root: build_virtual_root_path(source.id),
+        source_root: strm_workspace.to_string_lossy().to_string(),
         scan_summary,
     })
 }
@@ -1320,6 +1313,36 @@ pub fn parse_virtual_media_path(path: &str) -> Option<RemoteVirtualMediaPath> {
     })
 }
 
+/// 从 `media_items.provider_ids` 标记字段反查远端 source_id + remote item id。
+///
+/// 这是 STRM 输出根目录改必填后判定"是否远端条目"的主入口；
+/// 旧版本依赖 `parse_virtual_media_path(&item.path)`，对真实物理路径无效。
+/// 新增本函数后，路由层先用 provider_ids 判定，必要时再回退到 parse_virtual_media_path
+/// 以兼容尚未触发再同步的旧虚拟路径数据。
+pub fn remote_marker_for_item(provider_ids: &Value) -> Option<RemoteVirtualMediaPath> {
+    let source_id_str = provider_ids
+        .get("RemoteEmbySourceId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let remote_item_id = provider_ids
+        .get("RemoteEmbyItemId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let source_id = Uuid::parse_str(source_id_str).ok()?;
+    Some(RemoteVirtualMediaPath {
+        source_id,
+        remote_item_id,
+    })
+}
+
+/// 路由层使用：先按 provider_ids 标记判定，再兜底解析旧虚拟字符串路径。
+pub fn remote_marker_for_db_item(item: &crate::models::DbMediaItem) -> Option<RemoteVirtualMediaPath> {
+    remote_marker_for_item(&item.provider_ids).or_else(|| parse_virtual_media_path(&item.path))
+}
+
 pub fn remote_default_media_source_id(provider_ids: &Value) -> Option<String> {
     provider_ids
         .get("RemoteEmbyMediaSourceId")
@@ -1328,44 +1351,11 @@ pub fn remote_default_media_source_id(provider_ids: &Value) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn build_virtual_root_path(source_id: Uuid) -> String {
+/// 旧版本（虚拟路径阶段）所有 Folder/View/Series/Season/Item 都用 `REMOTE_EMBY/{source}/...`
+/// 形式落库。现在所有远端条目都改为真实 strm 物理目录，但 `cleanup_remote_source_items`
+/// 仍要清理历史虚拟字符串行，因此保留这个前缀作为兼容判定。
+fn legacy_virtual_root_prefix(source_id: Uuid) -> String {
     format!("REMOTE_EMBY/{}/root", source_id)
-}
-
-fn build_virtual_view_path(source_id: Uuid, view_id: &str) -> String {
-    format!(
-        "REMOTE_EMBY/{}/views/{}",
-        source_id,
-        sanitize_segment(view_id)
-    )
-}
-
-fn build_virtual_series_path(source_id: Uuid, view_id: &str, series_key: &str) -> String {
-    format!(
-        "REMOTE_EMBY/{}/views/{}/series/{}",
-        source_id,
-        sanitize_segment(view_id),
-        sanitize_segment(series_key)
-    )
-}
-
-fn build_virtual_season_path(
-    source_id: Uuid,
-    view_id: &str,
-    series_key: &str,
-    season_number: i32,
-) -> String {
-    format!(
-        "REMOTE_EMBY/{}/views/{}/series/{}/season/{}",
-        source_id,
-        sanitize_segment(view_id),
-        sanitize_segment(series_key),
-        season_number.max(0)
-    )
-}
-
-fn build_virtual_item_path(source_id: Uuid, remote_item_id: &str) -> String {
-    format!("REMOTE_EMBY/{}/items/{}", source_id, remote_item_id.trim())
 }
 
 fn remote_image_url(server_url: &str, remote_item_id: &str, image_type: &str, tag: &str) -> String {
@@ -1441,7 +1431,7 @@ async fn cleanup_remote_source_items(
     source_id: Uuid,
     legacy_source_root: &Path,
 ) -> Result<u64, AppError> {
-    let virtual_prefix = format!("{}%", build_virtual_root_path(source_id));
+    let virtual_prefix = format!("{}%", legacy_virtual_root_prefix(source_id));
     let virtual_prefix_windows = virtual_prefix.replace('/', "\\");
     let legacy_prefix = format!("{}%", legacy_source_root.to_string_lossy());
     // 不再限制 library_id，支持 separate 模式下条目分散在多个库
@@ -1500,138 +1490,13 @@ pub async fn cleanup_source_mapped_items(
     Ok(deleted)
 }
 
-async fn upsert_virtual_root_item(
-    pool: &sqlx::PgPool,
-    source: &DbRemoteEmbySource,
-) -> Result<Uuid, AppError> {
-    let path = build_virtual_root_path(source.id);
-    let path_ref = Path::new(path.as_str());
-    let empty = Vec::<String>::new();
-    repository::upsert_media_item(
-        pool,
-        repository::UpsertMediaItem {
-            library_id: source.target_library_id,
-            parent_id: None,
-            name: &source.name,
-            item_type: "Folder",
-            media_type: "Video",
-            path: path_ref,
-            container: None,
-            original_title: None,
-            overview: Some("远端 Emby 虚拟根目录"),
-            production_year: None,
-            official_rating: None,
-            community_rating: None,
-            critic_rating: None,
-            runtime_ticks: None,
-            premiere_date: None,
-            status: None,
-            end_date: None,
-            air_days: &empty,
-            air_time: None,
-            provider_ids: remote_marker_provider_ids(source.id, None, None, None),
-            genres: &empty,
-            studios: &empty,
-            tags: &empty,
-            production_locations: &empty,
-            image_primary_path: None,
-            backdrop_path: None,
-            logo_path: None,
-            thumb_path: None,
-            art_path: None,
-            banner_path: None,
-            disc_path: None,
-            backdrop_paths: &empty,
-            remote_trailers: &empty,
-            series_name: None,
-            season_name: None,
-            index_number: None,
-            index_number_end: None,
-            parent_index_number: None,
-            width: None,
-            height: None,
-            video_codec: None,
-            audio_codec: None,
-            series_id: None,
-        },
-    )
-    .await
-    .map(|(id, _was_new)| id)
-}
-
-async fn ensure_virtual_view_folder(
-    pool: &sqlx::PgPool,
-    source: &DbRemoteEmbySource,
-    root_item_id: Uuid,
-    view_id: &str,
-    view_name: &str,
-    view_parent_map: &mut HashMap<String, Uuid>,
-) -> Result<Uuid, AppError> {
-    if let Some(existing) = view_parent_map.get(view_id).copied() {
-        return Ok(existing);
-    }
-    let path = build_virtual_view_path(source.id, view_id);
-    let path_ref = Path::new(path.as_str());
-    let empty = Vec::<String>::new();
-    let (item_id, _was_new) = repository::upsert_media_item(
-        pool,
-        repository::UpsertMediaItem {
-            library_id: source.target_library_id,
-            parent_id: Some(root_item_id),
-            name: view_name,
-            item_type: "CollectionFolder",
-            media_type: "Video",
-            path: path_ref,
-            container: None,
-            original_title: None,
-            overview: None,
-            production_year: None,
-            official_rating: None,
-            community_rating: None,
-            critic_rating: None,
-            runtime_ticks: None,
-            premiere_date: None,
-            status: None,
-            end_date: None,
-            air_days: &empty,
-            air_time: None,
-            provider_ids: remote_marker_provider_ids(source.id, None, Some(view_id), None),
-            genres: &empty,
-            studios: &empty,
-            tags: &empty,
-            production_locations: &empty,
-            image_primary_path: None,
-            backdrop_path: None,
-            logo_path: None,
-            thumb_path: None,
-            art_path: None,
-            banner_path: None,
-            disc_path: None,
-            backdrop_paths: &empty,
-            remote_trailers: &empty,
-            series_name: None,
-            season_name: None,
-            index_number: None,
-            index_number_end: None,
-            parent_index_number: None,
-            width: None,
-            height: None,
-            video_codec: None,
-            audio_codec: None,
-            series_id: None,
-        },
-    )
-    .await?;
-    view_parent_map.insert(view_id.to_string(), item_id);
-    Ok(item_id)
-}
-
-async fn ensure_virtual_series_folder(
+async fn ensure_remote_series_folder(
     pool: &sqlx::PgPool,
     source: &DbRemoteEmbySource,
     item: &RemoteSyncItem,
     parent_id: Option<Uuid>,
     view_scope: &str,
+    view_workspace: &Path,
     library_id: Uuid,
     series_parent_map: &mut HashMap<String, Uuid>,
 ) -> Result<Uuid, AppError> {
@@ -1651,8 +1516,19 @@ async fn ensure_virtual_series_folder(
     if let Some(existing) = series_parent_map.get(series_key.as_str()).copied() {
         return Ok(existing);
     }
-    let path = build_virtual_series_path(source.id, view_scope, series_name.as_str());
-    let path_ref = Path::new(path.as_str());
+    // 物理目录：{view_workspace}/{sanitize(series_name)}/
+    // 与 build_relative_strm_path 中 episode 落盘目录保持一致，
+    // 这样 tvshow.nfo / poster.jpg / fanart.jpg 都能落到 series 真实目录。
+    let series_dir = view_workspace.join(sanitize_segment(series_name.as_str()));
+    if let Err(err) = tokio::fs::create_dir_all(&series_dir).await {
+        tracing::warn!(
+            series_dir = %series_dir.to_string_lossy(),
+            error = %err,
+            "创建 Series 物理目录失败"
+        );
+    }
+    let path_string = series_dir.to_string_lossy().to_string();
+    let path_ref = Path::new(path_string.as_str());
     let empty = Vec::<String>::new();
     let series_primary_url = item
         .item
@@ -1747,11 +1623,12 @@ async fn ensure_virtual_series_folder(
     Ok(item_id)
 }
 
-async fn ensure_virtual_season_folder(
+async fn ensure_remote_season_folder(
     pool: &sqlx::PgPool,
     source: &DbRemoteEmbySource,
     item: &RemoteSyncItem,
     series_parent_id: Uuid,
+    view_workspace: &Path,
     library_id: Uuid,
     season_parent_map: &mut HashMap<String, Uuid>,
 ) -> Result<Uuid, AppError> {
@@ -1760,15 +1637,26 @@ async fn ensure_virtual_season_folder(
     if let Some(existing) = season_parent_map.get(season_key.as_str()).copied() {
         return Ok(existing);
     }
-    let series_key = item
+    let series_name_raw = item
         .item
         .series_name
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("Unknown Series");
-    let path =
-        build_virtual_season_path(source.id, item.view_id.as_str(), series_key, season_number);
-    let path_ref = Path::new(path.as_str());
+    // 物理目录：{view_workspace}/{sanitize(series_name)}/Season {NN}/
+    // 与 build_relative_strm_path 中 episode 落盘的 Season 目录完全一致。
+    let season_dir = view_workspace
+        .join(sanitize_segment(series_name_raw))
+        .join(format!("Season {season_number:02}"));
+    if let Err(err) = tokio::fs::create_dir_all(&season_dir).await {
+        tracing::warn!(
+            season_dir = %season_dir.to_string_lossy(),
+            error = %err,
+            "创建 Season 物理目录失败"
+        );
+    }
+    let path_string = season_dir.to_string_lossy().to_string();
+    let path_ref = Path::new(path_string.as_str());
     let season_name = item
         .item
         .season_name
@@ -1837,7 +1725,11 @@ async fn ensure_virtual_season_folder(
     Ok(item_id)
 }
 
-async fn upsert_virtual_media_item(
+/// 向 DB 中 upsert 一个远端 Movie/Episode。
+///
+/// 自 STRM 输出根目录改为必填后，本函数要求调用方必须传入真实 strm 物理路径
+/// （由 `write_remote_strm_bundle` 返回），不再保留虚拟字符串兜底路径。
+async fn upsert_remote_media_item(
     pool: &sqlx::PgPool,
     source: &DbRemoteEmbySource,
     item: &RemoteSyncItem,
@@ -1845,7 +1737,7 @@ async fn upsert_virtual_media_item(
     library_id: Uuid,
     media_source_id: Option<&str>,
     analysis: Option<&MediaAnalysisResult>,
-    path_override: Option<&Path>,
+    strm_path: &Path,
     local_poster: Option<&Path>,
     local_backdrop: Option<&Path>,
     local_logo: Option<&Path>,
@@ -1875,11 +1767,7 @@ async fn upsert_virtual_media_item(
             media_source_id,
         ),
     );
-    let strm_or_virtual = match path_override {
-        Some(p) => p.to_path_buf(),
-        None => PathBuf::from(build_virtual_item_path(source.id, item.item.id.as_str())),
-    };
-    let path_ref = strm_or_virtual.as_path();
+    let path_ref = strm_path;
     let is_episode = item.item.item_type.eq_ignore_ascii_case("Episode");
     let item_type = if is_episode { "Episode" } else { "Movie" };
     let runtime_ticks = item.item.run_time_ticks.or_else(|| {
@@ -3016,14 +2904,36 @@ fn build_relative_strm_path(item: &RemoteSyncItem) -> Option<PathBuf> {
     None
 }
 
+/// 判定一个 sidecar 文件是否已经"完整存在"。
+///
+/// 用于避免远端同步在用户已经手动刷新元数据/字幕后再次覆盖：
+/// - 文件存在且大小 > 0 → 跳过下载
+/// - 不存在或长度为 0 → 允许写入
+async fn sidecar_exists_nonempty(path: &Path) -> bool {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => meta.is_file() && meta.len() > 0,
+        Err(_) => false,
+    }
+}
+
 /// STRM 源根目录：`{STRM_OUTPUT_PATH}/{SanitizedSourceName}/`
 /// 每个远端媒体库（View）在此基础上再建子目录：`{source_root}/{SanitizedViewName}/`
-fn strm_workspace_for_source(source: &DbRemoteEmbySource) -> Option<PathBuf> {
-    let raw = source.strm_output_path.as_deref()?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    Some(Path::new(raw).join(sanitize_segment(source.name.as_str())))
+///
+/// API 层在创建/更新源时已强制 `strm_output_path` 必填，因此理论上不会读到空值；
+/// 旧库（NULL/空字符串）作为兜底返回 Err，让调用方拒绝同步而非降级到虚拟路径。
+fn strm_workspace_for_source(source: &DbRemoteEmbySource) -> Result<PathBuf, AppError> {
+    let raw = source
+        .strm_output_path
+        .as_deref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "远端 Emby 源「{}」未配置 STRM 输出根目录，请先在编辑表单中补填后再同步",
+                source.name
+            ))
+        })?;
+    Ok(Path::new(raw).join(sanitize_segment(source.name.as_str())))
 }
 
 
@@ -3251,106 +3161,123 @@ async fn write_remote_strm_bundle(
     if source.sync_metadata {
         // 下载 Primary 封面（poster）
         {
-            let primary_tag = item
-                .item
-                .image_tags
-                .as_ref()
-                .and_then(|v| v.as_object())
-                .and_then(|m| m.get("Primary").and_then(Value::as_str));
-            let url = if let Some(tag) = primary_tag {
-                append_remote_api_key_param(
-                    remote_image_url(base.as_str(), item.item.id.as_str(), "Primary", tag).as_str(),
-                    playback_token.trim(),
-                )
+            let path = sidecar_dir.join(&poster_filename);
+            if sidecar_exists_nonempty(&path).await {
+                local_poster = Some(path);
             } else {
-                append_remote_api_key_param(
-                    &format!(
-                        "{}/emby/Items/{}/Images/Primary?quality=90&maxWidth=1920",
-                        base.trim_end_matches('/'),
-                        item.item.id
-                    ),
-                    playback_token.trim(),
-                )
-            };
-            match emby_download_bytes(source, playback_token, url.as_str()).await {
-                Ok(bytes) if !bytes.is_empty() => {
-                    let path = sidecar_dir.join(&poster_filename);
-                    if tokio::fs::write(&path, &bytes).await.is_ok() {
-                        local_poster = Some(path);
+                let primary_tag = item
+                    .item
+                    .image_tags
+                    .as_ref()
+                    .and_then(|v| v.as_object())
+                    .and_then(|m| m.get("Primary").and_then(Value::as_str));
+                let url = if let Some(tag) = primary_tag {
+                    append_remote_api_key_param(
+                        remote_image_url(base.as_str(), item.item.id.as_str(), "Primary", tag).as_str(),
+                        playback_token.trim(),
+                    )
+                } else {
+                    append_remote_api_key_param(
+                        &format!(
+                            "{}/emby/Items/{}/Images/Primary?quality=90&maxWidth=1920",
+                            base.trim_end_matches('/'),
+                            item.item.id
+                        ),
+                        playback_token.trim(),
+                    )
+                };
+                match emby_download_bytes(source, playback_token, url.as_str()).await {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        if tokio::fs::write(&path, &bytes).await.is_ok() {
+                            local_poster = Some(path);
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 
         // 下载 Backdrop（背景图）
         {
-            let backdrop_tag = item.item.backdrop_image_tags.as_ref().and_then(|tags| match tags {
-                Value::Array(arr) => arr.first().and_then(Value::as_str),
-                Value::Object(map) => map.values().next().and_then(Value::as_str),
-                Value::String(s) => Some(s.as_str()),
-                _ => None,
-            });
-            let url = if let Some(tag) = backdrop_tag {
-                append_remote_api_key_param(
-                    remote_image_url(base.as_str(), item.item.id.as_str(), "Backdrop", tag).as_str(),
-                    playback_token.trim(),
-                )
+            let path = sidecar_dir.join(&backdrop_filename);
+            if sidecar_exists_nonempty(&path).await {
+                local_backdrop = Some(path);
             } else {
-                append_remote_api_key_param(
-                    &format!(
-                        "{}/emby/Items/{}/Images/Backdrop?quality=90&maxWidth=1920",
-                        base.trim_end_matches('/'),
-                        item.item.id
-                    ),
-                    playback_token.trim(),
-                )
-            };
-            match emby_download_bytes(source, playback_token, url.as_str()).await {
-                Ok(bytes) if !bytes.is_empty() => {
-                    let path = sidecar_dir.join(&backdrop_filename);
-                    if tokio::fs::write(&path, &bytes).await.is_ok() {
-                        local_backdrop = Some(path);
+                let backdrop_tag = item.item.backdrop_image_tags.as_ref().and_then(|tags| match tags {
+                    Value::Array(arr) => arr.first().and_then(Value::as_str),
+                    Value::Object(map) => map.values().next().and_then(Value::as_str),
+                    Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                });
+                let url = if let Some(tag) = backdrop_tag {
+                    append_remote_api_key_param(
+                        remote_image_url(base.as_str(), item.item.id.as_str(), "Backdrop", tag).as_str(),
+                        playback_token.trim(),
+                    )
+                } else {
+                    append_remote_api_key_param(
+                        &format!(
+                            "{}/emby/Items/{}/Images/Backdrop?quality=90&maxWidth=1920",
+                            base.trim_end_matches('/'),
+                            item.item.id
+                        ),
+                        playback_token.trim(),
+                    )
+                };
+                match emby_download_bytes(source, playback_token, url.as_str()).await {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        if tokio::fs::write(&path, &bytes).await.is_ok() {
+                            local_backdrop = Some(path);
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 
         // 下载 Logo
-        if let Some(tag) = item
-            .item
-            .image_tags
-            .as_ref()
-            .and_then(|v| v.as_object())
-            .and_then(|m| m.get("Logo").and_then(Value::as_str))
         {
-            let url = append_remote_api_key_param(
-                remote_image_url(base.as_str(), item.item.id.as_str(), "Logo", tag).as_str(),
-                playback_token.trim(),
-            );
-            if let Ok(bytes) = emby_download_bytes(source, playback_token, url.as_str()).await {
-                let path = sidecar_dir.join(&logo_filename);
-                if tokio::fs::write(&path, &bytes).await.is_ok() {
-                    local_logo = Some(path);
+            let path = sidecar_dir.join(&logo_filename);
+            if sidecar_exists_nonempty(&path).await {
+                local_logo = Some(path);
+            } else if let Some(tag) = item
+                .item
+                .image_tags
+                .as_ref()
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.get("Logo").and_then(Value::as_str))
+            {
+                let url = append_remote_api_key_param(
+                    remote_image_url(base.as_str(), item.item.id.as_str(), "Logo", tag).as_str(),
+                    playback_token.trim(),
+                );
+                if let Ok(bytes) = emby_download_bytes(source, playback_token, url.as_str()).await {
+                    if tokio::fs::write(&path, &bytes).await.is_ok() {
+                        local_logo = Some(path);
+                    }
                 }
             }
         }
 
-        let nfo_body = if item.item.item_type.eq_ignore_ascii_case("Episode") {
-            build_episode_nfo_xml(item)
-        } else {
-            build_movie_nfo_xml(item)
-        };
+        // 已存在的 NFO 不覆盖：手动 POST /Items/{id}/Refresh 写入的 NFO 享有更高优先级。
         let nfo_path = strm_path.with_extension("nfo");
-        let _ = tokio::fs::write(&nfo_path, nfo_body).await;
+        if !sidecar_exists_nonempty(&nfo_path).await {
+            let nfo_body = if item.item.item_type.eq_ignore_ascii_case("Episode") {
+                build_episode_nfo_xml(item)
+            } else {
+                build_movie_nfo_xml(item)
+            };
+            let _ = tokio::fs::write(&nfo_path, nfo_body).await;
+        }
 
         if item.item.item_type.eq_ignore_ascii_case("Episode") {
             if let Some(series_dir) = strm_path.parent().and_then(Path::parent) {
                 if tvshow_written.insert(series_dir.to_path_buf()) {
                     let tvshow_path = series_dir.join("tvshow.nfo");
-                    let show_body = build_tvshow_nfo_xml_from_episode(item);
-                    let _ = tokio::fs::write(&tvshow_path, show_body).await;
+                    if !sidecar_exists_nonempty(&tvshow_path).await {
+                        let show_body = build_tvshow_nfo_xml_from_episode(item);
+                        let _ = tokio::fs::write(&tvshow_path, show_body).await;
+                    }
                 }
             }
         }
@@ -3378,6 +3305,9 @@ async fn write_remote_strm_bundle(
                 let safe_lang = sanitize_segment(lang);
                 let fname = format!("{stem}.{safe_lang}.{ext}");
                 let sub_path = sidecar_dir.join(fname);
+                if sidecar_exists_nonempty(&sub_path).await {
+                    continue;
+                }
                 let url = remote_subtitle_stream_url(
                     base.as_str(),
                     item.item.id.as_str(),

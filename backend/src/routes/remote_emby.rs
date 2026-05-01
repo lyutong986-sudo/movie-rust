@@ -14,9 +14,27 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::OnceLock, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::OnceLock, time::Duration};
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+/// 校验并规范化 STRM 输出根目录，必填且必须可写。
+///
+/// 远端媒体的 strm、元数据图、NFO、字幕都会写到此目录下，
+/// 因此必须在创建/更新源时强制校验，避免落到虚拟字符串路径。
+async fn validate_strm_output_path(raw: Option<&str>) -> Result<String, AppError> {
+    let trimmed = raw
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::BadRequest("STRM 输出根目录为必填项".to_string()))?;
+    let path = PathBuf::from(trimmed);
+    if let Err(err) = tokio::fs::create_dir_all(&path).await {
+        return Err(AppError::BadRequest(format!(
+            "无法创建/访问 STRM 输出根目录 {trimmed}: {err}"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -360,6 +378,7 @@ async fn create_remote_emby_source(
     auth::require_admin(&session)?;
     let remote_views =
         serde_json::to_value(&payload.remote_views).unwrap_or_else(|_| serde_json::json!([]));
+    let strm_output_path = validate_strm_output_path(payload.strm_output_path.as_deref()).await?;
     // target_library_id 可选：未填时自动使用「远端 Emby 中转」库
     let target_library_id = match payload.target_library_id {
         Some(id) if id != Uuid::nil() => id,
@@ -381,7 +400,7 @@ async fn create_remote_emby_source(
         payload.remote_view_ids.as_slice(),
         &remote_views,
         payload.enabled.unwrap_or(true),
-        payload.strm_output_path.as_deref(),
+        Some(strm_output_path.as_str()),
         payload.sync_metadata.unwrap_or(true),
         payload.sync_subtitles.unwrap_or(true),
         payload.token_refresh_interval_secs.unwrap_or(3600),
@@ -401,7 +420,7 @@ async fn update_remote_emby_source(
     auth::require_admin(&session)?;
     let remote_views =
         serde_json::to_value(&payload.remote_views).unwrap_or_else(|_| serde_json::json!([]));
-    let strm_raw = payload.strm_output_path.as_deref();
+    let strm_output_path = validate_strm_output_path(payload.strm_output_path.as_deref()).await?;
     // target_library_id 可选：未填时自动使用「远端 Emby 中转」库
     let target_library_id = match payload.target_library_id {
         Some(id) if id != Uuid::nil() => id,
@@ -424,7 +443,7 @@ async fn update_remote_emby_source(
         payload.remote_view_ids.as_slice(),
         &remote_views,
         payload.enabled.unwrap_or(true),
-        strm_raw,
+        Some(strm_output_path.as_str()),
         payload.sync_metadata.unwrap_or(true),
         payload.sync_subtitles.unwrap_or(true),
         payload.token_refresh_interval_secs.unwrap_or(3600),

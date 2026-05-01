@@ -4582,8 +4582,8 @@ async fn playback_info(
     let needs_metadata =
         item.video_codec.is_none() || item.audio_codec.is_none() || item.runtime_ticks.is_none();
     if needs_metadata {
-        if remote_emby::parse_virtual_media_path(&item.path).is_some() {
-            tracing::debug!("PlaybackInfo 跳过远端虚拟条目本地探测: {}", item.path);
+        if remote_emby::remote_marker_for_db_item(&item).is_some() {
+            tracing::debug!("PlaybackInfo 跳过远端条目本地探测: {}", item.path);
         } else {
             work_limiter_config(&state).await?;
             let item_path = item.path.clone();

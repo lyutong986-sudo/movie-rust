@@ -2153,10 +2153,14 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 
 | 项 | 说明 |
 |----|------|
-| 工作区路径 | `{StrmOutputPath}/{sanitize(Name)}.{source_uuid}/`，每次全量同步前清空并重建该子目录，与用户填写的根目录隔离。 |
-| `.strm` 内容 | 与起播一致的 Static 直链：`/emby/videos/{id}/stream?Static=true&MediaSourceId=…&DeviceId=…&api_key=…`。 |
-| 侧车文件 | `sync_metadata`：远端图落盘、`movie.nfo` / `episodedetails.nfo`、按季首次写入 `tvshow.nfo`；`sync_subtitles`：`/emby/Videos/{item}/{ms}/Subtitles/{index}/Stream.{ext}` 下载外挂字幕。 |
-| DB 入库 | `upsert_virtual_media_item` 使用 STRM 绝对路径，海报/背景/台标优先本地文件路径。 |
+| 工作区路径 | `{StrmOutputPath}/{sanitize(SourceName)}/{sanitize(ViewName)}/`，每次全量同步前清空并重建该子目录，与用户填写的根目录隔离。**STRM 输出根目录现为必填项**，旧虚拟字符串路径阶段已经移除。 |
+| `.strm` 内容 | 始终是本地代理 URL：`{base}/api/remote-emby/proxy/{source}/{remoteItem}?...&sig=...`，redirect 模式在运行时由代理端点动态构造 302。 |
+| 侧车文件 | `sync_metadata`：远端图落盘、`movie.nfo` / `episodedetails.nfo`、按季首次写入 `tvshow.nfo`；`sync_subtitles`：`/emby/Videos/{item}/{ms}/Subtitles/{index}/Stream.{ext}` 下载外挂字幕。**已存在且非空的侧车文件不会被同步覆盖**，让 `POST /Items/{id}/Refresh` 手动刷新结果优先。 |
+| DB 入库 | `upsert_remote_media_item` 使用 strm 绝对物理路径；`ensure_remote_series_folder` / `ensure_remote_season_folder` 在落盘前 `mkdir` 真实物理目录，并把目录路径作为 Series/Season 的 `media_items.path` 一并写库，`tvshow.nfo` / `season.nfo` / `season01-poster.jpg` 等 sidecar 自然落到正确位置。 |
+| 远端绑定库选项 | `ensure_remote_transit_library` 与 `ensure_view_library` 创建时默认 `SaveLocalMetadata=true`；`ensure_remote_view_path_in_library` 每次同步顺便升级旧库的该选项，确保元数据图片/NFO 都走 sidecar 路径而非中央 `static_dir/item-images/`。 |
+| `is_remote` 判定 | `repository::media_source_for_item` / `get_media_source_with_streams` / `sanitize_item_path` 主判定从 `path` 字符串前缀切到 `provider_ids.RemoteEmbySourceId`；旧 `REMOTE_EMBY/...` 仍兼容识别，待下次全量同步自然清理。 |
+| Token 重写 | `main.rs` 启动 `remote_emby_token_refresh_loop`：满足 `token_refresh_interval_secs` 与 STRM 根目录配置时强制重登；strm 文件不含 token，无需重写。 |
+| 其它 | 修复 `create_remote_emby_source` 使用独立 `row_id`（`Uuid::new_v4()`）绑定 INSERT，避免与视图循环中的 `id` 变量串扰。 |
 | Token 重写 | `main.rs` 启动 `remote_emby_token_refresh_loop`：满足 `token_refresh_interval_secs` 与 STRM 根目录配置时强制重登并批量替换工作区内 `.strm` 的 `api_key=`。 |
 | 其它 | 修复 `create_remote_emby_source` 使用独立 `row_id`（`Uuid::new_v4()`）绑定 INSERT，避免与视图循环中的 `id` 变量串扰。 |
 
@@ -2183,8 +2187,8 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 |------|------|------|
 | `PlaybackInfo` | `POST /Items/{id}/PlaybackInfo` → 返回 `MediaSources[0].DirectStreamUrl = /Videos/{id}/stream.{ext}?Static=true&api_key=...` | ✅ 标准 EmbySDK 格式 |
 | 流请求 | `/Videos/{id}/stream.{ext}` → `videos.rs::serve_media_item` | ✅ |
-| 虚拟路径 `REMOTE_EMBY/...` | 服务端直接调用 `proxy_item_stream_internal` 代理远端流 | ✅ |
-| STRM 文件 | STRM 内含本地签名代理 URL → `proxy_remote_stream` | ✅ |
+| 远端条目识别 | `remote_emby::remote_marker_for_db_item` 优先按 `provider_ids.RemoteEmbySourceId/RemoteEmbyItemId` 反查 source；旧虚拟路径 `REMOTE_EMBY/...` 仍兼容回退 | ✅ |
+| STRM 文件 | STRM 内永远是本地签名代理 URL → `proxy_remote_stream`（redirect 模式由代理端点动态返回 302，避免远端直链/api_key 落盘） | ✅ |
 | Range 支持 | `Range`/`If-Range` 随 RemoteEmby 代理转发 | ✅ |
 | HEAD | body 置空，上游响应头透传 | ✅ |
 
