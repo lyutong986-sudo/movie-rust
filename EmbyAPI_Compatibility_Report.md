@@ -2726,3 +2726,40 @@ POST /api/admin/remote-emby/cleanup-orphan-libraries
 **影响文件：** `backend/migrations/0001_schema.sql`、`backend/src/main.rs`、`backend/src/models.rs`、`backend/src/repository.rs`、`backend/src/remote_emby.rs`、`backend/src/routes/remote_emby.rs`、`frontend/src/api/emby.ts`、`frontend/src/pages/settings/RemoteEmbySettings.vue`、`EmbyAPI_Compatibility_Report.md`。
 
 ---
+
+## 第三十六批（2026-05-01）：FetchingRemoteIndex 阶段卡 4% 不响应取消（SF1+SF2）
+
+**触发场景：** 用户报告：远端 Emby 同步在 `FetchingRemoteIndex` 阶段（4%）进入「已运行 684 秒、远端抓取 0/0」的卡死状态，点击「中断同步」后**再点同步一直拉取不到**，且取消按钮的反馈是「请求参数错误: 同步任务已被取消」。
+
+**根因审计**：
+
+| ID | 优先级 | 缺陷位置 | 现象 |
+|----|--------|----------|------|
+| 问题 A | P0 | `remote_emby.rs::fetch_all_remote_item_ids`（旧实现） | 函数本身**没有 progress 参数**，更别提 `is_cancelled()` 检查；用户点中断后旧 task 一定要等所有 view × 所有 page 全部拉完，才能在外层主循环（`for view in &views`）首次看到取消信号；在 ~40 万远端条目大库上等待时间是 10+ 分钟。 |
+| 问题 B | P0 | `routes/remote_emby.rs::enqueue_remote_emby_sync` | 检查 `active_operation_ids` 时只看 `is_done()`：cancel_requested=true 但 task 还没真退的「将死」状态被当作"在跑"，再点立即同步直接复用同一个 id，前端始终看到那个停滞的 4% phase，给用户「再点同步一直拉不到」的错觉。 |
+| 问题 C | P1 | `remote_emby.rs::set_phase("FetchingRemoteIndex", 4.0)` | 一次性写入，进度静止在 4% 直到本阶段结束；前端「远端抓取」卡片显示 0/0 不动，用户分不清是「在拉」还是「卡死」。 |
+
+### 修复
+
+| # | 文件 | 改动 |
+|---|------|------|
+| **SF1**（修 A + C） | `remote_emby.rs::RemoteSyncProgress` + `fetch_all_remote_item_ids` + 调用点 | 1) `RemoteSyncProgress` 新增 `set_fetching_index_progress(scanned_ids, view_index, view_count)` 方法，让 progress 在 `[4.0, 5.0)` 区间随 view 个数线性爬，并把已扫 ID 数写进 `fetched_items` 字段（前端「远端抓取」卡片实时显示 ID 数增长）。2) `fetch_all_remote_item_ids` 签名加 `progress: Option<&RemoteSyncProgress>` 参数；进入每个 view、每页之间都先 `is_cancelled()` 检查，命中即 `Err(BadRequest("同步任务已被取消"))` 立即退出（最多一页 HTTP 周期延迟）；每页完成后调一次 `set_fetching_index_progress` 上报实时进度。3) `sync_source_inner` 调用点把 `progress.as_ref()` 透传下去。 |
+| **SF2**（修 B） | `routes/remote_emby.rs::enqueue_remote_emby_sync` | 检查 `active_operation_ids` 那一段，区分三种情况：a) `is_done()` → 走原有「创建新 task」路径；b) `!is_done() && cancel_requested` → 返回 `BadRequest("上一次取消尚未完成，旧任务正在退出，请稍候 1–2 秒再重试")`，前端拿到明确反馈；c) `!is_done() && !cancel_requested` → 复用 active_id（同一任务二次查看进度）。SF1 让旧 task 在最多一页 HTTP 周期内真退出，配合 SF2 的明确反馈，用户「取消 → 等 1–2s → 立即同步」的闭环就通了。 |
+
+### 行为变化
+
+- 用户点击「中断同步」**最多 1 个 HTTP page 周期**（默认每页 1000 ID，受 source.request_interval_ms 节流）就能看到旧 task 真死，不再要等 10+ 分钟。
+- `FetchingRemoteIndex` 阶段前端「远端抓取」卡片现在能看到 ID 数实时增长（每完成一页递增），phase 进度从 4.0% 慢慢爬到 5.0%。
+- 用户取消后立刻再点立即同步，会看到明确的 HTTP 400 + 文案「上一次取消尚未完成…」，不再被旧 task id 误导以为「再点同步一直拉不到」。
+- 旧用户报告的"请求参数错误: 同步任务已被取消"是 spawn task 退出路径上 BadRequest 错误的旧 Display 投射；当前 `cancel_requested` 路径下错误依旧被清空（`error = None`），UX 改后用户更可能看到「上一次取消尚未完成…」这条更友好的提示。
+
+### 验证
+
+- `cargo check` 0 error
+- `cargo test --bin movie-rust-backend`：60 passed; 0 failed.
+- ReadLints 无错误
+- `EmbyAPI_Compatibility_Report.md` 同步追加
+
+**影响文件：** `backend/src/remote_emby.rs`、`backend/src/routes/remote_emby.rs`、`EmbyAPI_Compatibility_Report.md`。
+
+---

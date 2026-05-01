@@ -702,6 +702,20 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
         if let Some(active_id) = registry.active_operation_ids.get(&source_id).copied() {
             if let Some(active) = registry.operations.get(&active_id) {
                 if !active.is_done() {
+                    // SF2：之前这里只看 `is_done()`，结果用户「中断同步」后旧 task 还在
+                    // 跑（特别是卡在 fetch_all_remote_item_ids 那种长循环），用户再点
+                    // 「立即同步」会立即被复用回**同一个**正在退出的旧 task id，前端就
+                    // 永远看到那个停滞的 4% phase，看上去像「再点同步一直拉不到」。
+                    // 现在区分三种情况：
+                    //  1) cancel_requested + 还没退完：返回明确错误「上次取消尚未完成」，
+                    //     前端可以提示用户稍候，旧 task 会在最长一页 HTTP 周期内（搭配
+                    //     SF1 的 cancel 检查）真退出，再点就能起新 task。
+                    //  2) 仍在跑且没要求取消：保留原行为返回 active_id（同一任务二次查看进度）。
+                    if active.cancel_requested {
+                        return Err(AppError::BadRequest(
+                            "上一次取消尚未完成，旧任务正在退出，请稍候 1–2 秒再重试".to_string(),
+                        ));
+                    }
                     return Ok(active_id);
                 }
             }

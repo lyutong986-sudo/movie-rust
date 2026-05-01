@@ -249,6 +249,39 @@ impl RemoteSyncProgress {
         });
     }
 
+    /// SF1：FetchingRemoteIndex 阶段实时进度。
+    /// 之前 `set_phase("FetchingRemoteIndex", 4.0)` 是一次性写入 → 在拉远端 ID 索引的
+    /// 长耗时循环里前端看到的永远是「4% / 远端抓取 0/0」，没法判断是卡死还是仍在拉，
+    /// 用户报告"已运行 684 秒还在 4%"就是这个症状。
+    /// 这里把已扫 ID 数写进 `fetched_items` 字段，progress 在 `[4.0, 5.0]` 区间随
+    /// view 总数 + 当前 view 进度线性爬动，前端「远端抓取」卡片就能看到 ID 数实时增长。
+    pub fn set_fetching_index_progress(
+        &self,
+        scanned_ids: u64,
+        view_index: usize,
+        view_count: usize,
+    ) {
+        let snapshot = self.snapshot.clone();
+        // 每个 view 各占 `1.0 / view_count` 个百分点，平均铺到 [4.0, 5.0)。即使 view
+        // 个数 = 0（理论不会）或 page.total_record_count 为 0 也不会除零。
+        let view_count_safe = view_count.max(1) as f64;
+        let view_idx_clamped = (view_index as f64).min(view_count_safe);
+        let progress = 4.0 + (view_idx_clamped / view_count_safe).min(1.0);
+        let progress = progress.clamp(4.0, 5.0);
+        if let Ok(mut guard) = snapshot.try_write() {
+            guard.phase = "FetchingRemoteIndex".to_string();
+            guard.fetched_items = scanned_ids;
+            guard.progress = progress;
+            return;
+        }
+        tokio::spawn(async move {
+            let mut guard = snapshot.write().await;
+            guard.phase = "FetchingRemoteIndex".to_string();
+            guard.fetched_items = scanned_ids;
+            guard.progress = progress;
+        });
+    }
+
     pub fn set_streaming_progress(&self, fetched_items: u64, written_files: u64, total_items: u64) {
         let snapshot = self.snapshot.clone();
         if let Ok(mut guard) = snapshot.try_write() {
@@ -974,11 +1007,14 @@ async fn sync_source_inner(
         handle.set_phase("FetchingRemoteIndex", 4.0);
     }
     // 1. 获取远端全量 ID 集合，检测「删」（远端已删除但本地仍在 DB 的条目）
+    // SF1：把 progress handle 传下去，让 fetch loop 能在每页之间检查 is_cancelled
+    // 与上报已扫 ID 数（避免 4% 长卡死时前端无任何反馈）。
     let remote_id_set = fetch_all_remote_item_ids(
         &state.pool,
         source,
         user_id.as_str(),
         &views,
+        progress.as_ref(),
     )
     .await?;
 
@@ -2131,11 +2167,26 @@ async fn fetch_all_remote_item_ids(
     source: &mut DbRemoteEmbySource,
     user_id: &str,
     views: &[RemoteLibraryView],
+    progress: Option<&RemoteSyncProgress>,
 ) -> Result<HashSet<String>, AppError> {
     let mut all_ids = HashSet::new();
-    for view in views {
+    let view_count = views.len();
+    for (view_index, view) in views.iter().enumerate() {
+        // SF1：进入新 view 之前先抢一次进度上报，让前端 phase=FetchingRemoteIndex 的
+        // 进度条按 view 个数线性推进（4.0 → 5.0），不再一直停在 4%。
+        if let Some(handle) = progress {
+            handle.set_fetching_index_progress(all_ids.len() as u64, view_index, view_count);
+        }
         let mut start_index = 0i64;
         loop {
+            // SF1：每页之间检查 cancel —— 之前这里完全没检查，用户点中断后旧 task
+            // 只能等所有 view + 所有 page 拉完才看到取消信号，对 ~40 万远端条目的
+            // 大库要等 10+ 分钟。检查放在 HTTP 请求之前，最大一次「单页延迟」就退出。
+            if let Some(handle) = progress {
+                if handle.is_cancelled() {
+                    return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+                }
+            }
             let page = fetch_remote_item_ids_page(
                 pool,
                 source,
@@ -2149,10 +2200,19 @@ async fn fetch_all_remote_item_ids(
                 all_ids.insert(entry.id.clone());
             }
             start_index += REMOTE_ID_PAGE_SIZE;
+            // SF1：每拉完一页，把累计已扫 ID 数上报一次，前端「远端抓取」卡片
+            // 就能看到 ID 数随 page 数实时增长，明确判断「在拉」还是「卡死」。
+            if let Some(handle) = progress {
+                handle.set_fetching_index_progress(all_ids.len() as u64, view_index, view_count);
+            }
             if page.items.is_empty() || start_index >= page.total_record_count {
                 break;
             }
         }
+    }
+    // 完成全部 view 后把进度推到 5%，下一阶段（PruningStaleItems）会接力。
+    if let Some(handle) = progress {
+        handle.set_fetching_index_progress(all_ids.len() as u64, view_count, view_count);
     }
     Ok(all_ids)
 }
