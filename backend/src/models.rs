@@ -506,7 +506,7 @@ pub struct UserPolicyDto {
     pub enable_user_preference_access: bool,
     pub max_parental_rating: Option<i32>,
     pub max_parental_sub_rating: Option<i32>,
-    #[serde(rename = "SimultaneousStreamLimit")]
+    #[serde(rename = "SimultaneousStreamLimit", alias = "MaxActiveSessions")]
     pub max_active_sessions: i32,
     pub invalid_login_attempt_count: i32,
     pub login_attempts_before_lockout: i32,
@@ -1639,7 +1639,7 @@ pub struct TranscodingInfoDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio_bitrate: Option<i32>,
+    pub audio_bitrate: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_bitrate: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

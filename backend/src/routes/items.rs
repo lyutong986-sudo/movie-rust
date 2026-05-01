@@ -4130,33 +4130,61 @@ async fn cascade_download_series_children(
     library_options: &LibraryOptionsDto,
     replace_images: bool,
 ) -> Result<(), AppError> {
+    // PB9：先一次性收集 Season + Episode，再用 Semaphore(4) 限流的轻量级并行调度，
+    // 与 do_refresh_item_metadata_with 递归子条目刷新的 4 并行模型对齐。
+    //
+    // 实现注意：provider 在路径 2（metadata_manager.get_provider）下是借用语义，
+    // 无 'static 生命周期，无法跨 tokio::spawn；这里改用 "手动 N-fan-out + select_all"
+    // 的方式在同一异步上下文里并发驱动 N 条 future，避免 JoinSet。
+    const PARALLELISM: usize = 4;
+
     let seasons = repository::list_media_item_children(&state.pool, series_item.id).await?;
+    let mut season_items: Vec<DbMediaItem> = Vec::new();
+    let mut episode_items: Vec<DbMediaItem> = Vec::new();
     for season in seasons {
         if !season.item_type.eq_ignore_ascii_case("Season") {
             continue;
         }
-        if let Err(e) = download_remote_images_for_item(
-            state,
-            provider,
-            &season,
-            tmdb_id,
-            library_options,
-            replace_images,
-        )
-        .await
-        {
-            tracing::warn!(season_id = %season.id, ?e, "下载 Season 海报失败");
-        }
-
         let episodes = repository::list_media_item_children(&state.pool, season.id).await?;
         for episode in episodes {
             if !episode.item_type.eq_ignore_ascii_case("Episode") {
                 continue;
             }
+            episode_items.push(episode);
+        }
+        season_items.push(season);
+    }
+
+    // 并发驱动器：维持最多 PARALLELISM 个 future 同时运行；用 join_all 在批次内并发。
+    // chunk 完一批再起下一批，等价于一个简易的 Semaphore(4) + JoinSet 模型。
+    for chunk in season_items.chunks(PARALLELISM) {
+        let futs = chunk.iter().map(|season| async move {
             if let Err(e) = download_remote_images_for_item(
                 state,
                 provider,
-                &episode,
+                season,
+                tmdb_id,
+                library_options,
+                replace_images,
+            )
+            .await
+            {
+                tracing::warn!(season_id = %season.id, ?e, "下载 Season 海报失败");
+            }
+            if library_options.save_local_metadata {
+                if let Err(e) = nfo_writer::write_season_nfo(&state.pool, season).await {
+                    tracing::warn!(season_id = %season.id, ?e, "写入 season.nfo 失败");
+                }
+            }
+        });
+        futures::future::join_all(futs).await;
+    }
+    for chunk in episode_items.chunks(PARALLELISM) {
+        let futs = chunk.iter().map(|episode| async move {
+            if let Err(e) = download_remote_images_for_item(
+                state,
+                provider,
+                episode,
                 tmdb_id,
                 library_options,
                 replace_images,
@@ -4165,21 +4193,13 @@ async fn cascade_download_series_children(
             {
                 tracing::warn!(episode_id = %episode.id, ?e, "下载 Episode 缩略图失败");
             }
-
             if library_options.save_local_metadata {
-                let pool = state.pool.clone();
-                let ep_clone = episode.clone();
-                if let Err(e) = nfo_writer::write_episode_nfo(&pool, &ep_clone).await {
+                if let Err(e) = nfo_writer::write_episode_nfo(&state.pool, episode).await {
                     tracing::warn!(episode_id = %episode.id, ?e, "写入 episode.nfo 失败");
                 }
             }
-        }
-
-        if library_options.save_local_metadata {
-            if let Err(e) = nfo_writer::write_season_nfo(&state.pool, &season).await {
-                tracing::warn!(season_id = %season.id, ?e, "写入 season.nfo 失败");
-            }
-        }
+        });
+        futures::future::join_all(futs).await;
     }
     Ok(())
 }
@@ -4751,14 +4771,7 @@ async fn playback_info(
             .media_streams
             .iter()
             .find(|stream| stream.stream_type.eq_ignore_ascii_case("Subtitle") && stream.is_default)
-            .map(|stream| stream.index)
-            .or_else(|| {
-                media_source
-                    .media_streams
-                    .iter()
-                    .find(|stream| stream.stream_type.eq_ignore_ascii_case("Subtitle"))
-                    .map(|stream| stream.index)
-            });
+            .map(|stream| stream.index);
         media_source.default_audio_stream_index = media_source
             .media_streams
             .iter()
@@ -4796,6 +4809,11 @@ async fn playback_info(
             if !device_profile.direct_play_profiles.is_empty() {
                 media_source.supports_direct_play =
                     device_profile_supports_direct_play(device_profile, media_source);
+            }
+
+            if media_source.is_remote && media_source.protocol.eq_ignore_ascii_case("Http") {
+                media_source.supports_direct_play = false;
+                media_source.required_http_headers.clear();
             }
 
             media_source.supports_direct_stream =
@@ -4949,7 +4967,7 @@ fn build_transcoding_info(
     let video_bitrate = video_stream
         .and_then(|stream| stream.bit_rate.map(i64::from))
         .or(source_bitrate);
-    let audio_bitrate = audio_stream.and_then(|stream| stream.bit_rate);
+    let audio_bitrate = audio_stream.and_then(|stream| stream.bit_rate.map(i64::from));
     let start_ticks = info.start_time_ticks.filter(|value| *value > 0);
 
     TranscodingInfoDto {
@@ -5604,13 +5622,7 @@ fn build_direct_stream_url(
     access_token: &str,
     device_id: Option<&str>,
 ) -> String {
-    let container = container
-        .trim()
-        .trim_start_matches('.')
-        .split(',')
-        .map(str::trim)
-        .find(|value| !value.is_empty())
-        .unwrap_or("mkv");
+    let container = repository::first_container(container);
 
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
@@ -5620,8 +5632,11 @@ fn build_direct_stream_url(
     serializer.append_pair("PlaySessionId", play_session_id);
     serializer.append_pair("api_key", access_token);
 
+    // 与 Emby 原生客户端的 "Direct Play / Direct Download" 端点对齐：
+    // 路由 routes/videos.rs 已同时挂 `/Videos/{id}/stream.{container}` 与 `/Videos/{id}/original.{container}`，
+    // 后者是 Emby SDK Direct Play 习惯路径，本地/移动端播放器（如 iOS Emby）首选解析。
     format!(
-        "/Videos/{item_emby_id}/stream.{container}?Static=true&{}",
+        "/Videos/{item_emby_id}/original.{container}?Static=true&{}",
         serializer.finish()
     )
 }
@@ -6642,8 +6657,13 @@ mod tests {
             buffer_ms: None,
             requires_looping: Some(false),
             supports_probing: Some(true),
+            video_type: None,
+            iso_type: None,
             video_3d_format: None,
             timestamp: None,
+            ignore_dts: false,
+            ignore_index: false,
+            gen_pts_input: false,
             required_http_headers: std::collections::BTreeMap::new(),
             add_api_key_to_direct_stream_url: Some(false),
             transcoding_url: None,
@@ -6654,6 +6674,7 @@ mod tests {
             item_id: Some("item".to_string()),
             server_id: None,
             media_streams: vec![video_stream, audio_stream],
+            media_attachments: Vec::new(),
         };
 
         let info: PlaybackInfoDto = serde_json::from_value(json!({

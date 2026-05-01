@@ -88,6 +88,9 @@ ALTER TABLE sessions
 CREATE INDEX IF NOT EXISTS idx_sessions_user         ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at   ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_session_type ON sessions(session_type);
+-- 与 main.rs::ensure_schema_compatibility 中的同名索引同源；
+-- 用于 /Sessions 列表 ORDER BY last_activity_at DESC 的快速 lookup。
+CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions(last_activity_at DESC);
 
 -- ---------------------------------------------------------------------------
 -- libraries：媒体库（对应 Emby "VirtualFolder"）
@@ -357,6 +360,10 @@ CREATE INDEX IF NOT EXISTS idx_media_items_type_sort ON media_items(item_type, s
 CREATE INDEX IF NOT EXISTS idx_media_items_type_date ON media_items(item_type, date_created DESC);
 CREATE INDEX IF NOT EXISTS idx_media_items_type_series ON media_items(item_type, series_id) WHERE series_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_media_items_genres_gin ON media_items USING gin (genres);
+-- 与 main.rs::ensure_schema_compatibility 同源：Studios / Tags 的 GIN 倒排索引，
+-- 服务于 ItemsQuery.studios / tags 的多值 ARRAY OP @> 过滤。
+CREATE INDEX IF NOT EXISTS idx_media_items_studios_gin ON media_items USING gin (studios);
+CREATE INDEX IF NOT EXISTS idx_media_items_tags_gin ON media_items USING gin (tags);
 CREATE INDEX IF NOT EXISTS idx_media_items_episode_nextup ON media_items(series_id, parent_index_number, index_number) WHERE item_type = 'Episode';
 
 -- pg_trgm 全文搜索加速（ILIKE '%xxx%'）

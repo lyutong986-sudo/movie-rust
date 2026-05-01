@@ -164,10 +164,21 @@ async fn get_seasons(
         });
     }
 
-    let mut season_dtos = Vec::with_capacity(filtered_seasons.len());
-    for season in filtered_seasons {
-        season_dtos.push(season_to_dto(&state, user_id, &season).await?);
-    }
+    let row_ids: Vec<Uuid> = filtered_seasons.iter().map(|s| s.id).collect();
+    let user_data_map =
+        repository::get_user_item_data_batch(&state.pool, user_id, &row_ids).await?;
+    let season_dtos: Vec<BaseItemDto> = filtered_seasons
+        .iter()
+        .map(|season| {
+            let prefetched = Some(user_data_map.get(&season.id).cloned());
+            repository::media_item_to_dto_for_list(
+                season,
+                state.config.server_id,
+                prefetched,
+                repository::DtoCountPrefetch::default(),
+            )
+        })
+        .collect();
 
     let season_dtos = apply_adjacent_items(season_dtos, query.adjacent_to.as_deref());
     let total_record_count = season_dtos.len() as i64;
@@ -331,12 +342,25 @@ async fn get_episodes(
         )
         .await?;
 
+        let row_ids: Vec<uuid::Uuid> = episodes.items.iter().map(|item| item.id).collect();
+        let user_data_map =
+            repository::get_user_item_data_batch(&state.pool, user_id, &row_ids).await?;
+
         if !needs_local_windowing {
-            let mut items = Vec::with_capacity(episodes.items.len());
-            for episode in episodes.items {
-                let dto = episode_to_dto(&state, user_id, &episode).await?;
-                items.push(apply_episode_response_shape(dto, &query));
-            }
+            let items: Vec<BaseItemDto> = episodes
+                .items
+                .iter()
+                .map(|episode| {
+                    let prefetched = Some(user_data_map.get(&episode.id).cloned());
+                    let dto = repository::media_item_to_dto_for_list(
+                        episode,
+                        state.config.server_id,
+                        prefetched,
+                        repository::DtoCountPrefetch::default(),
+                    );
+                    apply_episode_response_shape(dto, &query)
+                })
+                .collect();
             return Ok(Json(QueryResult {
                 items,
                 total_record_count: episodes.total_record_count,
@@ -344,11 +368,19 @@ async fn get_episodes(
             }));
         }
 
-        let mut items = Vec::with_capacity(episodes.items.len());
-        for episode in episodes.items {
-            items.push(episode_to_dto(&state, user_id, &episode).await?);
-        }
-        items
+        episodes
+            .items
+            .iter()
+            .map(|episode| {
+                let prefetched = Some(user_data_map.get(&episode.id).cloned());
+                repository::media_item_to_dto_for_list(
+                    episode,
+                    state.config.server_id,
+                    prefetched,
+                    repository::DtoCountPrefetch::default(),
+                )
+            })
+            .collect::<Vec<_>>()
     };
 
     apply_episode_sort(
@@ -911,22 +943,6 @@ async fn get_episodes_by_season(
         total_record_count: episodes.total_record_count,
         start_index: Some(requested_start),
     }))
-}
-
-async fn season_to_dto(
-    state: &AppState,
-    user_id: Uuid,
-    season: &crate::models::DbMediaItem,
-) -> Result<BaseItemDto, AppError> {
-    repository::media_item_to_dto(&state.pool, season, Some(user_id), state.config.server_id).await
-}
-
-async fn episode_to_dto(
-    state: &AppState,
-    user_id: Uuid,
-    episode: &crate::models::DbMediaItem,
-) -> Result<BaseItemDto, AppError> {
-    repository::media_item_to_dto(&state.pool, episode, Some(user_id), state.config.server_id).await
 }
 
 fn ensure_user_access(session: &AuthSession, user_id: Uuid) -> Result<(), AppError> {

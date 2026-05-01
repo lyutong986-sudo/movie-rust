@@ -4722,13 +4722,17 @@ fn check_allowed_library_short_circuit(options: &ItemListOptions) -> bool {
 }
 
 /// 在 `WHERE 1 = 1` 之后追加 `AND library_id = ANY(allowed_library_ids)`。
-/// 调用方需保证 `options.allowed_library_ids` 是 `Some` 且非空，否则直接 no-op。
+///
+/// PB10 防御加固：即便上游显式给了 `options.library_id`（路由层拿到的客户端 ParentId
+/// 或 library 参数），只要用户绑定了非空白名单，依旧把 `library_id = ANY(allowed)`
+/// 注入；与 `check_allowed_library_short_circuit` 一起形成 "客户端越权读取隐藏库
+/// COUNT" 的双重校验：一处早返空，一处即便绕过 short-circuit 也由 SQL 层过滤掉。
 fn push_allowed_library_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     options: &ItemListOptions,
 ) {
     if let Some(allowed) = options.allowed_library_ids.as_ref() {
-        if !allowed.is_empty() && options.library_id.is_none() {
+        if !allowed.is_empty() {
             builder
                 .push(" AND library_id = ANY(")
                 .push_bind(allowed.clone())
@@ -4745,10 +4749,12 @@ async fn fast_count_media_items(
         return Ok(0);
     }
 
+    // PB10：白名单非空就一律视为"有库过滤"，即便上游显式传 library_id，也强制走通用路径
+    // 让 push_allowed_library_filter 真正生效，避免快速路径绕过 allowed_library_ids。
     let has_user_library_filter = options
         .allowed_library_ids
         .as_ref()
-        .is_some_and(|list| !list.is_empty() && options.library_id.is_none());
+        .is_some_and(|list| !list.is_empty());
 
     let has_type_filter = !options.include_types.is_empty();
     let has_no_conditions = options.library_id.is_none()
@@ -5652,8 +5658,12 @@ pub async fn list_media_items(
             .push(")");
     }
 
+    // PB10：白名单非空就一律注入 SQL 过滤，与 push_allowed_library_filter 形成对称。
+    // outer_library_id 已在 check_allowed_library_short_circuit 校验过包含关系，这里
+    // 不再以 `outer_library_id.is_none()` 短路，避免上游显式 library_id 时绕过白名单。
+    let _ = outer_library_id;
     if let Some(allowed) = outer_allowed_libs.as_ref() {
-        if !allowed.is_empty() && outer_library_id.is_none() {
+        if !allowed.is_empty() {
             builder
                 .push(" AND library_id = ANY(")
                 .push_bind(allowed.clone())
@@ -10921,13 +10931,21 @@ fn effective_container_from_target(item: &DbMediaItem, strm_target: Option<&str>
     first_container(&raw)
 }
 
-fn first_container(value: &str) -> String {
+/// 把 CSV/管道/分号分隔的容器列表（如 `"mkv,mp4"`）规范化为单一容器；
+/// 全空时回退 `mp4`。供 `effective_container_from_target` 与
+/// `routes::items::build_direct_stream_url` 等共用，避免两边 fallback 不一致。
+pub fn first_container(value: &str) -> String {
     let v = value
         .split([',', '|', ';'])
         .next()
         .unwrap_or("mp4")
-        .trim();
-    if v.is_empty() { "mp4".to_string() } else { v.to_string() }
+        .trim()
+        .trim_start_matches('.');
+    if v.is_empty() {
+        "mp4".to_string()
+    } else {
+        v.to_string()
+    }
 }
 
 fn infer_timestamp(container: &str) -> Option<String> {

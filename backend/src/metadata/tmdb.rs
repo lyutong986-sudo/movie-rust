@@ -250,7 +250,9 @@ impl TmdbProvider {
 
         let mut params = HashMap::new();
         if !self.is_bearer_token() {
-            params.insert("api_key".to_string(), self.config.api_key.clone());
+            // PB11：fallback 也走 next_api_key 多 Key 轮询，避免主路径轮询、回退路径
+            // 固定 self.config.api_key 引发的 429 体感不一致。
+            params.insert("api_key".to_string(), self.next_api_key().to_string());
         }
         params.insert("language".to_string(), "en-US".to_string());
         let url = self.build_url(&format!("/person/{}", person_id));

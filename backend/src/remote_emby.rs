@@ -2309,7 +2309,9 @@ async fn send_remote_stream_request(
             .ok_or_else(|| AppError::Internal("远端用户ID为空".to_string()))?;
 
         let cache_key = playback_info_cache_key(source.id, remote_item_id, media_source_id);
+        let mut used_cache = false;
         let playback_info = if let Some(cached) = get_cached_playback_info(&cache_key).await {
+            used_cache = true;
             cached
         } else {
             let fresh = fetch_remote_playback_info(
@@ -2362,6 +2364,15 @@ async fn send_remote_stream_request(
             repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
             source.access_token = None;
             source.remote_user_id = None;
+            continue;
+        }
+        if status == reqwest::StatusCode::NOT_FOUND && used_cache && attempt == 0 {
+            // 远端 DirectStreamUrl/TranscodingUrl 已失效（如 token rotate、媒体源 ID 变更）；
+            // 清掉过期 PlaybackInfo 缓存，下一轮 attempt 会拉取 fresh PlaybackInfo 重试一次
+            // （token 仍有效，无需 clear_remote_emby_source_auth_state）。
+            let mut cache = PLAYBACK_INFO_CACHE.write().await;
+            cache.remove(&cache_key);
+            drop(cache);
             continue;
         }
         return Ok(response);

@@ -213,7 +213,8 @@ async fn notifications_services(
 
 /// emby 的 `/Notifications/Types` 端点：可订阅事件类型清单。
 /// 与 `webhooks::events::ALL` 同步，前端 UI 可以直接渲染成"事件订阅"复选框。
-async fn notifications_types(_session: AuthSession) -> Result<Json<Value>, AppError> {
+async fn notifications_types(session: AuthSession) -> Result<Json<Value>, AppError> {
+    auth::require_admin(&session)?;
     let items: Vec<Value> = webhooks::events::ALL
         .iter()
         .map(|name| {
