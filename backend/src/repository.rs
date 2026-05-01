@@ -8799,7 +8799,7 @@ pub fn media_item_to_dto_for_list(
         media_type: (!is_folder).then(|| item.media_type.clone()),
         container: item.container.clone(),
         parent_id: item.parent_id.map(|value| uuid_to_emby_guid(&value)),
-        path: Some(item.path.clone()),
+        path: sanitize_item_path(item),
         location_type: Some(if item.path.starts_with("http://") || item.path.starts_with("https://") { "Remote".to_string() } else { "FileSystem".to_string() }),
         run_time_ticks: item.runtime_ticks,
         production_year: item.production_year,
@@ -9156,7 +9156,7 @@ async fn media_item_to_dto_inner(
         media_type: (!is_folder).then(|| item.media_type.clone()),
         container: effective_container(item),
         parent_id: item.parent_id.map(|value| uuid_to_emby_guid(&value)),
-        path: Some(item.path.clone()),
+        path: sanitize_item_path(item),
         location_type: Some(
             if item.path.starts_with("http://") || item.path.starts_with("https://") {
                 "Remote".to_string()
@@ -9735,10 +9735,19 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
     let item_emby_id = uuid_to_emby_guid(&item.id);
     let media_source_id = format!("mediasource_{item_emby_id}");
 
+    let sanitized_path = if is_remote {
+        format!(
+            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}",
+            item_emby_id, container, media_source_id
+        )
+    } else {
+        item.path.clone()
+    };
+
     MediaSourceDto {
         chapters: Vec::new(),
         id: media_source_id.clone(),
-        path: strm_target.clone().unwrap_or_else(|| item.path.clone()),
+        path: sanitized_path,
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),
         container: container.clone(),
@@ -10146,6 +10155,23 @@ fn sort_name_for_item(input: &UpsertMediaItem<'_>) -> String {
         }
         (_, Some(index)) => format!("{index:04}-{normalized}"),
         _ => normalized,
+    }
+}
+
+fn sanitize_item_path(item: &DbMediaItem) -> Option<String> {
+    let normalized = item.path.replace('\\', "/");
+    let is_strm = naming::is_strm(Path::new(&item.path));
+    let is_virtual_remote = normalized.to_ascii_uppercase().starts_with("REMOTE_EMBY/");
+    if is_strm || is_virtual_remote {
+        let container = effective_container(item);
+        let name = &item.name;
+        let year = item
+            .production_year
+            .map(|y| format!(" ({y})"))
+            .unwrap_or_default();
+        Some(format!("/{name}{year}/{name}{year}.{}", container.unwrap_or_else(|| "mkv".to_string())))
+    } else {
+        Some(item.path.clone())
     }
 }
 
@@ -11508,10 +11534,19 @@ pub async fn get_media_source_with_streams(
     let item_emby_id = uuid_to_emby_guid(&item.id);
     let media_source_id = format!("mediasource_{item_emby_id}");
 
+    let sanitized_path = if is_remote {
+        format!(
+            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}",
+            item_emby_id, container, media_source_id
+        )
+    } else {
+        item.path.clone()
+    };
+
     Ok(MediaSourceDto {
         chapters: db_chapters.iter().map(chapter_to_value).collect(),
         id: media_source_id.clone(),
-        path: strm_target_early.clone().unwrap_or_else(|| item.path.clone()),
+        path: sanitized_path,
         protocol: if is_remote { "Http" } else { "File" }.to_string(),
         source_type: "Default".to_string(),
         container: container.clone(),
