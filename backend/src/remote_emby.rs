@@ -2868,6 +2868,13 @@ async fn fetch_remote_item_ids_page(
         ("IncludeItemTypes".to_string(), "Movie,Episode".to_string()),
         ("Fields".to_string(), "Id".to_string()),
         ("EnableTotalRecordCount".to_string(), "true".to_string()),
+        // 稳定分页排序键：Id 是 Emby 内部主键，全局唯一不重复；
+        // 不指定 SortBy 时 Emby 默认按 SortName 升序，而大库里 SortName 重复 / 空串
+        // 极常见，跨页时会跳过或重复条目（30 万条规模能稳定漏拉百~千条）。
+        // 漏拉的 ID 会让 `delete_stale_items_for_source` 把对应本地行误判成 stale
+        // 并 DELETE，是「重启后再同步媒体数量减少」灾难路径的根因之一。
+        ("SortBy".to_string(), "Id".to_string()),
+        ("SortOrder".to_string(), "Ascending".to_string()),
         ("StartIndex".to_string(), start_index.to_string()),
         ("Limit".to_string(), limit.to_string()),
     ];
@@ -2930,7 +2937,13 @@ async fn fetch_all_remote_item_ids(
     Ok(all_ids)
 }
 
-/// 删除本地 DB 中不再存在于远端的条目，并清理对应的 STRM 文件
+/// 删除本地 DB 中不再存在于远端的条目，并清理对应的 STRM 文件。
+///
+/// 内置「prune 比例安全阀」：当 `候选行数 ≥ PRUNE_GUARD_MIN_CANDIDATES` 且
+/// 「待删 / 候选」超过 `PRUNE_GUARD_RATIO`（10%）时，判定 `remote_id_set`
+/// 大概率不完整（典型场景：远端分页抖动 / 中途被 kill 重启再跑），整次
+/// prune 直接跳过并 WARN，等下一次同步用更完整的 ID 集合重新判定，
+/// 避免「重启 → 误删上千条 → 用户必须靠扫描所有媒体库恢复」灾难路径。
 async fn delete_stale_items_for_source(
     pool: &sqlx::PgPool,
     source_id: Uuid,
@@ -2938,6 +2951,15 @@ async fn delete_stale_items_for_source(
     remote_id_set: &HashSet<String>,
     strm_workspace: Option<&Path>,
 ) -> Result<u64, AppError> {
+    /// 安全阀触发的最小候选量；小于此值的库视为新建/小库，prune 波动天然较大，
+    /// 强行卡阈值会导致频繁误阻断，反而让小库永远没法清理真正的孤儿。
+    const PRUNE_GUARD_MIN_CANDIDATES: usize = 100;
+    /// 安全阀阈值：单次 prune 比例上限。10% 是经验值——
+    /// 真实场景下用户在远端 Emby 一次性下架 10% 以上条目极罕见；
+    /// 反过来分页抖动 / 部分视图拉空导致 ID 集合缺失 10% 以上很常见。
+    const PRUNE_GUARD_RATIO_NUM: usize = 10;
+    const PRUNE_GUARD_RATIO_DEN: usize = 100;
+
     let source_id_str = source_id.to_string();
     struct StaleRow {
         id: Uuid,
@@ -2971,6 +2993,35 @@ async fn delete_stale_items_for_source(
         }
     })
     .collect();
+
+    // 先两遍扫一下 stale 候选行：第一遍只算「真正会被判定 stale 的行数」用于安全阀决策，
+    // 第二遍才执行物理 + DB 删除。两遍 hash 查询都是 O(N)，相比单条 DELETE 的 IO 几乎可忽略，
+    // 但能确保「跨阈值就一条都不删」语义干净。
+    let candidate_count = rows.len();
+    let stale_count = rows
+        .iter()
+        .filter(|row| {
+            row.remote_id
+                .as_deref()
+                .map(|id| !id.trim().is_empty() && !remote_id_set.contains(id))
+                .unwrap_or(false)
+        })
+        .count();
+
+    if candidate_count >= PRUNE_GUARD_MIN_CANDIDATES
+        && stale_count * PRUNE_GUARD_RATIO_DEN > candidate_count * PRUNE_GUARD_RATIO_NUM
+    {
+        tracing::warn!(
+            source_id = %source_id,
+            candidate_count,
+            stale_count,
+            remote_id_set_size = remote_id_set.len(),
+            ratio_threshold_pct = PRUNE_GUARD_RATIO_NUM,
+            "prune 安全阀触发：本次 stale 比例超过阈值，疑似远端 ID 集合不完整（分页抖动 / 中途取消 / 进程重启等），\
+             跳过本次 stale 删除，等下一次同步用更完整的 ID 集合再行判定"
+        );
+        return Ok(0);
+    }
 
     let mut deleted = 0u64;
     for row in rows {
