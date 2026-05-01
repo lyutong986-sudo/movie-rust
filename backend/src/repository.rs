@@ -928,12 +928,92 @@ pub async fn find_user_by_connect_user_id(
     Ok(None)
 }
 
+/// PB34-2：删除条目前先扫出落盘的图片/章节图路径，DELETE 成功后逐个 fs::remove_file，
+/// 避免 `<static_dir>/items/<uuid>/` 目录里的孤儿文件占用磁盘。
+///
+/// 容错策略：磁盘删除任何失败仅记录 warn，不阻断 DELETE 已经在 DB 完成的事实
+/// （若 DB 删除成功后再因 IO 失败回滚，会让 ON DELETE CASCADE 留下不一致）。
+/// 远端 URL（http://、https://）跳过，不参与磁盘清理。
 pub async fn delete_media_item(pool: &sqlx::PgPool, item_id: Uuid) -> Result<bool, AppError> {
+    // 1) 先把要清理的本地文件路径全部 SELECT 出来
+    let image_paths_row = sqlx::query(
+        r#"
+        SELECT image_primary_path, backdrop_path, logo_path, thumb_path,
+               art_path, banner_path, disc_path, backdrop_paths
+        FROM media_items
+        WHERE id = $1
+        "#,
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?;
+    let chapter_image_paths: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT image_path FROM media_chapters WHERE media_item_id = $1",
+    )
+    .bind(item_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    // 2) 真正 DELETE（关联 streams/chapters/person_roles 等由 ON DELETE CASCADE 处理）
     let result = sqlx::query("DELETE FROM media_items WHERE id = $1")
         .bind(item_id)
         .execute(pool)
         .await?;
-    Ok(result.rows_affected() > 0)
+    let deleted = result.rows_affected() > 0;
+    if !deleted {
+        return Ok(false);
+    }
+
+    // 3) DELETE 成功后清理磁盘
+    let mut to_remove: Vec<String> = Vec::new();
+    if let Some(row) = image_paths_row {
+        for col in [
+            "image_primary_path",
+            "backdrop_path",
+            "logo_path",
+            "thumb_path",
+            "art_path",
+            "banner_path",
+            "disc_path",
+        ] {
+            if let Ok(Some(path)) = row.try_get::<Option<String>, _>(col) {
+                to_remove.push(path);
+            }
+        }
+        if let Ok(paths) = row.try_get::<Vec<String>, _>("backdrop_paths") {
+            for p in paths {
+                if !p.trim().is_empty() {
+                    to_remove.push(p);
+                }
+            }
+        }
+    }
+    for path in chapter_image_paths.into_iter().flatten() {
+        to_remove.push(path);
+    }
+    for raw in to_remove {
+        let trimmed = raw.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("http://")
+            || trimmed.starts_with("https://")
+        {
+            continue;
+        }
+        let p = std::path::PathBuf::from(trimmed);
+        if let Err(error) = tokio::fs::remove_file(&p).await {
+            // ENOENT 已经被删过，不算错；其它错误记 warn
+            if !matches!(error.kind(), std::io::ErrorKind::NotFound) {
+                tracing::warn!(
+                    item_id = %item_id,
+                    path = %p.display(),
+                    error = %error,
+                    "PB34-2：删除条目时清理本地图片失败"
+                );
+            }
+        }
+    }
+    Ok(true)
 }
 
 pub async fn add_media_item_tag(
@@ -1018,6 +1098,13 @@ pub struct MediaItemEditableFields {
     pub studios: Option<Vec<String>>,
     pub production_locations: Option<Vec<String>>,
     pub provider_ids: Option<serde_json::Value>,
+    /// PB35-1：用户在编辑面板把某个 provider_id（如 `Tmdb: ""`）置空时，
+    /// 视作「删除该 key」语义。这里是一份 key 列表（小写），与 `provider_ids` 互斥分配。
+    pub provider_ids_to_remove: Option<Vec<String>>,
+    // PB32-1：用户编辑面板可设置的「整体锁」+「字段级锁」+ taglines。
+    pub taglines: Option<Vec<String>>,
+    pub locked_fields: Option<Vec<String>>,
+    pub lock_data: Option<bool>,
 }
 
 /// 按 `MediaItemEditableFields` 更新媒体项，只有被显式赋值的字段会被写入。
@@ -1053,9 +1140,19 @@ pub async fn update_media_item_editable_fields(
             tags             = CASE WHEN $14::text[] IS NULL THEN tags ELSE $14 END,
             studios          = CASE WHEN $15::text[] IS NULL THEN studios ELSE $15 END,
             production_locations = CASE WHEN $16::text[] IS NULL THEN production_locations ELSE $16 END,
-            provider_ids     = CASE WHEN $17::jsonb IS NULL
-                                    THEN provider_ids
-                                    ELSE COALESCE(provider_ids, '{}'::jsonb) || $17::jsonb END,
+            provider_ids     = CASE
+                                   WHEN $17::jsonb IS NULL AND $22::text[] IS NULL
+                                       THEN provider_ids
+                                   WHEN $22::text[] IS NULL
+                                       THEN COALESCE(provider_ids, '{}'::jsonb) || $17::jsonb
+                                   WHEN $17::jsonb IS NULL
+                                       THEN COALESCE(provider_ids, '{}'::jsonb) - $22::text[]
+                                   ELSE
+                                       (COALESCE(provider_ids, '{}'::jsonb) || $17::jsonb) - $22::text[]
+                               END,
+            taglines         = CASE WHEN $19::text[] IS NULL THEN taglines ELSE $19 END,
+            locked_fields    = CASE WHEN $20::text[] IS NULL THEN locked_fields ELSE $20 END,
+            lock_data        = COALESCE($21, lock_data),
             date_modified    = now()
         WHERE id = $1
         "#,
@@ -1078,6 +1175,11 @@ pub async fn update_media_item_editable_fields(
     .bind(updates.production_locations.as_deref())
     .bind(updates.provider_ids.as_ref())
     .bind(parental_value)
+    .bind(updates.taglines.as_deref())
+    .bind(updates.locked_fields.as_deref())
+    .bind(updates.lock_data)
+    // PB35-1：要从 provider_ids 删除的 key 列表（用户传空字符串时收集）
+    .bind(updates.provider_ids_to_remove.as_deref())
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -1201,7 +1303,7 @@ pub async fn get_items_by_genre(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes, series_id, 0::bigint AS total_count
+                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data, 0::bigint AS total_count
             FROM media_items
             WHERE $1 = ANY(genres) AND library_id = ANY($4)
             ORDER BY sort_name
@@ -1220,7 +1322,7 @@ pub async fn get_items_by_genre(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes, series_id, 0::bigint AS total_count
+                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data, 0::bigint AS total_count
             FROM media_items
             WHERE $1 = ANY(genres)
             ORDER BY sort_name
@@ -1626,7 +1728,7 @@ pub async fn get_items_by_person(
                 mi.studios, mi.tags, mi.production_locations,
                 mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
                 mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-                mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, 0::bigint AS total_count
+                mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data, 0::bigint AS total_count
             FROM media_items mi
             WHERE mi.id IN (
                 SELECT DISTINCT pr.media_item_id
@@ -1655,7 +1757,7 @@ pub async fn get_items_by_person(
                 mi.studios, mi.tags, mi.production_locations,
                 mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
                 mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-                mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, 0::bigint AS total_count
+                mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data, 0::bigint AS total_count
             FROM media_items mi
             WHERE mi.id IN (
                 SELECT DISTINCT pr.media_item_id
@@ -1922,6 +2024,111 @@ pub async fn upsert_person_reference(
     Ok(result.get(0))
 }
 
+/// PB32-2：编辑面板「整段替换演职员」用：先按 `media_item_id` 删除全部 person_roles，
+/// 再逐一 upsert 用户提交的人员列表。`role_type` 默认 `Actor`，传入的 `Type` 大小写不敏感。
+pub async fn replace_item_people_from_edit(
+    pool: &sqlx::PgPool,
+    media_item_id: Uuid,
+    people: &[crate::routes::items::UpdateItemPerson],
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM person_roles WHERE media_item_id = $1")
+        .bind(media_item_id)
+        .execute(&mut *tx)
+        .await?;
+    let mut sort_order = 0i32;
+    for entry in people {
+        let name = entry
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(name) = name else { continue };
+        let role_type = match entry
+            .person_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(s) => match s.to_ascii_lowercase().as_str() {
+                "actor" => "Actor".to_string(),
+                "director" => "Director".to_string(),
+                "writer" => "Writer".to_string(),
+                "producer" => "Producer".to_string(),
+                "gueststar" => "GuestStar".to_string(),
+                "composer" => "Composer".to_string(),
+                _ => s.to_string(),
+            },
+            None => "Actor".to_string(),
+        };
+        let provider_ids = entry
+            .provider_ids
+            .clone()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        let sort_name = name.to_lowercase();
+        let person_row = sqlx::query(
+            r#"
+            INSERT INTO persons (
+                name, sort_name, provider_ids, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, now(), now())
+            ON CONFLICT (name, sort_name)
+            DO UPDATE SET
+                provider_ids = CASE
+                    WHEN persons.provider_ids = '{}'::jsonb THEN EXCLUDED.provider_ids
+                    ELSE persons.provider_ids || EXCLUDED.provider_ids
+                END,
+                updated_at = now()
+            RETURNING id
+            "#,
+        )
+        .bind(name)
+        .bind(sort_name)
+        .bind(provider_ids)
+        .fetch_one(&mut *tx)
+        .await?;
+        let person_id: Uuid = person_row.get(0);
+
+        let normalized_role = entry
+            .role
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let role_id = Uuid::new_v5(
+            &media_item_id,
+            format!(
+                "person-role:{person_id}:{role_type}:{}",
+                normalized_role.unwrap_or("<none>")
+            )
+            .as_bytes(),
+        );
+        sqlx::query(
+            r#"
+            INSERT INTO person_roles (
+                id, person_id, media_item_id, role_type, role, sort_order, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, now(), now())
+            ON CONFLICT (id)
+            DO UPDATE SET
+                sort_order = EXCLUDED.sort_order,
+                role       = EXCLUDED.role,
+                updated_at = now()
+            "#,
+        )
+        .bind(role_id)
+        .bind(person_id)
+        .bind(media_item_id)
+        .bind(role_type.as_str())
+        .bind(normalized_role)
+        .bind(sort_order)
+        .execute(&mut *tx)
+        .await?;
+        sort_order = sort_order.saturating_add(1);
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn upsert_person_role(
     pool: &sqlx::PgPool,
     person_id: Uuid,
@@ -1932,6 +2139,9 @@ pub async fn upsert_person_role(
 ) -> Result<(), AppError> {
     let normalized_role = role.map(str::trim).filter(|value| !value.is_empty());
     let role_key = normalized_role.unwrap_or("<none>");
+    // PB35-5 (P3-2)：根据 Emby 习惯，把前 5 位 Actor 视作 "Featured"，
+    // 用于客户端"主演 / Top Cast"区块优先排序。
+    let is_featured = role_type.eq_ignore_ascii_case("Actor") && sort_order < 5;
 
     let updated = sqlx::query(
         r#"
@@ -1939,6 +2149,7 @@ pub async fn upsert_person_role(
         SET
             role = $6,
             sort_order = $5,
+            is_featured = $7,
             updated_at = now()
         WHERE person_id = $1
           AND media_item_id = $2
@@ -1952,6 +2163,7 @@ pub async fn upsert_person_role(
     .bind(role_key)
     .bind(sort_order)
     .bind(normalized_role)
+    .bind(is_featured)
     .execute(pool)
     .await?;
 
@@ -1967,12 +2179,13 @@ pub async fn upsert_person_role(
     sqlx::query(
         r#"
         INSERT INTO person_roles (
-            id, person_id, media_item_id, role_type, role, sort_order, created_at, updated_at
+            id, person_id, media_item_id, role_type, role, sort_order, is_featured, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, now(), now())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())
         ON CONFLICT (id)
         DO UPDATE SET
             sort_order = EXCLUDED.sort_order,
+            is_featured = EXCLUDED.is_featured,
             updated_at = now()
         "#,
     )
@@ -1982,6 +2195,7 @@ pub async fn upsert_person_role(
     .bind(role_type)
     .bind(normalized_role)
     .bind(sort_order)
+    .bind(is_featured)
     .execute(pool)
     .await?;
 
@@ -5407,7 +5621,7 @@ pub async fn list_media_items(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, series_id, 0::bigint AS total_count
+            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data, 0::bigint AS total_count
         FROM media_items
         WHERE 1 = 1
         "#,
@@ -6371,7 +6585,7 @@ pub async fn get_next_up_episodes(
                 mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path,
                 mi.backdrop_paths, mi.remote_trailers,
                 mi.date_created, mi.date_modified, mi.image_blur_hashes,
-                mi.series_id,
+                mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data,
                 row_number() OVER (
                     PARTITION BY COALESCE(mi.series_id, mi.parent_id, mi.id)
                     ORDER BY
@@ -6395,7 +6609,7 @@ pub async fn get_next_up_episodes(
             genres, studios, tags, production_locations, width, height,
             bit_rate, size, video_codec, audio_codec, image_primary_path,
             backdrop_path, logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, series_id
+            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
         FROM ranked
         WHERE next_rank = 1
         ORDER BY series_name NULLS LAST,
@@ -6501,7 +6715,7 @@ pub async fn get_upcoming_episodes(
             mi.genres, mi.studios, mi.tags, mi.production_locations, mi.width, mi.height,
             mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path,
             mi.backdrop_path, mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id
+            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data
         FROM media_items mi
         WHERE mi.item_type = 'Episode'
           AND mi.premiere_date >= $1
@@ -7292,7 +7506,7 @@ pub async fn get_media_item(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, series_id
+            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
         FROM media_items
         WHERE id = $1
         "#,
@@ -7316,7 +7530,7 @@ pub async fn list_media_item_children(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, series_id
+            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
         FROM media_items
         WHERE parent_id = $1
         ORDER BY index_number, sort_name
@@ -7348,7 +7562,7 @@ pub async fn find_items_for_external_person_credit(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, series_id
+            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
         FROM media_items
         WHERE item_type = $1
           AND (
@@ -7813,7 +8027,7 @@ pub async fn session_play_queue(
             mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
             mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id
+            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data
         FROM session_play_queue q
         INNER JOIN sessions s ON s.access_token = q.session_id
         INNER JOIN media_items mi ON mi.id = q.item_id
@@ -7878,7 +8092,7 @@ pub async fn session_runtime_state(
             mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
             mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id
+            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data
         FROM session_play_queue q
         INNER JOIN sessions s ON s.access_token = q.session_id
         INNER JOIN media_items mi ON mi.id = q.item_id
@@ -9236,7 +9450,12 @@ pub fn media_item_to_dto_for_list(
         can_download: true,
         can_edit_items: Some(true),
         supports_resume: Some(!is_folder),
-        presentation_unique_key: None,
+        // PB35-3：list DTO 也产出 PresentationUniqueKey，让客户端缓存命中
+        // （Emby Cards / 「最近添加」横排靠这个去重）。
+        presentation_unique_key: Some(presentation_unique_key(
+            item,
+            &provider_ids_to_map(&item.provider_ids),
+        )),
         supports_sync: true,
         item_type: item.item_type.clone(),
         is_folder,
@@ -9261,7 +9480,11 @@ pub fn media_item_to_dto_for_list(
         genres: item.genres.clone(),
         genre_items: genre_items_from_names(&item.genres),
         provider_ids: provider_ids_to_map(&item.provider_ids),
-        external_urls: Vec::new(),
+        // PB35-3：list DTO 也带回 ExternalUrls（IMDb / TMDb / TVDb 跳转链接）。
+        external_urls: external_urls_from_provider_map(
+            &provider_ids_to_map(&item.provider_ids),
+            &item.item_type,
+        ),
         production_locations: item.production_locations.clone(),
         size: None,
         file_name: None,
@@ -9269,11 +9492,11 @@ pub fn media_item_to_dto_for_list(
         official_rating: item.official_rating.clone(),
         community_rating: item.community_rating,
         critic_rating: item.critic_rating,
-        taglines: Vec::new(),
-        remote_trailers: Vec::new(),
+        taglines: item.taglines.clone(),
+        remote_trailers: remote_trailers_from_urls(&item.remote_trailers),
         people: Vec::new(),
         studios: name_long_id_items_from_names(&item.studios),
-        tag_items: Vec::new(),
+        tag_items: name_long_id_items_from_names(&item.tags),
         local_trailer_count: 0,
         display_preferences_id: None,
         playlist_item_id: None,
@@ -9328,8 +9551,8 @@ pub fn media_item_to_dto_for_list(
         media_streams: Vec::new(),
         part_count: if is_folder { 0 } else { 1 },
         chapters: Vec::new(),
-        locked_fields: Vec::new(),
-        lock_data: false,
+        locked_fields: item.locked_fields.clone(),
+        lock_data: item.lock_data,
         special_feature_count: Some(0),
         child_count,
         primary_image_aspect_ratio,
@@ -9677,7 +9900,7 @@ async fn media_item_to_dto_inner(
         official_rating: item.official_rating.clone(),
         community_rating: item.community_rating,
         critic_rating: item.critic_rating,
-        taglines: Vec::new(),
+        taglines: item.taglines.clone(),
         remote_trailers: remote_trailers_from_urls(&item.remote_trailers),
         people,
         studios: name_long_id_items_from_names(&item.studios),
@@ -9732,8 +9955,8 @@ async fn media_item_to_dto_inner(
         media_streams,
         part_count: if is_folder { 0 } else { 1 },
         chapters,
-        locked_fields: Vec::new(),
-        lock_data: false,
+        locked_fields: item.locked_fields.clone(),
+        lock_data: item.lock_data,
         special_feature_count: Some(0),
         child_count,
         primary_image_aspect_ratio,
@@ -10374,7 +10597,7 @@ async fn version_group_items_for_item(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes, series_id
+                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
             FROM media_items
             WHERE item_type = 'Episode'
               AND media_type = $1
@@ -10431,7 +10654,7 @@ async fn version_group_items_for_item(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes, series_id
+                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
             FROM media_items
             WHERE item_type = $1
               AND media_type = $2
@@ -11605,6 +11828,14 @@ pub async fn update_media_item_series_metadata(
                 ELSE production_locations
             END,
             provider_ids = provider_ids || $15::jsonb,
+            taglines = CASE
+                WHEN $16::text IS NOT NULL AND length(btrim($16::text)) > 0 THEN ARRAY[$16::text]
+                ELSE taglines
+            END,
+            tags = CASE
+                WHEN cardinality($17::text[]) > 0 THEN $17
+                ELSE tags
+            END,
             date_modified = now()
         WHERE id = $1
         "#,
@@ -11624,6 +11855,8 @@ pub async fn update_media_item_series_metadata(
     .bind(&metadata.studios)
     .bind(&metadata.production_locations)
     .bind(provider_ids)
+    .bind(metadata.tagline.as_deref())
+    .bind(&metadata.tags)
     .execute(pool)
     .await?;
 
@@ -11679,6 +11912,14 @@ pub async fn update_media_item_movie_metadata(
                 WHEN cardinality($17::text[]) > 0 THEN $17
                 ELSE remote_trailers
             END,
+            taglines = CASE
+                WHEN $19::text IS NOT NULL AND length(btrim($19::text)) > 0 THEN ARRAY[$19::text]
+                ELSE taglines
+            END,
+            tags = CASE
+                WHEN cardinality($20::text[]) > 0 THEN $20
+                ELSE tags
+            END,
             date_modified = now()
         WHERE id = $1
         "#,
@@ -11701,6 +11942,8 @@ pub async fn update_media_item_movie_metadata(
     .bind(metadata.backdrop_image_url.as_deref())
     .bind(&metadata.remote_trailers)
     .bind(parental_value)
+    .bind(metadata.tagline.as_deref())
+    .bind(&metadata.tags)
     .execute(pool)
     .await?;
 
@@ -12555,7 +12798,7 @@ pub async fn find_similar_items(
                production_locations, width, height, bit_rate, video_codec,
                audio_codec, image_primary_path, backdrop_path, logo_path,
                thumb_path, art_path, banner_path, disc_path, backdrop_paths,
-               remote_trailers, date_created, date_modified, image_blur_hashes, series_id, size
+               remote_trailers, date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data, size
         FROM media_items
         WHERE id != $1 AND item_type = $2
         {lib_filter}

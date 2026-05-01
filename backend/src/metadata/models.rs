@@ -23,6 +23,12 @@ pub struct ExternalSeriesMetadata {
     pub production_locations: Vec<String>,
     pub provider_ids: HashMap<String, String>,
     pub homepage_url: Option<String>,
+    /// PB35-5 (P3-3)：TMDB tagline（"标语"）。
+    #[serde(default)]
+    pub tagline: Option<String>,
+    /// PB35-5 (P3-3)：TMDB keywords → 落到 media_items.tags 列。
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub metadata: Value,
 }
 
@@ -46,6 +52,12 @@ pub struct ExternalMovieMetadata {
     pub poster_image_url: Option<String>,
     pub backdrop_image_url: Option<String>,
     pub remote_trailers: Vec<String>,
+    /// PB35-5 (P3-3)：TMDB tagline（"标语"）。
+    #[serde(default)]
+    pub tagline: Option<String>,
+    /// PB35-5 (P3-3)：TMDB keywords → 落到 media_items.tags 列。
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub metadata: Value,
     #[serde(default)]
     pub collection_info: Option<MovieCollectionInfo>,

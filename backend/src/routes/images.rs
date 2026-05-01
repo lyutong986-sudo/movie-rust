@@ -2019,6 +2019,17 @@ async fn serve_remote_image(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
+    // PB35-4 (P2-2)：透传上游 ETag / Last-Modified 给浏览器，让 If-None-Match 重命中。
+    let upstream_etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let upstream_last_modified = response
+        .headers()
+        .get(header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
 
     let body_bytes = response
         .bytes()
@@ -2032,6 +2043,28 @@ async fn serve_remote_image(
             None => (body_bytes.to_vec(), declared_content_type),
         };
 
+    // PB35-4 (P2-2)：基于内容生成 ETag（上游没给时本地补一份）。
+    let computed_etag = upstream_etag.clone().unwrap_or_else(|| {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        final_bytes.hash(&mut hasher);
+        image_query.etag_suffix().hash(&mut hasher);
+        format!("\"{:x}\"", hasher.finish())
+    });
+    if let Some(if_none_match) = request.headers().get(header::IF_NONE_MATCH) {
+        if let Ok(val) = if_none_match.to_str() {
+            if val == computed_etag || val == format!("W/{computed_etag}") || val == "*" {
+                return Ok(Response::builder()
+                    .status(StatusCode::NOT_MODIFIED)
+                    .header(header::ETAG, &computed_etag)
+                    .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
+                    .body(Body::empty())
+                    .unwrap());
+            }
+        }
+    }
+
     let is_head = request.method() == Method::HEAD;
     let final_len = final_bytes.len();
     let body = if is_head {
@@ -2040,11 +2073,17 @@ async fn serve_remote_image(
         Body::from(final_bytes)
     };
 
-    Ok(Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
-        .header(header::CACHE_CONTROL, "public, max-age=86400")
-        .header(header::CONTENT_LENGTH, final_len)
+        .header(header::ETAG, &computed_etag)
+        // PB35-4 (P2-2)：远端图片虽不可控，但通常 tag 已包含 hash → 给一周强缓存。
+        .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
+        .header(header::CONTENT_LENGTH, final_len);
+    if let Some(lm) = upstream_last_modified.as_deref() {
+        builder = builder.header(header::LAST_MODIFIED, lm);
+    }
+    builder
         .body(body)
-        .map_err(|e| AppError::Internal(format!("构建图片响应失败: {e}")))?)
+        .map_err(|e| AppError::Internal(format!("构建图片响应失败: {e}")))
 }

@@ -2057,8 +2057,28 @@ struct UpdateItemBody {
     genre_items: Option<Vec<Value>>,
     tag_items: Option<Vec<Value>>,
     provider_ids: Option<Value>,
-    #[serde(alias = "LockedFields")]
-    _locked_fields: Option<Vec<String>>,
+    // PB32-1：Emby 客户端把单条 Tagline 放在 `Taglines: ["..."]`。之前直接丢弃。
+    taglines: Option<Vec<String>>,
+    // PB32-1：字段级锁定（如 `["Name","Cast","Genres"]`）。前端勾掉小锁后即来一次 Save。
+    locked_fields: Option<Vec<String>>,
+    // PB32-1：整体锁定开关。Emby 标准字段名 `LockData` —— 用户在右键菜单"锁定项目"时切这一项。
+    lock_data: Option<bool>,
+    // PB32-2：Emby 客户端「编辑演职员」一并 POST 整段 People[]。
+    people: Option<Vec<UpdateItemPerson>>,
+}
+
+/// PB32-2：客户端「编辑演职员」入参。Emby BaseItemDto.People 子结构。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct UpdateItemPerson {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default, rename = "Type")]
+    pub person_type: Option<String>,
+    #[serde(default)]
+    pub provider_ids: Option<Value>,
 }
 
 fn coerce_name_list(
@@ -2129,56 +2149,197 @@ async fn update_item(
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
     ensure_media_item_exists(&state, item_id).await?;
 
-    let provider_ids_value = body.provider_ids.as_ref().and_then(|v| {
-        if let Some(obj) = v.as_object() {
-            // 过滤掉空值，保留 string / number 转字符串。
-            let mut cleaned = serde_json::Map::new();
-            for (k, v) in obj {
-                let as_str = v
-                    .as_str()
-                    .map(ToOwned::to_owned)
-                    .or_else(|| v.as_i64().map(|id| id.to_string()))
-                    .or_else(|| v.as_f64().map(|id| id.to_string()));
-                if let Some(s) = as_str {
+    // PB35-1：解析 ProviderIds —— 非空值进 cleaned（用 `||` 合并）；
+    // 空字符串值进 keys_to_remove（用 `- text[]` 删除）。这样客户端通过把
+    // `Tmdb: ""` 提交可以语义化删除掉某个外部 ID，而不是被默默丢弃。
+    let mut provider_ids_value: Option<Value> = None;
+    let mut provider_ids_to_remove_vec: Vec<String> = Vec::new();
+    if let Some(Value::Object(obj)) = body.provider_ids.as_ref() {
+        let mut cleaned = serde_json::Map::new();
+        for (k, v) in obj {
+            let as_str = v
+                .as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| v.as_i64().map(|id| id.to_string()))
+                .or_else(|| v.as_f64().map(|id| id.to_string()));
+            match as_str {
+                Some(s) => {
                     let trimmed = s.trim().to_string();
-                    if !trimmed.is_empty() {
+                    if trimmed.is_empty() {
+                        provider_ids_to_remove_vec.push(k.clone());
+                    } else {
                         cleaned.insert(k.clone(), Value::String(trimmed));
                     }
                 }
+                None => {
+                    // null 在 jsonb 里也视作「明确清除」。
+                    if v.is_null() {
+                        provider_ids_to_remove_vec.push(k.clone());
+                    }
+                }
             }
-            if cleaned.is_empty() {
-                None
-            } else {
-                Some(Value::Object(cleaned))
-            }
-        } else {
-            None
         }
-    });
+        if !cleaned.is_empty() {
+            provider_ids_value = Some(Value::Object(cleaned));
+        }
+    }
+    let provider_ids_to_remove = if provider_ids_to_remove_vec.is_empty() {
+        None
+    } else {
+        Some(provider_ids_to_remove_vec)
+    };
+
+    // PB32-1：locked_fields 中包含 "Name" / "Overview" / "Cast" 等 Emby 字段名时，
+    // 编辑面板上对应字段不会被覆盖（Emby 行为：勾选小锁后再 Save，本字段保持原值）。
+    let locked_set: std::collections::HashSet<String> = body
+        .locked_fields
+        .as_ref()
+        .map(|list| {
+            list.iter()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let is_locked = |field: &str| -> bool { locked_set.contains(&field.to_ascii_lowercase()) };
 
     let updates = repository::MediaItemEditableFields {
-        name: body
-            .name
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-        original_title: body.original_title,
-        sort_name: body.sort_name,
-        overview: body.overview,
-        community_rating: body.community_rating,
-        critic_rating: body.critic_rating,
-        official_rating: body.official_rating,
-        production_year: body.production_year,
-        premiere_date: body.premiere_date.as_deref().and_then(parse_metadata_date),
-        end_date: body.end_date.as_deref().and_then(parse_metadata_date),
-        status: body.status,
-        genres: coerce_name_list(&body.genre_items, &body.genres),
-        tags: coerce_name_list(&body.tag_items, &body.tags),
-        studios: coerce_name_list(&body.studios, &None),
-        production_locations: body.production_locations,
+        name: if is_locked("Name") {
+            None
+        } else {
+            body.name
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        },
+        original_title: if is_locked("OriginalTitle") {
+            None
+        } else {
+            body.original_title
+        },
+        sort_name: if is_locked("SortName") {
+            None
+        } else {
+            body.sort_name
+        },
+        overview: if is_locked("Overview") {
+            None
+        } else {
+            body.overview
+        },
+        community_rating: if is_locked("CommunityRating") {
+            None
+        } else {
+            body.community_rating
+        },
+        critic_rating: if is_locked("CriticRating") {
+            None
+        } else {
+            body.critic_rating
+        },
+        official_rating: if is_locked("OfficialRating") {
+            None
+        } else {
+            body.official_rating
+        },
+        production_year: if is_locked("ProductionYear") {
+            None
+        } else {
+            body.production_year
+        },
+        premiere_date: if is_locked("PremiereDate") {
+            None
+        } else {
+            body.premiere_date.as_deref().and_then(parse_metadata_date)
+        },
+        end_date: if is_locked("EndDate") {
+            None
+        } else {
+            body.end_date.as_deref().and_then(parse_metadata_date)
+        },
+        status: if is_locked("Status") {
+            None
+        } else {
+            body.status
+        },
+        genres: if is_locked("Genres") {
+            None
+        } else {
+            coerce_name_list(&body.genre_items, &body.genres)
+        },
+        tags: if is_locked("Tags") {
+            None
+        } else {
+            coerce_name_list(&body.tag_items, &body.tags)
+        },
+        studios: if is_locked("Studios") {
+            None
+        } else {
+            coerce_name_list(&body.studios, &None)
+        },
+        production_locations: if is_locked("ProductionLocations") {
+            None
+        } else {
+            body.production_locations.clone()
+        },
         provider_ids: provider_ids_value,
+        provider_ids_to_remove,
+        taglines: if is_locked("Taglines") {
+            None
+        } else {
+            body.taglines.clone()
+        },
+        // PB32-1：直接把客户端提交的 LockedFields[] 写入 DB，下次拉取详情时会以 BaseItemDto.LockedFields 回传。
+        locked_fields: body.locked_fields.clone(),
+        lock_data: body.lock_data,
     };
 
     repository::update_media_item_editable_fields(&state.pool, item_id, &updates).await?;
+
+    // PB32-2：客户端在「编辑演职员」面板里整段重写 People[]：先清空再批量写入。
+    // 字段锁 `Cast` 命中时整体跳过（标准 Emby 行为：演职员被锁住，连 POST 也不应改）。
+    if !is_locked("Cast") && !is_locked("People") {
+        if let Some(people) = body.people.as_ref() {
+            if let Err(error) =
+                repository::replace_item_people_from_edit(&state.pool, item_id, people).await
+            {
+                tracing::warn!(
+                    item_id = %item_id,
+                    error = %error,
+                    "PB32-2：替换 item people 失败"
+                );
+            }
+        }
+    }
+
+    // PB32-2：编辑保存后异步写 NFO（fire-and-forget）。在远端库（path 是 .strm）也仍会落
+    // 一份 NFO 在 strm 同目录，方便用户切回原 Emby/Jellyfin 时也能识别用户改过的字段。
+    let state_owned = state.clone();
+    tokio::spawn(async move {
+        let item = match repository::get_media_item(&state_owned.pool, item_id).await {
+            Ok(Some(item)) => item,
+            _ => return,
+        };
+        let kind = item.item_type.as_str();
+        let result = if kind.eq_ignore_ascii_case("Movie") {
+            crate::metadata::nfo_writer::write_movie_nfo(&state_owned.pool, &item).await.map(|_| ())
+        } else if kind.eq_ignore_ascii_case("Series") {
+            crate::metadata::nfo_writer::write_series_nfo(&state_owned.pool, &item).await.map(|_| ())
+        } else if kind.eq_ignore_ascii_case("Season") {
+            crate::metadata::nfo_writer::write_season_nfo(&state_owned.pool, &item).await.map(|_| ())
+        } else if kind.eq_ignore_ascii_case("Episode") {
+            crate::metadata::nfo_writer::write_episode_nfo(&state_owned.pool, &item).await.map(|_| ())
+        } else {
+            return;
+        };
+        if let Err(error) = result {
+            tracing::debug!(
+                item_id = %item_id,
+                kind = %kind,
+                error = %error,
+                "PB32-2：编辑保存后 NFO 写入失败（条目可能为远端 STRM，目录不可写）"
+            );
+        }
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -3888,6 +4049,17 @@ pub(crate) async fn do_refresh_item_metadata_with(
         return Err(AppError::NotFound("媒体条目不存在".to_string()));
     };
 
+    // PB32-1：lock_data=true 表示用户已手动确认元数据，整体跳过 TMDB 刷新（含图片/人员）。
+    // Emby 标准行为：右键「锁定元数据」后，定时刷新与按需刷新都不再覆盖任何字段。
+    if item.lock_data {
+        tracing::debug!(
+            item_id = %item.id,
+            name = %item.name,
+            "PB32-1：item.lock_data=true，跳过元数据刷新（用户已锁定）"
+        );
+        return Ok(());
+    }
+
     let kind = item.item_type.as_str();
     let is_movie = kind.eq_ignore_ascii_case("Movie");
     let is_series = kind.eq_ignore_ascii_case("Series");
@@ -3962,16 +4134,23 @@ pub(crate) async fn do_refresh_item_metadata_with(
             } else {
                 None
             };
+            // PB33-1：之前直接 `results.first()` 取第一个，遇到「常见词」标题时
+            // （例如 "Avatar"、"Friends"）容易匹配到无关条目。改成对 top 5 hits
+            // 用「年份匹配 + 名称相似度 + popularity」三因子打分：
+            //   year_score: 完全相同 +1.0；±1 年 +0.5；±3 年 +0.2；其它 0
+            //   name_score: 把英文/中文标题 normalize 后做 Jaccard token 相似度（0..1）
+            //   popularity_score: log10(1+popularity)/3 拉到 ~0..1.5
+            // 总分 = year*3 + name*4 + popularity*1，相同时取年份更接近的。
             let found_id = search_result
                 .as_ref()
-                .and_then(|results| results.first())
+                .and_then(|results| pick_best_search_match(results, &tmdb_lookup_item))
                 .map(|hit| hit.external_id.clone());
             match found_id {
                 Some(id) => {
                     tracing::info!(
                         item_id = %tmdb_lookup_item.id,
                         tmdb_id = %id,
-                        "按名称搜索找到 TMDb ID"
+                        "PB33-1：按名称+年份+popularity 打分匹配到 TMDb ID"
                     );
                     id
                 }
@@ -4146,11 +4325,23 @@ async fn download_remote_images_for_item(
     force: bool,
 ) -> Result<(), AppError> {
     let kind = item.item_type.as_str();
+    // PB33-2：Movie/Series 7 类图对齐 Emby 标准（Primary/Backdrop/Logo/Thumb/Banner/Art/Disc）。
+    // 之前仅下 3 类，TMDB 实际不返回 Banner/Art/Disc 的话 hits 过滤后自然为空，多算一遍开销极小。
     let (media_type, season_no, episode_no, types_to_download): (&str, Option<i32>, Option<i32>, &[&str]) =
         if kind.eq_ignore_ascii_case("Series") {
-            ("tv", None, None, &["Primary", "Backdrop", "Logo"])
+            (
+                "tv",
+                None,
+                None,
+                &["Primary", "Backdrop", "Logo", "Thumb", "Banner", "Art", "Disc"],
+            )
         } else if kind.eq_ignore_ascii_case("Movie") {
-            ("movie", None, None, &["Primary", "Backdrop", "Logo"])
+            (
+                "movie",
+                None,
+                None,
+                &["Primary", "Backdrop", "Logo", "Thumb", "Banner", "Art", "Disc"],
+            )
         } else if kind.eq_ignore_ascii_case("Season") {
             ("season", item.index_number, None, &["Primary"])
         } else if kind.eq_ignore_ascii_case("Episode") {
@@ -4185,7 +4376,54 @@ async fn download_remote_images_for_item(
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
 
+    // PB33-2：Backdrop 多张下载——Emby 详情页支持 backdrop carousel（多张轮播），
+    // 通过 backdrop_index 写到 backdrop_paths[N]。最多取 popularity 排序后的前 4 张。
+    const MAX_BACKDROPS: usize = 4;
     for &img_type in types_to_download {
+        if img_type.eq_ignore_ascii_case("Backdrop") {
+            // 取 vote_count 倒序前 N 张（避免 max_by 只取 1 张）
+            let mut backdrops: Vec<&crate::metadata::provider::ExternalRemoteImage> = remote_images
+                .iter()
+                .filter(|img| img.image_type.eq_ignore_ascii_case("Backdrop"))
+                .collect();
+            backdrops.sort_by(|a, b| {
+                b.vote_count
+                    .unwrap_or(0)
+                    .cmp(&a.vote_count.unwrap_or(0))
+                    .then_with(|| {
+                        b.community_rating
+                            .unwrap_or(0.0)
+                            .partial_cmp(&a.community_rating.unwrap_or(0.0))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+            for (idx, img) in backdrops.iter().take(MAX_BACKDROPS).enumerate() {
+                // index=0 既写 backdrop_path 也写 backdrop_paths[0]
+                let backdrop_index = if idx == 0 { None } else { Some(idx as i32) };
+                if !force && backdrop_index.is_none() && local_image_exists(&item_fresh, "Backdrop") {
+                    continue;
+                }
+                if let Err(e) = download_and_save_image(
+                    state,
+                    &item_fresh,
+                    library_options,
+                    "Backdrop",
+                    &img.url,
+                    backdrop_index,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        item_id = %item.id,
+                        image_type = "Backdrop",
+                        idx,
+                        ?e,
+                        "PB33-2：刷新元数据时下载 backdrop[i] 失败"
+                    );
+                }
+            }
+            continue;
+        }
         if !force && local_image_exists(&item_fresh, img_type) {
             continue;
         }
@@ -4650,6 +4888,134 @@ async fn resolve_tmdb_id_with_fallback(
     }
 
     new_id
+}
+
+/// PB33-1：对 TMDB 搜索结果按 「年份匹配 + 名称相似度 + popularity」打分挑最佳。
+///
+/// 算法（贴近 Sonarr/Emby 经验值，纯计算无 IO）：
+/// - **year_score**：与 `item.production_year` 差 0/1/2/3 年时分别得 1.0/0.7/0.3/0.1，
+///   `item.production_year=None` 时记 0.5（中性）。
+/// - **name_score**：把 hit.name / hit.original_name 与 item.name 做 normalize（去空格、
+///   去标点、转小写、去年份后缀），再做 token Jaccard，取两者最大值。完全包含/被包含 +0.2 加成。
+/// - **popularity_score**：`log10(1+popularity).clamp(0,3.0) / 3.0` —— 即 popularity≥1000
+///   得满分 1.0，popularity≈10 得 ~0.33。
+///
+/// 综合：`name*4 + year*3 + popularity*1`，平局时优先 year_score 高的。
+fn pick_best_search_match<'a>(
+    results: &'a [crate::metadata::provider::ExternalMediaSearchResult],
+    item: &crate::models::DbMediaItem,
+) -> Option<&'a crate::metadata::provider::ExternalMediaSearchResult> {
+    if results.is_empty() {
+        return None;
+    }
+    let item_name_normalized = normalize_search_token(&item.name);
+    let item_tokens: std::collections::HashSet<String> = item_name_normalized
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let item_year = item.production_year;
+    let mut scored: Vec<(f64, f64, &crate::metadata::provider::ExternalMediaSearchResult)> =
+        Vec::with_capacity(results.len().min(5));
+    for hit in results.iter().take(5) {
+        let year_score = match (item_year, hit.production_year) {
+            (Some(a), Some(b)) => {
+                let diff = (a - b).abs();
+                if diff == 0 { 1.0 }
+                else if diff == 1 { 0.7 }
+                else if diff == 2 { 0.3 }
+                else if diff == 3 { 0.1 }
+                else { 0.0 }
+            }
+            _ => 0.5,
+        };
+
+        let names_to_score = [hit.name.as_str(), hit.original_name.as_deref().unwrap_or("")];
+        let name_score = names_to_score
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|name| {
+                let normalized = normalize_search_token(name);
+                let hit_tokens: std::collections::HashSet<String> = normalized
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                let intersection: usize = hit_tokens.intersection(&item_tokens).count();
+                let union: usize = hit_tokens.union(&item_tokens).count().max(1);
+                let mut score = intersection as f64 / union as f64;
+                if !item_name_normalized.is_empty()
+                    && (normalized.contains(&item_name_normalized)
+                        || item_name_normalized.contains(&normalized))
+                {
+                    score = (score + 0.2).min(1.0);
+                }
+                score
+            })
+            .fold(0.0_f64, f64::max);
+
+        let popularity = hit.popularity.unwrap_or(0.0).max(0.0);
+        let popularity_score = ((1.0 + popularity).log10() / 3.0).clamp(0.0, 1.0);
+
+        let total = name_score * 4.0 + year_score * 3.0 + popularity_score * 1.0;
+        scored.push((total, year_score, hit));
+    }
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    let (best_total, _, best_hit) = scored.first()?;
+    // 全部得分太低时（< 1.5 ≈ 名称相似度~0 + 年份~0），保守返回第一个原始结果而不是 None，
+    // 与之前 `results.first()` 行为兼容。
+    if *best_total < 1.5 {
+        return results.first();
+    }
+    Some(*best_hit)
+}
+
+/// PB33-1：把搜索词（标题）normalize 成空格分隔的 token 序列：
+/// - 转 ASCII lowercase
+/// - 去掉常见标点 / 括号 / 引号
+/// - 去掉尾部年份 `(YYYY)` / `[YYYY]`
+fn normalize_search_token(input: &str) -> String {
+    let mut s = input.trim().to_lowercase();
+    // 去尾部年份后缀
+    if let Some(stripped) = strip_trailing_year(&s) {
+        s = stripped;
+    }
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            out.push(ch);
+        } else {
+            out.push(' ');
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_trailing_year(s: &str) -> Option<String> {
+    let trimmed = s.trim_end();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() < 6 {
+        return None;
+    }
+    let len = chars.len();
+    let last = chars[len - 1];
+    let opens = ['(', '['];
+    let closes = [')', ']'];
+    let close_idx = if closes.contains(&last) { len - 1 } else { return None };
+    if close_idx < 5 {
+        return None;
+    }
+    let year_chars = &chars[close_idx - 4..close_idx];
+    if !year_chars.iter().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let open_idx = close_idx - 5;
+    if !opens.contains(&chars[open_idx]) {
+        return None;
+    }
+    Some(chars[..open_idx].iter().collect::<String>().trim().to_string())
 }
 
 fn tmdb_id_from_provider_ids(value: &serde_json::Value) -> Option<String> {
@@ -6901,6 +7267,7 @@ mod tests {
                 "Tmdb".to_string(),
                 "603".to_string(),
             )]),
+            popularity: Some(99.0),
         };
 
         let value = search_result_to_emby_value(&hit, "TheMovieDb");

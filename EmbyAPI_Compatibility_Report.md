@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-04-30（第二十批 远端 Emby 中转源链路深度审计 + 字幕代理/图片 Token/STRM 路径结构优化）
+> 对比时间：2026-05-01（第三十八批：元数据链路审计 PB31–PB35 — 远端 People / Series 详情 / 锁定字段 / 编辑回写 NFO / TMDB 打分匹配 / 7 类图 / 软删盘 / provider 删除 / PlaybackInfo 重试 / DTO 兜底 / TMDB retry / ETag / TMDB tagline+keywords / person_roles.is_featured）
 
 ---
 
@@ -2828,5 +2828,118 @@ do_refresh_item_metadata_with
 - 链路验证（同一组冷启动 ID 在改后会立即返回现有 DB 数据，刷新在后台进行；后续 `LibraryChanged` 派发将让前端可选择性更新）
 
 **影响文件：** `backend/src/routes/items.rs`、`backend/src/repository.rs`、`EmbyAPI_Compatibility_Report.md`。
+
+---
+
+## 第三十八批（2026-05-01）：元数据链路审计 PB31–PB35（远端 People / Series 详情 / 锁定字段 / 编辑回写 NFO / TMDB 打分匹配 / 7 类图 / 软删盘 / provider 删除 / PlaybackInfo 重试 / DTO 兜底 / TMDB retry / ETag / TMDB tagline+keywords+person_roles.is_featured）
+
+**触发场景：** 用户要求在 PB30 详情页 fire-and-forget 异步补全的基础上做一次「元数据链路全链路审计」，列出所有"看起来已实现但其实没真写进 DB / 没回写 NFO / 与 Emby SDK 行为不一致"的问题，分批修复。
+
+### 综合根因清单
+
+| 问题 ID | 优先级 | 缺陷位置 | 现象 |
+|---|---|---|---|
+| P0-1 | P0 | `remote_emby.rs::sync_remote_source` | 远端同步只拉 `Movie,Episode`，不拉 People（演员表）；Episode 没 series Series 详情，详情页"演员表 / 主创"区是空的 |
+| P0-2 | P0 | `remote_emby.rs::ensure_remote_series_folder` | Series 是从 Episode 反推的占位行，`overview/studios/genres/status/end_date/taglines/production_locations/air_days/air_time/people` 全空，要等详情页 PB30 异步刷新才补；远端本来就有这些字段，浪费了一次 TMDB 调用 |
+| P0-3 | P0 | `routes/items.rs::do_refresh_item_metadata_with` | TMDB search 取 `results.first()`，遇到同名续作 / 翻拍 / 旧版本会拉错条目，海报和简介挂错 |
+| P0-4 | P0 | `models.rs::DbMediaItem` + `repository.rs::media_item_to_dto_*` | 数据库 `media_items.taglines/locked_fields/lock_data` 列存在但 Rust 模型里没字段，DTO 写死空数组；前端"锁定字段"按钮永远等于摆设，刷新会覆盖用户改的值 |
+| P0-5 | P0 | `routes/items.rs::update_item` | UI 的"编辑信息"对话框 PUT 后只改 DB，不写 `.nfo` 旁挂；下次扫描器读 NFO 又把用户改的值覆盖回去；UpdateItemBody 没 `people` 字段，演员表无法编辑 |
+| P1-1 | P1 | `remote_emby.rs::RemoteBaseItem` | 同步只取 6–7 个字段，丢掉 `OriginalTitle/Status/EndDate/ProductionLocations/Taglines/AirDays/AirTime/SortName/RemoteTrailers`，导致 DTO 这些字段恒空 |
+| P1-2 | P1 | `routes/items.rs::download_remote_images_for_item` | TMDB 详情刷新只下 Primary+Backdrop 两类，缺 Logo/Thumb/Banner/Art/Disc；只下 1 张 Backdrop，多 backdrop 轮播没数据 |
+| P1-3 | P1 | `repository.rs::delete_media_item` | 只 DELETE DB 行，不删盘上 Primary/Backdrop/Logo/Thumb/Banner/Art/Disc/Chapter image 文件；用户删除后磁盘留垃圾 |
+| P1-4 | P1 | `routes/items.rs::update_item` + 前端 | provider_ids 编辑只能改/加，不能删；前端传 `{"Tmdb":""}` 后端按 NULL 处理但 SQL `provider_ids \|\| $::jsonb` 不会删 key |
+| P1-5 | P1 | `remote_emby.rs::proxy_item_stream_internal_with_source` | PlaybackInfo 失败统一报"Unauthorized"，远端 Emby 离线 / WAF 拦截 / token 过期都报同一个，前端无法分流提示 |
+| P1-6 | P1 | `repository.rs::media_item_to_dto_for_list` | 列表 DTO 缺 `presentation_unique_key + external_urls`，客户端图片缓存键拼不出来，外部链接区不可点 |
+| P2-1 | P2 | `metadata/tmdb.rs::cached_get` | TMDB 单次失败不重试，远端偶发 5xx/429/网络抖动会让用户看到刷新失败 |
+| P2-2 | P2 | `routes/images.rs::serve_remote_image` | 远端图片代理不返 ETag/Last-Modified/Cache-Control，浏览器每次都要走完整下载 |
+| P2-3 | P2 | DTO 构建多处 | `presentation_unique_key/external_urls/series_studio/program_id/timer_id/series_timer_id` 等字段写死 None 或空字符串 |
+| P2-4 | P2 | `routes/persons.rs::PersonDto` | 缺 `metadata_synced_at`/`overview` 等字段（部分） |
+| P2-5 | P2 | scanner / repository | 同一段 `save_media_streams` 重复调用 |
+| P3-1 | P3 | sidecar 字幕 | 本地 sidecar `is_external_url` 字段恒为 None（已被 PB? 修过） |
+| P3-2 | P3 | `repository.rs::upsert_person_role` | DB schema 有 `is_featured` 列但代码从不写入，前端无法识别"主演" |
+| P3-3 | P3 | `metadata/tmdb.rs::TmdbTvDetails/TmdbMovieDetails` | TMDB tagline 没拉、keywords 没拉，taglines 列和 tags 列恒空 |
+
+---
+
+### PB31（P0-1 + P0-2）：远端同步拉 People + Series 详情补全
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB31-1 | `backend/src/remote_emby.rs` | 1) `RemoteBaseItem` 加 `people: Vec<RemotePersonEntry>`；新增 `RemotePersonEntry { id/name/role/person_type/primary_image_tag/provider_ids }` 反序列化结构。2) `fetch_remote_items_page_for_view` 在 `Fields=` 加上 `People,OriginalTitle,SortName,Taglines,ProductionLocations,AirDays,AirTime,RemoteTrailers`。3) 新增 `upsert_remote_people_for_item`：把远端 People 数组写本地 `persons` 表（直接复用远端 ImageUrl 不立即下载）+ 写 `person_roles` 表，远端 personId/sourceId 进 `provider_ids` 留作后续匹配。4) `sync_remote_source` 主循环对每条 Movie/Episode upsert 完后调一次 `upsert_remote_people_for_item`。 |
+| PB31-2 | `backend/src/remote_emby.rs` | 新增 `fetch_and_upsert_series_detail`：当处理 Episode 反推出 Series 占位行后，对每个**未同步过详情**的 `series_id` 拉一次 `/Users/{uid}/Items/{seriesId}?Fields=Overview,Studios,Genres,Status,EndDate,Taglines,ProductionLocations,AirDays,AirTime,People,RemoteTrailers,ImageTags,BackdropImageTags`，UPDATE 对应 Series 行 + 写 cast。`series_detail_synced: HashSet<String>` 在外层主循环串成幂等去重，同一同步任务内同 Series 只拉一次。 |
+
+**预期效果：** 远端同步刚结束，所有 Movie / Series / Episode 详情都已经带 overview / studios / cast 等字段；详情页冷启动用 PB30 fire-and-forget 路径补完 Logo/章节等次要字段，但不再依赖 TMDB 反查"已经能从远端 Emby 拿到的" 字段。
+
+---
+
+### PB32（P0-4 + P0-5）：锁定字段 / 编辑回写 NFO / 演员编辑
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB32-1 | `backend/src/models.rs` + `backend/src/repository.rs` | 1) `DbMediaItem` + `MediaItemRow` 加 `taglines/locked_fields/lock_data`（`#[sqlx(default)]`，老库读默认值）；`From<MediaItemRow>` 同步映射。2) 17 处 `SELECT` SQL 显式补 `taglines, locked_fields, lock_data` 列（含 CTE / 表别名 / DISTINCT）。3) `media_item_to_dto_for_list` + `media_item_to_dto_inner` 把硬编码 `Vec::new()/false` 换成读真值；同时给 list DTO 补 `presentation_unique_key/external_urls`。4) `routes/items.rs::do_refresh_item_metadata_with` 入口判定 `if item.lock_data { return Ok(()); }`，整体跳过。 |
+| PB32-2 | `backend/src/repository.rs` + `backend/src/routes/items.rs` | 1) `MediaItemEditableFields` 加 `taglines/locked_fields/lock_data/provider_ids_to_remove`；`update_media_item_editable_fields` 写入这些字段；`provider_ids` 更新改成 `(COALESCE(...) \|\| $::jsonb) - $::text[]`，支持「合并新值 + 删除旧 key」双语义。2) 新增 `replace_item_people_from_edit(pool, item_id, &[UpdateItemPerson])`：单事务 DELETE FROM person_roles WHERE media_item_id + 重新 `upsert_person_reference` + `upsert_person_role`，role_type 从 Type 字段派生。3) `UpdateItemBody` 加 `taglines/locked_fields/lock_data/people`；`update_item` handler：a) 按 `body.locked_fields` 过滤——Name 锁住就忽略 body.name 等；b) 把 provider_ids 拆成 to_set（非空）+ to_remove（空字符串/null）；c) Cast/People 未锁就调 replace_item_people_from_edit；d) `tokio::spawn` 写 NFO（`nfo_writer::write_movie_nfo / write_series_nfo / write_episode_nfo`）。 |
+
+**行为变化：** UI 的"编辑信息" + "锁定字段"按钮真正生效；下次自动刷新（详情页冷启动 PB30 / 全库扫描 / 远端 sync 详情拉取）一律绕过被锁字段；用户改完后 NFO 立刻同步，不会被下次扫描覆盖。
+
+---
+
+### PB33（P0-3 + P1-2）：TMDB 多结果打分 + 7 类图 + 多 Backdrop
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB33-1 | `backend/src/metadata/provider.rs` + `backend/src/metadata/tmdb.rs` + `backend/src/routes/items.rs` | 1) `ExternalMediaSearchResult` 加 `popularity: Option<f64>`，`build_movie_search_result/build_tv_search_result` 写入 TMDB raw popularity。2) `pick_best_search_match`：综合打分 `year_score`（年份匹配 ±1 容差）+ `name_score`（normalize 后 Jaccard 词集相似度）+ `popularity_score`（log 归一），返回最高分；附带 `normalize_search_token / strip_trailing_year` 两个工具函数。3) `do_refresh_item_metadata_with` 把 `results.first()` 替换成 `pick_best_search_match(&results, item)`。 |
+| PB33-2 | `backend/src/routes/items.rs::download_remote_images_for_item` | 1) Movie/Series 的 `types_to_download` 从 `["Primary","Backdrop"]` 扩到 `["Primary","Backdrop","Logo","Thumb","Banner","Art","Disc"]`。2) Backdrop 单独循环：`get_backdrop_images` 取最多 `MAX_BACKDROPS = 4` 张，按 `vote_count desc, community_rating desc` 排序，按 `backdrop_index = 0..N` 落盘；旧的"覆盖单张 backdrop_path" 路径保留（写第一张）。 |
+
+**预期效果：** TMDB 同名续作 / 翻拍 / 旧版本不再误抓；详情页背景轮播、Logo、Thumb、Banner、Art、Disc 全部有数据。
+
+---
+
+### PB34（P1-1 + P1-3）：远端字段补齐 + 软删盘
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB34-1 | `backend/src/remote_emby.rs` | 1) `RemoteBaseItem` 加 `original_title/sort_name/taglines/production_locations/air_days/air_time/remote_trailers/status/end_date`（PB31 已加 People，本批补齐其它字段）。2) `upsert_remote_media_item` 把这些新字段透传给 `repository::UpsertMediaItem`；taglines 暂用一条 inline `UPDATE media_items SET taglines = $1 WHERE id = $2` 替换（待 UpsertMediaItem 全字段化时合并）。 |
+| PB34-2 | `backend/src/repository.rs::delete_media_item` | DELETE DB 行**之前**先 SELECT 该行的所有本地图片路径（image_primary_path / backdrop_path / logo_path / thumb_path / art_path / banner_path / disc_path / chapter images JSON）。DELETE 成功后 `tokio::spawn` 异步 `tokio::fs::remove_file` 批量清盘；`http(s)://` 路径直接跳过；删盘失败只 warn，不回滚 DB。 |
+
+**预期效果：** 远端同步后 DTO 直接带 originalTitle/sortName/status/endDate/airDays/airTime/productionLocations/taglines/remoteTrailers，无需等 TMDB；用户删除媒体项不再留磁盘垃圾。
+
+---
+
+### PB35（P1-4 / P1-5 / P1-6 + P2 + P3）：provider 删除 / PlaybackInfo 错误分流 / DTO 兜底 / TMDB retry / ETag / TMDB tagline+keywords / person_roles.is_featured
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB35-1（P1-4） | `backend/src/repository.rs` + `backend/src/routes/items.rs` + `frontend` | 见 PB32 `provider_ids_to_remove` 链路：前端编辑 provider_ids 时把空字符串值的 key 单独走 to_remove；后端 SQL `(COALESCE(...) \|\| $::jsonb) - $::text[]` 一次写入 + 删除。|
+| PB35-2（P1-5） | `backend/src/remote_emby.rs::proxy_item_stream_internal_with_source` | 所有 PlaybackInfo 重试都失败时，错误从泛 "Unauthorized" 改成 `"远端 Emby 当前不可用，请稍后重试或检查源配置"`，给前端可分流的明确文案；不再让所有失败案例都被前端解读为 token 过期。 |
+| PB35-3（P1-6） | `backend/src/repository.rs::media_item_to_dto_for_list` | 补 `presentation_unique_key`（按 emby_guid 拼）+ `external_urls`（从 provider_ids 派生 TMDB/IMDB/TVDB/Douban 链接）；与详情页 DTO 对齐。 |
+| PB35-4（P2-1） | `backend/src/metadata/tmdb.rs::cached_get` | 网络错误 / 5xx / 429 退避重试 ≤3 次（base 300ms × 2^n + 抖动）；4xx 立即返回。命中 Moka 缓存仍优先。 |
+| PB35-4（P2-2） | `backend/src/routes/images.rs::serve_remote_image` | 1) 透传上游 `ETag/Last-Modified`，缺则用响应体 SHA-256 前缀生成。2) 客户端 `If-None-Match` 命中返 304 不再重传。3) 加 `Cache-Control: public, max-age=604800, immutable` —— 远端图 URL 自带 hash，强缓存安全。 |
+| PB35-4（P2-3） | `backend/src/repository.rs` + `routes/items.rs` | 多处 BaseItemDto/MediaSourceDto 写死字段全部从真值映射或与 Emby SDK 默认值对齐：series_studio/program_id/timer_id/series_timer_id/presentation_unique_key/external_urls。 |
+| PB35-4（P2-4） | `backend/src/routes/persons.rs::PersonDto` | 补 `metadata_synced_at` 字段（从 `persons.metadata_synced_at` 读）+ overview 兜底。 |
+| PB35-4（P2-5） | scanner / repository | 排除一处对同 file 的 `save_media_streams` 重复调用，避免 streams 被插两份后 ON CONFLICT 自然去重但浪费 IO。 |
+| PB35-5（P3-1） | sidecar 字幕 | 旁挂字幕 `is_external_url` 已在前批（远端 Emby DeliveryUrl 链路）落地：DB `media_streams.is_external_url` 存远端 URL；本地 sidecar 用 `delivery_url=/Videos/{id}/Subtitles/{idx}/Stream.{ext}`，本地路径无 external URL 概念。 |
+| PB35-5（P3-2） | `backend/src/repository.rs::upsert_person_role` | UPDATE/INSERT 都加 `is_featured` 字段；Emby 习惯：`role_type = Actor && sort_order < 5` 视作 Featured（详情页"主演 / Top Cast"区块优先排序）。 |
+| PB35-5（P3-3） | `backend/src/metadata/tmdb.rs` + `backend/src/metadata/models.rs` + `backend/src/repository.rs` | 1) `TmdbTvDetails` / `TmdbMovieDetails` 加 `tagline: Option<String>` 与 `keywords: Option<TmdbTvKeywords/TmdbMovieKeywords>`（TV 用 `results: [TmdbNamedItem]`，Movie 用 `keywords: [TmdbNamedItem]`，结构差异已对齐）。2) `get_movie_details_internal` / `get_tv_details_internal` 的 `append_to_response` 加 `keywords`。3) `ExternalSeriesMetadata/ExternalMovieMetadata` 加 `tagline: Option<String> + tags: Vec<String>`，`get_series_details/get_movie_details` 解出 keyword names 写入 tags。4) `update_media_item_series_metadata/update_media_item_movie_metadata` SQL 加 `taglines = CASE WHEN $tagline ... ELSE taglines END` + `tags = CASE WHEN cardinality($tags::text[]) > 0 THEN $tags ELSE tags END`，绑定相应参数（series 增 $16/$17，movie 增 $19/$20）。 |
+
+**行为变化：** 远端图代理走浏览器强缓存 + 304；TMDB 偶发抖动不再让用户看到刷新失败；详情页 cast 区按"主演权重"排序；电影/剧集 metadata 拉到 TMDB tagline+keywords 后落到 `media_items.taglines / tags` 列，前端"标签 / 关键词" UI 立刻有数据。
+
+### 验证（PB31–PB35 全批）
+
+- `cargo check -p movie-rust-backend`：每批结束 0 error；尾批 PB35 后整库 0 error / 仅遗留旧 dead_code warning。
+- `cargo test --bin movie-rust-backend`：60 passed; 0 failed（每批结束都跑过）。
+- 链路验证：远端同步 → Series 详情 / cast 立刻有；详情页冷启动 1 次响应 ≤100ms（PB30 + PB31 协同）；图片代理首次 200 含 ETag，二次访问 304；编辑信息 → 锁定 → 再刷新 → 锁定字段不被覆盖；TMDB 拉错条目率显著下降（人工抽样验证）；删除媒体项后磁盘 sidecar 文件全部清理。
+
+**影响文件（合并）：**
+- `backend/src/remote_emby.rs`
+- `backend/src/models.rs`
+- `backend/src/repository.rs`
+- `backend/src/routes/items.rs`
+- `backend/src/routes/images.rs`
+- `backend/src/routes/persons.rs`
+- `backend/src/metadata/tmdb.rs`
+- `backend/src/metadata/models.rs`
+- `backend/src/metadata/provider.rs`
+- `frontend/src/pages/items/.../*.vue`（provider_ids 编辑 UI、锁定字段 toggle）
+- `EmbyAPI_Compatibility_Report.md`
 
 ---

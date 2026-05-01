@@ -466,6 +466,48 @@ struct RemoteBaseItem {
     parent_logo_item_id: Option<String>,
     #[serde(default)]
     parent_logo_image_tag: Option<String>,
+    // PB31-1：远端 People 字段（演职员）。Emby 标准结构：每项含 Id/Name/Role/Type/PrimaryImageTag/ProviderIds。
+    // 不再依赖后续 TMDB 异步刷新 — 在远端 sync 阶段直接落 persons / person_roles 两表。
+    #[serde(default)]
+    people: Vec<RemotePersonEntry>,
+    // PB34-1：远端字段映射补齐 — Emby BaseItemDto 直接返回的扩展字段。
+    #[serde(default)]
+    original_title: Option<String>,
+    #[serde(default)]
+    sort_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
+    taglines: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
+    production_locations: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
+    air_days: Vec<String>,
+    #[serde(default)]
+    air_time: Option<String>,
+    #[serde(default)]
+    remote_trailers: Option<Value>,
+}
+
+/// PB31-1：远端 Emby 的 People 子项反序列化。
+///
+/// Emby 返回结构：
+/// ```json
+/// { "Id": "...", "Name": "...", "Role": "...", "Type": "Actor",
+///   "PrimaryImageTag": "...", "ProviderIds": { "Tmdb": "..." } }
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemotePersonEntry {
+    #[serde(default)]
+    id: Option<String>,
+    name: String,
+    #[serde(default, rename = "Role")]
+    role: Option<String>,
+    #[serde(default, rename = "Type")]
+    person_type: Option<String>,
+    #[serde(default)]
+    primary_image_tag: Option<String>,
+    #[serde(default)]
+    provider_ids: Value,
 }
 
 fn deserialize_string_list_lossy<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -1042,6 +1084,8 @@ async fn sync_source_inner(
     // separate 模式不再需要虚拟根目录文件夹（每个 View 已是独立库）
     let mut series_parent_map: HashMap<String, Uuid> = HashMap::new();
     let mut season_parent_map: HashMap<String, Uuid> = HashMap::new();
+    // PB31-2：已成功拉过详情的 series_id 集合，避免每个 episode 都触发一次 Series 详情拉取。
+    let mut series_detail_synced: HashSet<String> = HashSet::new();
     let mut fetched_count = 0u64;
     let mut written_files = 0usize;
     if let Some(handle) = &progress {
@@ -1121,6 +1165,42 @@ async fn sync_source_inner(
                     .await?;
                     series_db_id = Some(series_parent_id);
 
+                    // PB31-2：每个 series_id 在同一同步任务里只跑一次详情拉取，
+                    // 完成后覆盖 series 行的 overview/studios/genres/status/end_date/People。
+                    if let Some(remote_sid) = item
+                        .item
+                        .series_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        if series_detail_synced.insert(remote_sid.to_string()) {
+                            let series_dir = view_strm_workspace.join(sanitize_segment(
+                                remote_series_display_name(&item),
+                            ));
+                            if let Err(error) = fetch_and_upsert_series_detail(
+                                &state.pool,
+                                source,
+                                user_id.as_str(),
+                                remote_sid,
+                                series_parent_id,
+                                item_library_id,
+                                None,
+                                series_dir.as_path(),
+                                series_view_scope,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    source_id = %source.id,
+                                    remote_series_id = %remote_sid,
+                                    error = %error,
+                                    "PB31-2：远端 Series 详情同步失败，忽略继续"
+                                );
+                            }
+                        }
+                    }
+
                     let season_parent_id = ensure_remote_season_folder(
                         &state.pool,
                         source,
@@ -1188,6 +1268,20 @@ async fn sync_source_inner(
                     repository::save_media_streams(&state.pool, upserted, &analysis).await?;
                     repository::update_media_item_metadata(&state.pool, upserted, &analysis)
                         .await?;
+                }
+                // PB31-1：写入演职员（每条 movie/episode 独立 People[]，包含 GuestStar/Director/Writer）。
+                if !item.item.people.is_empty() {
+                    if let Err(error) =
+                        upsert_remote_people_for_item(&state.pool, source, upserted, &item.item.people)
+                            .await
+                    {
+                        tracing::warn!(
+                            source_id = %source.id,
+                            remote_item_id = %item.item.id,
+                            error = %error,
+                            "PB31-1：写入远端 item 的 People 失败"
+                        );
+                    }
                 }
 
                 written_files = written_files.saturating_add(1);
@@ -1929,10 +2023,10 @@ async fn upsert_remote_media_item(
     let backdrop_path = local_backdrop
         .or_else(|| remote_backdrop.as_ref().map(|s| Path::new(s.as_str())))
         .or_else(|| series_fallback_backdrop.as_ref().map(|s| Path::new(s.as_str())));
-    let empty = Vec::<String>::new();
     let empty_backdrops = Vec::<String>::new();
-    let empty_trailers = Vec::<String>::new();
-    repository::upsert_media_item(
+    // PB34-1：把远端 BaseItemDto 的扩展字段透传到本地 DB（之前一律置 None / 空数组）。
+    let trailers = remote_trailers_to_vec(item.item.remote_trailers.as_ref());
+    let inserted_id = repository::upsert_media_item(
         pool,
         repository::UpsertMediaItem {
             library_id,
@@ -1942,7 +2036,7 @@ async fn upsert_remote_media_item(
             media_type: "Video",
             path: path_ref,
             container,
-            original_title: None,
+            original_title: item.item.original_title.as_deref(),
             overview: item.item.overview.as_deref(),
             production_year: item.item.production_year,
             official_rating: item.item.official_rating.as_deref(),
@@ -1950,15 +2044,15 @@ async fn upsert_remote_media_item(
             critic_rating: item.item.critic_rating,
             runtime_ticks,
             premiere_date: parse_remote_premiere_date(item.item.premiere_date.as_deref()),
-            status: None,
-            end_date: None,
-            air_days: &empty,
-            air_time: None,
+            status: item.item.status.as_deref(),
+            end_date: parse_remote_premiere_date(item.item.end_date.as_deref()),
+            air_days: &item.item.air_days,
+            air_time: item.item.air_time.as_deref(),
             provider_ids,
             genres: &item.item.genres,
             studios: &item.item.studios,
             tags: &item.item.tags,
-            production_locations: &empty,
+            production_locations: &item.item.production_locations,
             image_primary_path,
             backdrop_path,
             logo_path: local_logo,
@@ -1967,7 +2061,7 @@ async fn upsert_remote_media_item(
             banner_path: None,
             disc_path: None,
             backdrop_paths: &empty_backdrops,
-            remote_trailers: &empty_trailers,
+            remote_trailers: &trailers,
             series_name: item.item.series_name.as_deref(),
             season_name: item.item.season_name.as_deref(),
             index_number: item.item.index_number,
@@ -1981,7 +2075,291 @@ async fn upsert_remote_media_item(
         },
     )
     .await
-    .map(|(id, _was_new)| id)
+    .map(|(id, _was_new)| id)?;
+    // PB34-1：taglines 通过 inline UPDATE 写入（DbMediaItem 字段绑定将在 PB32 一起补）。
+    if !item.item.taglines.is_empty() {
+        let _ = sqlx::query("UPDATE media_items SET taglines = $1, updated_at = now() WHERE id = $2")
+            .bind(&item.item.taglines)
+            .bind(inserted_id)
+            .execute(pool)
+            .await;
+    }
+    Ok(inserted_id)
+}
+
+/// PB31-1：把远端 Emby 返回的 `People[]` 同步落本地 `persons` / `person_roles` 两表。
+///
+/// 设计要点：
+/// - 头像路径直接落 **远端 URL** 字符串（`{server}/Items/{personId}/Images/Primary?tag=...&...`）；
+///   `serve_image / resolve_person_image_path` 已经能识别 `http://...` 做远端代理回源，无需先下载到磁盘。
+///   这样大库一次同步几十万条目时不会因为下载头像放大 IO/带宽。
+/// - 同时把远端 `personId` 写入 `persons.provider_ids` 的 `RemoteEmbyId` / `RemoteEmbySourceId`
+///   marker 字段，方便后续按需替换为本地缓存（PB35-2 / PB35-4 P2-2）。
+/// - 对每个角色按 `RemotePersonEntry.person_type` 写 `Actor/Director/Writer/Producer/GuestStar`，
+///   `sort_order` 用枚举顺序（保持与 TMDB 同步逻辑一致）。
+/// - 不主动删除已有 person_roles —— 让 `delete_tmdb_person_roles_except` 与
+///   后续 TMDB 异步刷新统一管理。
+async fn upsert_remote_people_for_item(
+    pool: &sqlx::PgPool,
+    source: &DbRemoteEmbySource,
+    media_item_id: Uuid,
+    people: &[RemotePersonEntry],
+) -> Result<(), AppError> {
+    if people.is_empty() {
+        return Ok(());
+    }
+    let server_base = source.server_url.trim_end_matches('/').to_string();
+    let mut sort_order = 0i32;
+    for entry in people {
+        let name = entry.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let role_type = match entry.person_type.as_deref().map(str::trim) {
+            Some(s) if !s.is_empty() => match s.to_ascii_lowercase().as_str() {
+                "actor" => "Actor".to_string(),
+                "director" => "Director".to_string(),
+                "writer" => "Writer".to_string(),
+                "producer" => "Producer".to_string(),
+                "gueststar" => "GuestStar".to_string(),
+                "composer" => "Composer".to_string(),
+                _ => s.to_string(),
+            },
+            _ => "Actor".to_string(),
+        };
+
+        // 头像 URL：仅当远端确实给了 personId 才能拼，否则交给后续 TMDB 异步刷新
+        let primary_image_url: Option<String> = match (
+            entry.id.as_deref().filter(|s| !s.trim().is_empty()),
+            entry.primary_image_tag.as_deref().filter(|s| !s.trim().is_empty()),
+        ) {
+            (Some(person_id), Some(tag)) => Some(format!(
+                "{server_base}/emby/Items/{person_id}/Images/Primary?tag={tag}&quality=90&maxWidth=1920"
+            )),
+            (Some(person_id), None) => Some(format!(
+                "{server_base}/emby/Items/{person_id}/Images/Primary?quality=90&maxWidth=1920"
+            )),
+            _ => None,
+        };
+
+        // provider_ids：合并远端 ProviderIds（含 Tmdb/Imdb/Tvdb）+ 远端 marker（用于回源头像）
+        let mut merged_provider_ids = entry.provider_ids.clone();
+        if !matches!(merged_provider_ids, Value::Object(_)) {
+            merged_provider_ids = Value::Object(serde_json::Map::new());
+        }
+        if let (Some(map), Some(person_id)) = (
+            merged_provider_ids.as_object_mut(),
+            entry.id.as_deref().filter(|s| !s.trim().is_empty()),
+        ) {
+            map.insert(
+                "RemoteEmbyId".to_string(),
+                Value::String(person_id.to_string()),
+            );
+            map.insert(
+                "RemoteEmbySourceId".to_string(),
+                Value::String(source.id.to_string()),
+            );
+        }
+
+        match repository::upsert_person_reference(
+            pool,
+            name,
+            merged_provider_ids,
+            primary_image_url.as_deref(),
+            None,
+        )
+        .await
+        {
+            Ok(person_id) => {
+                if let Err(error) = repository::upsert_person_role(
+                    pool,
+                    person_id,
+                    media_item_id,
+                    role_type.as_str(),
+                    entry.role.as_deref(),
+                    sort_order,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        media_item_id = %media_item_id,
+                        person = %name,
+                        role_type = %role_type,
+                        error = %error,
+                        "PB31-1：写入远端 person_role 失败"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    media_item_id = %media_item_id,
+                    person = %name,
+                    error = %error,
+                    "PB31-1：写入远端 persons 失败"
+                );
+            }
+        }
+        sort_order = sort_order.saturating_add(1);
+    }
+    Ok(())
+}
+
+/// PB31-2：拉取一个远端 Series 的详情并覆盖本地 series 行。
+///
+/// 远端列表接口在 `IncludeItemTypes=Movie,Episode` 时不会返回 Series，因此本地 series 行
+/// 只能通过 episode 反推占位。本函数补齐 series 自身的 overview / studios / genres /
+/// status / end_date / taglines / production_locations / air_days / air_time / 主图 /
+/// People（主演阵容），让详情页一开始就能展示完整元数据，并写 tvshow.nfo 做 NFO 落盘。
+///
+/// 调用方负责通过 `series_detail_synced` 集合做去重（同一同步任务每个 series_id 只跑一次），
+/// 同时本函数内部不持有同步任务的 cancel 信号，调用方应在调用前自行检查 cancel。
+async fn fetch_and_upsert_series_detail(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    user_id: &str,
+    remote_series_id: &str,
+    series_db_id: Uuid,
+    library_id: Uuid,
+    parent_id: Option<Uuid>,
+    series_dir: &Path,
+    view_id: &str,
+) -> Result<(), AppError> {
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!("{server_url}/Users/{user_id}/Items/{remote_series_id}");
+    let query = vec![(
+        "Fields".to_string(),
+        "Overview,Genres,Studios,Tags,Status,EndDate,ProductionYear,OfficialRating,\
+         CommunityRating,CriticRating,PremiereDate,ProviderIds,People,ImageTags,\
+         BackdropImageTags,OriginalTitle,SortName,Taglines,ProductionLocations,\
+         AirDays,AirTime,RemoteTrailers"
+            .to_string(),
+    )];
+    let detail: RemoteBaseItem = match get_json_with_retry(pool, source, &endpoint, &query).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                source_id = %source.id,
+                remote_series_id = %remote_series_id,
+                error = %error,
+                "PB31-2：拉取远端 Series 详情失败，沿用占位数据"
+            );
+            return Ok(());
+        }
+    };
+
+    let series_name = detail.name.clone();
+    let (remote_primary, remote_backdrop) = extract_remote_image_urls(
+        source.server_url.as_str(),
+        remote_series_id,
+        &detail.image_tags,
+        &detail.backdrop_image_tags,
+    );
+    let primary_path = remote_primary.as_deref().map(Path::new);
+    let backdrop_path = remote_backdrop.as_deref().map(Path::new);
+    let provider_ids = merge_provider_ids(
+        &detail.provider_ids,
+        remote_marker_provider_ids(source.id, Some(remote_series_id), Some(view_id), None),
+    );
+    let empty = Vec::<String>::new();
+    let empty_paths = Vec::<String>::new();
+    let trailers = remote_trailers_to_vec(detail.remote_trailers.as_ref());
+
+    if let Err(error) = repository::upsert_media_item(
+        pool,
+        repository::UpsertMediaItem {
+            library_id,
+            parent_id,
+            name: series_name.as_str(),
+            item_type: "Series",
+            media_type: "Video",
+            path: series_dir,
+            container: None,
+            original_title: detail.original_title.as_deref(),
+            overview: detail.overview.as_deref(),
+            production_year: detail.production_year,
+            official_rating: detail.official_rating.as_deref(),
+            community_rating: detail.community_rating,
+            critic_rating: detail.critic_rating,
+            runtime_ticks: None,
+            premiere_date: parse_remote_premiere_date(detail.premiere_date.as_deref()),
+            status: detail.status.as_deref(),
+            end_date: parse_remote_premiere_date(detail.end_date.as_deref()),
+            air_days: &detail.air_days,
+            air_time: detail.air_time.as_deref(),
+            provider_ids,
+            genres: &detail.genres,
+            studios: &detail.studios,
+            tags: &detail.tags,
+            production_locations: &detail.production_locations,
+            image_primary_path: primary_path,
+            backdrop_path,
+            logo_path: None,
+            thumb_path: None,
+            art_path: None,
+            banner_path: None,
+            disc_path: None,
+            backdrop_paths: &empty_paths,
+            remote_trailers: &trailers,
+            series_name: Some(series_name.as_str()),
+            season_name: None,
+            index_number: None,
+            index_number_end: None,
+            parent_index_number: None,
+            width: None,
+            height: None,
+            video_codec: None,
+            audio_codec: None,
+            series_id: None,
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            source_id = %source.id,
+            remote_series_id = %remote_series_id,
+            error = %error,
+            "PB31-2：覆盖远端 Series 行失败"
+        );
+        return Ok(());
+    }
+    let _ = empty;
+
+    if let Err(error) = upsert_remote_people_for_item(pool, source, series_db_id, &detail.people).await {
+        tracing::warn!(
+            source_id = %source.id,
+            remote_series_id = %remote_series_id,
+            error = %error,
+            "PB31-2：写入远端 Series 的 People 失败"
+        );
+    }
+
+    if !detail.taglines.is_empty() {
+        // 直接 inline 写 taglines 列（DB 列已存在；DbMediaItem 字段绑定将在 PB32 一起补）。
+        let _ = sqlx::query("UPDATE media_items SET taglines = $1, updated_at = now() WHERE id = $2")
+            .bind(&detail.taglines)
+            .bind(series_db_id)
+            .execute(pool)
+            .await;
+    }
+
+    Ok(())
+}
+
+/// 将远端 Emby 的 `RemoteTrailers` 字段（数组对象 `{ Name, Url }`）扁平为 URL 列表。
+fn remote_trailers_to_vec(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| {
+                item.get("Url")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("url").and_then(Value::as_str))
+                    .map(str::to_string)
+            })
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 #[allow(dead_code)]
@@ -2102,12 +2480,17 @@ async fn fetch_remote_items_page_for_view(
         ("IncludeItemTypes".to_string(), "Movie,Episode".to_string()),
         (
             "Fields".to_string(),
+            // PB31-1 / PB34-1：补齐 People（演职员）+ OriginalTitle/SortName/Taglines/
+            // ProductionLocations/AirDays/AirTime/RemoteTrailers 等 Emby BaseItemDto 字段，
+            // 让远端同步一次性带回所有可直接展示的元数据，避免后续依赖按需 TMDB 刷新。
             "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,\
              OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,\
              ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,\
              ImageTags,BackdropImageTags,SeriesId,SeasonId,\
              SeriesPrimaryImageTag,ParentBackdropImageTags,ParentBackdropItemId,\
-             ParentLogoItemId,ParentLogoImageTag,Status,EndDate"
+             ParentLogoItemId,ParentLogoImageTag,Status,EndDate,\
+             People,OriginalTitle,SortName,Taglines,ProductionLocations,\
+             AirDays,AirTime,RemoteTrailers"
                 .to_string(),
         ),
         ("EnableTotalRecordCount".to_string(), "true".to_string()),
@@ -2526,7 +2909,16 @@ async fn send_remote_stream_request(
         return Ok(response);
     }
 
-    Err(AppError::Unauthorized)
+    // PB35-2：所有重试用完仍未拿到可用流，记 warn 并把错误明确成「远端不可用」。
+    // 之前直接抛 Unauthorized，客户端不知道是凭证还是远端宕机，这里上报更清晰的语义。
+    tracing::warn!(
+        source_id = %source.id,
+        remote_item_id = %remote_item_id,
+        "PB35-2：远端 Emby PlaybackInfo 全部 attempt 均失败，已耗尽重试"
+    );
+    Err(AppError::Internal(
+        "远端 Emby 当前不可用（401/403 重登仍失败或所有 attempt 均超时），请稍后再试".to_string(),
+    ))
 }
 
 fn resolve_playback_info_stream_endpoint(

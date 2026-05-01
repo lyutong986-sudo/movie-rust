@@ -22,6 +22,8 @@ pub struct ExternalMediaSearchResult {
     pub production_year: Option<i32>,
     pub image_url: Option<String>,
     pub provider_ids: HashMap<String, String>,
+    /// PB33-1：TMDB popularity（搜索结果选取用，缺省 0.0）。
+    pub popularity: Option<f64>,
 }
 
 /// 元数据提供者接口

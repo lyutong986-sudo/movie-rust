@@ -165,6 +165,10 @@ impl TmdbProvider {
     }
 
     /// Cached GET: check moka cache first, on miss perform HTTP GET and store 2xx responses.
+    ///
+    /// PB35-4 (P2-1)：对网络/5xx/429 增加指数退避重试（最多 3 次：300ms/600ms/1200ms）。
+    /// 之前任何瞬时网络抖动都会让 do_refresh_item_metadata 直接失败，重新触发整个
+    /// 详情页的按需刷新链路；现在通过本地重试可以把绝大多数瞬时错误吸收掉。
     async fn cached_get<T: serde::de::DeserializeOwned>(
         &self,
         cache_key: &str,
@@ -176,21 +180,69 @@ impl TmdbProvider {
                 .map_err(|e| AppError::Internal(format!("cache deser: {e}")));
         }
 
-        let response = self
-            .auth_get(url)
-            .query(params)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        let json_val: JsonValue = response.json().await?;
-        let arc_val = Arc::new(json_val);
-        self.json_cache
-            .insert(cache_key.to_string(), arc_val.clone())
-            .await;
-
-        serde_json::from_value((*arc_val).clone())
-            .map_err(|e| AppError::Internal(format!("tmdb deser: {e}")))
+        const MAX_RETRIES: u32 = 3;
+        const BASE_DELAY_MS: u64 = 300;
+        let mut last_err: Option<AppError> = None;
+        for attempt in 0..=MAX_RETRIES {
+            match self.auth_get(url).query(params).send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        let json_val: JsonValue = match response.json().await {
+                            Ok(value) => value,
+                            Err(error) => {
+                                last_err = Some(error.into());
+                                break;
+                            }
+                        };
+                        let arc_val = Arc::new(json_val);
+                        self.json_cache
+                            .insert(cache_key.to_string(), arc_val.clone())
+                            .await;
+                        return serde_json::from_value((*arc_val).clone())
+                            .map_err(|e| AppError::Internal(format!("tmdb deser: {e}")));
+                    }
+                    if (status.is_server_error()
+                        || status == reqwest::StatusCode::TOO_MANY_REQUESTS)
+                        && attempt < MAX_RETRIES
+                    {
+                        let delay = BASE_DELAY_MS << attempt;
+                        tracing::warn!(
+                            url,
+                            status = %status,
+                            attempt = attempt + 1,
+                            delay_ms = delay,
+                            "PB35-4 (P2-1)：TMDB GET 5xx/429，退避后重试"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    return Err(AppError::Internal(format!(
+                        "TMDB GET 失败：HTTP {} for {}",
+                        status, url
+                    )));
+                }
+                Err(error) => {
+                    if (error.is_timeout() || error.is_connect() || error.is_request())
+                        && attempt < MAX_RETRIES
+                    {
+                        let delay = BASE_DELAY_MS << attempt;
+                        tracing::warn!(
+                            url,
+                            attempt = attempt + 1,
+                            delay_ms = delay,
+                            error = %error,
+                            "PB35-4 (P2-1)：TMDB GET 网络错误，退避后重试"
+                        );
+                        last_err = Some(error.into());
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| AppError::Internal("TMDB GET 失败：重试耗尽".to_string())))
     }
 
     /// 搜索人物
@@ -322,7 +374,7 @@ impl TmdbProvider {
         self.add_api_key(&mut params);
         params.insert(
             "append_to_response".to_string(),
-            "external_ids,release_dates,videos".to_string(),
+            "external_ids,release_dates,videos,keywords".to_string(),
         );
 
         let url = self.build_url(&format!("/movie/{movie_id}"));
@@ -333,7 +385,10 @@ impl TmdbProvider {
     async fn get_tv_details_internal(&self, tv_id: &str) -> Result<TmdbTvDetails, AppError> {
         let mut params = HashMap::new();
         self.add_api_key(&mut params);
-        params.insert("append_to_response".to_string(), "external_ids".to_string());
+        params.insert(
+            "append_to_response".to_string(),
+            "external_ids,keywords".to_string(),
+        );
 
         let url = self.build_url(&format!("/tv/{}", tv_id));
         let cache_key = format!("tv:{tv_id}");
@@ -461,6 +516,7 @@ impl TmdbProvider {
         let mut provider_ids = HashMap::new();
         provider_ids.insert("Tmdb".to_string(), item.id.to_string());
 
+        let popularity = item.popularity;
         ExternalMediaSearchResult {
             provider: "tmdb".to_string(),
             external_id: item.id.to_string(),
@@ -475,6 +531,7 @@ impl TmdbProvider {
             production_year,
             image_url,
             provider_ids,
+            popularity,
         }
     }
 
@@ -488,6 +545,7 @@ impl TmdbProvider {
         let mut provider_ids = HashMap::new();
         provider_ids.insert("Tmdb".to_string(), item.id.to_string());
 
+        let popularity = item.popularity;
         ExternalMediaSearchResult {
             provider: "tmdb".to_string(),
             external_id: item.id.to_string(),
@@ -502,6 +560,7 @@ impl TmdbProvider {
             production_year,
             image_url,
             provider_ids,
+            popularity,
         }
     }
 }
@@ -735,6 +794,18 @@ impl MetadataProvider for TmdbProvider {
             production_locations: details.origin_country,
             provider_ids,
             homepage_url: details.homepage,
+            tagline: details.tagline.filter(|s| !s.trim().is_empty()),
+            tags: details
+                .keywords
+                .as_ref()
+                .map(|k| {
+                    k.results
+                        .iter()
+                        .map(|kw| kw.name.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
             metadata,
         })
     }
@@ -812,6 +883,18 @@ impl MetadataProvider for TmdbProvider {
                 .backdrop_path
                 .map(|path| format!("{}/original{}", self.config.image_base_url, path)),
             remote_trailers,
+            tagline: details.tagline.filter(|s| !s.trim().is_empty()),
+            tags: details
+                .keywords
+                .as_ref()
+                .map(|k| {
+                    k.keywords
+                        .iter()
+                        .map(|kw| kw.name.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
             metadata,
             collection_info,
         })
@@ -1368,6 +1451,9 @@ struct TmdbTvDetails {
     vote_average: Option<f64>,
     poster_path: Option<String>,
     backdrop_path: Option<String>,
+    /// PB35-5 (P3-3)：剧集 tagline（"标语"）。
+    #[serde(default)]
+    tagline: Option<String>,
     #[serde(default)]
     genres: Vec<TmdbNamedItem>,
     #[serde(default)]
@@ -1381,6 +1467,9 @@ struct TmdbTvDetails {
     last_episode_to_air: Option<TmdbEpisodeStub>,
     #[serde(default)]
     seasons: Vec<TmdbSeasonStub>,
+    /// PB35-5 (P3-3)：TMDB TV /keywords append 返回 `{"results": [{"id":..,"name":..}]}`。
+    #[serde(default)]
+    keywords: Option<TmdbTvKeywords>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1394,6 +1483,9 @@ struct TmdbMovieDetails {
     vote_average: Option<f64>,
     poster_path: Option<String>,
     backdrop_path: Option<String>,
+    /// PB35-5 (P3-3)：电影 tagline（"标语"）。
+    #[serde(default)]
+    tagline: Option<String>,
     #[serde(default)]
     genres: Vec<TmdbNamedItem>,
     #[serde(default)]
@@ -1404,6 +1496,21 @@ struct TmdbMovieDetails {
     release_dates: Option<TmdbMovieReleaseDates>,
     videos: Option<TmdbVideoCollection>,
     belongs_to_collection: Option<TmdbCollectionRef>,
+    /// PB35-5 (P3-3)：TMDB Movie /keywords append 返回 `{"keywords": [{"id":..,"name":..}]}`。
+    #[serde(default)]
+    keywords: Option<TmdbMovieKeywords>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct TmdbTvKeywords {
+    #[serde(default)]
+    results: Vec<TmdbNamedItem>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct TmdbMovieKeywords {
+    #[serde(default)]
+    keywords: Vec<TmdbNamedItem>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

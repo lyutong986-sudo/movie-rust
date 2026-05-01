@@ -154,6 +154,14 @@ pub struct DbMediaItem {
     pub image_blur_hashes: Value,
     #[sqlx(default)]
     pub series_id: Option<Uuid>,
+    // PB32-1：DB 上 0001_schema.sql 已存在 taglines/locked_fields/lock_data 三列，
+    // 现绑定到结构体，让 DTO 层和 update_item 能读写真实值（之前 BaseItemDto 一律返回空数组/false）。
+    #[sqlx(default)]
+    pub taglines: Vec<String>,
+    #[sqlx(default)]
+    pub locked_fields: Vec<String>,
+    #[sqlx(default)]
+    pub lock_data: bool,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -300,6 +308,13 @@ pub struct MediaItemRow {
     pub image_blur_hashes: Value,
     #[sqlx(default)]
     pub series_id: Option<Uuid>,
+    // PB32-1：列表 SQL 现在也带回 taglines/locked_fields/lock_data，DTO 才能填真值。
+    #[sqlx(default)]
+    pub taglines: Vec<String>,
+    #[sqlx(default)]
+    pub locked_fields: Vec<String>,
+    #[sqlx(default)]
+    pub lock_data: bool,
     pub total_count: i64,
 }
 
@@ -355,6 +370,9 @@ impl From<MediaItemRow> for DbMediaItem {
             date_modified: value.date_modified,
             image_blur_hashes: value.image_blur_hashes,
             series_id: value.series_id,
+            taglines: value.taglines,
+            locked_fields: value.locked_fields,
+            lock_data: value.lock_data,
         }
     }
 }
