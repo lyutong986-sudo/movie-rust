@@ -585,6 +585,12 @@ async fn record_report(
         volume_level: report.volume_level,
         repeat_mode: report.repeat_mode.clone(),
         playback_rate: report.playback_rate,
+        // PB29：把客户端 PlaybackReport.PlaySessionId 带进 INSERT，进 playback_events.play_session_id
+        play_session_id: report
+            .play_session_id
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
     };
     repository::record_playback_event(
         &state.pool,
@@ -755,16 +761,29 @@ async fn record_legacy_for_user(
         volume_level: None,
         repeat_mode: None,
         playback_rate: None,
+        // PB29：legacy /PlayingItems 客户端通过 query 字段带 PlaySessionId，写进独立列
+        play_session_id: query
+            .play_session_id
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
     };
+    // PB25：legacy 路径之前对 query.play_session_id 做了 `filter(== access_token)` 这种
+    // 没有意义的等价判断（Emby 客户端发的 PlaySessionId 是 PlaybackInfo handler 生成的
+    // 独立 ID，几乎从不等于 access_token），实际效果是「取 access_token 当 session_id」。
+    // 这里改为：如果客户端带了 PlaySessionId 就尊重它（写进 playback_events.session_id 兜底
+    // 维度，等 PB29 持久化跨表后再分离），否则回落 access_token。
+    let session_id_for_event = query
+        .play_session_id
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| session.access_token.clone());
     repository::record_playback_event(
         &state.pool,
         user_id,
         Some(item_id),
-        query
-            .play_session_id
-            .as_deref()
-            .filter(|value| value == &session.access_token)
-            .or(Some(session.access_token.as_str())),
+        Some(session_id_for_event.as_str()),
         event_type,
         query.position_ticks,
         query.is_paused,
@@ -772,6 +791,48 @@ async fn record_legacy_for_user(
         &extras,
     )
     .await?;
+
+    // PB25：legacy /PlayingItems 路径之前完全不派发 SessionsChanged / UserDataChanged /
+    // 出向 webhook —— 老 Emby 客户端走 legacy 上报时，UI 无法实时刷新「现在播放」、
+    // Sakura 等下游也收不到 playback.* 事件。这里与 record_report 同口径补齐三类派发。
+    if matches!(event_type, "Started" | "Progress" | "Stopped") {
+        if let Ok(Some(ud)) = repository::get_user_item_data(&state.pool, user_id, item_id).await {
+            let user_data_entry = serde_json::json!({
+                "ItemId": crate::models::uuid_to_emby_guid(&item_id),
+                "PlaybackPositionTicks": ud.playback_position_ticks,
+                "PlayCount": ud.play_count,
+                "IsFavorite": ud.is_favorite,
+                "Played": ud.is_played,
+                "LastPlayedDate": ud.last_played_date,
+            });
+            let _ = state.event_tx.send(crate::state::ServerEvent::UserDataChanged {
+                user_id,
+                user_data_list: vec![user_data_entry],
+            });
+        }
+        let _ = state.event_tx.send(crate::state::ServerEvent::SessionsChanged);
+
+        let event_name = match event_type {
+            "Started" => Some(crate::webhooks::events::PLAYBACK_START),
+            "Progress" => Some(crate::webhooks::events::PLAYBACK_PROGRESS),
+            "Stopped" => Some(crate::webhooks::events::PLAYBACK_STOP),
+            _ => None,
+        };
+        if let Some(event) = event_name {
+            let payload = build_playback_payload(
+                state,
+                user_id,
+                Some(item_id),
+                Some(session_id_for_event.as_str()),
+                query.position_ticks,
+                query.is_paused.unwrap_or(false),
+                played_to_completion,
+            )
+            .await;
+            crate::webhooks::dispatch(state, event, payload);
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 

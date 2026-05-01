@@ -37,15 +37,19 @@ pub struct GetPersonsQuery {
 }
 
 pub async fn get_persons(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Query(query): Query<GetPersonsQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
+    // PB27：受限用户的 /Persons 列表只暴露「在自己可见库内有参演条目」的人物。
+    // admin 走 None 路径维持快查询。
+    let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
     let (persons, total) = repository::get_persons(
         &state.pool,
         query.start_index,
         query.limit,
         query.name_starts_with,
+        allowed.as_deref(),
     )
     .await?;
     let items: Vec<BaseItemDto> = persons
@@ -61,17 +65,33 @@ pub async fn get_persons(
 }
 
 pub async fn get_person(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(person_id_or_name): Path<String>,
 ) -> Result<Json<BaseItemDto>, AppError> {
+    let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
+
     if let Ok(uuid) = Uuid::parse_str(&person_id_or_name) {
         if let Some(person) = repository::get_person_by_uuid(&state.pool, uuid).await? {
+            // PB27：admin 直接放行；受限用户必须确认这个人物在可见库里有参演条目，
+            // 否则按 NotFound 处理（避免「拿到 GUID 即可读」的旁路）。
+            if !session.is_admin
+                && !repository::person_visible_to_user(&state.pool, uuid, allowed.as_deref()).await?
+            {
+                return Err(AppError::NotFound("人物不存在".to_string()));
+            }
             return Ok(Json(person_to_base_item(person, state.config.server_id)));
         }
     }
 
     let person = repository::get_person_by_name(&state.pool, &person_id_or_name).await?;
+    if !session.is_admin {
+        let person_uuid = emby_id_to_uuid(&person.id)
+            .map_err(|_| AppError::Internal("人物 ID 解析失败".to_string()))?;
+        if !repository::person_visible_to_user(&state.pool, person_uuid, allowed.as_deref()).await? {
+            return Err(AppError::NotFound("人物不存在".to_string()));
+        }
+    }
     Ok(Json(person_to_base_item(person, state.config.server_id)))
 }
 

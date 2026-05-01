@@ -134,13 +134,15 @@ async fn dispatch_pattern(state: &AppState, sql: &str, replace_user_id: bool) ->
     {
         let (start, end) = extract_date_range(sql);
         if let Some(addr) = extract_quoted_after(sql, "where remoteaddress = ") {
-            return users_by_ip(state, &addr, start, end).await;
+            return users_by_ip(state, &addr, start, end, replace_user_id).await;
         }
         if let Some(kw) = extract_quoted_like(sql, "where devicename like ") {
-            return users_by_device_or_client(state, "device_name", &kw, start, end).await;
+            return users_by_device_or_client(state, "device_name", &kw, start, end, replace_user_id)
+                .await;
         }
         if let Some(kw) = extract_quoted_like(sql, "where clientname like ") {
-            return users_by_device_or_client(state, "client", &kw, start, end).await;
+            return users_by_device_or_client(state, "client", &kw, start, end, replace_user_id)
+                .await;
         }
     }
 
@@ -385,10 +387,12 @@ async fn users_by_ip(
     ip: &str,
     start: Option<DateTime<Utc>>,
     end: Option<DateTime<Utc>>,
+    replace_user_id: bool,
 ) -> Result<Value, AppError> {
     let rows = sqlx::query(
         r#"
         SELECT pe.user_id::text                          AS user_id,
+               COALESCE(u.name, '')                      AS user_name,
                COALESCE(s.device_name, '')               AS device_name,
                COALESCE(s.client, '')                    AS client,
                COALESCE(s.remote_address, '')            AS remote_address,
@@ -396,10 +400,11 @@ async fn users_by_ip(
                COUNT(*)::bigint                          AS activity_count
           FROM playback_events pe
           JOIN sessions s ON s.access_token = pe.session_id
+          LEFT JOIN users u ON u.id = pe.user_id
          WHERE s.remote_address = $1
            AND ($2::timestamptz IS NULL OR pe.created_at >= $2)
            AND ($3::timestamptz IS NULL OR pe.created_at <  $3)
-         GROUP BY pe.user_id, s.device_name, s.client, s.remote_address
+         GROUP BY pe.user_id, u.name, s.device_name, s.client, s.remote_address
          ORDER BY last_activity DESC
         "#,
     )
@@ -408,7 +413,7 @@ async fn users_by_ip(
     .bind(end)
     .fetch_all(&state.pool)
     .await?;
-    Ok(build_users_by_xxx(rows))
+    Ok(build_users_by_xxx(rows, replace_user_id))
 }
 
 async fn users_by_device_or_client(
@@ -417,11 +422,13 @@ async fn users_by_device_or_client(
     keyword: &str,
     start: Option<DateTime<Utc>>,
     end: Option<DateTime<Utc>>,
+    replace_user_id: bool,
 ) -> Result<Value, AppError> {
     let pattern = format!("%{}%", keyword);
     let sql = format!(
         r#"
         SELECT pe.user_id::text                          AS user_id,
+               COALESCE(u.name, '')                      AS user_name,
                COALESCE(s.device_name, '')               AS device_name,
                COALESCE(s.client, '')                    AS client,
                COALESCE(s.remote_address, '')            AS remote_address,
@@ -429,10 +436,11 @@ async fn users_by_device_or_client(
                COUNT(*)::bigint                          AS activity_count
           FROM playback_events pe
           JOIN sessions s ON s.access_token = pe.session_id
+          LEFT JOIN users u ON u.id = pe.user_id
          WHERE s.{column} ILIKE $1
            AND ($2::timestamptz IS NULL OR pe.created_at >= $2)
            AND ($3::timestamptz IS NULL OR pe.created_at <  $3)
-         GROUP BY pe.user_id, s.device_name, s.client, s.remote_address
+         GROUP BY pe.user_id, u.name, s.device_name, s.client, s.remote_address
          ORDER BY last_activity DESC
         "#,
         column = column
@@ -443,21 +451,31 @@ async fn users_by_device_or_client(
         .bind(end)
         .fetch_all(&state.pool)
         .await?;
-    Ok(build_users_by_xxx(rows))
+    Ok(build_users_by_xxx(rows, replace_user_id))
 }
 
-fn build_users_by_xxx(rows: Vec<sqlx::postgres::PgRow>) -> Value {
+fn build_users_by_xxx(rows: Vec<sqlx::postgres::PgRow>, replace_user_id: bool) -> Value {
+    // PB28：第二轮审计 Q1——`ReplaceUserId` 是 Sakura 等下游约定的「列名仍叫 UserId，
+    // 但内容换成用户名」语义。Pattern #1/#8 已支持，#5/#6/#7 之前没传透；这里和它们
+    // 一致：当 `replace_user_id=true` 且 users.name 非空时，第一列输出 `user_name`，
+    // 否则回落 `emby_id_or_raw(user_id)` 保留兼容性。
     let results: Vec<Value> = rows
         .into_iter()
         .map(|r| {
             let user_id: String = r.get("user_id");
+            let user_name: String = r.get("user_name");
             let dn: String = r.get("device_name");
             let cl: String = r.get("client");
             let ra: String = r.get("remote_address");
             let la: Option<DateTime<Utc>> = r.get("last_activity");
             let cnt: i64 = r.get("activity_count");
             let la_str = la.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
-            json!([emby_id_or_raw(&user_id), dn, cl, ra, la_str, cnt])
+            let id_field = if replace_user_id && !user_name.is_empty() {
+                user_name
+            } else {
+                emby_id_or_raw(&user_id)
+            };
+            json!([id_field, dn, cl, ra, la_str, cnt])
         })
         .collect();
     json!({

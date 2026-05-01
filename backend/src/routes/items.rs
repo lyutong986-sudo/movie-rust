@@ -206,10 +206,18 @@ struct ItemCountsQuery {
 }
 
 async fn media_folders(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    libraries_as_query_result(&state).await
+    // PB26：admin 看全量；非 admin 必须按 `visible_libraries_for_user` 裁剪到自己可见
+    // 的库列表，并改走 `batch_library_stats` 一次拉齐统计——之前两个问题：
+    //  1) 任意已认证用户都拿到 `list_libraries` 全表，可枚举出隐藏库的存在
+    //  2) 逐库 `library_to_item_dto` N+1 计数（10 个库要 30+ 次小查询）
+    // 与 `/Users/{id}/Views`、`/Users/{id}/Items?ParentId=...` 的可见性保持一致。
+    if session.is_admin {
+        return libraries_as_query_result(&state).await;
+    }
+    libraries_as_query_result_for_user(&state, session.user_id).await
 }
 
 async fn libraries_as_query_result(

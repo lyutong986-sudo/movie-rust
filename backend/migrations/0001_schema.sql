@@ -413,8 +413,16 @@ CREATE TABLE IF NOT EXISTS playback_events (
     played_to_completion boolean,
     created_at           timestamptz NOT NULL DEFAULT now()
 );
+-- PB29：补 play_session_id 列。Emby/Jellyfin 客户端在 PlaybackInfo 拿到的
+-- PlaySessionId 与 access_token 是不同维度（一个 token 可以同时跑多次播放），
+-- 旧版本只把 session_id 当 access_token 用，导致 PlaybackReport 里客户端上报的
+-- PlaySessionId 被丢弃；现在独立列存它，与 record_playback_event 签名扩展配套。
+ALTER TABLE playback_events
+    ADD COLUMN IF NOT EXISTS play_session_id text;
 CREATE INDEX IF NOT EXISTS idx_playback_events_user_created ON playback_events(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_playback_events_item ON playback_events(item_id) WHERE item_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_playback_events_play_session
+    ON playback_events(play_session_id, created_at DESC) WHERE play_session_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- media_streams：视频/音频/字幕等轨道信息。对应 Emby MediaStream。

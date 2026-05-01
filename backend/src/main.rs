@@ -852,6 +852,9 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         // playback_events 性能索引
         r#"CREATE INDEX IF NOT EXISTS idx_playback_events_user_created ON playback_events(user_id, created_at DESC)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_playback_events_item ON playback_events(item_id) WHERE item_id IS NOT NULL"#,
+        // PB29：play_session_id 独立列 + 反查索引（与 0001_schema.sql 同步）
+        r#"ALTER TABLE playback_events ADD COLUMN IF NOT EXISTS play_session_id text"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_playback_events_play_session ON playback_events(play_session_id, created_at DESC) WHERE play_session_id IS NOT NULL"#,
         // studios/tags GIN 索引（对 aggregate_array_values 全表扫描优化）
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_studios_gin ON media_items USING gin (studios)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_tags_gin ON media_items USING gin (tags)"#,

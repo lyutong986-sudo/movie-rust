@@ -2630,3 +2630,47 @@ POST /api/admin/remote-emby/cleanup-orphan-libraries
 **影响文件：** `backend/src/repository.rs`、`backend/src/routes/remote_emby.rs`、`backend/src/main.rs`、`EmbyAPI_Compatibility_Report.md`。
 
 ---
+
+## 第三十四批（2026-05-01）：第三轮链路审计 — Legacy 派发 + 库可见性 + 反查报表 + PlaySessionId 跨表持久化（PB25–PB29）
+
+**触发场景：** 上一轮第三十一批列出 6 项「已知保留项」，本轮按 P0/P1 优先级各拣 5 项落地：legacy `/PlayingItems` 上报路径完全不派发 WebSocket / webhook、`/Library/MediaFolders` 对非 admin 仍返全量 + N+1、`/Persons` 列表/详情未按可见库裁剪、Sakura `submit_custom_query` Pattern #5/#6/#7 ReplaceUserId 没透传、PlaybackInfo 生成的 PlaySessionId 在落表层完全不持久。
+
+### P0 修复
+
+| # | 文件 | 修复 |
+|---|------|------|
+| PB25 | `routes/sessions.rs::record_legacy_for_user` | 老 Emby 客户端走 legacy `POST /Sessions/Playing` / `/Users/{id}/PlayingItems/...` 上报，先前只 INSERT `playback_events` 就 `Ok(StatusCode::NO_CONTENT)` 返回，**完全不派发** `SessionsChanged` / `UserDataChanged` WebSocket，**也不调** webhook：表现是「老客户端在播，但 UI 的『现在播放』面板和 Sakura 等下游永远收不到事件」。本批与 `record_report` 同口径补齐三类派发：`Started/Progress/Stopped` 都会推 `SessionsChanged`、查 `get_user_item_data` 推 `UserDataChanged`、调 `webhooks::dispatch(PLAYBACK_START/PROGRESS/STOP)`。同时去掉之前那个 `query.play_session_id.filter(== access_token)` 这种「反正几乎不会等」的等价判断（PlaybackInfo 给的 PlaySessionId 是独立 UUID，几乎从不等于 access_token），改为「客户端带就尊重，不带回落 access_token」。 |
+| PB26 | `routes/items.rs::media_folders` | `/Library/MediaFolders` 之前**不分 admin/受限**全部走 `libraries_as_query_result` → `list_libraries`（拉全表）+ 逐库 `library_to_item_dto`（N+1 计数 SQL）。两个问题：1）受限用户会看到隐藏库的存在（哪怕进不去）；2）10 库要 30+ 次小查询。本批拆分 admin 走原快路径，非 admin 改走 `libraries_as_query_result_for_user` → `visible_libraries_for_user` + `batch_library_stats`（一次 Query 拉齐统计），与 `/Users/{id}/Views`、`/Users/{id}/Items?ParentId=...` 的可见性口径完全对齐。 |
+| PB29 | `migrations/0001_schema.sql` + `main.rs::ensure_schema_compatibility` + `repository.rs::record_playback_event` / `PlaybackEventExtras` + `routes/sessions.rs::record_report` & `record_legacy_for_user` | 之前 `playback_events.session_id` 既装 `access_token` 又装 `PlaybackReport.session_id`，与 Emby SDK 的 PlaySessionId 是两个维度强行混在一列。后果：客户端 `PlaybackReport.PlaySessionId` 字段反序列化存在但**从来没传进 INSERT**，PlaybackInfo handler 生成的 PlaySessionId 也没机会落表，`/Sessions/Playing/{id}/Stop` 等仅靠 PlaySessionId 识别的回调路径无法反查。本批：1）`playback_events` 加 `play_session_id text` 列 + `idx_playback_events_play_session(play_session_id, created_at DESC)` 索引（`0001_schema.sql` 与 `main.rs::ensure_schema_compatibility` 同步加，符合项目规范）；2）`PlaybackEventExtras` 加 `play_session_id: Option<String>` 字段；3）`record_playback_event` INSERT 增加 `play_session_id` 绑定；4）`record_report` 把 `report.play_session_id` trim 后写进 extras；5）`record_legacy_for_user` 把 `query.play_session_id` 写进 extras；6）新增 `repository::get_latest_event_by_play_session_id(play_session_id) -> Option<(event_id, user_id, item_id)>` 给 Stop/Progress 回调反查最近一次 `Started` 用。`session_id` 仍然保留作「队列归属维度」（access_token 视角），不破坏 `session_play_queue` 的现有主键 `(session_id, item_id)` 行为。 |
+
+### P1 修复
+
+| # | 文件 | 修复 |
+|---|------|------|
+| PB27 | `repository.rs::get_persons` & 新增 `person_visible_to_user` + `routes/persons.rs::get_persons` & `get_person` | `/Persons` 列表/详情之前直接从 `persons` 全表查，受限用户能枚举出在隐藏库参演的演员（信息泄露）。本批：1）`get_persons` 加 `allowed_library_ids: Option<&[Uuid]>` 参数，受限路径走 `EXISTS (SELECT 1 FROM person_roles JOIN media_items WHERE library_id = ANY(...))` 子查询裁剪 + `COUNT(DISTINCT)`；admin 路径仍走 `persons` 全表 ORDER BY name 的最便宜计划。2）新增 `person_visible_to_user(pool, person_id, allowed)` —— admin 直接 `Ok(true)`，空白名单 `Ok(false)`，否则做单次 EXISTS 检查。3）`routes/persons.rs::get_persons` 走 `effective_library_filter_for_user` 拿白名单、传给 repo；`get_person` admin 直接放行，受限用户对 `get_person_by_uuid`/`get_person_by_name` 命中后再做 `person_visible_to_user`，不可见时返 `NotFound("人物不存在")` 而不是 200，避免「拿到 GUID 即可读」旁路。 |
+| PB28 | `routes/usage_stats.rs::users_by_ip` & `users_by_device_or_client` & `build_users_by_xxx` | Sakura 的 `submit_custom_query` 协议里 `ReplaceUserId=true` 的语义是「列名仍叫 UserId，但内容换成用户名」（Sakura 弹幕 / 报表为了直接显示人名）。Pattern #1 / #8 已实现，本轮发现 #5 (`get_users_by_ip`)、#6 (`get_users_by_device_name`)、#7 (`get_users_by_client_name`) 都漏了：调用链上 `replace_user_id` 在分发点解析了，但根本没传到这三个 helper，`build_users_by_xxx` 也没参数，所以反查报表始终回 GUID。本批：1）三个 helper 签名都加 `replace_user_id: bool` 参数；2）SQL 加 `LEFT JOIN users u ON u.id = pe.user_id` + `COALESCE(u.name, '') AS user_name`；3）`build_users_by_xxx` 拿到 user_name 后按 `replace_user_id && !user_name.is_empty()` 决定第一列输出 user_name 还是 `emby_id_or_raw(user_id)`，与 Pattern #1 行为对齐。 |
+
+### 行为变化
+
+- **Legacy 老客户端**现在能正常被 Sakura/webhook/前端「现在播放」面板感知到；之前只在 DB 里默默记账。
+- **非 admin** 调 `/Library/MediaFolders` 只看到自己可见的库（与 `/Users/{id}/Views` 一致），SQL 复杂度从 `O(libraries × 3)` 降到 `O(2)`（一次 visible + 一次 batch_stats）。
+- **`/Persons` 列表/详情** 受限用户只暴露在自己可见库参演过的演员；admin 完全不变。
+- **Sakura `submit_custom_query` `ReplaceUserId=true`** 现在 7 个常用 pattern (#1/#5/#6/#7/#8 等) 全都能换出用户名。
+- **PlaybackReport.PlaySessionId** 现在真的进库；`get_latest_event_by_play_session_id` 提供按 PlaySessionId 反查 user/item 的入口，留给后续 `/Sessions/Playing/{id}/Stop` 这类回调按需接入（路由层后续按客户端实际行为调用）。
+
+### 已知本批未处理（保留下批）
+
+- `sessions` 表与 `session_play_queue` 主键仍以 `access_token` 为维度；如果将来要支持「同一 token 同时跑两路播放」需要再扩 schema（当前所有客户端实测一 token 一路），优先级 P2，留作下批专项。
+- 跨库扫描 `JoinSet` 入队仍是「先穷尽当前库再下一库」：在「一个 100 万级别大库 + 多个小库」的场景下，小库会一直饿等到大库扫完才出活——下批做 round-robin 入队 + `tracker_per_library` 让每个库都先消费完自己的入队预算再切下一个。
+- `intro_timestamps` / `MediaSegments` 后扫描任务的失败处理（一次失败就吞）——下批补 retry/dead-letter。
+- `/PlayingItems*` 兼容路径下 `query.audio_stream_index` / `subtitle_stream_index` / `volume_level` 等字段没解析（当前 `LegacyPlaybackQuery` 仅支持 `position_ticks` / `is_paused` / `media_source_id` / `play_session_id`）——优先级 P2，多数老客户端实测用不到。
+
+### 验证
+
+- `cargo check` 通过（无 warning 增量）
+- 6 个新增/修改函数均不破坏既有 API 签名（`PlaybackEventExtras` 是 struct 字段追加，所有 2 个调用点同步更新；`get_persons` 是新增参数，唯一调用点同步更新）
+- `EmbyAPI_Compatibility_Report.md` 同步更新
+
+**影响文件：** `backend/migrations/0001_schema.sql`、`backend/src/main.rs`、`backend/src/repository.rs`、`backend/src/routes/sessions.rs`、`backend/src/routes/items.rs`、`backend/src/routes/persons.rs`、`backend/src/routes/usage_stats.rs`、`EmbyAPI_Compatibility_Report.md`。
+
+---

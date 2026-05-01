@@ -1315,16 +1315,67 @@ pub async fn get_persons(
     start_index: Option<i32>,
     limit: Option<i32>,
     name_starts_with: Option<String>,
+    allowed_library_ids: Option<&[Uuid]>,
 ) -> Result<(Vec<PersonDto>, i64), AppError> {
     let start_index = start_index.unwrap_or(0);
     let limit = limit.unwrap_or(100).min(200);
 
-    let (persons, total) = if let Some(name_prefix) = &name_starts_with {
-        let name_pattern = format!("{}%", name_prefix);
+    // PB27：受限用户的 /Persons 列表必须只包含「在用户可见库里参演过的人物」，否则
+    // 隐藏库参演人物会通过人物列表泄露。`Some(&[])` 直接返回空集（用户当前无任何
+    // 可见库时），`None` 走原有「persons 全表 ORDER BY name」快路径。
+    if matches!(allowed_library_ids, Some(ids) if ids.is_empty()) {
+        return Ok((Vec::new(), 0));
+    }
+    let allowed_vec: Option<Vec<Uuid>> = allowed_library_ids.map(<[Uuid]>::to_vec);
+
+    let name_pattern_opt = name_starts_with.as_ref().map(|prefix| format!("{}%", prefix));
+
+    let (persons, total) = if let Some(allowed) = allowed_vec.as_ref() {
+        // 受限路径：JOIN person_roles + media_items 做 EXISTS 子查询过滤，再按 name 排序。
+        // EXISTS 比 IN 在大表 + 部分库白名单时执行计划更稳定。
+        let sql_total = r#"
+            SELECT COUNT(DISTINCT p.id)
+            FROM persons p
+            WHERE ($2::text IS NULL OR p.name ILIKE $2)
+              AND EXISTS (
+                  SELECT 1 FROM person_roles pr
+                  INNER JOIN media_items mi ON mi.id = pr.item_id
+                  WHERE pr.person_id = p.id
+                    AND mi.library_id = ANY($1)
+              )
+        "#;
+        let total: i64 = sqlx::query_scalar(sql_total)
+            .bind(allowed)
+            .bind(name_pattern_opt.as_deref())
+            .fetch_one(pool)
+            .await?;
+        let sql_rows = r#"
+            SELECT DISTINCT p.*
+            FROM persons p
+            WHERE ($2::text IS NULL OR p.name ILIKE $2)
+              AND EXISTS (
+                  SELECT 1 FROM person_roles pr
+                  INNER JOIN media_items mi ON mi.id = pr.item_id
+                  WHERE pr.person_id = p.id
+                    AND mi.library_id = ANY($1)
+              )
+            ORDER BY p.name
+            LIMIT $3 OFFSET $4
+        "#;
+        let rows = sqlx::query_as::<_, DbPerson>(sql_rows)
+            .bind(allowed)
+            .bind(name_pattern_opt.as_deref())
+            .bind(limit as i64)
+            .bind(start_index as i64)
+            .fetch_all(pool)
+            .await?;
+        (rows, total)
+    } else if let Some(name_pattern) = name_pattern_opt.as_ref() {
+        // admin / 全可见 + name prefix
         let total: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM persons WHERE name ILIKE $1",
         )
-        .bind(&name_pattern)
+        .bind(name_pattern)
         .fetch_one(pool)
         .await?;
         let rows = sqlx::query_as::<_, DbPerson>(
@@ -1336,13 +1387,14 @@ pub async fn get_persons(
             LIMIT $2 OFFSET $3
             "#,
         )
-        .bind(&name_pattern)
+        .bind(name_pattern)
         .bind(limit as i64)
         .bind(start_index as i64)
         .fetch_all(pool)
         .await?;
         (rows, total)
     } else {
+        // admin / 全可见 + 无 prefix：维持原有最便宜路径。
         let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM persons")
             .fetch_one(pool)
             .await?;
@@ -1364,6 +1416,35 @@ pub async fn get_persons(
     let person_dtos = persons.into_iter().map(db_person_to_dto).collect();
 
     Ok((person_dtos, total))
+}
+
+/// PB27：判定某人物是否在「用户可见库」里有参演条目；admin 路径直接传 `None` 跳过校验。
+pub async fn person_visible_to_user(
+    pool: &sqlx::PgPool,
+    person_id: Uuid,
+    allowed_library_ids: Option<&[Uuid]>,
+) -> Result<bool, AppError> {
+    let allowed = match allowed_library_ids {
+        None => return Ok(true),
+        Some(ids) if ids.is_empty() => return Ok(false),
+        Some(ids) => ids,
+    };
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM person_roles pr
+            INNER JOIN media_items mi ON mi.id = pr.item_id
+            WHERE pr.person_id = $1
+              AND mi.library_id = ANY($2)
+        )
+        "#,
+    )
+    .bind(person_id)
+    .bind(allowed)
+    .fetch_one(pool)
+    .await?;
+    Ok(exists)
 }
 
 pub async fn get_person_by_uuid(
@@ -7492,6 +7573,31 @@ pub struct PlaybackEventExtras {
     pub volume_level: Option<i32>,
     pub repeat_mode: Option<String>,
     pub playback_rate: Option<f64>,
+    /// PB29：客户端在 PlaybackReport 里带的 PlaySessionId，会随 INSERT 写入
+    /// `playback_events.play_session_id` 独立列；与 `session_id`（access_token 维度）
+    /// 解耦，让 Stop/Progress 等回调能按 PlaySessionId 反查最初 PlaybackInfo。
+    pub play_session_id: Option<String>,
+}
+
+/// PB29：按 PlaySessionId 反查最近一次 `Started` 事件，常用于 `/Sessions/Playing/{id}/Stop`
+/// 这种"靠 PlaySessionId 不靠 itemId 也能识别"的回调路径。当前只返回最新一行用作识别。
+pub async fn get_latest_event_by_play_session_id(
+    pool: &sqlx::PgPool,
+    play_session_id: &str,
+) -> Result<Option<(Uuid, Uuid, Option<Uuid>)>, AppError> {
+    let row: Option<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(
+        r#"
+        SELECT id, user_id, item_id
+        FROM playback_events
+        WHERE play_session_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(play_session_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
 pub async fn record_playback_event(
@@ -7505,11 +7611,15 @@ pub async fn record_playback_event(
     played_to_completion: Option<bool>,
     extras: &PlaybackEventExtras,
 ) -> Result<(), AppError> {
+    // PB29：把客户端在 PlaybackReport 里上报的 PlaySessionId 写进独立列。
+    // `session_id` 仍然是「access_token / 队列归属维度」（兼容旧逻辑），新加的
+    // `play_session_id` 字段对应 Emby PlaybackInfo handler 生成的 PlaySessionId，
+    // 让 Stop/Progress 等回调能通过 PlaySessionId 反查最初的 PlaybackInfo。
     sqlx::query(
         r#"
         INSERT INTO playback_events
-            (id, user_id, item_id, session_id, event_type, position_ticks, is_paused, played_to_completion)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (id, user_id, item_id, session_id, event_type, position_ticks, is_paused, played_to_completion, play_session_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(Uuid::new_v4())
@@ -7520,6 +7630,7 @@ pub async fn record_playback_event(
     .bind(position_ticks)
     .bind(is_paused)
     .bind(played_to_completion)
+    .bind(extras.play_session_id.as_deref())
     .execute(pool)
     .await?;
 
