@@ -3328,6 +3328,87 @@ pub async fn ensure_remote_view_path_in_library(
     Ok(())
 }
 
+/// PB23：删除远端源时配套清理 libraries 表里挂着的虚拟路径。
+/// 包含两类清理：
+///   1) **Separate 模式**：path 形如 `__remote_view_<source_id>_*` 的整条 library 记录
+///      由 `ensure_view_library` 自动创建，删除源时这些独立库失去归属，整条删除（含 media_paths）。
+///   2) **Merge 模式**：本地用户原本的 library，其 `library_options.PathInfos` 中混入了
+///      `__remote_view_<source_id>_*` 条目；这里只移除这些 entry，保留库本体。
+///
+/// 返回 `(deleted_libraries, updated_libraries)`：分别是被整体删除的库数 / 被剥离了
+/// 远端 view 路径的库数，用于审计日志。
+pub async fn cleanup_remote_view_paths_for_source(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+) -> Result<(u64, u64), AppError> {
+    let prefix = format!("__remote_view_{}_", source_id.simple());
+    let standalone_libs: Vec<DbLibrary> = sqlx::query_as::<_, DbLibrary>(
+        r#"
+        SELECT id, name, collection_type, path, library_options, created_at,
+               primary_image_path, primary_image_tag
+        FROM libraries
+        WHERE path LIKE $1
+        "#,
+    )
+    .bind(format!("{prefix}%"))
+    .fetch_all(pool)
+    .await?;
+    let mut deleted = 0u64;
+    for lib in &standalone_libs {
+        let res = sqlx::query("DELETE FROM libraries WHERE id = $1")
+            .bind(lib.id)
+            .execute(pool)
+            .await?;
+        deleted += res.rows_affected();
+    }
+
+    // Merge 模式：扫所有「非独立」库，从 library_options.PathInfos 剥掉远端 view 路径。
+    let merge_candidates: Vec<DbLibrary> = sqlx::query_as::<_, DbLibrary>(
+        r#"
+        SELECT id, name, collection_type, path, library_options, created_at,
+               primary_image_path, primary_image_tag
+        FROM libraries
+        WHERE library_options::text LIKE $1
+        "#,
+    )
+    .bind(format!("%{prefix}%"))
+    .fetch_all(pool)
+    .await?;
+    let mut updated = 0u64;
+    for lib in &merge_candidates {
+        let mut options = lib.library_options.clone();
+        let mut dirty = false;
+        if let Some(arr) = options
+            .as_object_mut()
+            .and_then(|obj| obj.get_mut("PathInfos"))
+            .and_then(|v| v.as_array_mut())
+        {
+            let before = arr.len();
+            arr.retain(|p| {
+                p.get("Path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.starts_with(&prefix))
+                    .unwrap_or(true)
+            });
+            if arr.len() != before {
+                dirty = true;
+            }
+        }
+        if dirty {
+            sqlx::query(
+                "UPDATE libraries SET library_options = $1, date_modified = now() WHERE id = $2",
+            )
+            .bind(&options)
+            .bind(lib.id)
+            .execute(pool)
+            .await?;
+            updated += 1;
+        }
+    }
+
+    Ok((deleted, updated))
+}
+
 /// 将 view_library_map 写回 remote_emby_sources
 pub async fn update_source_view_library_map(
     pool: &sqlx::PgPool,

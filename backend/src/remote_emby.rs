@@ -1477,6 +1477,31 @@ pub async fn cleanup_source_mapped_items(
     )
     .await?;
 
+    // PB23：删除源时同步清掉 libraries 表里挂的虚拟路径——
+    //   - separate 模式：`ensure_view_library` 自动建出来的独立库（path 以 `__remote_view_<source_id>_` 起头）整条删；
+    //   - merge 模式：用户原有库 library_options.PathInfos 里的远端 view 路径剥掉；
+    // 这样用户在 /settings/libraries 里就不会看到「片源 13113，路径 __remote_view_xxx」这种残留，
+    // 也不会再被扫描器误进入虚拟路径触发文件不存在告警。
+    match repository::cleanup_remote_view_paths_for_source(pool, source.id).await {
+        Ok((deleted_libs, updated_libs)) => {
+            if deleted_libs > 0 || updated_libs > 0 {
+                tracing::info!(
+                    source_id = %source.id,
+                    deleted_libs,
+                    updated_libs,
+                    "已清理与远端源关联的 libraries（separate/merge 两类虚拟路径）"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                source_id = %source.id,
+                error = %error,
+                "清理 libraries 远端 view 路径失败（不阻塞源删除）"
+            );
+        }
+    }
+
     match tokio::fs::remove_dir_all(&source_root).await {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2433,6 +2458,34 @@ fn resolve_playback_info_stream_endpoint(
     )
 }
 
+/// 远端 Emby HTTP 拉取的最大重试次数（5xx / 网络错误 / Connection reset 等）。
+/// 取 4 是因为：1 次首发 + 3 次重试，叠加退避 1s/2s/4s，最坏 7s 后放弃，
+/// 既避免「797/399752 撞 502 直接失败」的雪崩，也不会让单次扫描卡死。
+const REMOTE_HTTP_MAX_RETRIES: u32 = 3;
+
+/// 重试退避基线毫秒数；实际间隔为 `BASE * 2^attempt`，attempt 从 0 起算。
+const REMOTE_HTTP_BACKOFF_BASE_MS: u64 = 1000;
+
+/// 判断状态码是否值得退避后重试。401/403 由上层 token 续登路径单独处理；
+/// 其它 4xx 视为客户端错误（参数错、不存在），重试无意义直接抛错。
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::REQUEST_TIMEOUT
+            | reqwest::StatusCode::TOO_MANY_REQUESTS
+            | reqwest::StatusCode::INTERNAL_SERVER_ERROR
+            | reqwest::StatusCode::BAD_GATEWAY
+            | reqwest::StatusCode::SERVICE_UNAVAILABLE
+            | reqwest::StatusCode::GATEWAY_TIMEOUT
+    ) || status.as_u16() >= 500
+}
+
+/// 判断 reqwest 网络错误是否值得重试。connect/timeout/connection reset 等暂时性错误
+/// 都允许重试；只有 builder 错误等结构性问题才直接失败。
+fn is_retryable_network_error(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.is_connect() || err.is_request() || err.is_body()
+}
+
 async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
@@ -2440,8 +2493,15 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
     query: &[(String, String)],
 ) -> Result<T, AppError> {
     let client = &*crate::http_client::SHARED;
-    for attempt in 0..2 {
-        let _user_id = ensure_authenticated(pool, source, attempt > 0).await?;
+    let mut auth_retry_used = false;
+    let mut last_error: Option<String> = None;
+
+    // 重试循环：max_retries 次「网络/5xx 错误」退避重试 + 最多 1 次 401/403 续登重试。
+    // 这两类重试相互独立计数：
+    //   - auth_retry_used：401/403 触发的「清 token 重登」是否已用掉；
+    //   - retry_count：5xx / 网络错误 触发的退避重试次数。
+    for retry_count in 0..=REMOTE_HTTP_MAX_RETRIES {
+        let _user_id = ensure_authenticated(pool, source, false).await?;
         let token = source
             .access_token
             .clone()
@@ -2469,20 +2529,70 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
             );
 
         request = request.query(&[("api_key", token.as_str())]);
-        let response = request.send().await?;
+
+        let response = match request.send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                if is_retryable_network_error(&err) && retry_count < REMOTE_HTTP_MAX_RETRIES {
+                    let delay_ms = REMOTE_HTTP_BACKOFF_BASE_MS << retry_count;
+                    tracing::warn!(
+                        endpoint,
+                        attempt = retry_count + 1,
+                        max_retries = REMOTE_HTTP_MAX_RETRIES,
+                        delay_ms,
+                        error = %err,
+                        "远端 Emby 网络错误，退避后重试"
+                    );
+                    last_error = Some(err.to_string());
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+                return Err(err.into());
+            }
+        };
+
+        let status = response.status();
+
+        // 401/403：清 token + 重登，仅允许一次（避免凭证错误时无限循环）。
         if matches!(
-            response.status(),
+            status,
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-        ) && attempt == 0
+        ) && !auth_retry_used
         {
+            auth_retry_used = true;
             repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
             source.access_token = None;
             source.remote_user_id = None;
+            // PB22：重登 + 清 PlaybackInfo 缓存（与 PB15 一致），下一轮 ensure_authenticated 会重新拿 token。
+            invalidate_playback_info_cache_for_source(source.id).await;
             continue;
         }
 
-        if !response.status().is_success() {
-            let status = response.status();
+        // 5xx / 429 / 408：退避后重试。
+        if is_retryable_status(status) && retry_count < REMOTE_HTTP_MAX_RETRIES {
+            let body_preview = response
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect::<String>();
+            let delay_ms = REMOTE_HTTP_BACKOFF_BASE_MS << retry_count;
+            tracing::warn!(
+                endpoint,
+                status = %status,
+                attempt = retry_count + 1,
+                max_retries = REMOTE_HTTP_MAX_RETRIES,
+                delay_ms,
+                body_preview = %body_preview,
+                "远端 Emby 上游错误（5xx/429/408），退避后重试"
+            );
+            last_error = Some(format!("HTTP {} {}", status.as_u16(), body_preview));
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            continue;
+        }
+
+        if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             return Err(AppError::Internal(format!(
                 "远端 Emby 请求失败: {} {}",
@@ -2493,7 +2603,11 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
         return parse_remote_json_response(response, endpoint).await;
     }
 
-    Err(AppError::Unauthorized)
+    Err(AppError::Internal(format!(
+        "远端 Emby 请求多次重试仍失败 endpoint={} 最近错误: {}",
+        endpoint,
+        last_error.unwrap_or_else(|| "未记录".to_string())
+    )))
 }
 
 async fn parse_remote_json_response<T: serde::de::DeserializeOwned>(

@@ -2550,3 +2550,45 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 **影响文件：** `backend/src/webhooks.rs`、`backend/src/scanner.rs`、`backend/src/remote_emby.rs`、`backend/src/repository.rs`、`backend/src/repo_cache.rs`、`backend/src/routes/items.rs`、`backend/src/routes/images.rs`、`backend/src/routes/sessions.rs`、`backend/src/routes/websocket.rs`、`backend/src/routes/mod.rs`、`backend/src/metadata/opensubtitles.rs`、`EmbyAPI_Compatibility_Report.md`。
 
 ---
+
+## 第三十二批（2026-05-01）：远端同步韧性 + 删除源时联级清理 libraries
+
+**触发场景：** 用户报告：1) 「远端抓取 797/399752 撞 502 直接失败」——远端 Emby 上游临时性错误没有任何重试，整个增量同步从此停在中途。2) 删除远端源后，`/settings/libraries` 里仍能看到「片源 13113」「`__remote_view_xxxxx_yyyyy`」等虚拟路径残留，说明源删除没有联级清掉 libraries 表里挂的虚拟路径。
+
+### P0 — 同步韧性 + 数据残留
+
+| # | 文件 | 修复 |
+|---|------|------|
+| PB22 | `remote_emby.rs::get_json_with_retry` ~2436 + 三个常量 / 两个 helper | 把「**只对 401/403 重试一次**」的策略升级为**双层重试模型**：1) `auth_retry_used` 标志位独立控制 token 续登（最多 1 次）；2) `retry_count` 控制网络错误 + `is_retryable_status`（408 / 429 / 500 / 502 / 503 / 504 / 通用 5xx）的退避重试，最多 `REMOTE_HTTP_MAX_RETRIES=3` 次，间隔 `1s / 2s / 4s`。新增 `is_retryable_status` 与 `is_retryable_network_error` 判定函数：reqwest 的 `is_timeout / is_connect / is_request / is_body` 都纳入可重试范畴。重试期间打印 `tracing::warn!` 含 endpoint / status / attempt / delay_ms / body_preview，便于运维诊断；最终所有重试都耗尽时抛 `远端 Emby 请求多次重试仍失败` 含最近一次错误。401/403 重登路径上同时调用 PB15 的 `invalidate_playback_info_cache_for_source`，与 token 生命周期严格对齐。**百万级片源同步遇短暂 502 不再整批失败**。 |
+| PB23 | `repository.rs::cleanup_remote_view_paths_for_source` 新增 + `remote_emby.rs::cleanup_source_mapped_items` ~1486 | 删除远端源时同步清理两类挂在 libraries 表的虚拟路径：**Separate 模式**——`ensure_view_library` 自动创建的独立库（`libraries.path` 起头形如 `__remote_view_<source_id_simple>_<view_id>`）整条 DELETE，level cascading 由外键约束自动清掉 media_paths/media_items 残留；**Merge 模式**——本地用户原有库的 `library_options.PathInfos` 数组里被 `ensure_remote_view_path_in_library` 注入的 `__remote_view_<source_id>_*` 条目，仅剥离这些 entry 不动库本体。`cleanup_source_mapped_items` 在原 `cleanup_remote_source_items + remove_dir_all` 基础上插入这一步，并 `tracing::info!` 报告 `(deleted_libs, updated_libs)`。SQL 层面：第一遍按 `path LIKE '<prefix>%'` 找出 standalone；第二遍按 `library_options::text LIKE '%<prefix>%'` 粗筛 merge 候选，再在 Rust 里精确按 `PathInfos[].Path.starts_with(prefix)` retain；用户在 `/settings/libraries` 里不再看到「片源 13113，路径 `__remote_view_*`」残留，扫描器也不会再误进入虚拟路径报「文件不存在」。 |
+
+### 行为对照
+
+| 场景 | PB22 前 | PB22 后 |
+|------|---------|---------|
+| 远端 Emby 短暂 502 | 立即抛 `远端 Emby 请求失败: 502 ...`，整批同步标记 Failed | 退避 1s/2s/4s 重试 3 次，**多数恢复**；只有连续 7s+ 都 502 才标 Failed |
+| 远端连接被对端 reset (`is_connect()`) | `request.send().await?` 直接吐 reqwest::Error | 同样退避重试 3 次，含 1s/2s/4s |
+| Token 失效（401） | 已支持：清 token → 重登 → 重试一次 | 同（独立计数，不消耗 5xx 重试预算） |
+| 4xx 客户端错误（如 400 / 404） | 立即报错 | 立即报错（不浪费重试预算） |
+
+| 场景 | PB23 前 | PB23 后 |
+|------|---------|---------|
+| Separate 模式删除源 | media_items 被清空，但 `__remote_view_*` 独立库仍出现在 /settings/libraries | 独立库整条 DELETE，前端不再展示 |
+| Merge 模式删除源 | 本地库 `PathInfos` 里仍带 `__remote_view_*` entry | 仅这些 entry 被剥离，库其它配置不变 |
+| 删除时清理失败 | 整个删除链路报错回滚 | `tracing::warn!` 记录后继续删除源（不阻塞） |
+
+### 文档勘误
+
+- 第二十六批关于「远端同步流程贯通」的描述需注明：**网络/上游临时错误不再是单点失败**，由 `REMOTE_HTTP_MAX_RETRIES=3` 退避重试覆盖。
+- 第二十九批「删除源时清理映射」原表只描述 media_items + 工作区目录；现在还包含 libraries 表（separate 整删 / merge 剥离）。
+
+### 验证
+
+- `cargo check` 通过；`cargo test --bin movie-rust-backend` 60/60 通过。
+- 实际行为预期：
+  - 远端短暂 502/连接 reset 不再让百万级片源同步「797/399752 卡住」；
+  - 删除远端源后，`GET /settings/libraries` / `GET /Library/VirtualFolders` 不再返回 `__remote_view_*` 路径。
+
+**影响文件：** `backend/src/remote_emby.rs`、`backend/src/repository.rs`、`EmbyAPI_Compatibility_Report.md`。
+
+---
