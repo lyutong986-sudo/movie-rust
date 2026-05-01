@@ -11,6 +11,14 @@ use crate::error::AppError;
 pub static SHARED: LazyLock<Client> = LazyLock::new(|| {
     Client::builder()
         .pool_max_idle_per_host(32)
+        // 长任务（远端 Emby 全量同步可达 1500s+）容易踩到「池里的 keep-alive
+        // 连接被中间反代/NAT 静默掐断」：表象就是下一次复用时 body 读到一半抛
+        // `error decoding response body`。`tcp_keepalive` 强制周期性发探测，
+        // `pool_idle_timeout` 限制空闲连接存活时间，两者一起把死连接挡在池外。
+        // 30s/60s 是相对保守的折中：既能避开常见的 NAT/CDN 60–90s 空闲回收，
+        // 又不会频繁建连影响短突发请求。
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .pool_idle_timeout(std::time::Duration::from_secs(60))
         .timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()

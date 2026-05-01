@@ -3337,7 +3337,12 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
             .header(
                 "X-Emby-Authorization",
                 emby_auth_header(source, Some(token.as_str())),
-            );
+            )
+            // 远端大库（30 万+ 条）单页可达 1000 条 + 全 Fields，单次响应 body 可达数 MB；
+            // 全局 SHARED 默认 30s 总超时偏紧，body 读到一半被超时砍断会抛
+            // `error decoding response body`，本路径单独放宽到 120s（per-request override，
+            // 不影响 TMDB / 图片 / 反代直链等其它复用 SHARED 的链路）。
+            .timeout(Duration::from_secs(120));
 
         request = request.query(&[("api_key", token.as_str())]);
 
@@ -3411,7 +3416,59 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
                 body
             )));
         }
-        return parse_remote_json_response(response, endpoint).await;
+
+        // status=200 之后的 body 读取阶段也可能瞬时失败：
+        //   - 上游 / 反代 / NAT 中途掐断 keep-alive 长连接 → hyper IncompleteMessage
+        //   - per-request `.timeout(120s)` 烧到 body 读阶段触发
+        //   - 解压 / chunked 流自身错误
+        // 这些在 reqwest 里都标记为 `is_body() == true`（Display 字面量
+        // 「error decoding response body」），与 send 阶段的网络错误同属可重试类。
+        // 故意放进同一个 `for retry_count` 循环里复用 `is_retryable_network_error`
+        // + 退避策略，保证「拉了 11% 撞一次连接重置 → 整个同步任务直接 Failed」
+        // 这条 1605s 大库灾难路径（status=200 + body decode err）也会按
+        // 1s/2s/4s 退避重试，不再一击毙命。
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("-")
+            .to_string();
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                if is_retryable_network_error(&err) && retry_count < REMOTE_HTTP_MAX_RETRIES {
+                    let delay_ms = REMOTE_HTTP_BACKOFF_BASE_MS << retry_count;
+                    tracing::warn!(
+                        endpoint,
+                        status = %status,
+                        attempt = retry_count + 1,
+                        max_retries = REMOTE_HTTP_MAX_RETRIES,
+                        delay_ms,
+                        content_type = %content_type,
+                        error = %err,
+                        "远端 Emby 响应 body 读取失败，退避后重试"
+                    );
+                    last_error =
+                        Some(format!("body read err (status={}): {err}", status.as_u16()));
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+                return Err(AppError::Internal(format!(
+                    "远端响应读取失败: endpoint={endpoint}, status={}, content_type={content_type}, error={err}",
+                    status.as_u16()
+                )));
+            }
+        };
+        return serde_json::from_slice::<T>(bytes.as_ref()).map_err(|error| {
+            let preview = String::from_utf8_lossy(bytes.as_ref())
+                .chars()
+                .take(280)
+                .collect::<String>();
+            AppError::Internal(format!(
+                "远端JSON解析失败: endpoint={endpoint}, status={}, content_type={content_type}, error={error}, body预览={preview}",
+                status.as_u16()
+            ))
+        });
     }
 
     Err(AppError::Internal(format!(
