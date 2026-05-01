@@ -574,6 +574,11 @@ export interface RemoteEmbySource {
    * - `"redirect"`：返回 302 重定向到远端直链，节省本地带宽（要求客户端能直连远端）
    */
   ProxyMode: 'proxy' | 'redirect' | string;
+  /**
+   * 自动增量同步间隔（分钟）。0 = 关闭。
+   * 后端 `remote_emby_auto_sync_loop` 每分钟根据该间隔触发该源的增量同步（增/改/删）。
+   */
+  AutoSyncIntervalMinutes?: number;
   CreatedAt: string;
   UpdatedAt: string;
 }
@@ -1545,6 +1550,7 @@ export class EmbyApi {
     SyncSubtitles?: boolean;
     TokenRefreshIntervalSecs?: number;
     ProxyMode?: 'proxy' | 'redirect';
+    AutoSyncIntervalMinutes?: number;
   }) {
     return this.request<RemoteEmbySource>('/api/admin/remote-emby/sources', {
       method: 'POST',
@@ -1571,6 +1577,7 @@ export class EmbyApi {
       SyncSubtitles?: boolean;
       TokenRefreshIntervalSecs?: number;
       ProxyMode?: 'proxy' | 'redirect';
+      AutoSyncIntervalMinutes?: number;
     }
   ) {
     return this.request<RemoteEmbySource>(`/api/admin/remote-emby/sources/${encodeURIComponent(sourceId)}`, {

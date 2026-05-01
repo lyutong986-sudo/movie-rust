@@ -41,7 +41,8 @@ const form = ref({
   syncMetadata: true,
   syncSubtitles: true,
   tokenRefreshIntervalSecs: 3600,
-  proxyMode: 'proxy' as 'proxy' | 'redirect'
+  proxyMode: 'proxy' as 'proxy' | 'redirect',
+  autoSyncIntervalMinutes: 0
 });
 
 const editOpen = ref(false);
@@ -63,6 +64,7 @@ const editForm = ref({
   syncSubtitles: true,
   tokenRefreshIntervalSecs: 3600,
   proxyMode: 'proxy' as 'proxy' | 'redirect',
+  autoSyncIntervalMinutes: 0,
   mergedRemoteViews: [] as RemoteEmbyView[]
 });
 
@@ -380,6 +382,7 @@ function openEditor(source: RemoteEmbySource) {
     syncSubtitles: source.SyncSubtitles !== false,
     tokenRefreshIntervalSecs: source.TokenRefreshIntervalSecs ?? 3600,
     proxyMode: (source.ProxyMode === 'redirect' ? 'redirect' : 'proxy') as 'proxy' | 'redirect',
+    autoSyncIntervalMinutes: Math.max(0, Number(source.AutoSyncIntervalMinutes ?? 0) || 0),
     mergedRemoteViews: [...merged.values()]
   };
   editOpen.value = true;
@@ -440,6 +443,7 @@ async function saveEditor() {
       SyncSubtitles: boolean;
       TokenRefreshIntervalSecs: number;
       ProxyMode: 'proxy' | 'redirect';
+      AutoSyncIntervalMinutes: number;
     } = {
       Name: p.name.trim(),
       ServerUrl: p.serverUrl.trim(),
@@ -458,7 +462,8 @@ async function saveEditor() {
         Math.max(Number(p.tokenRefreshIntervalSecs) || 3600, 300),
         86400 * 30
       ),
-      ProxyMode: p.proxyMode
+      ProxyMode: p.proxyMode,
+      AutoSyncIntervalMinutes: Math.max(0, Math.min(60 * 24 * 7, Number(p.autoSyncIntervalMinutes) || 0))
     };
     if (p.password.trim()) {
       payload.Password = p.password;
@@ -542,7 +547,8 @@ async function createSource() {
         Math.max(Number(payload.tokenRefreshIntervalSecs) || 3600, 300),
         86400 * 30
       ),
-      ProxyMode: payload.proxyMode
+      ProxyMode: payload.proxyMode,
+      AutoSyncIntervalMinutes: Math.max(0, Math.min(60 * 24 * 7, Number(payload.autoSyncIntervalMinutes) || 0))
     });
     saved.value = `已创建远端源：${payload.name.trim()}`;
     form.value.name = '';
@@ -871,6 +877,19 @@ onBeforeUnmount(() => {
               范围 300–2592000。STRM 文件指向本地代理（无需嵌入 api_key），此间隔控制后台任务刷新本地服务器缓存的远端访问令牌，确保代理能持续鉴权。
             </p>
           </UFormField>
+          <UFormField class="lg:col-span-2" label="自动增量同步间隔（分钟）">
+            <UInput
+              v-model.number="form.autoSyncIntervalMinutes"
+              type="number"
+              class="w-full max-w-xs"
+              :min="0"
+              :max="60 * 24 * 7"
+              placeholder="0 = 关闭，30 表示每 30 分钟一次"
+            />
+            <p class="text-muted mt-1 text-xs">
+              0 = 关闭。后台每分钟检查一次该源距离上次同步的时间，达到该间隔即触发增量同步（增 / 改 / 删）。范围 1–10080（最长 7 天）。
+            </p>
+          </UFormField>
           <div class="lg:col-span-2 flex flex-wrap items-center justify-between gap-2">
             <UButton
               color="neutral"
@@ -992,6 +1011,18 @@ onBeforeUnmount(() => {
                 流量模式：
                 <span :class="source.ProxyMode === 'redirect' ? 'text-warning font-medium' : 'text-success font-medium'">
                   {{ source.ProxyMode === 'redirect' ? '302 直链重定向（节省带宽）' : '本地中转（默认）' }}
+                </span>
+              </p>
+              <p class="text-muted mt-1 text-xs">
+                自动增量同步：
+                <span
+                  :class="(source.AutoSyncIntervalMinutes ?? 0) > 0 ? 'text-success font-medium' : 'text-muted'"
+                >
+                  {{
+                    (source.AutoSyncIntervalMinutes ?? 0) > 0
+                      ? `每 ${source.AutoSyncIntervalMinutes} 分钟一次（增/改/删）`
+                      : '已关闭（仅手动同步或全局计划任务）'
+                  }}
                 </span>
               </p>
               <p v-if="source.LastTokenRefreshAt" class="text-muted text-xs">
@@ -1198,6 +1229,19 @@ onBeforeUnmount(() => {
               <UInput v-model.number="editForm.tokenRefreshIntervalSecs" type="number" class="max-w-xs" :min="300" />
               <p class="text-muted mt-1 text-xs">
                 300–2592000。后台任务据此周期刷新本地缓存的远端鉴权令牌，STRM 文件指向本地代理无需嵌入 api_key。
+              </p>
+            </UFormField>
+            <UFormField class="lg:col-span-2" label="自动增量同步间隔（分钟）">
+              <UInput
+                v-model.number="editForm.autoSyncIntervalMinutes"
+                type="number"
+                class="max-w-xs"
+                :min="0"
+                :max="60 * 24 * 7"
+                placeholder="0 = 关闭，30 表示每 30 分钟一次"
+              />
+              <p class="text-muted mt-1 text-xs">
+                0 = 关闭。后台每分钟检查该源，到达间隔即触发增量同步（增 / 改 / 删）。范围 1–10080（最长 7 天）。
               </p>
             </UFormField>
             <div class="lg:col-span-2 mt-2 flex flex-wrap justify-end gap-2">

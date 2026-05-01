@@ -2369,4 +2369,38 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 - 当一整个 Series 在远端被删除（所有 Episode 消失）时，DB 里的 Series/Season 节点会保留为"空骨架"。下次出现同名 Series 时会被复用；如需主动清理，可让本地库扫描器周期性删除"无 child 的 Series/Season"。
 - 增量「改」依赖远端 `MinDateLastSaved` 过滤 — 远端 Emby 必须正确维护 `DateLastSaved`，否则远端元数据修订无法被检测到。
 
+### 远端 Emby 源「自动增量同步间隔」（2026-05-01）
+
+**背景：** 之前远端源只有两条触发路径：
+- 全局计划任务 `library-scan`（在 `/settings/scheduled-tasks`）—— 所有库共用一个 cron；
+- `remote_library_monitor_loop`（5 分钟硬编码 + 要求 library `EnableRealtimeMonitor=true`）。
+
+用户在远端源页面找不到「为这个源单独配置自动增量同步频率」的入口。
+
+**实现：** 新增按源粒度的"自动增量同步"配置。
+
+| 项 | 内容 |
+|----|------|
+| DB 列 | `remote_emby_sources.auto_sync_interval_minutes INTEGER NOT NULL DEFAULT 0`（0 = 关闭，1–10080 分钟可配，最长 7 天） |
+| 字段位置 | `0001_schema.sql` ALTER 块、`main.rs::ensure_schema_compatibility` ALTER 块、`DbRemoteEmbySource.auto_sync_interval_minutes` |
+| API | `Create/UpdateRemoteEmbySourceRequest.AutoSyncIntervalMinutes`、`RemoteEmbySourceDto.AutoSyncIntervalMinutes` |
+| 后端循环 | `remote_emby::remote_emby_auto_sync_loop`：每 60 秒扫描所有启用源，当 `now() >= max(last_sync_at, created_at) + interval` 时调 `sync_source_with_progress`。`auto_sync_in_flight: HashSet<Uuid>` 互斥锁防止同一源重复触发。失败/中断不推水位线（参见前条修复）。 |
+| 前端 UI | `/settings/remote-emby` 创建表单与编辑弹窗均新增「自动增量同步间隔（分钟）」输入框；源卡片摘要展示当前配置（`已关闭` / `每 N 分钟一次`）。 |
+
+**触发链路（最终形态）：**
+
+| 入口 | 频率 / 条件 | 适用场景 |
+|------|-------------|----------|
+| 前端「同步」按钮 | 用户点击 | 立即手动触发 |
+| 媒体库「增量更新」按钮 | 用户点击 | 立即手动触发 |
+| 计划任务 `library-scan` | 全局 cron | 所有库统一节奏 |
+| `remote_library_monitor_loop` | 5 分钟，`EnableRealtimeMonitor=true` | 与本地实时监控对齐 |
+| `remote_emby_auto_sync_loop` | 每 60 秒检查，`auto_sync_interval_minutes > 0` | **按源粒度配置**，独立于库选项 |
+
+所有路径都汇聚到 `sync_source_with_progress`，「增 / 改 / 删」语义一致；失败/中断不推水位线。
+
+**影响文件：**
+- 后端：`backend/migrations/0001_schema.sql`、`backend/src/main.rs`、`backend/src/models.rs`、`backend/src/repository.rs`、`backend/src/remote_emby.rs`、`backend/src/routes/remote_emby.rs`
+- 前端：`frontend/src/api/emby.ts`、`frontend/src/pages/settings/RemoteEmbySettings.vue`
+
 ---

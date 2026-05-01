@@ -119,6 +119,9 @@ struct CreateRemoteEmbySourceRequest {
     proxy_mode: Option<String>,
     #[serde(default, alias = "viewLibraryMap", alias = "view_library_map")]
     view_library_map: Option<serde_json::Value>,
+    /// 自动增量同步间隔（分钟），0 = 关闭。
+    #[serde(default, alias = "autoSyncIntervalMinutes", alias = "auto_sync_interval_minutes")]
+    auto_sync_interval_minutes: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +171,9 @@ struct UpdateRemoteEmbySourceRequest {
     proxy_mode: Option<String>,
     #[serde(default, alias = "viewLibraryMap", alias = "view_library_map")]
     view_library_map: Option<serde_json::Value>,
+    /// 自动增量同步间隔（分钟），0 = 关闭。
+    #[serde(default, alias = "autoSyncIntervalMinutes", alias = "auto_sync_interval_minutes")]
+    auto_sync_interval_minutes: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -220,6 +226,8 @@ struct RemoteEmbySourceDto {
     view_library_map: serde_json::Value,
     /// 流量模式：`"proxy"`（本地中转）或 `"redirect"`（302 直链）
     proxy_mode: String,
+    /// 自动增量同步间隔（分钟），0 = 关闭。
+    auto_sync_interval_minutes: i32,
     created_at: String,
     updated_at: String,
 }
@@ -406,6 +414,7 @@ async fn create_remote_emby_source(
         payload.token_refresh_interval_secs.unwrap_or(3600),
         payload.proxy_mode.as_deref().unwrap_or("proxy"),
         payload.view_library_map.as_ref(),
+        payload.auto_sync_interval_minutes.unwrap_or(0),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))
@@ -449,6 +458,7 @@ async fn update_remote_emby_source(
         payload.token_refresh_interval_secs.unwrap_or(3600),
         payload.proxy_mode.as_deref().unwrap_or("proxy"),
         payload.view_library_map.as_ref(),
+        payload.auto_sync_interval_minutes.unwrap_or(0),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))
@@ -840,6 +850,7 @@ fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> Remot
             .last_token_refresh_at
             .map(|value| value.to_rfc3339()),
         view_library_map: source.view_library_map,
+        auto_sync_interval_minutes: source.auto_sync_interval_minutes.max(0),
         proxy_mode: if source.proxy_mode.trim().is_empty() {
             "proxy".to_string()
         } else {

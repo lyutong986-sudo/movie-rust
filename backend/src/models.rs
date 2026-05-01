@@ -79,6 +79,10 @@ pub struct DbRemoteEmbySource {
     /// 流量模式：`"proxy"`（本地中转，默认）或 `"redirect"`（302 直链，客户端直连远端，节省带宽）
     #[sqlx(default)]
     pub proxy_mode: String,
+    /// 自动增量同步间隔（分钟），0 = 关闭。后端 `remote_emby_auto_sync_loop` 每分钟检查，
+    /// 当 `now() >= last_sync_at + interval` 时触发该源的增量同步。
+    #[sqlx(default)]
+    pub auto_sync_interval_minutes: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

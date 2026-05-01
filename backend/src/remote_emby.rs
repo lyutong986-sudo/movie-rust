@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
@@ -3400,6 +3400,88 @@ pub async fn remote_emby_token_refresh_loop(pool: sqlx::PgPool) {
             tracing::warn!(error = %error, "远端 Emby token 刷新批次失败");
         }
     }
+}
+
+/// 远端 Emby 源「定时增量同步」循环：每 60 秒检查一次每个源，
+/// 当 `auto_sync_interval_minutes > 0` 且 `now() >= last_sync_at + interval` 时，
+/// 自动触发该源的增量同步（增 / 改 / 删，由 `sync_source_with_progress` 内部统一处理）。
+///
+/// 与 `remote_library_monitor_loop` 的差异：
+/// - 监控循环依赖 library `EnableRealtimeMonitor` 选项 + 5 分钟硬编码间隔；
+/// - 本循环按 **源粒度** 配置间隔，独立于 library 监控开关。
+pub async fn remote_emby_auto_sync_loop(state: crate::state::AppState) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(60));
+    ticker.tick().await; // 跳过启动瞬间立即触发
+    loop {
+        ticker.tick().await;
+        if let Err(err) = run_remote_emby_auto_sync_pass(&state).await {
+            tracing::warn!(error = %err, "远端 Emby 自动增量同步轮询失败");
+        }
+    }
+}
+
+/// 防止 auto_sync 自身在同一个源上并发触发（用户手动按钮 + auto loop 的并发由
+/// `sync_source_with_progress` 顶层去重保证：同一时间一个源最多一个 spawn 任务）。
+fn auto_sync_in_flight() -> &'static tokio::sync::Mutex<std::collections::HashSet<Uuid>> {
+    static SET: OnceLock<tokio::sync::Mutex<std::collections::HashSet<Uuid>>> = OnceLock::new();
+    SET.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+async fn run_remote_emby_auto_sync_pass(
+    state: &crate::state::AppState,
+) -> Result<(), AppError> {
+    let sources = repository::list_remote_emby_sources(&state.pool).await?;
+    let now = Utc::now();
+    for source in sources {
+        if !source.enabled {
+            continue;
+        }
+        let interval_min = source.auto_sync_interval_minutes;
+        if interval_min <= 0 {
+            continue;
+        }
+        // 没有 last_sync_at 时使用 created_at 作为基准，确保新源也会按周期触发首次同步。
+        let baseline = source.last_sync_at.unwrap_or(source.created_at);
+        let elapsed_min = now
+            .signed_duration_since(baseline)
+            .num_minutes()
+            .max(0);
+        if elapsed_min < i64::from(interval_min) {
+            continue;
+        }
+        // 抢占去重锁：本轮已经在跑同一个源就跳过；正常退出时移除。
+        {
+            let mut guard = auto_sync_in_flight().lock().await;
+            if !guard.insert(source.id) {
+                continue;
+            }
+        }
+        tracing::info!(
+            source_id = %source.id,
+            source_name = %source.name,
+            interval_min,
+            elapsed_min,
+            "远端 Emby 自动增量同步：触发"
+        );
+        match sync_source_with_progress(state, source.id, None).await {
+            Ok(result) => {
+                tracing::info!(
+                    source_id = %source.id,
+                    written = result.written_files,
+                    "远端 Emby 自动增量同步：完成"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    source_id = %source.id,
+                    error = %err,
+                    "远端 Emby 自动增量同步：失败"
+                );
+            }
+        }
+        auto_sync_in_flight().lock().await.remove(&source.id);
+    }
+    Ok(())
 }
 
 /// 远端媒体库实时监控轮询：每 5 分钟检查启用了 EnableRealtimeMonitor 的远端库，

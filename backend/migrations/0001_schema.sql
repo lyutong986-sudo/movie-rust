@@ -734,6 +734,10 @@ ALTER TABLE remote_emby_sources
 -- proxy_mode: 'proxy'（本地中转，默认）或 'redirect'（302 直链，节省带宽）
 ALTER TABLE remote_emby_sources
     ADD COLUMN IF NOT EXISTS proxy_mode TEXT NOT NULL DEFAULT 'proxy';
+-- auto_sync_interval_minutes: 自动增量同步间隔（分钟），0 = 关闭。配合 sync_source_with_progress 的「增/改/删」语义，
+-- 后端定期触发该源的增量同步，独立于全局 library-scan 计划任务。
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS auto_sync_interval_minutes INTEGER NOT NULL DEFAULT 0;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique
     ON remote_emby_sources(lower(name));

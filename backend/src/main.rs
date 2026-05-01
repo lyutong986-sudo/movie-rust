@@ -189,6 +189,13 @@ async fn main() -> Result<()> {
         tracing::info!("远端 Emby 库高频轮询已禁用（APP_ENABLE_REMOTE_LIBRARY_MONITOR=false），由计划任务负责增量更新");
     }
 
+    // 远端 Emby 源「按源粒度」的自动增量同步循环：每分钟根据每个源的
+    // auto_sync_interval_minutes 配置触发增量同步（与 EnableRealtimeMonitor 无关）。
+    let auto_sync_state = state.clone();
+    tokio::spawn(async move {
+        crate::remote_emby::remote_emby_auto_sync_loop(auto_sync_state).await;
+    });
+
     let watcher_state = state.clone();
     tokio::spawn(async move {
         crate::file_watcher::file_watcher_loop(watcher_state).await;
@@ -426,6 +433,10 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         r#"
         ALTER TABLE remote_emby_sources
             ADD COLUMN IF NOT EXISTS proxy_mode TEXT NOT NULL DEFAULT 'proxy'
+        "#,
+        r#"
+        ALTER TABLE remote_emby_sources
+            ADD COLUMN IF NOT EXISTS auto_sync_interval_minutes INTEGER NOT NULL DEFAULT 0
         "#,
         r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique ON remote_emby_sources (lower(name))"#,
         r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_library ON remote_emby_sources(target_library_id)"#,

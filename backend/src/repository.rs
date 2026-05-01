@@ -3407,7 +3407,7 @@ pub async fn list_remote_emby_sources(
             id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
-            view_library_map, proxy_mode,
+            view_library_map, proxy_mode, auto_sync_interval_minutes,
             created_at, updated_at
         FROM remote_emby_sources
         ORDER BY name
@@ -3429,7 +3429,7 @@ pub async fn find_remote_sources_for_library(
             id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
-            view_library_map, proxy_mode,
+            view_library_map, proxy_mode, auto_sync_interval_minutes,
             created_at, updated_at
         FROM remote_emby_sources
         WHERE enabled = true
@@ -3453,7 +3453,7 @@ pub async fn get_remote_emby_source(
             id, name, server_url, username, password, spoofed_user_agent, target_library_id, display_mode, remote_view_ids, remote_views,
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
-            view_library_map, proxy_mode,
+            view_library_map, proxy_mode, auto_sync_interval_minutes,
             created_at, updated_at
         FROM remote_emby_sources
         WHERE id = $1
@@ -3482,6 +3482,7 @@ pub async fn create_remote_emby_source(
     token_refresh_interval_secs: i32,
     proxy_mode: &str,
     view_library_map: Option<&Value>,
+    auto_sync_interval_minutes: i32,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
     let server_url = server_url.trim().trim_end_matches('/');
@@ -3579,6 +3580,12 @@ pub async fn create_remote_emby_source(
     }
     let strm_output_path = strm_output_path.map(|s| s.trim()).filter(|s| !s.is_empty());
     let token_refresh_interval_secs = token_refresh_interval_secs.clamp(300, 86400 * 30);
+    // 0 = 关闭；正值在 [1, 7 天] 区间钳制，避免无效配置
+    let auto_sync_interval_minutes = if auto_sync_interval_minutes <= 0 {
+        0
+    } else {
+        auto_sync_interval_minutes.clamp(1, 60 * 24 * 7)
+    };
     let proxy_mode = match proxy_mode.trim().to_ascii_lowercase().as_str() {
         "redirect" => "redirect",
         _ => "proxy",
@@ -3594,9 +3601,9 @@ pub async fn create_remote_emby_source(
             id, name, server_url, username, password, spoofed_user_agent, target_library_id,
             display_mode, remote_view_ids, remote_views, enabled, source_secret,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, proxy_mode,
-            view_library_map
+            view_library_map, auto_sync_interval_minutes
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
         "#,
     )
     .bind(row_id)
@@ -3617,6 +3624,7 @@ pub async fn create_remote_emby_source(
     .bind(token_refresh_interval_secs)
     .bind(proxy_mode)
     .bind(&vlm)
+    .bind(auto_sync_interval_minutes)
     .execute(pool)
     .await?;
 
@@ -3656,6 +3664,7 @@ pub async fn update_remote_emby_source(
     token_refresh_interval_secs: i32,
     proxy_mode: &str,
     view_library_map: Option<&Value>,
+    auto_sync_interval_minutes: i32,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
     let server_url = server_url.trim().trim_end_matches('/');
@@ -3754,6 +3763,11 @@ pub async fn update_remote_emby_source(
     let strm_trim = strm_output_path.unwrap_or("").trim();
     let strm_binding: Option<&str> = (!strm_trim.is_empty()).then_some(strm_trim);
     let token_refresh_interval_secs = token_refresh_interval_secs.clamp(300, 86400 * 30);
+    let auto_sync_interval_minutes = if auto_sync_interval_minutes <= 0 {
+        0
+    } else {
+        auto_sync_interval_minutes.clamp(1, 60 * 24 * 7)
+    };
     let proxy_mode = match proxy_mode.trim().to_ascii_lowercase().as_str() {
         "redirect" => "redirect",
         _ => "proxy",
@@ -3769,7 +3783,8 @@ pub async fn update_remote_emby_source(
                 remote_view_ids = $9, remote_views = $10, enabled = $11,
                 strm_output_path = $12, sync_metadata = $13, sync_subtitles = $14,
                 token_refresh_interval_secs = $15, proxy_mode = $16,
-                view_library_map = $17, updated_at = now()
+                view_library_map = $17, auto_sync_interval_minutes = $18,
+                updated_at = now()
             WHERE id = $1
             "#,
         )
@@ -3790,6 +3805,7 @@ pub async fn update_remote_emby_source(
         .bind(token_refresh_interval_secs)
         .bind(proxy_mode)
         .bind(&vlm)
+        .bind(auto_sync_interval_minutes)
         .execute(pool)
         .await?
     } else {
@@ -3801,7 +3817,8 @@ pub async fn update_remote_emby_source(
                 remote_view_ids = $8, remote_views = $9, enabled = $10,
                 strm_output_path = $11, sync_metadata = $12, sync_subtitles = $13,
                 token_refresh_interval_secs = $14, proxy_mode = $15,
-                view_library_map = $16, updated_at = now()
+                view_library_map = $16, auto_sync_interval_minutes = $17,
+                updated_at = now()
             WHERE id = $1
             "#,
         )
@@ -3821,6 +3838,7 @@ pub async fn update_remote_emby_source(
         .bind(token_refresh_interval_secs)
         .bind(proxy_mode)
         .bind(&vlm)
+        .bind(auto_sync_interval_minutes)
         .execute(pool)
         .await?
     };
