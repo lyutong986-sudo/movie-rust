@@ -4354,6 +4354,29 @@ pub fn library_paths(library: &DbLibrary) -> Vec<String> {
     library_paths_from_options_or_path(&library.library_options, &library.path)
 }
 
+/// 扫描时使用的路径 = 库 `PathInfos` 中真实磁盘路径 + **映射到本库的远端 STRM 物理子目录**，
+/// 便于混合库在用户删除 `.strm`/侧车后由计划任务/实时监控扫到。
+pub async fn library_scan_paths_union_remote_strm(
+    pool: &sqlx::PgPool,
+    library: &DbLibrary,
+) -> Result<Vec<String>, AppError> {
+    let mut merged = library_paths(library);
+    let sources = find_remote_sources_for_library(pool, library.id).await?;
+    for pb in crate::remote_emby::strm_watch_directories_for_sources(&sources, library.id) {
+        let s = pb.to_string_lossy().into_owned();
+        if s.trim().is_empty() {
+            continue;
+        }
+        let has = merged
+            .iter()
+            .any(|x| x.trim().eq_ignore_ascii_case(s.trim()));
+        if !has {
+            merged.push(s);
+        }
+    }
+    Ok(normalize_library_paths(&merged))
+}
+
 pub fn library_to_virtual_folder_dto(library: &DbLibrary) -> VirtualFolderInfoDto {
     let options = library_options(library);
     let locations = options

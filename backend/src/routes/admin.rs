@@ -216,8 +216,10 @@ fn scan_registry() -> &'static RwLock<ScanOperationRegistry> {
 /// 对单个媒体库执行"增量更新"：根据库是否绑定远端 Emby 源，分发到本地扫描或远端同步。
 ///
 /// 行为约定：
-/// - library 绑定了 `remote_emby_sources` → 对每个源调用 `sync_source_with_progress`（增量/全量自动）
-/// - 否则 → 调用 `scanner::scan_single_library_with_db_semaphore` 走本地扫描
+/// - library 绑定了 `remote_emby_sources` → 先对每个相关源调用 `sync_source_with_progress`（增 / 改 / 删），
+///   再 **始终**调用一次本地扫描（含 STRM 物理目录，参见 `library_scan_paths_union_remote_strm`），
+///   以确保混合库的本地磁盘与 strm 手工删改能及时反映到 DB。
+/// - 否则 → 仅调用 `scanner::scan_single_library_with_db_semaphore` 走本地扫描。
 ///
 /// 返回的 `ScanSummary` 是该库在本次更新中处理的合并结果。
 pub async fn incremental_update_library(
@@ -252,6 +254,30 @@ pub async fn incremental_update_library(
                     );
                     return Err(err);
                 }
+            }
+        }
+        match scanner::scan_single_library_with_db_semaphore(
+            &state.pool,
+            state.metadata_manager.clone(),
+            &state.config,
+            state.work_limiters.clone(),
+            library_id,
+            progress,
+            db_semaphore.clone(),
+        )
+        .await
+        {
+            Ok(scan_sum) => {
+                summary.scanned_files += scan_sum.scanned_files;
+                summary.imported_items += scan_sum.imported_items;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    library_id = %library_id,
+                    error = %err,
+                    "远端同步已成功，本地/STRM 目录增量扫描失败"
+                );
+                return Err(err);
             }
         }
         Ok(summary)

@@ -342,7 +342,8 @@ async fn scan_libraries(
         if let Some(p) = &progress {
             p.set_current_library(Some(library.name.clone()));
         }
-        for library_path in repository::library_paths(library) {
+        let scan_paths = repository::library_scan_paths_union_remote_strm(pool, library).await?;
+        for library_path in scan_paths {
             let path = PathBuf::from(&library_path);
             if !path.exists() {
                 tracing::warn!("媒体库路径不存在: {}", library_path);

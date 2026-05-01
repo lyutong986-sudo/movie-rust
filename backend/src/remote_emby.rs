@@ -2917,24 +2917,94 @@ async fn sidecar_exists_nonempty(path: &Path) -> bool {
     }
 }
 
-/// STRM 源根目录：`{STRM_OUTPUT_PATH}/{SanitizedSourceName}/`
-/// 每个远端媒体库（View）在此基础上再建子目录：`{source_root}/{SanitizedViewName}/`
-///
-/// API 层在创建/更新源时已强制 `strm_output_path` 必填，因此理论上不会读到空值；
-/// 旧库（NULL/空字符串）作为兜底返回 Err，让调用方拒绝同步而非降级到虚拟路径。
-fn strm_workspace_for_source(source: &DbRemoteEmbySource) -> Result<PathBuf, AppError> {
+/// STRM：`{输出根}/{SanitizedSourceName}/`，各视图再建 `{SanitizedViewName}/`（与 [`try_strm_workspace_for_source`]、`sync_source_inner` 一致）。
+/// `strm_output_path` 未配置或非空裁剪后为空 → `None`，供 watcher/扫描跳过。
+pub fn try_strm_workspace_for_source(source: &DbRemoteEmbySource) -> Option<PathBuf> {
     let raw = source
         .strm_output_path
         .as_deref()
         .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "远端 Emby 源「{}」未配置 STRM 输出根目录，请先在编辑表单中补填后再同步",
-                source.name
-            ))
-        })?;
-    Ok(Path::new(raw).join(sanitize_segment(source.name.as_str())))
+        .filter(|value| !value.is_empty())?;
+    Some(Path::new(raw).join(sanitize_segment(source.name.as_str())))
+}
+
+fn strm_workspace_for_source(source: &DbRemoteEmbySource) -> Result<PathBuf, AppError> {
+    try_strm_workspace_for_source(source).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "远端 Emby 源「{}」未配置 STRM 输出根目录，请先在编辑表单中补填后再同步",
+            source.name
+        ))
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteViewBrief {
+    id: String,
+    name: String,
+}
+
+fn view_folder_segment_for_watch(source: &DbRemoteEmbySource, view_map_key: &str) -> String {
+    let want = view_map_key.trim();
+    let want_l = want.to_ascii_lowercase();
+    if let Ok(views) = serde_json::from_value::<Vec<RemoteViewBrief>>(source.remote_views.clone()) {
+        if let Some(found) = views.iter().find(|v| v.id.trim().to_ascii_lowercase() == want_l) {
+            if !found.name.trim().is_empty() {
+                return sanitize_segment(found.name.trim());
+            }
+        }
+    }
+    sanitize_segment(want)
+}
+
+/// Hybrid 库的 file watcher / 本地扫描需覆盖「写入 strm 与同目录侧车」的物理目录，
+/// 即 `{输出根}/{源名}/{远端视图名}/`（与 `sync_source_inner` 的 `view_strm_workspace` 一致）。
+///
+/// `view_library_map` 若在同步后仍为完整 `view_id → library_id`，对每个映射到目标库的视图各返回一条；
+/// map 为空时若 `target_library_id` 与该库相等，则递归监控 `{输出根}/{源名}/` 整棵树上所有视图子目录。
+pub fn strm_watch_directories_for_sources(
+    sources: &[DbRemoteEmbySource],
+    library_id: Uuid,
+) -> Vec<PathBuf> {
+    use std::collections::HashSet;
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    let lib_str = library_id.to_string();
+
+    for source in sources {
+        let Some(workspace) = try_strm_workspace_for_source(source) else {
+            continue;
+        };
+
+        match source.view_library_map.as_object() {
+            Some(map) if !map.is_empty() => {
+                for (view_key, mapped) in map {
+                    let Some(mapped_raw) = mapped.as_str().map(str::trim) else {
+                        continue;
+                    };
+                    if !mapped_raw.eq_ignore_ascii_case(lib_str.as_str()) {
+                        continue;
+                    }
+                    let sub = workspace.join(view_folder_segment_for_watch(source, view_key));
+                    let canon = sub.to_string_lossy().to_string();
+                    if seen.insert(canon) {
+                        out.push(sub);
+                    }
+                }
+            }
+            _ => {
+                if source.target_library_id != library_id {
+                    continue;
+                }
+                let canon = workspace.to_string_lossy().to_string();
+                if seen.insert(canon) {
+                    out.push(workspace.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 

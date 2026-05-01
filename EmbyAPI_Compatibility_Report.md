@@ -2403,4 +2403,24 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 - 后端：`backend/migrations/0001_schema.sql`、`backend/src/main.rs`、`backend/src/models.rs`、`backend/src/repository.rs`、`backend/src/remote_emby.rs`、`backend/src/routes/remote_emby.rs`
 - 前端：`frontend/src/api/emby.ts`、`frontend/src/pages/settings/RemoteEmbySettings.vue`
 
+### 混合库（本地 + `__remote_view_*`）行为对齐（2026-05-01）
+
+**改动目标：** 媒体库可同时挂真实磁盘路径与远端视图虚拟占位；用户对「库选项」（实时监控、中文元数据、预下载图片、章节图、占位缺集、`SaveLocalMetadata` 等）的期望与实际扫描路径一致。
+
+| 链路 | 实现 |
+|------|------|
+| **实时监控** | `file_watcher` 不再因「库绑定了远端源」整块关闭；对每个启用监控的库：收集 `PathInfos` 中非 `__remote*` 的真实路径 + **`remote_emby::strm_watch_directories_for_sources` 推导出的 STRM 子目录**（`{输出根}/{源名}/{远端视图名}/`），去重后加入 `notify`。触发变更后仍调度 `scanner::scan_single_library_with_db_semaphore`。 |
+| **计划任务 / 单次「增量更新」**（`incremental_update_library`） | 若存在远端源映射：**先对每个源** `sync_source_with_progress`，**再跑一次**本地扫描（与下面路径并集一致），避免只做远端、漏扫本地。 |
+| **本地扫描 Phase A（收集文件）** | `scanner` 对每个库使用 `repository::library_scan_paths_union_remote_strm`：`library_paths(...) ∪ strm_watch_directories_for_sources`，STRM/sidecar 与本地 ISO 同人库并发现在同一扫描流程中。 |
+
+**推导 STRM 子目录：** `backend/src/remote_emby.rs` 中 `try_strm_workspace_for_source`（公共）、`strm_watch_directories_for_sources`。逻辑与 `sync_source_inner` 中 `view_strm_workspace = strm_workspace.join(sanitize_segment(view.name))` 对齐；依赖 `remote_emby_sources.remote_views` 里各 View 的 `Id/Name`。
+
+**已知限制（与 Emby/Jellyfin 类似）：**
+
+1. **章节图片**：`.strm` 指向远端代理 URL 时在扫描阶段仍跳过 ffmpeg 抽取；只对真实媒体容器文件有效。
+2. **占位缺集 / 合集 / 缺失剧集：** 远端条目结构与 TMDB「占位」可能叠加，需结合实际数据观察。
+3. **手工删除 `.strm` 与远端仍存在条目：** 只要下一次 **远端增量同步** 仍会拉取该条目，`write_remote_strm_bundle` **会重新写出 `.strm`**。若需在库中永久移除而远端仍存在，须在远端下架或另行做「服务端黑名单」（当前未实现）。若远端已下架，下一轮同步会通过 `delete_stale_items_for_source` 收敛。
+
+**影响文件：** `backend/src/file_watcher.rs`、`backend/src/routes/admin.rs`（`incremental_update_library`）、`backend/src/scanner.rs`、`backend/src/repository.rs`（`library_scan_paths_union_remote_strm`）、`backend/src/remote_emby.rs`（`strm_watch_directories_for_sources`）。
+
 ---

@@ -2,7 +2,6 @@ use crate::{repository, state::AppState};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -124,36 +123,41 @@ async fn collect_monitored_libraries(
             continue;
         }
         let path_str = lib.path.as_str();
-        // 跳过远端虚拟路径
-        if path_str.starts_with("__remote_view_") || path_str.starts_with("__remote_transit") {
-            continue;
-        }
-        // 跳过已绑定远端 Emby 源的媒体库：远端同步会大量写入 strm/侧车文件，
-        // 文件监控会被反复触发造成扫描风暴；这些库的更新由远端轮询/计划任务负责。
+
         let remote_sources = repository::find_remote_sources_for_library(&state.pool, lib.id)
             .await
             .unwrap_or_default();
-        if !remote_sources.is_empty() {
-            continue;
-        }
+
         let mut paths = Vec::new();
-        if let Some(infos) = opts.path_infos.iter().next() {
-            // path_infos 中的路径
-            for info in &opts.path_infos {
-                let p = PathBuf::from(&info.path);
-                if p.exists() && !info.path.starts_with("__remote") {
-                    paths.push(p);
-                }
+        for info in &opts.path_infos {
+            if info.path.starts_with("__remote") {
+                continue;
             }
-            let _ = infos;
-        }
-        // fallback: 使用库的主路径
-        if paths.is_empty() {
-            let p = PathBuf::from(path_str);
+            let p = PathBuf::from(&info.path);
             if p.exists() {
                 paths.push(p);
             }
         }
+        // 远端 STRM 物理目录：`{输出根}/{源名}/{远端视图}/`，用户手工删 strm/侧车时也需能被监控到
+        for pb in crate::remote_emby::strm_watch_directories_for_sources(&remote_sources, lib.id)
+        {
+            if pb.exists() {
+                paths.push(pb);
+            }
+        }
+        if paths.is_empty() {
+            if !path_str.starts_with("__remote_view_") && !path_str.starts_with("__remote_transit")
+            {
+                let p = PathBuf::from(path_str);
+                if p.exists() {
+                    paths.push(p);
+                }
+            }
+        }
+
+        let mut seen = HashSet::new();
+        paths.retain(|p| seen.insert(p.to_string_lossy().to_string()));
+
         if !paths.is_empty() {
             result.push(WatchedLibrary { id: lib.id, paths });
         }
