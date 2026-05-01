@@ -35,6 +35,20 @@ use uuid::Uuid;
 /// - 太大（>16）会让 sqlx 连接池排队、磁盘小文件写竞争加剧，反而劣化速率。
 const REMOTE_SYNC_INNER_CONCURRENCY: usize = 8;
 
+/// PB46：远端 Series 详情后台并发度。
+///
+/// PB43 之前 `fetch_and_upsert_series_detail` 内联在 `process_one_remote_sync_item`
+/// 的 `await` 链上：只要某个 series 的第一个 episode 落到某条 task 里，整个 task 就被
+/// detail 那次远端 HTTP（最长 10s + 重试）+ DB 写 + people upsert 阻塞——把 episode
+/// 主循环的并发槽白白占掉，导致整批 8 个 task 进度不齐。
+///
+/// PB46 把 detail 下沉到独立 spawn 池：
+/// - episode 主循环（buffer_unordered=8）只负责把 episode 入库 → 立刻让位
+/// - detail 任务统一在本 Semaphore 控制下后台跑，4 是相对保守值（detail 不只一次远端 HTTP，
+///   还会触发 People 合并写人物表，比 episode 单条更重）
+/// - sync_source_inner 末尾的 `FinalizingSeriesDetails` 阶段等齐所有 spawn handle 才回 Completed
+const SERIES_DETAIL_CONCURRENCY: usize = 4;
+
 const PLAYBACK_INFO_CACHE_TTL_SECS: u64 = 300;
 const PLAYBACK_INFO_CACHE_MAX_ENTRIES: usize = 512;
 
@@ -1093,6 +1107,14 @@ async fn sync_source_inner(
     // task 内部 clone 一份本地可变副本——auth 状态写回 DB 是幂等的，不会出现冲突。
     let source_arc: Arc<DbRemoteEmbySource> = Arc::new(source.clone());
 
+    // PB46：series detail 下沉用的 spawn 池资源。
+    // - semaphore 限制后台 detail 同时在飞的远端 HTTP 数量
+    // - handles 收集所有 spawn 的 JoinHandle，sync_source_inner 末尾统一等齐
+    //   （让前端"Completed" 真的等于"全部 series 元数据已落库"）
+    let series_detail_semaphore = Arc::new(tokio::sync::Semaphore::new(SERIES_DETAIL_CONCURRENCY));
+    let series_detail_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
     for view in &views {
         let item_library_id = *view_library_id_map.get(&view.id).ok_or_else(|| {
             AppError::Internal(format!("View「{}」未找到对应本地库映射", view.name))
@@ -1160,6 +1182,8 @@ async fn sync_source_inner(
                 let tvshow_roots_written = Arc::clone(&tvshow_roots_written);
                 let fetched_count = Arc::clone(&fetched_count);
                 let written_files = Arc::clone(&written_files);
+                let series_detail_semaphore = Arc::clone(&series_detail_semaphore);
+                let series_detail_handles = Arc::clone(&series_detail_handles);
                 let progress = progress.clone();
                 async move {
                     process_one_remote_sync_item(
@@ -1178,6 +1202,8 @@ async fn sync_source_inner(
                         &tvshow_roots_written,
                         &fetched_count,
                         &written_files,
+                        &series_detail_semaphore,
+                        &series_detail_handles,
                         total_items,
                         progress.as_ref(),
                         force_refresh_sidecar,
@@ -1202,6 +1228,33 @@ async fn sync_source_inner(
             }
         }
     }
+
+    // PB46：等齐所有 series detail spawn task。
+    //
+    // 时间预算：detail spawn 的并发度是 SERIES_DETAIL_CONCURRENCY=4，单条 detail 一般
+    // 1-3 秒（HTTP + people upsert）。如果是大库（1 万 series），最坏要等 ~2-3 分钟。
+    // 但实际上 episode 主循环跑了几小时，detail spawn 一直在背景滚，到这里大多数都已完成。
+    //
+    // 取消语义：spawn task 内部已经 check 过 progress.is_cancelled，被取消的会立即 return；
+    // 这里 join 不需要再 abort。take 之后清空容器，handles 持有的 JoinHandle drop 即 detach。
+    let pending_handles = std::mem::take(&mut *series_detail_handles.lock().await);
+    if !pending_handles.is_empty() {
+        let pending_count = pending_handles.len();
+        if let Some(handle) = &progress {
+            handle.set_phase("FinalizingSeriesDetails", 99.0);
+        }
+        for h in pending_handles {
+            // detail spawn 任务自身永远不 panic（内部 await Result 都已 warn-and-swallow），
+            // JoinError 只可能来自任务被强制 abort——本次同步路径不会 abort，所以忽略。
+            let _ = h.await;
+        }
+        tracing::info!(
+            source_id = %source.id,
+            count = pending_count,
+            "PB46：所有 Series 详情后台同步完成"
+        );
+    }
+
     let fetched_count = fetched_count.load(Ordering::Relaxed);
     let written_files = written_files.load(Ordering::Relaxed) as usize;
 
@@ -1260,6 +1313,9 @@ async fn process_one_remote_sync_item(
     tvshow_roots_written: &DashSet<PathBuf>,
     fetched_count: &AtomicU64,
     written_files: &AtomicU64,
+    // PB46：series detail 后台 spawn 池资源。
+    series_detail_semaphore: &Arc<tokio::sync::Semaphore>,
+    series_detail_handles: &Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     total_items: u64,
     progress: Option<&RemoteSyncProgress>,
     force_refresh_sidecar: bool,
@@ -1304,33 +1360,63 @@ async fn process_one_remote_sync_item(
             .filter(|s| !s.is_empty())
         {
             if series_detail_synced.insert(remote_sid.to_string()) {
-                let series_dir = view_strm_workspace
+                // PB46：把 detail 拉取从同步主链路 await 链上摘下来——episode 主循环
+                // 只要把 episode 入库就立刻让位，detail 让独立 spawn 池后台慢慢补元数据。
+                // sync_source_inner 末尾的 FinalizingSeriesDetails 阶段会 join 所有 spawn handle，
+                // 保证整个 sync 任务结束时（phase=Completed）series 元数据真的全部到位。
+                let pool_owned = state.pool.clone();
+                let source_owned = source.clone();
+                let user_id_owned = user_id.to_string();
+                let remote_sid_owned = remote_sid.to_string();
+                let series_view_scope_owned = series_view_scope.to_string();
+                let series_dir_owned = view_strm_workspace
                     .join(sanitize_segment(remote_series_display_name(&item)));
-                // PB43：fetch_and_upsert_series_detail 还要 `&mut DbRemoteEmbySource`
-                // （因为内部 get_json_with_retry 要在 401 时 ensure_authenticated 续登）。
-                // 在并发任务里 clone 一份本地可变副本——auth 状态写回 DB 是幂等的，
-                // 主 source 由调用方在下次同步开始时从 DB 重新加载。
-                let mut source_for_detail = source.clone();
-                if let Err(error) = fetch_and_upsert_series_detail(
-                    &state.pool,
-                    &mut source_for_detail,
-                    user_id,
-                    remote_sid,
-                    series_parent_id,
-                    item_library_id,
-                    None,
-                    series_dir.as_path(),
-                    series_view_scope,
-                )
-                .await
-                {
-                    tracing::warn!(
-                        source_id = %source.id,
-                        remote_series_id = %remote_sid,
-                        error = %error,
-                        "PB31-2：远端 Series 详情同步失败，忽略继续"
-                    );
-                }
+                let semaphore = Arc::clone(series_detail_semaphore);
+                let progress_owned = progress.cloned();
+                let series_parent_id_copy = series_parent_id;
+                let item_library_id_copy = item_library_id;
+                let source_id_copy = source.id;
+
+                let handle = tokio::spawn(async move {
+                    // 取消优先：进 spawn 之前任务已被取消就直接放弃；不会触发任何远端 HTTP。
+                    if let Some(p) = &progress_owned {
+                        if p.is_cancelled() {
+                            return;
+                        }
+                    }
+                    let _permit = match semaphore.acquire().await {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    };
+                    // 拿到 permit 之后再 check 一次 cancel——可能在排队等 permit 时取消。
+                    if let Some(p) = &progress_owned {
+                        if p.is_cancelled() {
+                            return;
+                        }
+                    }
+                    let mut source_local = source_owned;
+                    if let Err(error) = fetch_and_upsert_series_detail(
+                        &pool_owned,
+                        &mut source_local,
+                        user_id_owned.as_str(),
+                        remote_sid_owned.as_str(),
+                        series_parent_id_copy,
+                        item_library_id_copy,
+                        None,
+                        series_dir_owned.as_path(),
+                        series_view_scope_owned.as_str(),
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            source_id = %source_id_copy,
+                            remote_series_id = %remote_sid_owned,
+                            error = %error,
+                            "PB46：远端 Series 详情后台同步失败，忽略继续"
+                        );
+                    }
+                });
+                series_detail_handles.lock().await.push(handle);
             }
         }
 

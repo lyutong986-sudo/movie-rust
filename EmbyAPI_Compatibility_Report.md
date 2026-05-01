@@ -3256,3 +3256,184 @@ PB42 把单条目核心耗时从 ~2.26 秒压到 ~150ms，但内层 `for base_it
 - `EmbyAPI_Compatibility_Report.md`
 
 ---
+
+## 第四十五批（2026-05-01）：修复 PB43 并发暴露的 `media_items_pkey` race（PB45）
+
+### 触发场景
+PB43 上线后用户上报：
+
+```
+最近任务失败 · 已运行 1519 秒
+阶段 Failed
+远端抓取 1039 / 325336
+入库条目 1039
+数据库错误: error returned from database:
+  duplicate key value violates unique constraint "media_items_pkey"
+```
+
+PB42 之前的串行循环永远走不到这条路径，因此该 race 被掩盖了很久；PB43 把内层改 `buffer_unordered(8)` 后立刻暴露。
+
+### 根因分析
+
+`backend/src/repository.rs::upsert_media_item` 同时具备两个特征：
+
+1. **id 是确定性 UUID v5**：
+   ```rust
+   let id = Uuid::new_v5(&input.library_id, path_text.as_bytes());
+   ```
+   同一 `(library_id, path)` 永远计算出**完全相同**的 UUID。
+
+2. **ON CONFLICT arbiter 用的是 (library_id, path)**：
+   ```sql
+   ON CONFLICT (library_id, path) DO UPDATE SET ...
+   ```
+
+并发场景：两个 task 同一秒处理同一 Series 下的两个 Episode（共用一个 series 父目录）：
+
+```
+Task A (Episode S01E03): ensure_remote_series_folder("Foo")
+   → series_parent_map.get("Foo") → miss
+   → upsert_media_item(item_type="Series", path="/strm/Foo")
+       → id = uuid_v5(library_id, "/strm/Foo") = X
+       → INSERT id=X, library_id=L, path="/strm/Foo"
+
+Task B (Episode S01E07, 并发): ensure_remote_series_folder("Foo")
+   → series_parent_map.get("Foo") → 仍然 miss（A 还没 insert 完）
+   → upsert_media_item(item_type="Series", path="/strm/Foo")
+       → id = uuid_v5(library_id, "/strm/Foo") = X  ← 同一个 X！
+       → INSERT id=X, library_id=L, path="/strm/Foo"
+```
+
+PG 在 Task B 的 INSERT 上同时探测到两条 UNIQUE 违例：
+- **PK (`id`)** 在已存在的 X 上违例 → 约束名 `media_items_pkey`
+- **UNIQUE (`library_id`, `path`)** 也违例 → 约束名 `media_items_library_id_path_key`
+
+ON CONFLICT 子句**只能命中 arbiter 列出的约束**——`(library_id, path)` 不覆盖 PK；PG 会原样把 PK 违例抛出来：
+
+> *"if `INSERT` causes a violation in any other constraint or index that's not specified in the conflict_target, the error is raised normally."*
+> — PostgreSQL 文档 §6.4. UPSERT
+
+由于 PG 的索引检查顺序通常 PK 在前，violations 几乎一定从 `media_items_pkey` 抛。
+
+### 关键设计决策
+
+**为什么改 `ON CONFLICT (id)` 而不是去掉 v5、改回随机 id？**
+
+1. **id 仍需要稳定**：上层 `media_items.id` 被 `media_streams.media_item_id` / `person_roles.media_item_id` / `playlist_items` / 多张 NFO 文件名等大量外键引用；增量同步重写一次后，所有依赖必须仍指向同一行。换 `gen_random_uuid()` 会让每次 incremental sync 重新生成 id，外键全断。
+
+2. **`(library_id, path)` UNIQUE 仍保留**：schema `0001_schema.sql:259` 的 `UNIQUE (library_id, path)` 不删除——它在老版本数据 / 手工导入 / 第三方工具直接 INSERT 时仍是兜底约束。改 ON CONFLICT 只改"并发 upsert 路径用哪个 arbiter"，不动表结构。
+
+3. **`ON CONFLICT (id)` 等价但并发安全**：因为 `id = f(library_id, path)` 是**双射**——
+   - 同一 (library_id, path) → 必定同一 id
+   - 不同 (library_id, path) → UUID v5 碰撞概率 ≈ 2⁻¹²² ≈ 0
+
+   所以"id 冲突"和"(library_id, path) 冲突"在本表上**逻辑等价**，但 PK 是 PG 第一个检查的索引，arbiter 命中率 100%。
+
+4. **(library_id, path) 还会冲突吗？**：会，并发 INSERT 时两个索引都会冲突，但 ON CONFLICT (id) DO UPDATE 会把"目标行"识别为 PK 命中的那一行——而那行的 `(library_id, path)` 和 EXCLUDED 完全相等，所以 UPDATE 不会再触发新的 (library_id, path) 违例。
+
+### 改动清单
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB45-1 | `backend/src/repository.rs::upsert_media_item` | `ON CONFLICT (library_id, path) DO UPDATE` → `ON CONFLICT (id) DO UPDATE`。补 8 行注释解释为什么改、并发 race 是怎么发生的、为什么 (id) arbiter 等价于 (library_id, path)。 |
+
+### 排查的相邻路径（确认无类似 race）
+
+| 函数 | id 生成 | arbiter | 评估 |
+|---|---|---|---|
+| `upsert_person_reference` | `gen_random_uuid()` 默认值 | `(name, sort_name)` UNIQUE | ✅ 安全：随机 id 不会 PK 冲突，只会触发 UNIQUE，arbiter 命中。 |
+| `upsert_person_role` | `Uuid::new_v5(media_item_id, "person-role:...")` 确定性 | `(id)` PK | ✅ 安全：PK 即 arbiter，已正确处理。 |
+| `replace_item_people_from_edit` | 同上 | `(id)` | ✅ 安全。 |
+| `upsert_episode_catalog` (line 7005) | `Uuid::new_v5(series_id, "catalog:...")` | INSERT 无 ON CONFLICT，靠事务串行 | ✅ 安全：仅 TMDB 富化路径，非并发同步路径。 |
+| `save_media_streams` | DELETE + INSERT 在事务内 | 按 `media_item_id` 隔离 | ✅ 安全：不同 task 处理不同 media_item，无交叉。 |
+
+### 验证
+
+- `cargo check -p movie-rust-backend`：0 error，41 个旧 warning（全为 dead code 预存在告警）。
+- `cargo test --bin movie-rust-backend`：60 passed; 0 failed。
+- `ReadLints` on `repository.rs`：0 lint。
+- 修复后预期行为：
+  - 同步阶段不再被 `media_items_pkey` 阻断；
+  - 同 series 多 episode 并发到达时，第一个 task 走 INSERT 分支，后续 task 走 UPDATE 分支（payload 完全相同，幂等）；
+  - DashMap 在 race 后会从两个 task 都 `insert(series_key, item_id)` ——值相同，最终状态一致。
+
+### 影响文件
+- `backend/src/repository.rs`
+- `EmbyAPI_Compatibility_Report.md`
+
+---
+
+## 第四十六批（2026-05-01）：Series 详情后台 spawn 池（PB46 — 摘掉 episode 主循环 await 链）
+
+### 触发场景
+PB45 修完 PK race 后，链路审计发现 PB43 的 8 并发槽位在以下场景仍被卡：
+
+```
+process_one_remote_sync_item(Episode):
+  ├─ ensure_remote_series_folder        ~50ms（DB upsert）
+  ├─ series_detail_synced.insert == true（这是该 series 的第一个 episode）
+  │   └─ fetch_and_upsert_series_detail.await
+  │       ├─ get_json_with_retry        ~200-2000ms（远端 Series detail HTTP）
+  │       ├─ upsert_media_item(Series)  ~50ms（覆盖 series 占位行）
+  │       ├─ upsert_remote_people_for_item ~100-500ms（People 全量入库 persons + person_roles）
+  │       └─ taglines UPDATE            ~10ms
+  ├─ ensure_remote_season_folder        ~50ms
+  └─ upsert_remote_media_item / save_media_streams / ... ~150ms
+```
+
+只要 episode 落到「该 series 的第一条」task 上，整个 8 并发槽位里就有 1 个被 detail 卡住 1-3 秒。
+1 万个 series 的库就有 1 万次这种「卡顿」分布在 32 万 episode 中——直接拖慢整批同步速率。
+
+### 设计
+
+| 决策 | 选择 | 否决项 / 备注 |
+|---|---|---|
+| detail 任务调度方式 | `tokio::spawn` 后台跑，主循环 fire-and-forget | 不能继续内联 `.await`：会卡 episode 槽位 |
+| 并发上限 | `Semaphore(SERIES_DETAIL_CONCURRENCY=4)` | 不能无上限：1 万个 series 瞬间 spawn 会打爆远端 HTTP；4 比 episode 主循环 8 更保守，因为 detail 单条更重（HTTP + people 入库） |
+| handle 收集 | `Arc<Mutex<Vec<JoinHandle<()>>>>` | 比 `JoinSet` 简单，只需要"末尾全部 join"语义 |
+| 何时 join | `sync_source_inner` 末尾，所有 view loop 完成后；新增 `FinalizingSeriesDetails` (99%) 阶段 | 不能在每个 view 之间 join：那样还是按 view 串行；不能不 join：用户看 phase=Completed 时元数据可能还没补齐 |
+| 取消传播 | spawn 内 `progress.is_cancelled()` 双重 check（acquire 前 + 后） | 不需要 abort 已 spawned task：spawn 自身轻量，let it die naturally |
+| 错误处理 | spawn 内 `tracing::warn!` 即吞 | 与 PB43 之前内联版本同语义；series detail 不到位不影响 episode 入库 / 播放 |
+| source 共享 | spawn task 拿到 `source.clone()` 自己持有可变副本 | 与 PB43 同：avoid `&mut Arc<source>` 风暴；ensure_authenticated 写回 DB 是幂等的 |
+
+### 改动清单
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB46-1 | `backend/src/remote_emby.rs` | 顶部新增 `SERIES_DETAIL_CONCURRENCY = 4` 常量 + 注释解释为什么和 episode 主循环并发不同。 |
+| PB46-2 | `backend/src/remote_emby.rs::sync_source_inner` | 在 `source_arc` 之后新增 `series_detail_semaphore: Arc<Semaphore>` 与 `series_detail_handles: Arc<Mutex<Vec<JoinHandle<()>>>>`；在内层 `buffer_unordered` 闭包里 `Arc::clone` 一份给 task 用。 |
+| PB46-3 | `backend/src/remote_emby.rs::process_one_remote_sync_item` | 函数签名加 `series_detail_semaphore` / `series_detail_handles` 两参；原本内联的 `fetch_and_upsert_series_detail.await` 改为 `tokio::spawn` 闭包：① clone 出所有 owned 数据（pool / source / user_id / remote_sid / series_dir / view_scope）；② spawn 内先 cancel-check，再 acquire permit，再 cancel-check；③ 调用原函数（签名未改），`Err` 时 `tracing::warn!` 吞掉；④ 把 `JoinHandle` push 到共享 vec。 |
+| PB46-4 | `backend/src/remote_emby.rs::sync_source_inner` 末尾 | 在所有 view loop 之后，`std::mem::take` 出所有 handle，先切到 `FinalizingSeriesDetails (99%)` phase，再 `for h in handles { let _ = h.await; }` 等齐；`tracing::info!` 收尾日志附 `count`。 |
+
+### 性能预期
+
+| 项 | PB45 之后（PB46 之前） | PB46 之后 |
+|---|---|---|
+| 同 series 第一条 episode task 耗时 | 50 + 200~2000 + 50 + 100~500 + 50 + 150 ≈ **600-3000 ms** | 50 + 50 + 150 ≈ **250 ms** |
+| 大库 (1 万 series / 32 万 episode) 主循环估算 | 主循环里 1 万个槽位被 detail 卡 1-3 秒 → 大批次推进速率被拖慢到 ~10 条/秒 | episode 槽位永不被 detail 卡 → 主循环受限于 DB 写入 / sqlx 连接池 → ~30-50 条/秒 |
+| FinalizingSeriesDetails 阶段独占耗时 | — | ~`series_count × avg_detail_time / 4`，1 万 series × 1 秒 / 4 ≈ **~40 分钟**（但与主循环重叠，绝大多数 detail 在 episode 跑完前已完成） |
+| sync 任务总耗时（32 万 episode + 1 万 series） | ~13.5 小时 | **~2-3 小时**（episode 主循环跑完时大部分 detail 已经背景跑完，FinalizingSeriesDetails 通常 < 1 分钟收尾） |
+
+### 取消语义
+
+- 用户点「中断同步」→ `progress.request_cancel()` 把 `cancelled` 原子置 `true`
+- 已 spawned 但还在 `semaphore.acquire().await` 排队的 task：拿到 permit 后 check `is_cancelled` → return（不发起远端 HTTP）
+- 已拿到 permit 正在跑 `fetch_and_upsert_series_detail` 的 task：本批次内的 HTTP / DB 操作不抢断（约束于 `get_json_with_retry` 内部的 retry loop），但下次同步重启时会从 DB 当前状态继续
+- `FinalizingSeriesDetails` 阶段的 `for h in handles { let _ = h.await; }` 不会无限阻塞——cancel 后的 task 立即 return，`await` 立即拿到 `()`
+
+### 验证
+
+- `cargo check -p movie-rust-backend`：0 error，41 个旧 warning（全部为 dead code 预存在告警，与本次改动无关）。
+- `cargo test --bin movie-rust-backend`：60 passed; 0 failed。
+- `ReadLints` on `remote_emby.rs`：0 lint。
+- 行为期望（部署后）：
+  - phase 顺序：`Preparing → CountingRemoteItems → FetchingRemoteIndex → PruningStaleItems → SyncingRemoteItems → FinalizingSeriesDetails → Completed`
+  - episode 入库速率显著提升（前端「入库条目」计数器爬动明显加快）
+  - 用户在 SyncingRemoteItems 阶段就能看到 series 行的元数据（占位的 series_name + episode 推断的 image），detail 数据在背景陆续补上
+  - tracing 日志末尾出现 `PB46：所有 Series 详情后台同步完成 count=N`
+
+### 影响文件
+- `backend/src/remote_emby.rs`
+- `EmbyAPI_Compatibility_Report.md`
+
+---
