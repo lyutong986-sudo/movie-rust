@@ -2153,9 +2153,9 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 
 | 项 | 说明 |
 |----|------|
-| 工作区路径 | `{StrmOutputPath}/{sanitize(SourceName)}/{sanitize(ViewName)}/`，每次全量同步前清空并重建该子目录，与用户填写的根目录隔离。**STRM 输出根目录现为必填项**，旧虚拟字符串路径阶段已经移除。 |
+| 工作区路径 | `{StrmOutputPath}/{sanitize(SourceName)}/{sanitize(ViewName)}/`，**重复点击「同步」永远走增/改/删的增量语义**，不再清空 / 重建工作区，不再 `cleanup_remote_source_items` 整源清表。**STRM 输出根目录为必填项**，旧虚拟字符串路径阶段已经移除。 |
 | `.strm` 内容 | 始终是本地代理 URL：`{base}/api/remote-emby/proxy/{source}/{remoteItem}?...&sig=...`，redirect 模式在运行时由代理端点动态构造 302。 |
-| 侧车文件 | `sync_metadata`：远端图落盘、`movie.nfo` / `episodedetails.nfo`、按季首次写入 `tvshow.nfo`；`sync_subtitles`：`/emby/Videos/{item}/{ms}/Subtitles/{index}/Stream.{ext}` 下载外挂字幕。**已存在且非空的侧车文件不会被同步覆盖**，让 `POST /Items/{id}/Refresh` 手动刷新结果优先。 |
+| 侧车文件 | `sync_metadata`：远端图落盘、`movie.nfo` / `episodedetails.nfo`、按季首次写入 `tvshow.nfo`；`sync_subtitles`：`/emby/Videos/{item}/{ms}/Subtitles/{index}/Stream.{ext}` 下载外挂字幕。**首次/恢复同步**（`last_sync_at = None`）保留已存在且非空的侧车，让 `POST /Items/{id}/Refresh` 手动刷新结果优先；**增量「改」**（`last_sync_at = Some` + 远端在水位线后变更）触发 `force_refresh = true`，覆盖 poster/backdrop/logo/.nfo/字幕，反映远端最新元数据。 |
 | DB 入库 | `upsert_remote_media_item` 使用 strm 绝对物理路径；`ensure_remote_series_folder` / `ensure_remote_season_folder` 在落盘前 `mkdir` 真实物理目录，并把目录路径作为 Series/Season 的 `media_items.path` 一并写库，`tvshow.nfo` / `season.nfo` / `season01-poster.jpg` 等 sidecar 自然落到正确位置。 |
 | 远端绑定库选项 | `ensure_remote_transit_library` 与 `ensure_view_library` 创建时默认 `SaveLocalMetadata=true`；`ensure_remote_view_path_in_library` 每次同步顺便升级旧库的该选项，确保元数据图片/NFO 都走 sidecar 路径而非中央 `static_dir/item-images/`。 |
 | `is_remote` 判定 | `repository::media_source_for_item` / `get_media_source_with_streams` / `sanitize_item_path` 主判定从 `path` 字符串前缀切到 `provider_ids.RemoteEmbySourceId`；旧 `REMOTE_EMBY/...` 仍兼容识别，待下次全量同步自然清理。 |
@@ -2322,5 +2322,30 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 - 合并后远端 View 虚拟路径自动注册到本地库的 `PathInfos`，在库设置中可见
 - 前端 UI 改为逐个 View 下拉选择目标库 + 可选默认目标库
 - 库扫描触发时自动检测远端源，触发远端同步而非本地文件扫描
+
+### 远端 Emby 同步语义统一为「增 / 改 / 删」（2026-05-01）
+
+**问题：** 之前 `sync_source_inner` 区分「全量」与「增量」两套分支：
+- 全量分支会 `remove_dir_all(strm_workspace)` + `cleanup_remote_source_items`，整源清空 STRM 物理目录与 DB media_items；
+- 失败/中断时 `update_remote_emby_source_sync_state` 仍把 `last_sync_at = now()`，导致下次"恢复同步"水位线被错误推进，错过补全数据；
+- 增量分支的 sidecar 一律 `sidecar_exists_nonempty` 跳过，远端被修改的元数据无法刷新到本地。
+
+**修复：**
+1. **删除全量分支**（`backend/src/remote_emby.rs::sync_source_inner`）：重复点击「同步」永远是同一条增/改/删管线 — 不删 `strm_workspace`，不 `cleanup_remote_source_items`，仅依赖 `delete_stale_items_for_source` 清理远端已下架条目。
+2. **失败不推进水位线**（`backend/src/repository.rs::update_remote_emby_source_sync_state`）：仅成功时 `last_sync_at = now() + last_sync_error = NULL`；失败/中断仅写 `last_sync_error`，保留旧 `last_sync_at`。
+3. **增量「改」覆盖 sidecar**：`write_remote_strm_bundle` 新增 `force_refresh: bool`，主循环按 `incremental_since.is_some()` 传值；
+   - `force_refresh = true`（远端在水位线之后被修改）→ poster/backdrop/logo/.nfo/字幕全部覆盖；
+   - `force_refresh = false`（首次同步 `last_sync_at = None`）→ 已存在文件保留，避免覆盖手动 `POST /Items/{id}/Refresh` 写入的内容。
+4. 下载失败时若磁盘已存在非空文件，仍把 `local_*` 字段指向旧文件，避免增量"改"网络抖动导致 DB 反向丢失图片引用。
+
+| 行为 | 修复前 | 修复后 |
+|------|--------|--------|
+| 首次点击同步 | 整源清空 + 重写 | 不删工作区，按页拉远端全量条目，逐条 upsert + 删过期 |
+| 重复点击同步 | 仅在 `last_sync_at!=None` 时是增量；失败/中断后又走全量 | 永远是增/改/删；失败不推水位线，下次仍可恢复 |
+| 远端条目被修改 | sidecar 一律跳过，本地永远停在旧元数据 | `force_refresh=true` 覆盖图/NFO/字幕 |
+| 远端条目被删除 | 仅在增量分支 `delete_stale_items_for_source` | 任何路径都执行删（含首次） |
+| 用户手动 Refresh 写入的 NFO/封面 | 增量分支保留，全量分支被清空 | 任何路径都保留（除非远端确实在水位线后改过） |
+
+**影响文件：** `backend/src/remote_emby.rs`、`backend/src/repository.rs`
 
 ---

@@ -3892,20 +3892,38 @@ pub async fn update_remote_emby_source_sync_state(
     id: Uuid,
     error_message: Option<&str>,
 ) -> Result<(), AppError> {
-    sqlx::query(
-        r#"
-        UPDATE remote_emby_sources
-        SET
-            last_sync_at = now(),
-            last_sync_error = $2,
-            updated_at = now()
-        WHERE id = $1
-        "#,
-    )
-    .bind(id)
-    .bind(error_message.map(str::trim))
-    .execute(pool)
-    .await?;
+    // 成功（error_message = None）：推进 last_sync_at = now() 并清空 last_sync_error；
+    // 失败/中断（error_message = Some）：仅记录错误，**不修改** last_sync_at，
+    //   避免上一次成功的增量水位线被失败/中断重写为 now()，导致下次错过远端补全数据。
+    if let Some(message) = error_message {
+        sqlx::query(
+            r#"
+            UPDATE remote_emby_sources
+            SET
+                last_sync_error = $2,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(message.trim())
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE remote_emby_sources
+            SET
+                last_sync_at = now(),
+                last_sync_error = NULL,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .execute(pool)
+        .await?;
+    }
     Ok(())
 }
 

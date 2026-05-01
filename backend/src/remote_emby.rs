@@ -874,9 +874,15 @@ async fn sync_source_inner(
         }
     }
 
-    // 增量同步：有 last_sync_at 则仅同步变更条目；否则全量同步
+    // 同步语义统一为「增 / 改 / 删」三段式：
+    //   - last_sync_at = Some  → 仅拉取远端在该水位线之后变更的条目（增量改），
+    //     并允许覆盖本地已存在的 sidecar（poster/backdrop/logo/.nfo/字幕）。
+    //   - last_sync_at = None  → 视作首次/恢复同步，拉取全部条目用于补齐 DB；
+    //     但仍然不删除 strm_workspace、不全表 cleanup，已存在的 sidecar 一律保留，
+    //     避免覆盖用户手动 POST /Items/{id}/Refresh 写入的 NFO/封面。
+    // 任何情况下都通过 delete_stale_items_for_source 同步「删」远端已不存在的条目。
     let incremental_since = source.last_sync_at;
-    let is_incremental = incremental_since.is_some();
+    let force_refresh_sidecar = incremental_since.is_some();
 
     let mut total_items = 0u64;
     for view in &views {
@@ -891,8 +897,8 @@ async fn sync_source_inner(
         total_items = total_items.saturating_add(view_count);
     }
 
-    // merge 模式的 source_root（用于清理旧 STRM 路径）
-    let source_root = target_library_opt
+    // 仅用于日志/legacy 兼容（路径以 source_root 开头的旧 STRM 文件）
+    let _legacy_source_root = target_library_opt
         .as_ref()
         .map(|lib| source_root_path(lib, source))
         .unwrap_or_else(|| PathBuf::from(format!("__nonexistent_{}", source.id.simple())));
@@ -906,61 +912,41 @@ async fn sync_source_inner(
 
     let strm_workspace = strm_workspace_for_source(source)?;
 
-    if is_incremental {
-        // ── 增量模式 ─────────────────────────────────────────────────────
-        // STRM 工作区保持现有内容，不整体清空，但确保根目录存在（首次增量时可能还不存在）
-        tokio::fs::create_dir_all(&strm_workspace)
-            .await
-            .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
+    // STRM 工作区保持现有内容，不整体清空，但确保根目录存在
+    tokio::fs::create_dir_all(&strm_workspace)
+        .await
+        .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
 
-        if let Some(handle) = &progress {
-            handle.set_phase("FetchingRemoteIndex", 4.0);
-        }
-        // 1. 获取远端全量 ID 集合，检测已删除条目
-        let remote_id_set = fetch_all_remote_item_ids(
-            &state.pool,
-            source,
-            user_id.as_str(),
-            &views,
-        )
-        .await?;
+    if let Some(handle) = &progress {
+        handle.set_phase("FetchingRemoteIndex", 4.0);
+    }
+    // 1. 获取远端全量 ID 集合，检测「删」（远端已删除但本地仍在 DB 的条目）
+    let remote_id_set = fetch_all_remote_item_ids(
+        &state.pool,
+        source,
+        user_id.as_str(),
+        &views,
+    )
+    .await?;
 
-        if let Some(handle) = &progress {
-            handle.set_phase("PruningStaleItems", 5.0);
-        }
-        // 2. 从 DB 中删除远端已不存在的条目
-        let deleted = delete_stale_items_for_source(
-            &state.pool,
-            source.id,
-            source.target_library_id,
-            &remote_id_set,
-            Some(strm_workspace.as_path()),
-        )
-        .await?;
-        if deleted > 0 {
-            tracing::info!(
-                source_id = %source.id,
-                deleted,
-                "增量同步：清理过时条目"
-            );
-        }
-    } else {
-        // ── 全量模式 ─────────────────────────────────────────────────────
-        // 清空 STRM 工作区并清理 DB 中旧条目
-        let _ = tokio::fs::remove_dir_all(&strm_workspace).await.ok();
-        tokio::fs::create_dir_all(&strm_workspace)
-            .await
-            .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
-        if let Some(handle) = &progress {
-            handle.set_phase("PreparingTargetLibrary", 5.0);
-        }
-        cleanup_remote_source_items(
-            &state.pool,
-            source.target_library_id,
-            source.id,
-            source_root.as_path(),
-        )
-        .await?;
+    if let Some(handle) = &progress {
+        handle.set_phase("PruningStaleItems", 5.0);
+    }
+    // 2. 从 DB（与对应 STRM 文件夹）删除远端已不存在的条目
+    let deleted = delete_stale_items_for_source(
+        &state.pool,
+        source.id,
+        source.target_library_id,
+        &remote_id_set,
+        Some(strm_workspace.as_path()),
+    )
+    .await?;
+    if deleted > 0 {
+        tracing::info!(
+            source_id = %source.id,
+            deleted,
+            "同步「删」：清理远端已下架条目"
+        );
     }
 
     let mut tvshow_roots_written: HashSet<PathBuf> = HashSet::new();
@@ -1074,6 +1060,7 @@ async fn sync_source_inner(
                     &item,
                     media_source_id,
                     &mut tvshow_roots_written,
+                    force_refresh_sidecar,
                 )
                 .await
                 {
@@ -1124,12 +1111,17 @@ async fn sync_source_inner(
         }
     }
 
-    let mode_label = if is_incremental { "增量" } else { "全量" };
+    let mode_label = if incremental_since.is_some() {
+        "增量(增/改/删)"
+    } else {
+        "首次(增/删)"
+    };
     tracing::info!(
         source_id = %source.id,
         mode = mode_label,
         fetched = fetched_count,
         written = written_files,
+        deleted_stale = deleted,
         "远端 Emby 同步完成"
     );
 
@@ -3091,6 +3083,9 @@ async fn write_remote_strm_bundle(
     item: &RemoteSyncItem,
     media_source_id: Option<&str>,
     tvshow_written: &mut HashSet<PathBuf>,
+    // true = 增量「改」场景：远端在 last_sync_at 之后被修改，sidecar 需要覆盖以同步最新元数据。
+    // false = 首次/恢复同步：尊重已存在文件（用户手动 Refresh / 旧版本沉淀），不覆盖。
+    force_refresh: bool,
 ) -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>, Option<PathBuf>), AppError> {
     let relative = build_relative_strm_path(item).ok_or_else(|| {
         AppError::Internal(format!(
@@ -3162,7 +3157,8 @@ async fn write_remote_strm_bundle(
         // 下载 Primary 封面（poster）
         {
             let path = sidecar_dir.join(&poster_filename);
-            if sidecar_exists_nonempty(&path).await {
+            let already_exists = sidecar_exists_nonempty(&path).await;
+            if already_exists && !force_refresh {
                 local_poster = Some(path);
             } else {
                 let primary_tag = item
@@ -3186,13 +3182,14 @@ async fn write_remote_strm_bundle(
                         playback_token.trim(),
                     )
                 };
-                match emby_download_bytes(source, playback_token, url.as_str()).await {
+                let downloaded = match emby_download_bytes(source, playback_token, url.as_str()).await {
                     Ok(bytes) if !bytes.is_empty() => {
-                        if tokio::fs::write(&path, &bytes).await.is_ok() {
-                            local_poster = Some(path);
-                        }
+                        tokio::fs::write(&path, &bytes).await.is_ok()
                     }
-                    _ => {}
+                    _ => false,
+                };
+                if downloaded || already_exists {
+                    local_poster = Some(path);
                 }
             }
         }
@@ -3200,7 +3197,8 @@ async fn write_remote_strm_bundle(
         // 下载 Backdrop（背景图）
         {
             let path = sidecar_dir.join(&backdrop_filename);
-            if sidecar_exists_nonempty(&path).await {
+            let already_exists = sidecar_exists_nonempty(&path).await;
+            if already_exists && !force_refresh {
                 local_backdrop = Some(path);
             } else {
                 let backdrop_tag = item.item.backdrop_image_tags.as_ref().and_then(|tags| match tags {
@@ -3224,13 +3222,14 @@ async fn write_remote_strm_bundle(
                         playback_token.trim(),
                     )
                 };
-                match emby_download_bytes(source, playback_token, url.as_str()).await {
+                let downloaded = match emby_download_bytes(source, playback_token, url.as_str()).await {
                     Ok(bytes) if !bytes.is_empty() => {
-                        if tokio::fs::write(&path, &bytes).await.is_ok() {
-                            local_backdrop = Some(path);
-                        }
+                        tokio::fs::write(&path, &bytes).await.is_ok()
                     }
-                    _ => {}
+                    _ => false,
+                };
+                if downloaded || already_exists {
+                    local_backdrop = Some(path);
                 }
             }
         }
@@ -3238,7 +3237,8 @@ async fn write_remote_strm_bundle(
         // 下载 Logo
         {
             let path = sidecar_dir.join(&logo_filename);
-            if sidecar_exists_nonempty(&path).await {
+            let already_exists = sidecar_exists_nonempty(&path).await;
+            if already_exists && !force_refresh {
                 local_logo = Some(path);
             } else if let Some(tag) = item
                 .item
@@ -3251,17 +3251,24 @@ async fn write_remote_strm_bundle(
                     remote_image_url(base.as_str(), item.item.id.as_str(), "Logo", tag).as_str(),
                     playback_token.trim(),
                 );
-                if let Ok(bytes) = emby_download_bytes(source, playback_token, url.as_str()).await {
-                    if tokio::fs::write(&path, &bytes).await.is_ok() {
-                        local_logo = Some(path);
-                    }
+                let downloaded = match emby_download_bytes(source, playback_token, url.as_str()).await {
+                    Ok(bytes) => tokio::fs::write(&path, &bytes).await.is_ok(),
+                    Err(_) => false,
+                };
+                if downloaded || already_exists {
+                    local_logo = Some(path);
                 }
+            } else if already_exists {
+                local_logo = Some(path);
             }
         }
 
-        // 已存在的 NFO 不覆盖：手动 POST /Items/{id}/Refresh 写入的 NFO 享有更高优先级。
+        // NFO 覆盖策略：
+        //   - force_refresh = true（远端在水位线后修改过，增量「改」）→ 覆盖以同步最新 NFO 字段。
+        //   - force_refresh = false（首次/恢复同步）→ 已存在则保留（兼容用户手动 Refresh 写入）。
         let nfo_path = strm_path.with_extension("nfo");
-        if !sidecar_exists_nonempty(&nfo_path).await {
+        let nfo_exists = sidecar_exists_nonempty(&nfo_path).await;
+        if !nfo_exists || force_refresh {
             let nfo_body = if item.item.item_type.eq_ignore_ascii_case("Episode") {
                 build_episode_nfo_xml(item)
             } else {
@@ -3274,7 +3281,8 @@ async fn write_remote_strm_bundle(
             if let Some(series_dir) = strm_path.parent().and_then(Path::parent) {
                 if tvshow_written.insert(series_dir.to_path_buf()) {
                     let tvshow_path = series_dir.join("tvshow.nfo");
-                    if !sidecar_exists_nonempty(&tvshow_path).await {
+                    let tvshow_exists = sidecar_exists_nonempty(&tvshow_path).await;
+                    if !tvshow_exists || force_refresh {
                         let show_body = build_tvshow_nfo_xml_from_episode(item);
                         let _ = tokio::fs::write(&tvshow_path, show_body).await;
                     }
@@ -3305,7 +3313,9 @@ async fn write_remote_strm_bundle(
                 let safe_lang = sanitize_segment(lang);
                 let fname = format!("{stem}.{safe_lang}.{ext}");
                 let sub_path = sidecar_dir.join(fname);
-                if sidecar_exists_nonempty(&sub_path).await {
+                // 已存在的字幕在非强刷场景下保留（兼容用户手动维护的字幕）；
+                // 增量「改」时覆盖以反映远端最新外挂字幕。
+                if sidecar_exists_nonempty(&sub_path).await && !force_refresh {
                     continue;
                 }
                 let url = remote_subtitle_stream_url(
