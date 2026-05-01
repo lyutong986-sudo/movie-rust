@@ -2083,13 +2083,18 @@ async fn delete_stale_items_for_source(
         path: Option<String>,
         remote_id: Option<String>,
     }
-    // 不再限制 library_id，支持 separate 模式下条目分散在多个库
+    // 不再限制 library_id，支持 separate 模式下条目分散在多个库。
+    // 仅检测有真实 RemoteEmbyItemId 的 Movie/Episode 节点：
+    //   - Series/Season 节点的 RemoteEmbyItemId 写为空串（远端没有对应的 Movie/Episode ID），
+    //     `IS NOT NULL` 不能过滤空串，必须额外用 <> '' 防御，避免把它们当作 stale 误删。
+    //   - fetch_all_remote_item_ids 仅拉 Movie/Episode 类型，Series/Season 本就不在集合内。
     let rows: Vec<StaleRow> = sqlx::query(
         r#"
         SELECT id, path, provider_ids->>'RemoteEmbyItemId' AS remote_id
         FROM media_items
         WHERE provider_ids->>'RemoteEmbySourceId' = $1
           AND provider_ids->>'RemoteEmbyItemId' IS NOT NULL
+          AND provider_ids->>'RemoteEmbyItemId' <> ''
         "#,
     )
     .bind(&source_id_str)
@@ -2111,6 +2116,10 @@ async fn delete_stale_items_for_source(
         let Some(ref remote_id) = row.remote_id else {
             continue;
         };
+        // 兜底：SQL 已用 <> '' 过滤；这里再防御一次空串，避免误删 Series/Season。
+        if remote_id.trim().is_empty() {
+            continue;
+        }
         if remote_id_set.contains(remote_id.as_str()) {
             continue;
         }

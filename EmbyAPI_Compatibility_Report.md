@@ -2348,4 +2348,25 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 
 **影响文件：** `backend/src/remote_emby.rs`、`backend/src/repository.rs`
 
+### 同步链路深度审计 — 修复 Series/Season 误删（2026-05-01）
+
+**审计结论（合理 ✅）：**
+- **入口收敛**：前端「同步」按钮、`incremental_update_library` / `incremental_update_all_libraries`、定时任务 `library-scan`、远端实时监控 `run_remote_library_monitor_pass` 全部汇聚到 `remote_emby::sync_source_with_progress`，新的「增/改/删」语义对所有触发点一致生效。
+- **水位线对齐**：`fetch_remote_items_total_count_for_view` 与 `fetch_remote_items_page_for_view` 共用同一个 `incremental_since`，进度条与实际拉取量匹配；`fetch_all_remote_item_ids` 不带 since（用于「删」检测），保证完整远端集快照。
+- **取消/错误**：`sync_source_with_progress` Err 分支通过 `update_remote_emby_source_sync_state(Some(...))` 仅写 `last_sync_error`，**不推进** `last_sync_at`，下次重试不会丢失补全数据。
+- **file_watcher 排除**：`file_watcher::list_watched_libraries` 同时按"路径前缀"和"绑定远端源"两套规则排除远端中转库，远端同步写盘不会触发本地扫描风暴。
+
+**审计发现 + 修复（Bug）：** `delete_stale_items_for_source` 误删 Series/Season 节点。
+
+| 项 | 内容 |
+|----|------|
+| 现象 | Series 与 Season 节点 `upsert` 时调用 `remote_marker_provider_ids(source.id, None, ...)`，`RemoteEmbyItemId` 被填为空串 `""`；SQL `WHERE provider_ids->>'RemoteEmbyItemId' IS NOT NULL` 在 PostgreSQL 中对空串仍判 TRUE，把 Series/Season 误纳入 stale 检测。 |
+| 后果 | `fetch_all_remote_item_ids` 仅拉 `Movie,Episode` 类型，Series/Season 的空串永远不在 `remote_id_set` 中 → 每次同步都把它们当成远端已下架删除，丢失 UserData/收藏/评分/上次播放进度等关联数据。 |
+| 修复 | SQL 增加 `AND provider_ids->>'RemoteEmbyItemId' <> ''`；删除循环里再做一次 `remote_id.trim().is_empty() → continue` 兜底（双层防御）。 |
+| 文件 | `backend/src/remote_emby.rs::delete_stale_items_for_source` |
+
+**已知 limit（非阻塞）：**
+- 当一整个 Series 在远端被删除（所有 Episode 消失）时，DB 里的 Series/Season 节点会保留为"空骨架"。下次出现同名 Series 时会被复用；如需主动清理，可让本地库扫描器周期性删除"无 child 的 Series/Season"。
+- 增量「改」依赖远端 `MinDateLastSaved` 过滤 — 远端 Emby 必须正确维护 `DateLastSaved`，否则远端元数据修订无法被检测到。
+
 ---
