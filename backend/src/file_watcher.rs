@@ -128,6 +128,14 @@ async fn collect_monitored_libraries(
         if path_str.starts_with("__remote_view_") || path_str.starts_with("__remote_transit") {
             continue;
         }
+        // 跳过已绑定远端 Emby 源的媒体库：远端同步会大量写入 strm/侧车文件，
+        // 文件监控会被反复触发造成扫描风暴；这些库的更新由远端轮询/计划任务负责。
+        let remote_sources = repository::find_remote_sources_for_library(&state.pool, lib.id)
+            .await
+            .unwrap_or_default();
+        if !remote_sources.is_empty() {
+            continue;
+        }
         let mut paths = Vec::new();
         if let Some(infos) = opts.path_infos.iter().next() {
             // path_infos 中的路径

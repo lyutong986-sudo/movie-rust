@@ -52,7 +52,7 @@ fn builtin_tasks() -> Vec<TaskDescriptor> {
         TaskDescriptor {
             id: "library-scan",
             name: "媒体库扫描",
-            description: "扫描所有媒体库目录，发现并录入新的媒体文件。",
+            description: "对所有媒体库执行增量更新（含增/改/删）：本地库扫描磁盘，远端 Emby 库通过 API 同步。",
             category: "Library",
             default_triggers: vec![TriggerInfo {
                 trigger_type: "IntervalTrigger",
@@ -379,11 +379,8 @@ async fn set_progress(pool: &sqlx::PgPool, task_id: &str, pct: f64) {
 async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
     match task_id {
         "library-scan" => {
-            crate::scanner::scan_all_libraries_with_db_semaphore(
-                &state.pool,
-                state.metadata_manager.clone(),
-                &state.config,
-                state.work_limiters.clone(),
+            crate::routes::admin::incremental_update_all_libraries(
+                state,
                 None,
                 Some(state.scan_db_semaphore.clone()),
             )

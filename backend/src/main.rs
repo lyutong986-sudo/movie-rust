@@ -180,10 +180,14 @@ async fn main() -> Result<()> {
         crate::remote_emby::remote_emby_token_refresh_loop(remote_emby_refresh_pool).await;
     });
 
-    let monitor_state = state.clone();
-    tokio::spawn(async move {
-        crate::remote_emby::remote_library_monitor_loop(monitor_state).await;
-    });
+    if state.config.enable_remote_library_monitor {
+        let monitor_state = state.clone();
+        tokio::spawn(async move {
+            crate::remote_emby::remote_library_monitor_loop(monitor_state).await;
+        });
+    } else {
+        tracing::info!("远端 Emby 库高频轮询已禁用（APP_ENABLE_REMOTE_LIBRARY_MONITOR=false），由计划任务负责增量更新");
+    }
 
     let watcher_state = state.clone();
     tokio::spawn(async move {

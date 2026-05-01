@@ -28,6 +28,9 @@ pub struct Config {
     pub enable_transcoding: bool,
     pub max_transcode_sessions: u32,
     pub allowed_origins: Vec<String>,
+    /// 是否启用独立的远端 Emby 库高频轮询循环（5 分钟）。
+    /// 关闭后远端库的增量更新将完全交由计划任务"媒体库扫描"承担。
+    pub enable_remote_library_monitor: bool,
 }
 
 impl Config {
@@ -108,6 +111,10 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
+            enable_remote_library_monitor: env::var("APP_ENABLE_REMOTE_LIBRARY_MONITOR")
+                .ok()
+                .map(|value| value.eq_ignore_ascii_case("true"))
+                .unwrap_or(true),
         })
     }
 

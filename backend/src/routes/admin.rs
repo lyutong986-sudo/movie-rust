@@ -213,6 +213,96 @@ fn scan_registry() -> &'static RwLock<ScanOperationRegistry> {
     REGISTRY.get_or_init(|| RwLock::new(ScanOperationRegistry::default()))
 }
 
+/// 对单个媒体库执行"增量更新"：根据库是否绑定远端 Emby 源，分发到本地扫描或远端同步。
+///
+/// 行为约定：
+/// - library 绑定了 `remote_emby_sources` → 对每个源调用 `sync_source_with_progress`（增量/全量自动）
+/// - 否则 → 调用 `scanner::scan_single_library_with_db_semaphore` 走本地扫描
+///
+/// 返回的 `ScanSummary` 是该库在本次更新中处理的合并结果。
+pub async fn incremental_update_library(
+    state: &AppState,
+    library_id: Uuid,
+    progress: Option<scanner::ScanProgress>,
+    db_semaphore: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+) -> Result<ScanSummary, AppError> {
+    let remote_sources =
+        repository::find_remote_sources_for_library(&state.pool, library_id).await?;
+    if !remote_sources.is_empty() {
+        let mut summary = ScanSummary {
+            libraries: 0,
+            scanned_files: 0,
+            imported_items: 0,
+        };
+        for source in &remote_sources {
+            // 远端同步使用独立的 RemoteSyncProgress 体系，与 scanner::ScanProgress 不互通；
+            // 这里传 None，让远端同步自管理日志，与现有 enqueue_library_scan 行为保持一致。
+            match remote_emby::sync_source_with_progress(state, source.id, None).await {
+                Ok(result) => {
+                    summary.libraries += 1;
+                    summary.scanned_files += result.scan_summary.scanned_files;
+                    summary.imported_items += result.scan_summary.imported_items;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        source_id = %source.id,
+                        library_id = %library_id,
+                        error = %err,
+                        "远端 Emby 源同步失败"
+                    );
+                    return Err(err);
+                }
+            }
+        }
+        Ok(summary)
+    } else {
+        scanner::scan_single_library_with_db_semaphore(
+            &state.pool,
+            state.metadata_manager.clone(),
+            &state.config,
+            state.work_limiters.clone(),
+            library_id,
+            progress,
+            db_semaphore,
+        )
+        .await
+    }
+}
+
+/// 遍历所有媒体库，为每个库各自调度本地扫描或远端同步。
+pub async fn incremental_update_all_libraries(
+    state: &AppState,
+    progress: Option<scanner::ScanProgress>,
+    db_semaphore: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+) -> Result<ScanSummary, AppError> {
+    let libraries = repository::list_libraries(&state.pool).await?;
+    let mut total = ScanSummary {
+        libraries: 0,
+        scanned_files: 0,
+        imported_items: 0,
+    };
+    for library in libraries {
+        match incremental_update_library(state, library.id, progress.clone(), db_semaphore.clone())
+            .await
+        {
+            Ok(s) => {
+                total.libraries += s.libraries.max(1);
+                total.scanned_files += s.scanned_files;
+                total.imported_items += s.imported_items;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    library_id = %library.id,
+                    library_name = %library.name,
+                    error = %err,
+                    "媒体库增量更新失败，继续处理后续媒体库"
+                );
+            }
+        }
+    }
+    Ok(total)
+}
+
 async fn enqueue_library_scan(
     state: &AppState,
     trigger: &str,
@@ -377,68 +467,21 @@ async fn enqueue_library_scan(
             }
 
             let scan_future = {
-                let pool = pool.clone();
-                let metadata_manager = metadata_manager.clone();
-                let config = config.clone();
-                let work_limiters = work_limiters.clone();
                 let progress = progress.clone();
                 let db_semaphore = db_semaphore.clone();
-                let state_for_remote = app_state.clone();
+                let state_for_dispatch = app_state.clone();
                 async move {
                     if let Some(scan_library_id) = library_id_for_task {
-                        // 检查该库是否有关联的远端 Emby 源
-                        let remote_sources = repository::find_remote_sources_for_library(
-                            &pool, scan_library_id,
+                        incremental_update_library(
+                            &state_for_dispatch,
+                            scan_library_id,
+                            Some(progress),
+                            db_semaphore,
                         )
                         .await
-                        .unwrap_or_default();
-                        if !remote_sources.is_empty() {
-                            let mut total_scanned = 0i64;
-                            let mut total_imported = 0i64;
-                            for source in &remote_sources {
-                                match remote_emby::sync_source_with_progress(
-                                    &state_for_remote,
-                                    source.id,
-                                    None,
-                                )
-                                .await
-                                {
-                                    Ok(result) => {
-                                        total_scanned += result.scan_summary.scanned_files;
-                                        total_imported += result.scan_summary.imported_items;
-                                    }
-                                    Err(err) => {
-                                        tracing::warn!(
-                                            source_id = %source.id,
-                                            error = %err,
-                                            "远程库扫描触发同步失败"
-                                        );
-                                    }
-                                }
-                            }
-                            Ok(ScanSummary {
-                                libraries: remote_sources.len() as i64,
-                                scanned_files: total_scanned,
-                                imported_items: total_imported,
-                            })
-                        } else {
-                            scanner::scan_single_library_with_db_semaphore(
-                                &pool,
-                                metadata_manager,
-                                &config,
-                                work_limiters,
-                                scan_library_id,
-                                Some(progress),
-                                db_semaphore,
-                            )
-                            .await
-                        }
                     } else {
-                        scanner::scan_all_libraries_with_db_semaphore(
-                            &pool,
-                            metadata_manager,
-                            &config,
-                            work_limiters,
+                        incremental_update_all_libraries(
+                            &state_for_dispatch,
                             Some(progress),
                             db_semaphore,
                         )
@@ -840,26 +883,9 @@ async fn scan_libraries(
     if query.wait_for_completion.unwrap_or(false) {
         let db_sem = Some(state.scan_db_semaphore.clone());
         let summary = if let Some(library_id) = query.library_id {
-            scanner::scan_single_library_with_db_semaphore(
-                &state.pool,
-                state.metadata_manager.clone(),
-                &state.config,
-                state.work_limiters.clone(),
-                library_id,
-                None,
-                db_sem,
-            )
-            .await?
+            incremental_update_library(&state, library_id, None, db_sem).await?
         } else {
-            scanner::scan_all_libraries_with_db_semaphore(
-                &state.pool,
-                state.metadata_manager.clone(),
-                &state.config,
-                state.work_limiters.clone(),
-                None,
-                db_sem,
-            )
-            .await?
+            incremental_update_all_libraries(&state, None, db_sem).await?
         };
         return Ok((StatusCode::OK, Json(summary)).into_response());
     }
