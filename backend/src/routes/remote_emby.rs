@@ -151,6 +151,12 @@ struct CreateRemoteEmbySourceRequest {
     /// 自动增量同步间隔（分钟），0 = 关闭。
     #[serde(default, alias = "autoSyncIntervalMinutes", alias = "auto_sync_interval_minutes")]
     auto_sync_interval_minutes: Option<i32>,
+    /// 拉取速率：每页拉条目数，默认 200，clamp [50, 1000]。
+    #[serde(default, alias = "pageSize", alias = "page_size")]
+    page_size: Option<i32>,
+    /// 拉取速率：两次 HTTP 请求最小间隔（毫秒），默认 0=不限，clamp [0, 60000]。
+    #[serde(default, alias = "requestIntervalMs", alias = "request_interval_ms")]
+    request_interval_ms: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,6 +209,12 @@ struct UpdateRemoteEmbySourceRequest {
     /// 自动增量同步间隔（分钟），0 = 关闭。
     #[serde(default, alias = "autoSyncIntervalMinutes", alias = "auto_sync_interval_minutes")]
     auto_sync_interval_minutes: Option<i32>,
+    /// 拉取速率：每页拉条目数，默认 200，clamp [50, 1000]。
+    #[serde(default, alias = "pageSize", alias = "page_size")]
+    page_size: Option<i32>,
+    /// 拉取速率：两次 HTTP 请求最小间隔（毫秒），默认 0=不限，clamp [0, 60000]。
+    #[serde(default, alias = "requestIntervalMs", alias = "request_interval_ms")]
+    request_interval_ms: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -257,6 +269,10 @@ struct RemoteEmbySourceDto {
     proxy_mode: String,
     /// 自动增量同步间隔（分钟），0 = 关闭。
     auto_sync_interval_minutes: i32,
+    /// 拉取速率：每页拉条目数。默认 200，可调 50–1000。
+    page_size: i32,
+    /// 拉取速率：两次请求之间最小间隔（毫秒）。默认 0 = 不限，可调 0–60000。
+    request_interval_ms: i32,
     created_at: String,
     updated_at: String,
 }
@@ -444,6 +460,8 @@ async fn create_remote_emby_source(
         payload.proxy_mode.as_deref().unwrap_or("proxy"),
         payload.view_library_map.as_ref(),
         payload.auto_sync_interval_minutes.unwrap_or(0),
+        payload.page_size.unwrap_or(200),
+        payload.request_interval_ms.unwrap_or(0),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))
@@ -488,6 +506,8 @@ async fn update_remote_emby_source(
         payload.proxy_mode.as_deref().unwrap_or("proxy"),
         payload.view_library_map.as_ref(),
         payload.auto_sync_interval_minutes.unwrap_or(0),
+        payload.page_size.unwrap_or(200),
+        payload.request_interval_ms.unwrap_or(0),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))
@@ -885,6 +905,8 @@ fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> Remot
         } else {
             source.proxy_mode
         },
+        page_size: if source.page_size <= 0 { 200 } else { source.page_size },
+        request_interval_ms: source.request_interval_ms.max(0),
         created_at: source.created_at.to_rfc3339(),
         updated_at: source.updated_at.to_rfc3339(),
     }

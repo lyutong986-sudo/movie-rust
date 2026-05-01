@@ -83,6 +83,13 @@ pub struct DbRemoteEmbySource {
     /// 当 `now() >= last_sync_at + interval` 时触发该源的增量同步。
     #[sqlx(default)]
     pub auto_sync_interval_minutes: i32,
+    /// 拉取速率：单页条目数（默认 200，可调 50–1000）；越小越平稳但请求次数越多。
+    #[sqlx(default)]
+    pub page_size: i32,
+    /// 拉取速率：两次 HTTP 请求之间的最小间隔（毫秒，0 = 不限）。
+    /// 在远端有 QPS / WAF / 反爬保护被 429/502 频繁打回时手动降速。
+    #[sqlx(default)]
+    pub request_interval_ms: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

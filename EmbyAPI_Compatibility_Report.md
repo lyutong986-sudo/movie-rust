@@ -2674,3 +2674,55 @@ POST /api/admin/remote-emby/cleanup-orphan-libraries
 **影响文件：** `backend/migrations/0001_schema.sql`、`backend/src/main.rs`、`backend/src/repository.rs`、`backend/src/routes/sessions.rs`、`backend/src/routes/items.rs`、`backend/src/routes/persons.rs`、`backend/src/routes/usage_stats.rs`、`EmbyAPI_Compatibility_Report.md`。
 
 ---
+
+## 第三十五批（2026-05-01）：远端媒体库可调拉取速率（PageSize + RequestIntervalMs）
+
+**触发场景：** 用户反馈：远端 Emby 同步在远端机器较弱 / 反爬严格 / WAF 限流时容易被 502/429 打回（之前 PB22 已经为这种情况加了指数退避重试，但用户希望从源头降速避免触发）。要求「添加远程库时可以调节对远程媒体库拉取速率」。
+
+### 设计
+
+每个远端源新增两个独立可调字段：
+
+| 字段 | 默认 | 范围 | 语义 |
+|------|------|------|------|
+| `page_size` | 200 | 50–1000 | 每次 `GET /Users/{uid}/Items` 的 `Limit`；越大单页 IO 越大但请求次数越少 |
+| `request_interval_ms` | 0（不限） | 0–60000 | 同源两次 HTTP 请求之间的最小间隔（毫秒）；峰值 QPS ≈ 1000 / 该值 |
+
+二者共同决定单源对远端的实际 QPS：例如 `page_size=100, request_interval_ms=500` ≈ 单源每秒 ≤ 2 个请求 × 100 条/请求 = 200 条/秒，比默认配置（200 条/请求 × 远端自然吐量）平稳得多。
+
+### 实施
+
+| # | 文件 | 改动 |
+|---|------|------|
+| 1 | `backend/migrations/0001_schema.sql` + `main.rs::ensure_schema_compatibility` | `remote_emby_sources` 加 `page_size INTEGER NOT NULL DEFAULT 200` 与 `request_interval_ms INTEGER NOT NULL DEFAULT 0` 两列；按规范同步在 0001 schema 与启动兼容补丁两处。 |
+| 2 | `backend/src/models.rs::DbRemoteEmbySource` | 加 `page_size: i32` 与 `request_interval_ms: i32` 字段（`#[sqlx(default)]`，老库读默认值）。 |
+| 3 | `backend/src/repository.rs::create_remote_emby_source` / `update_remote_emby_source` | 各加两个参数；服务端 clamp：`page_size <= 0` 退默认 200 后 clamp [50, 1000]；`request_interval_ms` clamp [0, 60000]；INSERT/UPDATE 同步绑定。 |
+| 4 | `backend/src/routes/remote_emby.rs::CreateRemoteEmbySourceRequest` / `UpdateRemoteEmbySourceRequest` / `RemoteEmbySourceDto` / `remote_emby_source_to_dto` | 接收 `PageSize` / `RequestIntervalMs`（PascalCase + camelCase + snake_case 三套别名）；DTO 加同名字段回显给前端。 |
+| 5 | `backend/src/remote_emby.rs` | 1）新增 `effective_page_size(source) -> i64`，把 `source.page_size` 钳到 [50, 1000]；之前硬编码的 `REMOTE_PAGE_SIZE: i64 = 200` 删除，两个使用点（`sync_source_with_progress` 主循环、`fetch_all_remote_items` 列表预载）改为读 `source.page_size`。2）新增静态 `REMOTE_REQUEST_THROTTLE: RwLock<HashMap<Uuid, Arc<Mutex<Instant>>>>` 与 `throttle_remote_request(source_id, interval_ms)` —— 进入临界区检查「距上一次发请求」的时长，不足就 `tokio::time::sleep` 补齐，再写回 `now()`。3）`get_json_with_retry` 在每次实际发出 `request.send()` 之前调用一次 throttle —— 这样不管调用是顺序循环还是后续可能引入的并发，都被 per-source 互斥锁串成「最低间隔」。4）`cleanup_source_mapped_items` 删源时同步清掉它的节流槽，避免 HashMap 累积。 |
+| 6 | `frontend/src/api/emby.ts` | `RemoteEmbySource` 接口加 `PageSize?` / `RequestIntervalMs?`（含 JSDoc 范围与公式）；`createRemoteEmbySource` / `updateRemoteEmbySource` 请求体两个 payload 类型同步加字段。 |
+| 7 | `frontend/src/pages/settings/RemoteEmbySettings.vue` | `form` 与 `editForm` ref 加 `pageSize: 200` / `requestIntervalMs: 0`；填表 → API 时同步 clamp（前后端双重防御）；从远端 source 加载 → editForm 时按字段读出；新增和编辑两套面板各加一对 `<UFormField>` UI 控件，含范围/默认/限速公式提示。 |
+
+### 行为变化
+
+- 老用户的现存源会自动拿到默认值 `page_size=200, request_interval_ms=0`，与改动前的硬编码完全等价 —— 零行为变化。
+- 改动后用户在「系统设置 → 远端 Emby 源」面板的「新增 / 编辑」对话框里可以直接看到两个新输入框：
+  - **「拉取速率：单页条目数（PageSize）」** — 50–1000；想拉细一点就调小，想节省请求数就调大。
+  - **「拉取速率：请求最小间隔（毫秒）」** — 0–60000；远端被 429/502 打回就调到 200/500/1000 等，立刻看到 QPS 下降。
+- 节流是**单源 per-source**（不同源独立计速），允许不同源根据各自远端的承受力使用不同节奏。
+
+### 鲁棒性
+
+- `request_interval_ms = 0` 走快路径直接 return，不进锁不分配，对默认配置零开销。
+- 节流锁在 `Arc<Mutex<Instant>>` 上，读写双层 RwLock，保证 lock-free 路径在 hot path 上 O(1)；HashMap 由 source 删除路径主动清理，再加上 source-id 是 UUID，无累积上限担忧。
+- 服务端在 `create_remote_emby_source` / `update_remote_emby_source` 都对入参 clamp，避免前端绕过校验直接发负数 / 超大值。
+
+### 验证
+
+- `cargo check` 0 error；之前 `REMOTE_PAGE_SIZE` 常量删除后无未使用警告。
+- `cargo test --bin movie-rust-backend`：60 passed; 0 failed.
+- 前端 `frontend/src/api/emby.ts` + `RemoteEmbySettings.vue` ReadLints 无错误。
+- `EmbyAPI_Compatibility_Report.md` 同步追加。
+
+**影响文件：** `backend/migrations/0001_schema.sql`、`backend/src/main.rs`、`backend/src/models.rs`、`backend/src/repository.rs`、`backend/src/remote_emby.rs`、`backend/src/routes/remote_emby.rs`、`frontend/src/api/emby.ts`、`frontend/src/pages/settings/RemoteEmbySettings.vue`、`EmbyAPI_Compatibility_Report.md`。
+
+---

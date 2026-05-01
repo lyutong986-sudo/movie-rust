@@ -753,6 +753,14 @@ ALTER TABLE remote_emby_sources
 -- 后端定期触发该源的增量同步，独立于全局 library-scan 计划任务。
 ALTER TABLE remote_emby_sources
     ADD COLUMN IF NOT EXISTS auto_sync_interval_minutes INTEGER NOT NULL DEFAULT 0;
+-- 拉取速率调节：page_size 控制单页条目数（影响远端 IO 与本地反序列化体量），
+-- request_interval_ms 控制「两次 HTTP 请求之间的最小间隔」（毫秒，0=不限）。
+-- 二者共同决定单源对远端的请求速率上限：peak ≈ 1000/request_interval_ms 个 req/s，
+-- 单 req 拉 page_size 条；用户在远端有 QPS / 防火墙 / 反爬保护时可手动降速避免 502/429。
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS page_size INTEGER NOT NULL DEFAULT 200;
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS request_interval_ms INTEGER NOT NULL DEFAULT 0;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique
     ON remote_emby_sources(lower(name));

@@ -3758,6 +3758,8 @@ pub async fn create_remote_emby_source(
     proxy_mode: &str,
     view_library_map: Option<&Value>,
     auto_sync_interval_minutes: i32,
+    page_size: i32,
+    request_interval_ms: i32,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
     let server_url = server_url.trim().trim_end_matches('/');
@@ -3865,6 +3867,9 @@ pub async fn create_remote_emby_source(
         "redirect" => "redirect",
         _ => "proxy",
     };
+    // 拉取速率：page_size <= 0 退默认 200，clamp [50, 1000]；request_interval_ms 负数归零，clamp [0, 60_000ms]。
+    let page_size = if page_size <= 0 { 200 } else { page_size.clamp(50, 1000) };
+    let request_interval_ms = request_interval_ms.max(0).min(60_000);
     let source_secret = Uuid::new_v4();
     let row_id = Uuid::new_v4();
     // remote_views 列类型为 jsonb（单个 JSON 数组），必须 wrap 成 Value::Array
@@ -3876,9 +3881,9 @@ pub async fn create_remote_emby_source(
             id, name, server_url, username, password, spoofed_user_agent, target_library_id,
             display_mode, remote_view_ids, remote_views, enabled, source_secret,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, proxy_mode,
-            view_library_map, auto_sync_interval_minutes
+            view_library_map, auto_sync_interval_minutes, page_size, request_interval_ms
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
         "#,
     )
     .bind(row_id)
@@ -3900,6 +3905,8 @@ pub async fn create_remote_emby_source(
     .bind(proxy_mode)
     .bind(&vlm)
     .bind(auto_sync_interval_minutes)
+    .bind(page_size)
+    .bind(request_interval_ms)
     .execute(pool)
     .await?;
 
@@ -3940,6 +3947,8 @@ pub async fn update_remote_emby_source(
     proxy_mode: &str,
     view_library_map: Option<&Value>,
     auto_sync_interval_minutes: i32,
+    page_size: i32,
+    request_interval_ms: i32,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
     let server_url = server_url.trim().trim_end_matches('/');
@@ -4047,6 +4056,8 @@ pub async fn update_remote_emby_source(
         "redirect" => "redirect",
         _ => "proxy",
     };
+    let page_size = if page_size <= 0 { 200 } else { page_size.clamp(50, 1000) };
+    let request_interval_ms = request_interval_ms.max(0).min(60_000);
 
     let vlm = view_library_map.cloned().unwrap_or_else(|| serde_json::json!({}));
     let rows = if let Some(pw) = password.filter(|p| !p.trim().is_empty()) {
@@ -4059,6 +4070,7 @@ pub async fn update_remote_emby_source(
                 strm_output_path = $12, sync_metadata = $13, sync_subtitles = $14,
                 token_refresh_interval_secs = $15, proxy_mode = $16,
                 view_library_map = $17, auto_sync_interval_minutes = $18,
+                page_size = $19, request_interval_ms = $20,
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -4081,6 +4093,8 @@ pub async fn update_remote_emby_source(
         .bind(proxy_mode)
         .bind(&vlm)
         .bind(auto_sync_interval_minutes)
+        .bind(page_size)
+        .bind(request_interval_ms)
         .execute(pool)
         .await?
     } else {
@@ -4093,6 +4107,7 @@ pub async fn update_remote_emby_source(
                 strm_output_path = $11, sync_metadata = $12, sync_subtitles = $13,
                 token_refresh_interval_secs = $14, proxy_mode = $15,
                 view_library_map = $16, auto_sync_interval_minutes = $17,
+                page_size = $18, request_interval_ms = $19,
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -4114,6 +4129,8 @@ pub async fn update_remote_emby_source(
         .bind(proxy_mode)
         .bind(&vlm)
         .bind(auto_sync_interval_minutes)
+        .bind(page_size)
+        .bind(request_interval_ms)
         .execute(pool)
         .await?
     };

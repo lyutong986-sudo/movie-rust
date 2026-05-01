@@ -42,7 +42,9 @@ const form = ref({
   syncSubtitles: true,
   tokenRefreshIntervalSecs: 3600,
   proxyMode: 'proxy' as 'proxy' | 'redirect',
-  autoSyncIntervalMinutes: 0
+  autoSyncIntervalMinutes: 0,
+  pageSize: 200,
+  requestIntervalMs: 0
 });
 
 const editOpen = ref(false);
@@ -65,6 +67,8 @@ const editForm = ref({
   tokenRefreshIntervalSecs: 3600,
   proxyMode: 'proxy' as 'proxy' | 'redirect',
   autoSyncIntervalMinutes: 0,
+  pageSize: 200,
+  requestIntervalMs: 0,
   mergedRemoteViews: [] as RemoteEmbyView[]
 });
 
@@ -383,6 +387,8 @@ function openEditor(source: RemoteEmbySource) {
     tokenRefreshIntervalSecs: source.TokenRefreshIntervalSecs ?? 3600,
     proxyMode: (source.ProxyMode === 'redirect' ? 'redirect' : 'proxy') as 'proxy' | 'redirect',
     autoSyncIntervalMinutes: Math.max(0, Number(source.AutoSyncIntervalMinutes ?? 0) || 0),
+    pageSize: Math.max(50, Math.min(1000, Number(source.PageSize ?? 200) || 200)),
+    requestIntervalMs: Math.max(0, Math.min(60000, Number(source.RequestIntervalMs ?? 0) || 0)),
     mergedRemoteViews: [...merged.values()]
   };
   editOpen.value = true;
@@ -463,7 +469,9 @@ async function saveEditor() {
         86400 * 30
       ),
       ProxyMode: p.proxyMode,
-      AutoSyncIntervalMinutes: Math.max(0, Math.min(60 * 24 * 7, Number(p.autoSyncIntervalMinutes) || 0))
+      AutoSyncIntervalMinutes: Math.max(0, Math.min(60 * 24 * 7, Number(p.autoSyncIntervalMinutes) || 0)),
+      PageSize: Math.max(50, Math.min(1000, Number(p.pageSize) || 200)),
+      RequestIntervalMs: Math.max(0, Math.min(60000, Number(p.requestIntervalMs) || 0))
     };
     if (p.password.trim()) {
       payload.Password = p.password;
@@ -548,7 +556,9 @@ async function createSource() {
         86400 * 30
       ),
       ProxyMode: payload.proxyMode,
-      AutoSyncIntervalMinutes: Math.max(0, Math.min(60 * 24 * 7, Number(payload.autoSyncIntervalMinutes) || 0))
+      AutoSyncIntervalMinutes: Math.max(0, Math.min(60 * 24 * 7, Number(payload.autoSyncIntervalMinutes) || 0)),
+      PageSize: Math.max(50, Math.min(1000, Number(payload.pageSize) || 200)),
+      RequestIntervalMs: Math.max(0, Math.min(60000, Number(payload.requestIntervalMs) || 0))
     });
     saved.value = `已创建远端源：${payload.name.trim()}`;
     form.value.name = '';
@@ -888,6 +898,32 @@ onBeforeUnmount(() => {
             />
             <p class="text-muted mt-1 text-xs">
               0 = 关闭。后台每分钟检查一次该源距离上次同步的时间，达到该间隔即触发增量同步（增 / 改 / 删）。范围 1–10080（最长 7 天）。
+            </p>
+          </UFormField>
+          <UFormField class="lg:col-span-2" label="拉取速率：单页条目数（PageSize）">
+            <UInput
+              v-model.number="form.pageSize"
+              type="number"
+              class="w-full max-w-xs"
+              :min="50"
+              :max="1000"
+              placeholder="默认 200"
+            />
+            <p class="text-muted mt-1 text-xs">
+              范围 50–1000，默认 200。每次请求拉这么多条目；越大越省请求数但单页 IO 越大；远端机器较弱或带宽紧张可调小。
+            </p>
+          </UFormField>
+          <UFormField class="lg:col-span-2" label="拉取速率：请求最小间隔（毫秒）">
+            <UInput
+              v-model.number="form.requestIntervalMs"
+              type="number"
+              class="w-full max-w-xs"
+              :min="0"
+              :max="60000"
+              placeholder="0 = 不限速"
+            />
+            <p class="text-muted mt-1 text-xs">
+              范围 0–60000。两次 HTTP 请求之间至少间隔多少毫秒；峰值 QPS ≈ 1000 / 该值，例：200 ms ≈ 5 req/s。远端有 QPS / WAF / 反爬保护被 429/502 频繁打回时调大降速。
             </p>
           </UFormField>
           <div class="lg:col-span-2 flex flex-wrap items-center justify-between gap-2">
@@ -1242,6 +1278,32 @@ onBeforeUnmount(() => {
               />
               <p class="text-muted mt-1 text-xs">
                 0 = 关闭。后台每分钟检查该源，到达间隔即触发增量同步（增 / 改 / 删）。范围 1–10080（最长 7 天）。
+              </p>
+            </UFormField>
+            <UFormField class="lg:col-span-2" label="拉取速率：单页条目数（PageSize）">
+              <UInput
+                v-model.number="editForm.pageSize"
+                type="number"
+                class="max-w-xs"
+                :min="50"
+                :max="1000"
+                placeholder="默认 200"
+              />
+              <p class="text-muted mt-1 text-xs">
+                范围 50–1000，默认 200。越大越省请求数但单页 IO 越大；远端机器较弱或带宽紧张可调小。
+              </p>
+            </UFormField>
+            <UFormField class="lg:col-span-2" label="拉取速率：请求最小间隔（毫秒）">
+              <UInput
+                v-model.number="editForm.requestIntervalMs"
+                type="number"
+                class="max-w-xs"
+                :min="0"
+                :max="60000"
+                placeholder="0 = 不限速"
+              />
+              <p class="text-muted mt-1 text-xs">
+                范围 0–60000。两次请求之间至少间隔多少毫秒；峰值 QPS ≈ 1000 / 该值。被远端 429/502 频繁打回时调大降速。
               </p>
             </UFormField>
             <div class="lg:col-span-2 mt-2 flex flex-wrap justify-end gap-2">

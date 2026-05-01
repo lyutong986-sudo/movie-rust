@@ -23,9 +23,51 @@ use std::{
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-const REMOTE_PAGE_SIZE: i64 = 200;
 const PLAYBACK_INFO_CACHE_TTL_SECS: u64 = 300;
 const PLAYBACK_INFO_CACHE_MAX_ENTRIES: usize = 512;
+
+/// per-source 拉取速率节流器：记录每个源「上一次发出 HTTP 请求的时间」，
+/// 在 `get_json_with_retry` 入口处与 `request_interval_ms` 配合，串行串成
+/// 「两次请求至少间隔 N 毫秒」。Mutex 包 Instant 是为了让多个异步任务争用
+/// 同一源时也能形成串行屏障（同时跑也强制最小间隔）。
+static REMOTE_REQUEST_THROTTLE: std::sync::LazyLock<
+    RwLock<HashMap<Uuid, Arc<tokio::sync::Mutex<Instant>>>>,
+> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// 以 `source.request_interval_ms` 为节奏对该源做限速：先取/创建该源的 Mutex 槽，
+/// 进入临界区后计算「距上一次发请求的时间差」，不足 `request_interval_ms` 就 sleep
+/// 补齐，最后把「now」写回作为下一次基准。`request_interval_ms <= 0` 时直接返回。
+async fn throttle_remote_request(source_id: Uuid, request_interval_ms: i32) {
+    if request_interval_ms <= 0 {
+        return;
+    }
+    let interval = Duration::from_millis(request_interval_ms.max(0) as u64);
+    let slot = {
+        let read = REMOTE_REQUEST_THROTTLE.read().await;
+        read.get(&source_id).cloned()
+    };
+    let slot = if let Some(slot) = slot {
+        slot
+    } else {
+        let mut write = REMOTE_REQUEST_THROTTLE.write().await;
+        write
+            .entry(source_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(Instant::now() - interval)))
+            .clone()
+    };
+    let mut last = slot.lock().await;
+    let elapsed = last.elapsed();
+    if elapsed < interval {
+        tokio::time::sleep(interval - elapsed).await;
+    }
+    *last = Instant::now();
+}
+
+/// 钳到合法范围的 page_size：source.page_size <= 0 时退默认 200。
+fn effective_page_size(source: &DbRemoteEmbySource) -> i64 {
+    let raw = if source.page_size <= 0 { 200 } else { source.page_size };
+    raw.clamp(50, 1000) as i64
+}
 
 struct CachedPlaybackInfo {
     info: RemotePlaybackInfo,
@@ -987,6 +1029,9 @@ async fn sync_source_inner(
         }
 
         let mut start_index = 0i64;
+        // 拉取速率：单源可调 page_size（50–1000），影响每页带回的条目数（与 request_interval_ms
+        // 一起决定单源对远端的实际 QPS / 带宽消耗）。
+        let page_size = effective_page_size(source);
         loop {
             if let Some(handle) = &progress {
                 if handle.is_cancelled() {
@@ -1000,7 +1045,7 @@ async fn sync_source_inner(
                 user_id.as_str(),
                 view.id.as_str(),
                 start_index,
-                REMOTE_PAGE_SIZE,
+                page_size,
                 incremental_since,
             )
             .await?;
@@ -1115,7 +1160,7 @@ async fn sync_source_inner(
                 }
             }
 
-            start_index += REMOTE_PAGE_SIZE;
+            start_index += page_size;
             if start_index >= page.total_record_count {
                 break;
             }
@@ -1476,6 +1521,12 @@ pub async fn cleanup_source_mapped_items(
         source_root.as_path(),
     )
     .await?;
+
+    // 删除源时清掉它的拉取速率节流槽，避免 HashMap 累积陈旧条目（重新创建同 id 概率极低，但仍清理）
+    {
+        let mut throttle = REMOTE_REQUEST_THROTTLE.write().await;
+        throttle.remove(&source.id);
+    }
 
     // PB23：删除源时同步清掉 libraries 表里挂的虚拟路径——
     //   - separate 模式：`ensure_view_library` 自动建出来的独立库（path 以 `__remote_view_<source_id>_` 起头）整条删；
@@ -1920,6 +1971,7 @@ async fn fetch_all_remote_items(
 
     let mut fetched_count = 0u64;
     let mut all_items = Vec::new();
+    let page_size = effective_page_size(source);
     for view in views {
         let mut start_index = 0i64;
         loop {
@@ -1929,7 +1981,7 @@ async fn fetch_all_remote_items(
                 user_id.as_str(),
                 view.id.as_str(),
                 start_index,
-                REMOTE_PAGE_SIZE,
+                page_size,
                 None,
             )
             .await?;
@@ -1944,7 +1996,7 @@ async fn fetch_all_remote_items(
                 view_id: view.id.clone(),
                 view_name: view.name.clone(),
             }));
-            start_index += REMOTE_PAGE_SIZE;
+            start_index += page_size;
 
             if let Some(handle) = progress {
                 let expected = total_count.max(fetched_count);
@@ -2500,6 +2552,8 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
     // 这两类重试相互独立计数：
     //   - auth_retry_used：401/403 触发的「清 token 重登」是否已用掉；
     //   - retry_count：5xx / 网络错误 触发的退避重试次数。
+    let request_interval_ms = source.request_interval_ms;
+    let source_id = source.id;
     for retry_count in 0..=REMOTE_HTTP_MAX_RETRIES {
         let _user_id = ensure_authenticated(pool, source, false).await?;
         let token = source
@@ -2513,6 +2567,10 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
         {
             normalized_query.push(("reqformat".to_string(), "json".to_string()));
         }
+        // 拉取速率节流：实际发出请求前先按 `source.request_interval_ms` 等候足够时间，
+        // 这样无论调用点是 fetch_remote_items_page_for_view（顺序循环）还是后续可能
+        // 引入的并发路径，都会在网关层（per-source mutex）形成「全局最低间隔」屏障。
+        throttle_remote_request(source_id, request_interval_ms).await;
         let mut request = client
             .get(endpoint)
             .query(&normalized_query)
