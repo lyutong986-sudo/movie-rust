@@ -12457,6 +12457,30 @@ pub async fn get_media_source_with_streams(
     })
 }
 
+/// 将 ffprobe `codec_type` 或远端 Emby `MediaStream.Type`（经小写）规范为
+/// `media_streams.stream_type` 上 CHECK 允许的 5 类值。
+///
+/// 旧逻辑把无法识别的类型统一写成 `"unknown"`，会触发
+/// `media_streams_stream_type_check`（PG error: violates check constraint）。
+/// 虚假/钓鱼 Emby、HTTP 302 后的畸形站点、或非标准 JSON 常返回 `EmbeddedImage` / `Unknown` /
+/// 空串 / 带空格尾缀的 `Type` 字段。
+fn normalize_stream_type_for_media_streams_db(raw: &str) -> Option<&'static str> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    match t.to_ascii_lowercase().as_str() {
+        "video" => Some("video"),
+        "audio" => Some("audio"),
+        "subtitle" => Some("subtitle"),
+        "data" => Some("data"),
+        "attachment" => Some("attachment"),
+        // Emby `MediaStreamType`：`EmbeddedImage` 等封面/缩略图轨
+        "embeddedimage" | "stillimage" | "thumbnail" | "posterimage" | "coverart" => Some("data"),
+        _ => None,
+    }
+}
+
 pub async fn save_media_streams(
     pool: &sqlx::PgPool,
     media_item_id: Uuid,
@@ -12474,13 +12498,15 @@ pub async fn save_media_streams(
         .await?;
 
     for stream in &analysis.streams {
-        let stream_type = match stream.codec_type.as_str() {
-            "video" => "video",
-            "audio" => "audio",
-            "subtitle" => "subtitle",
-            "data" => "data",
-            "attachment" => "attachment",
-            _ => "unknown",
+        let Some(stream_type) = normalize_stream_type_for_media_streams_db(stream.codec_type.as_str())
+        else {
+            tracing::warn!(
+                media_item_id = %media_item_id,
+                index = stream.index,
+                raw_codec_type = %stream.codec_type,
+                "跳过无法映射的 media_streams 轨道类型（CHECK 仅允许 video/audio/subtitle/data/attachment；可能为虚假或非标准 Emby）"
+            );
+            continue;
         };
 
         let bit_rate = stream

@@ -3456,7 +3456,7 @@ fn remote_playback_stream_to_analysis_stream(
 
     MediaStreamInfo {
         index: stream.index,
-        codec_type: stream.stream_type.to_ascii_lowercase(),
+        codec_type: stream.stream_type.trim().to_ascii_lowercase(),
         codec_name: stream.codec.clone(),
         codec_long_name: stream.codec.clone(),
         width: stream.width,

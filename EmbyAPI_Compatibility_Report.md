@@ -3095,3 +3095,30 @@ do_refresh_item_metadata_with
 - `EmbyAPI_Compatibility_Report.md`
 
 ---
+
+## 第四十一批（2026-05-01）：`media_streams_stream_type_check` 违例修复 — 虚假/非标准 Emby 的 `Type` 字段
+
+### 触发场景
+用户报告：配置远端地址 `http://aaa.204cloud.com:80` 时发生 HTTP 跳转，最终命中不可播放的「山寨 Emby」；同步时出现  
+`error returned from database: new row for relation "media_streams" violates check constraint "media_streams_stream_type_check"`。
+
+### 根因
+`0001_schema.sql::media_streams.stream_type` 的 CHECK 仅允许：`video` / `audio` / `subtitle` / `data` / `attachment`（**全小写**）。
+
+`repository::save_media_streams` 旧逻辑：对无法匹配的 `stream.codec_type` 一律绑定为字面量 `"unknown"`，必然触发 CHECK 违例。
+
+真实 Emby 的 `PlaybackInfo.MediaStreams[].Type` 多为 `Video` / `Audio` / `Subtitle`，经 `remote_playback_stream_to_analysis_stream` 转小写后正常。但山寨站或畸形 JSON 可能返回：
+- `EmbeddedImage` / `StillImage`（Emby 枚举存在，但旧代码未映射）
+- `Unknown`、空串、带首尾空格的 `Type`
+- 任意随机字符串
+
+### 改动
+| 文件 | 内容 |
+|------|------|
+| `backend/src/repository.rs` | 新增 `normalize_stream_type_for_media_streams_db`：trim + 小写后映射 5 类合法值；`embeddedimage` / `stillimage` / `thumbnail` / `posterimage` / `coverart` → `data`；无法识别则 **跳过该轨** 并 `tracing::warn!`，不再写入 `unknown`。 |
+| `backend/src/remote_emby.rs` | `remote_playback_stream_to_analysis_stream` 中 `codec_type` 使用 `.trim().to_ascii_lowercase()`，避免 `"Video "` 这类尾缀导致匹配失败。 |
+
+### 关于「能否识别跳转后的虚假 Emby」
+当前项目 **不会** 根据「是否可播放」或「是否钓鱼」做自动拉黑：HTTP 客户端会跟随 302，`System/Info` 能返回 JSON 就会当作 Emby 参与登录与同步。识别恶意站需运营侧规则（TLS、域名黑名单、PlaybackInfo 结构校验等），超出本批范围。**本批仅保证**：再畸形的 `MediaStream.Type` 也不会把整个同步事务炸在 `media_streams` INSERT 上。
+
+---
