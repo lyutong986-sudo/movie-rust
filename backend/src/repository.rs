@@ -3219,6 +3219,93 @@ pub async fn update_media_item_image_path(
     Ok(())
 }
 
+/// PB42：远端 Emby 同步阶段写入的"待下载图片"任务行（仅查询用，不绑定表）。
+///
+/// 后台 sidecar_image_download_loop 周期性 SELECT 出本结构，
+/// 把 `image_primary_path / backdrop_path / logo_path` 中仍是远端 URL 的字段
+/// 物理下载到 sidecar 目录，再用 `update_media_item_image_path` 替换为本地绝对路径。
+#[derive(Debug, Clone)]
+pub struct PendingRemoteImageDownload {
+    pub item_id: Uuid,
+    pub source_id: Uuid,
+    pub item_path: String,
+    pub item_type: String,
+    pub remote_primary_url: Option<String>,
+    pub remote_backdrop_url: Option<String>,
+    pub remote_logo_url: Option<String>,
+}
+
+/// PB42：扫描 media_items 找出仍指向远端 URL 的图片字段。
+///
+/// 过滤条件：
+/// - `item_type IN ('Movie','Episode')`：只处理 STRM 真实媒体行（Series/Season 行复用同一字段
+///   但其 path 不以 .strm 结尾，且本地 sidecar 目录概念不同，由 series detail 流程负责）。
+/// - `path LIKE '%.strm'`：与 worker 推导 sidecar_dir 的前提一致——必须有真实落盘的 strm 文件
+///   否则 `path.parent()` 没有对应的物理目录。
+/// - `provider_ids ? 'RemoteEmbySourceId'`：只挑同步阶段写入的远端绑定行。
+/// - 三个 image path 列至少一列以 `http://` / `https://` 开头：还没被 worker 替换为本地。
+///
+/// 排序：`date_modified DESC` 让最新刚同步进来的条目优先下载（前端用户最可能立刻去看的就是
+/// 最近写入的，体感上"刚同步完图片很快补齐"）。
+pub async fn find_pending_remote_image_downloads(
+    pool: &sqlx::PgPool,
+    limit: i64,
+) -> Result<Vec<PendingRemoteImageDownload>, AppError> {
+    let limit = limit.clamp(1, 1000);
+    let rows: Vec<(Uuid, String, String, String, Option<String>, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            r#"
+            SELECT
+                mi.id,
+                mi.provider_ids->>'RemoteEmbySourceId' AS source_id_str,
+                mi.path,
+                mi.item_type,
+                CASE WHEN mi.image_primary_path LIKE 'http://%' OR mi.image_primary_path LIKE 'https://%'
+                     THEN mi.image_primary_path ELSE NULL END,
+                CASE WHEN mi.backdrop_path      LIKE 'http://%' OR mi.backdrop_path      LIKE 'https://%'
+                     THEN mi.backdrop_path      ELSE NULL END,
+                CASE WHEN mi.logo_path          LIKE 'http://%' OR mi.logo_path          LIKE 'https://%'
+                     THEN mi.logo_path          ELSE NULL END
+            FROM media_items mi
+            WHERE mi.item_type IN ('Movie', 'Episode')
+              AND mi.path LIKE '%.strm'
+              AND mi.provider_ids ? 'RemoteEmbySourceId'
+              AND (
+                   mi.image_primary_path LIKE 'http://%' OR mi.image_primary_path LIKE 'https://%'
+                OR mi.backdrop_path      LIKE 'http://%' OR mi.backdrop_path      LIKE 'https://%'
+                OR mi.logo_path          LIKE 'http://%' OR mi.logo_path          LIKE 'https://%'
+              )
+            ORDER BY mi.date_modified DESC NULLS LAST
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (item_id, source_id_str, path, item_type, primary, backdrop, logo) in rows {
+        let Ok(source_id) = Uuid::parse_str(source_id_str.trim()) else {
+            // RemoteEmbySourceId 写错（理论上不会，但留个跳过路径）—— 跳过避免阻塞 worker
+            tracing::warn!(
+                item_id = %item_id,
+                raw = %source_id_str,
+                "PB42：sidecar worker 忽略 RemoteEmbySourceId 不是合法 UUID 的条目"
+            );
+            continue;
+        };
+        out.push(PendingRemoteImageDownload {
+            item_id,
+            source_id,
+            item_path: path,
+            item_type,
+            remote_primary_url: primary,
+            remote_backdrop_url: backdrop,
+            remote_logo_url: logo,
+        });
+    }
+    Ok(out)
+}
+
 async fn update_blurhash_for_image(pool: sqlx::PgPool, item_id: Uuid, image_type: String, image_path: String) {
     let hash = match tokio::task::spawn_blocking(move || generate_blurhash_from_path(&image_path))
         .await

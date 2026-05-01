@@ -180,6 +180,15 @@ async fn main() -> Result<()> {
         crate::remote_emby::remote_emby_token_refresh_loop(remote_emby_refresh_pool).await;
     });
 
+    // PB42：远端 Emby 同步阶段把 image_primary_path/backdrop_path/logo_path 先存为
+    // 远端 URL 占位，由本 worker 按批次（默认 200 条/轮、并发 4）异步下载到本地 sidecar
+    // 目录后再 UPDATE 为本地绝对路径。这样主同步循环每条目省下 3 张图（~1.2 秒）+ 字幕的
+    // 远端 RTT，速率从 0.44 条/秒可上 6-10 条/秒。
+    let sidecar_pool = state.pool.clone();
+    tokio::spawn(async move {
+        crate::remote_emby::remote_emby_sidecar_download_loop(sidecar_pool).await;
+    });
+
     if state.config.enable_remote_library_monitor {
         let monitor_state = state.clone();
         tokio::spawn(async move {

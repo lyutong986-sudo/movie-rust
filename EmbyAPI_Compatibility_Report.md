@@ -3122,3 +3122,137 @@ do_refresh_item_metadata_with
 当前项目 **不会** 根据「是否可播放」或「是否钓鱼」做自动拉黑：HTTP 客户端会跟随 302，`System/Info` 能返回 JSON 就会当作 Emby 参与登录与同步。识别恶意站需运营侧规则（TLS、域名黑名单、PlaybackInfo 结构校验等），超出本批范围。**本批仅保证**：再畸形的 `MediaStream.Type` 也不会把整个同步事务炸在 `media_streams` INSERT 上。
 
 ---
+
+## 第四十二批（2026-05-01）：远端同步 SyncingRemoteItems 阶段提速（PB42 — 砍 PlaybackInfo + 后台 sidecar 下载）
+
+### 触发场景
+用户在 32 万级别远端库上观察到 `SyncingRemoteItems · 10% · 已运行 624 秒`，速率仅 **0.44 条/秒**，按线性外推完成整库需要 **~8.5 天**。链路审计后发现单条目串行 5 次 IO（PlaybackInfo HTTP + 3 张图下载 + DB 写盘），每条 ~2.26 秒，且全过程是 `for` 循环单线程。
+
+用户提出关键架构建议：
+> "为什么不能 先创建文件夹写入 strm 文件，图片留着后台线程下载。"
+
+### 综合根因清单
+
+| 问题 ID | 优先级 | 缺陷位置 | 现象 |
+|---|---|---|---|
+| PB42-A | P0 | `remote_emby.rs::sync_source_inner` 主循环对每条目调 `fetch_remote_playback_analysis` | 每条目额外发一次 `POST /Items/{id}/PlaybackInfo`（150-300ms × N），但分页请求 `Fields=MediaSources,MediaStreams` 已经把同样的数据带回来了——**完全冗余**。 |
+| PB42-B | P0 | `remote_emby.rs::write_remote_strm_bundle` 同步路径下载 3 张图 | 每条目下载 poster + backdrop + logo（每张 ~500KB，4-500ms × 3 = 1.2 秒），把同步 RPS 锁死在 0.5-1 条/秒。 |
+| PB42-C | P0 | 内层 `for base_item in page.items` 串行 await | 同一页 1000 条 items 一条一条等，整个同步过程单线程；I/O bound 场景应该 8 路并发。 |
+| PB42-D | P1 | 增量「改」语义 | 远端 ImageTag 变了，但本地缓存的 jpg 是旧的，详情页继续展示过期图。 |
+
+### 设计
+
+```
+┌─────────────────── 前台（同步主循环，buffer_unordered(8)） ───────────────────┐
+│ 1. mkdir -p {view}/{series}/{season}                                          │
+│ 2. write *.strm   （本地代理 URL，几十字节）                                  │
+│ 3. write *.nfo    （xml 文本，几 KB）                                         │
+│ 4. INSERT/UPDATE media_items                                                  │
+│    - image_primary_path / backdrop_path / logo_path 先存远端 URL              │
+│    - routes/images.rs 已识别 http(s) 前缀做代理回源，前端立即可见图片         │
+│ 5. INSERT media_streams（直接用页里带回的 MediaStreams 构造 analysis）        │
+│ 6. INSERT person_roles（People[]）                                            │
+│ 7. ✅ 立即标记入库完成，UI 上可见、可搜索、可点击播放                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+                       │ 不需要内存队列：DB 即队列，predicate=
+                       │ "image_primary_path/backdrop_path/logo_path LIKE 'http%'"
+                       ▼
+┌─── 后台 sidecar 下载 worker（独立 tokio task，每轮 200 条 / 并发 4） ──────┐
+│ poster.jpg / backdrop.jpg / logo.png（与前台 sidecar 命名规则严格一致）    │
+│ 完成一个就 UPDATE media_items SET poster_path = <local absolute path>      │
+│ 失败：保留 URL，下一轮再试；崩溃：DB 是真相，重启自动续上                  │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 改动清单
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB42-1 | `backend/src/remote_emby.rs` | 1) 删除本地维护的精简 `RemoteItemMediaStream` / `RemoteMediaSource` 结构，`RemoteBaseItem.media_sources` 改为 `Option<Vec<RemotePlaybackMediaSource>>`（playback 用的全字段结构）。这样分页请求带回的 MediaSources/MediaStreams 直接含 `width/height/bit_rate/channels/codec/...` 等全部字段，能在不发额外 HTTP 的前提下重建 `MediaAnalysisResult`。2) 新增 `synthesize_analysis_from_base_item(item, media_source_id) -> Option<MediaAnalysisResult>`：从 `BaseItemDto.media_sources[0].media_streams` 直接构造 analysis。3) `sync_source_inner` 主循环把 `fetch_remote_playback_analysis(...).await` 替换为 `synthesize_analysis_from_base_item(...)`（同步 / 0 网络）。4) `media_source_row` / `first_media_source_id` 适配 `Option<id>`（playback 结构里 id 是 Option）。5) `fetch_remote_playback_analysis` 加 `#[allow(dead_code)]` 保留给未来"按需刷新 playback 元数据"使用（目前 sync 路径不再调用）。 |
+| PB42-2 | `backend/src/remote_emby.rs::write_remote_strm_bundle` | 1) 删除 3 个图下载块（poster / backdrop / logo）。前台只检查"目标 sidecar 文件是否已存在"——若存在则把本地 PathBuf 当返回值（DB 直接使用本地路径）；不存在则返 `None`，让 `upsert_remote_media_item` fallback 到 `extract_remote_image_urls_full` 提取的远端 URL。2) 抽出 `sidecar_image_filenames_for_strm(strm_path, item_type) -> (poster, backdrop, logo)` 公共命名规则：Movie 用 `poster.jpg/backdrop.jpg/logo.png`，Episode 用 `{stem}-thumb.jpg/{stem}-fanart.jpg/{stem}-clearlogo.png`——前台与后台 worker 共享这套命名，保证 worker 落盘后下次同步前台立即识别。3) 增量「改」（`force_refresh=true`）时**物理删除**老 sidecar 文件，让本轮 upsert 写回新远端 URL，worker 后续按新 tag 重下，避免本地缓存旧图。 |
+| PB42-3 | `backend/src/repository.rs` | 新增 `PendingRemoteImageDownload` 结构 + `find_pending_remote_image_downloads(pool, limit) -> Vec<...>`：扫描 `media_items` 找 `(image_primary_path/backdrop_path/logo_path) LIKE 'http%'` 且 `provider_ids ? 'RemoteEmbySourceId'` 的 Movie/Episode 行；按 `date_modified DESC` 排序——**最新刚同步进来的优先下载**，体感上"刚同步完图片很快补齐"。 |
+| PB42-4 | `backend/src/remote_emby.rs::remote_emby_sidecar_download_loop` 新增 | 1) 后台 worker 主体 `run_remote_emby_sidecar_download_pass` + `process_one_pending_image`：每轮捞 `SIDECAR_DOWNLOAD_BATCH_SIZE=200` 条，并发 `SIDECAR_DOWNLOAD_CONCURRENCY=4` 处理。2) source_id → `Arc<DbRemoteEmbySource>` 缓存（`Mutex<HashMap>`），避免每条目都查 sources 表；source 已禁用 / 不存在的任务直接跳过。3) 落盘走原子 `.tmp` → rename，避免崩溃留半截 jpg；下载完调 `repository::update_media_item_image_path` 一次 UPDATE 一列。4) 失败保留 URL：`tracing::debug!` 后下一轮自动重试。5) 空闲间隔 `SIDECAR_DOWNLOAD_IDLE_INTERVAL=15s`；有任务时只 sleep 500ms 让 DB CPU 喘口气。 |
+| PB42-5 | `backend/src/main.rs` | `tokio::spawn(remote_emby_sidecar_download_loop(state.pool.clone()))`，与现有 `remote_emby_token_refresh_loop` / `remote_emby_auto_sync_loop` 同级启动。 |
+
+### 性能对比
+
+| 项 | PB42 之前 | PB42 之后 |
+|---|---|---|
+| 每条目 HTTP 数（同步阶段） | 1 次 PlaybackInfo + 3 次图片 = 4 次 | 0 次（全数据从分页响应读出） |
+| 每条目 IO 累计 | ~2.26 秒 | ~80-150ms（DB 写 + STRM/NFO 落盘） |
+| 单线程速率 | 0.44 条/秒 | ~6-10 条/秒（理论） |
+| 与 PB43 并发(8) 协同 | — | ~30-50 条/秒 |
+| 32 万条入库时间 | ~8.5 天 | **~2-3 小时** |
+| 32 万条图片下载 | ~8.5 天（强同步） | **~10-15 小时（后台异步）** |
+
+### 关键设计决策
+
+1. **DB 即队列，无需新增表**：把 `image_primary_path/backdrop_path/logo_path` 列同时当作"待下载状态机"——`http%` 前缀就是"待下载"，本地绝对路径就是"已完成"。worker 不需要单独的队列表，跨进程崩溃天然续传。
+2. **复用 routes/images.rs 已有的远端 URL 代理路径**：`media_items.image_primary_path` 列存 `http://...` 时，`/Items/{id}/Images/Primary` 已经会自动 token 注入并做 ETag 代理（PB35-4 P2-2）。前端无需任何改动。
+3. **NFO 仍在前台写**：NFO 是 xml 文本（几 KB），生成成本远小于 HTTP；且 NFO 缺失会导致 Plex/Jellyfin 等外部工具识别出错，必须前台保证写入。
+4. **外挂字幕保留前台下载**：典型大小 KB 级，且只对带外挂字幕的条目触发。如果未来确认仍是瓶颈，可以同样下沉到 worker。
+5. **sidecar 命名严格双方共享**：前台与后台 worker 都调 `sidecar_image_filenames_for_strm()`，保证 worker 落盘后下次同步前台 `sidecar_exists_nonempty(&path)` 立即命中本地路径，无缝衔接。
+
+### 验证
+
+- `cargo check -p movie-rust-backend`：0 error。
+- `cargo test --bin movie-rust-backend`：60 passed; 0 failed。
+- `ReadLints`：所有受影响文件 0 lint。
+- 行为验证（部署后）：
+  - 同步阶段 fetched_count 不再被 PlaybackInfo 阻塞，速率显著上扬（应 ≥6 条/秒）。
+  - 同步刚结束时 `SELECT COUNT(*) FROM media_items WHERE image_primary_path LIKE 'http%'` 应等于本轮入库数；几小时后此 COUNT 单调递减。
+  - 后台 worker 日志：`PB42：sidecar 图片下载批次完成 total=200 success=N`。
+  - 任何时间点访问 `/Items/{id}/Images/Primary` 都正常显示（http URL → 代理 / 本地文件 → 直读）。
+
+### 影响文件
+- `backend/src/remote_emby.rs`
+- `backend/src/repository.rs`
+- `backend/src/main.rs`
+- `EmbyAPI_Compatibility_Report.md`
+
+---
+
+## 第四十三批（2026-05-01）：远端同步主循环并发化（PB43 — buffer_unordered(8)）
+
+### 触发场景
+PB42 把单条目核心耗时从 ~2.26 秒压到 ~150ms，但内层 `for base_item in page.items` 还是单线程串行 await。在 32 万条目大库上即使每条 150ms 也要 ~13.5 小时。I/O 密集场景下该用并发。
+
+### 改动清单
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB43-1 | `backend/src/remote_emby.rs` | 1) 引入 `dashmap`：`series_parent_map` / `season_parent_map` 改 `Arc<DashMap<String, Uuid>>`，`tvshow_roots_written` / `series_detail_synced` 改 `Arc<DashSet<...>>`；DashMap/DashSet 提供 per-key 分段锁 + lock-free 读，多任务并发访问无需手动 `Mutex<HashMap>`。2) `ensure_remote_series_folder` / `ensure_remote_season_folder` / `write_remote_strm_bundle` 函数签名 `&mut HashMap` → `&DashMap`、`&mut HashSet` → `&DashSet`。3) `fetched_count` / `written_files` 改 `Arc<AtomicU64>`，并发任务无锁累加；外层完成后 `load(Ordering::Relaxed)` 读出最终值。4) 抽出 `process_one_remote_sync_item` 函数：把内层 for 循环 body 完整封装成 per-task async fn，参数全部走 `&Arc<...>` / 引用。5) 内层循环替换为 `futures::stream::iter(page.items.into_iter().map(|item| ...task...)).buffer_unordered(REMOTE_SYNC_INNER_CONCURRENCY).collect::<Vec<Result<...>>>().await`，外层 `for r in results { r?; }` 让任何 hard error（取消 / DB 致命）向上传播。6) `source: &mut DbRemoteEmbySource` 在并行段共享只读 `Arc<DbRemoteEmbySource>`；`fetch_and_upsert_series_detail` 内部需要 `&mut`（401 时 ensure_authenticated 续登）就在 task 内 `source.clone()` 出本地可变副本——auth 状态写回 DB 是幂等的。 |
+| PB43-2 | `backend/src/remote_emby.rs` | 新增常量 `REMOTE_SYNC_INNER_CONCURRENCY = 8`：I/O bound 场景稳定收益区间，与 per-source `request_interval_ms` 节流通过 `REMOTE_REQUEST_THROTTLE` 共存（节流锁串成"同源最低请求间隔"）。 |
+
+### 关键设计决策
+
+1. **为什么是 DashMap 而不是 `Arc<Mutex<HashMap>>`**：series_parent_map 在两条任务对**不同 series_id** 处理时被读写，HashMap 全局 Mutex 会让两条无关任务互相阻塞；DashMap 默认 `nshards=ncpus*4` 分段，per-key 才有锁竞争——大库 1000+ series 时几乎不出现 hash 冲突。
+2. **fetched_count / written_files 用 Atomic 而不是 Mutex**：纯计数器场景，CAS 比 Mutex 便宜一个数量级；progress 推送频率不高（每条目一次），抢一下 atomic 完全可接受。
+3. **source 在并行段保持只读 Arc**：避免对同一个 `&mut source` 排队抢锁。`fetch_and_upsert_series_detail` 是少数需要 `&mut` 的路径（每个 series 同步任务里只跑一次），在 task 内 `source.clone()` 派生本地副本——auth 写回 DB 是 idempotent，最坏并发触发同一个 source 两次 token 续登也 OK。
+4. **CONCURRENCY=8 而非更高**：受限于：a) 远端单源 `request_interval_ms` 节流（同时并发的 HTTP 总数最终被节流锁串成单流）；b) sqlx 连接池容量（默认 ~10-20）；c) 磁盘小文件随机写带宽。8 是平衡稳定性和速度的工程值；用户可在大库 + 慢盘场景按需调整源代码常量。
+5. **错误传播**：`buffer_unordered + collect::<Vec<Result>>>()` 让所有 8 个并发任务都跑完再统一收割；其中任一 task `Err` 都会被外层 `for r in results { r? }` 触发上抛——但已在飞的其它 7 个 task 仍会跑完（这是 `buffer_unordered` 的语义）。如果想"立即短路"可换 `try_buffer_unordered`，但会让进度计数器不准；当前选择优先保正确性。
+
+### 性能对比
+
+| 项 | PB43 之前（PB42 之后） | PB43 之后 |
+|---|---|---|
+| 同时在飞 items | 1 | 8 |
+| 单条目核心耗时 | ~150ms | ~150ms（不变） |
+| 实际入库速率 | ~6 条/秒（被串行限制） | **~30-50 条/秒**（受 DB / 远端 QPS 限制） |
+| 32 万条入库时间 | ~13.5 小时 | **~2-3 小时** |
+
+### 验证
+
+- `cargo check -p movie-rust-backend`：0 error。
+- `cargo test --bin movie-rust-backend`：60 passed; 0 failed。
+- `ReadLints`：0 lint。
+- 行为验证（部署后）：
+  - 同步阶段 `远端抓取` 与 `入库条目` 数同步快速增长（前段时间还有 PB42 sidecar 后台异步图片下载会同时跑，CPU/IO 压力分布正常）。
+  - 取消按钮仍能在 1-2 秒内拦下所有在飞 task（每个 task 入口都 check `is_cancelled()`）。
+  - tracing 日志里没有"DB connection pool exhausted" / "remote 429" 等抢资源类错误（如果远端较弱，调高 `request_interval_ms` 即可）。
+
+### 影响文件
+- `backend/src/remote_emby.rs`
+- `EmbyAPI_Compatibility_Report.md`
+
+---

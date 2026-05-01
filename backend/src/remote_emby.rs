@@ -12,16 +12,28 @@ use axum::{
     response::Response,
 };
 use chrono::{NaiveDate, Utc};
+use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock,
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+/// PB43：远端同步主循环里"同一页 items"并发处理度。
+///
+/// - I/O 密集（每条目主要在等 DB / 磁盘 / 偶发 Series-detail HTTP），8 是稳定收益区间。
+/// - 与每源的 `request_interval_ms` 节流共存：所有并发任务共享 `REMOTE_REQUEST_THROTTLE`
+///   的 per-source mutex，所以同时并发的 HTTP 请求总数不会超过节流阈值。
+/// - 太大（>16）会让 sqlx 连接池排队、磁盘小文件写竞争加剧，反而劣化速率。
+const REMOTE_SYNC_INNER_CONCURRENCY: usize = 8;
 
 const PLAYBACK_INFO_CACHE_TTL_SECS: u64 = 300;
 const PLAYBACK_INFO_CACHE_MAX_ENTRIES: usize = 512;
@@ -445,9 +457,11 @@ struct RemoteBaseItem {
     studios: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
     tags: Vec<String>,
-    #[serde(default)]
-    media_streams: Vec<RemoteItemMediaStream>,
-    media_sources: Option<Vec<RemoteMediaSource>>,
+    // PB42：分页请求时 `Fields=MediaSources` 带回的 `MediaSource[]` 内嵌完整 `MediaStreams[]`，
+    // 类型直接复用 `RemotePlaybackMediaSource`/`RemotePlaybackMediaStream`，
+    // 这样同步阶段不再发 `/PlaybackInfo` 也能重建 MediaAnalysisResult。顶层 `MediaStreams`
+    // 字段在 BaseItemDto 上是冗余镜像，这里不再单独反序列化（避免重复内存 + 减少警告）。
+    media_sources: Option<Vec<RemotePlaybackMediaSource>>,
     #[serde(default)]
     image_tags: Option<Value>,
     #[serde(default)]
@@ -560,31 +574,10 @@ fn value_to_lossy_string(value: &Value) -> Option<String> {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct RemoteMediaSource {
-    id: String,
-    #[serde(default)]
-    media_streams: Vec<RemoteItemMediaStream>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct RemoteItemMediaStream {
-    index: i32,
-    #[serde(rename = "Type")]
-    stream_type: String,
-    #[serde(default)]
-    codec: Option<String>,
-    #[serde(default, rename = "IsExternal")]
-    is_external: Option<bool>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    language: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-}
+// PB42：原来本地维护的 `RemoteMediaSource` / `RemoteItemMediaStream` 是 Emby 字段的精简子集
+// （只反序列化 6 个字段），之后想用同步阶段自带的数据重建 MediaAnalysisResult 时缺一大半字段
+// （width/height/bit_rate/channels/...）。直接复用 `RemotePlaybackMediaSource` /
+// `RemotePlaybackMediaStream`，这两个结构体已在 PlaybackInfo 解析路径里覆盖了所有用得上的字段。
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -1082,17 +1075,23 @@ async fn sync_source_inner(
         );
     }
 
-    let mut tvshow_roots_written: HashSet<PathBuf> = HashSet::new();
-    // separate 模式不再需要虚拟根目录文件夹（每个 View 已是独立库）
-    let mut series_parent_map: HashMap<String, Uuid> = HashMap::new();
-    let mut season_parent_map: HashMap<String, Uuid> = HashMap::new();
+    // PB43：把所有"跨条目共享、需要并发安全"的集合换成 DashMap/DashSet，让 buffer_unordered
+    // 启动的多任务能直接访问 (per-key lock + lock-free read，无需手动 Mutex)。
+    let tvshow_roots_written: Arc<DashSet<PathBuf>> = Arc::new(DashSet::new());
+    let series_parent_map: Arc<DashMap<String, Uuid>> = Arc::new(DashMap::new());
+    let season_parent_map: Arc<DashMap<String, Uuid>> = Arc::new(DashMap::new());
     // PB31-2：已成功拉过详情的 series_id 集合，避免每个 episode 都触发一次 Series 详情拉取。
-    let mut series_detail_synced: HashSet<String> = HashSet::new();
-    let mut fetched_count = 0u64;
-    let mut written_files = 0usize;
+    let series_detail_synced: Arc<DashSet<String>> = Arc::new(DashSet::new());
+    // PB43：进度计数器换成原子，让并发任务无锁累加。
+    let fetched_count = Arc::new(AtomicU64::new(0));
+    let written_files = Arc::new(AtomicU64::new(0));
     if let Some(handle) = &progress {
         handle.set_streaming_progress(0, 0, total_items);
     }
+    // PB43：source 在并行段共享，仅做只读访问。`fetch_and_upsert_series_detail` 仍需要
+    // `&mut DbRemoteEmbySource`（为偶发 401 触发 ensure_authenticated），所以那里在每个
+    // task 内部 clone 一份本地可变副本——auth 状态写回 DB 是幂等的，不会出现冲突。
+    let source_arc: Arc<DbRemoteEmbySource> = Arc::new(source.clone());
 
     for view in &views {
         let item_library_id = *view_library_id_map.get(&view.id).ok_or_else(|| {
@@ -1135,161 +1134,66 @@ async fn sync_source_inner(
                 break;
             }
 
-            for base_item in page.items {
-                if let Some(handle) = &progress {
-                    if handle.is_cancelled() {
-                        return Err(AppError::BadRequest("同步任务已被取消".to_string()));
-                    }
-                }
-                fetched_count = fetched_count.saturating_add(1);
-                let item = RemoteSyncItem {
-                    item: base_item,
-                    view_id: view.id.clone(),
-                    view_name: view.name.clone(),
-                };
+            // PB43：内层循环改成 `buffer_unordered`，让同一页内 items 并发处理。
+            // 这是真正的提速大头——之前每条 await 5+ 次 IO（DB 写入 + 磁盘 + Series detail HTTP）
+            // 串行串成 ~700ms / 条，并发 8 之后在 IO bound 场景下能压到 ~80-100ms。
+            // page 内并发不会破坏分页推进（外层 loop 仍按 start_index 顺序拉），也不会和
+            // 删除检测 / Series detail 去重冲突（DashMap/DashSet 提供并发安全）。
+            use futures::stream::{self, StreamExt};
+            let view_strm_workspace_arc = Arc::new(view_strm_workspace.clone());
+            let view_id_arc = Arc::new(view.id.clone());
+            let view_name_arc = Arc::new(view.name.clone());
+            let user_id_arc = Arc::new(user_id.clone());
+            let playback_token_arc = Arc::new(playback_token.clone());
 
-                // separate 模式：电影/剧集直接放在 View 库根层，无视图文件夹
-                let mut parent_id: Option<Uuid> = None;
-                let mut series_db_id: Option<Uuid> = None;
-
-                if item.item.item_type.eq_ignore_ascii_case("Episode") {
-                    let series_view_scope = item.view_id.as_str();
-                    let series_parent_id = ensure_remote_series_folder(
-                        &state.pool,
-                        source,
-                        &item,
-                        None,
-                        series_view_scope,
+            let item_results = stream::iter(page.items.into_iter().map(|base_item| {
+                let state_cloned = state.clone();
+                let source_for_task = Arc::clone(&source_arc);
+                let view_strm_workspace = Arc::clone(&view_strm_workspace_arc);
+                let view_id = Arc::clone(&view_id_arc);
+                let view_name = Arc::clone(&view_name_arc);
+                let user_id = Arc::clone(&user_id_arc);
+                let playback_token = Arc::clone(&playback_token_arc);
+                let series_parent_map = Arc::clone(&series_parent_map);
+                let season_parent_map = Arc::clone(&season_parent_map);
+                let series_detail_synced = Arc::clone(&series_detail_synced);
+                let tvshow_roots_written = Arc::clone(&tvshow_roots_written);
+                let fetched_count = Arc::clone(&fetched_count);
+                let written_files = Arc::clone(&written_files);
+                let progress = progress.clone();
+                async move {
+                    process_one_remote_sync_item(
+                        &state_cloned,
+                        source_for_task.as_ref(),
+                        base_item,
+                        view_id.as_str(),
+                        view_name.as_str(),
                         view_strm_workspace.as_path(),
                         item_library_id,
-                        &mut series_parent_map,
+                        user_id.as_str(),
+                        playback_token.as_str(),
+                        &series_parent_map,
+                        &season_parent_map,
+                        &series_detail_synced,
+                        &tvshow_roots_written,
+                        &fetched_count,
+                        &written_files,
+                        total_items,
+                        progress.as_ref(),
+                        force_refresh_sidecar,
                     )
-                    .await?;
-                    series_db_id = Some(series_parent_id);
-
-                    // PB31-2：每个 series_id 在同一同步任务里只跑一次详情拉取，
-                    // 完成后覆盖 series 行的 overview/studios/genres/status/end_date/People。
-                    if let Some(remote_sid) = item
-                        .item
-                        .series_id
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                    {
-                        if series_detail_synced.insert(remote_sid.to_string()) {
-                            let series_dir = view_strm_workspace.join(sanitize_segment(
-                                remote_series_display_name(&item),
-                            ));
-                            if let Err(error) = fetch_and_upsert_series_detail(
-                                &state.pool,
-                                source,
-                                user_id.as_str(),
-                                remote_sid,
-                                series_parent_id,
-                                item_library_id,
-                                None,
-                                series_dir.as_path(),
-                                series_view_scope,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    source_id = %source.id,
-                                    remote_series_id = %remote_sid,
-                                    error = %error,
-                                    "PB31-2：远端 Series 详情同步失败，忽略继续"
-                                );
-                            }
-                        }
-                    }
-
-                    let season_parent_id = ensure_remote_season_folder(
-                        &state.pool,
-                        source,
-                        &item,
-                        series_parent_id,
-                        view_strm_workspace.as_path(),
-                        item_library_id,
-                        &mut season_parent_map,
-                    )
-                    .await?;
-                    parent_id = Some(season_parent_id);
+                    .await
                 }
+            }))
+            .buffer_unordered(REMOTE_SYNC_INNER_CONCURRENCY)
+            .collect::<Vec<Result<(), AppError>>>()
+            .await;
 
-                let media_source_id = first_media_source_id(&item);
-                let analysis = fetch_remote_playback_analysis(
-                    &state.pool,
-                    source,
-                    item.item.id.as_str(),
-                    media_source_id,
-                )
-                .await
-                .ok()
-                .flatten();
-                let strm_bundle = match write_remote_strm_bundle(
-                    state,
-                    source,
-                    view_strm_workspace.as_path(),
-                    playback_token.as_str(),
-                    &item,
-                    media_source_id,
-                    &mut tvshow_roots_written,
-                    force_refresh_sidecar,
-                )
-                .await
-                {
-                    Ok(paths) => paths,
-                    Err(error) => {
-                        // 单条写盘失败不再降级到虚拟路径，跳过该条目继续处理下一项，
-                        // 避免一处磁盘异常污染整库 path 字段。
-                        tracing::warn!(
-                            remote_item_id = %item.item.id,
-                            error = %error,
-                            "STRM 旁路写入失败，跳过此条目"
-                        );
-                        continue;
-                    }
-                };
-                let (strm_path, poster_path, backdrop_path, logo_path) = strm_bundle;
-                let upserted = upsert_remote_media_item(
-                    &state.pool,
-                    source,
-                    &item,
-                    parent_id,
-                    item_library_id,
-                    media_source_id,
-                    analysis.as_ref(),
-                    strm_path.as_path(),
-                    poster_path.as_deref(),
-                    backdrop_path.as_deref(),
-                    logo_path.as_deref(),
-                    series_db_id,
-                )
-                .await?;
-                if let Some(analysis) = analysis {
-                    repository::save_media_streams(&state.pool, upserted, &analysis).await?;
-                    repository::update_media_item_metadata(&state.pool, upserted, &analysis)
-                        .await?;
-                }
-                // PB31-1：写入演职员（每条 movie/episode 独立 People[]，包含 GuestStar/Director/Writer）。
-                if !item.item.people.is_empty() {
-                    if let Err(error) =
-                        upsert_remote_people_for_item(&state.pool, source, upserted, &item.item.people)
-                            .await
-                    {
-                        tracing::warn!(
-                            source_id = %source.id,
-                            remote_item_id = %item.item.id,
-                            error = %error,
-                            "PB31-1：写入远端 item 的 People 失败"
-                        );
-                    }
-                }
-
-                written_files = written_files.saturating_add(1);
-                if let Some(handle) = &progress {
-                    handle.set_streaming_progress(fetched_count, written_files as u64, total_items);
-                }
+            // PB43：并发任务里任何 hard error（取消 / DB 致命错误等）都向上传播。
+            // 单条目软失败（write_remote_strm_bundle 写盘错、Series detail 拉取失败等）
+            // 在 process_one_remote_sync_item 内部已 warn 后吃掉，不会出现在 results 里。
+            for r in item_results {
+                r?;
             }
 
             start_index += page_size;
@@ -1298,6 +1202,8 @@ async fn sync_source_inner(
             }
         }
     }
+    let fetched_count = fetched_count.load(Ordering::Relaxed);
+    let written_files = written_files.load(Ordering::Relaxed) as usize;
 
     let mode_label = if incremental_since.is_some() {
         "增量(增/改/删)"
@@ -1326,6 +1232,187 @@ async fn sync_source_inner(
         source_root: strm_workspace.to_string_lossy().to_string(),
         scan_summary,
     })
+}
+
+/// PB43：处理单个 RemoteSyncItem 的全流程（Series/Season 父行 → STRM/NFO 写盘 → DB upsert
+/// → MediaStreams/people 写入 → 进度推进）。
+///
+/// 这是为 buffer_unordered 设计的"per-task 工作单元"：所有跨任务共享状态都通过引用传入，
+/// 自身只持有局部变量。只在以下两种情况才 return Err：
+/// 1. 任务被取消（progress.is_cancelled）→ AppError::BadRequest
+/// 2. 致命 DB / IO 错误（DB 连接池崩、文件系统挂等）→ 向上传播终止整次同步
+///
+/// 软失败（比如 Series detail 拉不下来、单条 STRM 写盘失败）记 warn 后继续，不污染整次同步。
+#[allow(clippy::too_many_arguments)]
+async fn process_one_remote_sync_item(
+    state: &AppState,
+    source: &DbRemoteEmbySource,
+    base_item: RemoteBaseItem,
+    view_id: &str,
+    view_name: &str,
+    view_strm_workspace: &Path,
+    item_library_id: Uuid,
+    user_id: &str,
+    playback_token: &str,
+    series_parent_map: &DashMap<String, Uuid>,
+    season_parent_map: &DashMap<String, Uuid>,
+    series_detail_synced: &DashSet<String>,
+    tvshow_roots_written: &DashSet<PathBuf>,
+    fetched_count: &AtomicU64,
+    written_files: &AtomicU64,
+    total_items: u64,
+    progress: Option<&RemoteSyncProgress>,
+    force_refresh_sidecar: bool,
+) -> Result<(), AppError> {
+    if let Some(handle) = progress {
+        if handle.is_cancelled() {
+            return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+        }
+    }
+
+    let item = RemoteSyncItem {
+        item: base_item,
+        view_id: view_id.to_string(),
+        view_name: view_name.to_string(),
+    };
+
+    let mut parent_id: Option<Uuid> = None;
+    let mut series_db_id: Option<Uuid> = None;
+
+    if item.item.item_type.eq_ignore_ascii_case("Episode") {
+        let series_view_scope = item.view_id.as_str();
+        let series_parent_id = ensure_remote_series_folder(
+            &state.pool,
+            source,
+            &item,
+            None,
+            series_view_scope,
+            view_strm_workspace,
+            item_library_id,
+            series_parent_map,
+        )
+        .await?;
+        series_db_id = Some(series_parent_id);
+
+        // PB31-2 + PB43：每个 series_id 在同一同步任务里只跑一次详情拉取。
+        // DashSet::insert 返回 bool 是 lock-free 的（CAS 实现），并发安全。
+        if let Some(remote_sid) = item
+            .item
+            .series_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if series_detail_synced.insert(remote_sid.to_string()) {
+                let series_dir = view_strm_workspace
+                    .join(sanitize_segment(remote_series_display_name(&item)));
+                // PB43：fetch_and_upsert_series_detail 还要 `&mut DbRemoteEmbySource`
+                // （因为内部 get_json_with_retry 要在 401 时 ensure_authenticated 续登）。
+                // 在并发任务里 clone 一份本地可变副本——auth 状态写回 DB 是幂等的，
+                // 主 source 由调用方在下次同步开始时从 DB 重新加载。
+                let mut source_for_detail = source.clone();
+                if let Err(error) = fetch_and_upsert_series_detail(
+                    &state.pool,
+                    &mut source_for_detail,
+                    user_id,
+                    remote_sid,
+                    series_parent_id,
+                    item_library_id,
+                    None,
+                    series_dir.as_path(),
+                    series_view_scope,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        source_id = %source.id,
+                        remote_series_id = %remote_sid,
+                        error = %error,
+                        "PB31-2：远端 Series 详情同步失败，忽略继续"
+                    );
+                }
+            }
+        }
+
+        let season_parent_id = ensure_remote_season_folder(
+            &state.pool,
+            source,
+            &item,
+            series_parent_id,
+            view_strm_workspace,
+            item_library_id,
+            season_parent_map,
+        )
+        .await?;
+        parent_id = Some(season_parent_id);
+    }
+
+    let media_source_id = first_media_source_id(&item);
+    // PB42：分页带回的 MediaStreams 已够用，无需 PlaybackInfo 多发一次 HTTP。
+    let analysis = synthesize_analysis_from_base_item(&item.item, media_source_id);
+    let strm_bundle = match write_remote_strm_bundle(
+        state,
+        source,
+        view_strm_workspace,
+        playback_token,
+        &item,
+        media_source_id,
+        tvshow_roots_written,
+        force_refresh_sidecar,
+    )
+    .await
+    {
+        Ok(paths) => paths,
+        Err(error) => {
+            tracing::warn!(
+                remote_item_id = %item.item.id,
+                error = %error,
+                "PB43：STRM 旁路写入失败，跳过此条目"
+            );
+            // 软失败：跳过本条目但不终止整次同步（与 PB42 之前 for 循环里的 `continue` 等价）。
+            fetched_count.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+    };
+    let (strm_path, poster_path, backdrop_path, logo_path) = strm_bundle;
+    let upserted = upsert_remote_media_item(
+        &state.pool,
+        source,
+        &item,
+        parent_id,
+        item_library_id,
+        media_source_id,
+        analysis.as_ref(),
+        strm_path.as_path(),
+        poster_path.as_deref(),
+        backdrop_path.as_deref(),
+        logo_path.as_deref(),
+        series_db_id,
+    )
+    .await?;
+    if let Some(analysis) = analysis {
+        repository::save_media_streams(&state.pool, upserted, &analysis).await?;
+        repository::update_media_item_metadata(&state.pool, upserted, &analysis).await?;
+    }
+    if !item.item.people.is_empty() {
+        if let Err(error) =
+            upsert_remote_people_for_item(&state.pool, source, upserted, &item.item.people).await
+        {
+            tracing::warn!(
+                source_id = %source.id,
+                remote_item_id = %item.item.id,
+                error = %error,
+                "PB31-1：写入远端 item 的 People 失败"
+            );
+        }
+    }
+
+    let f = fetched_count.fetch_add(1, Ordering::Relaxed) + 1;
+    let w = written_files.fetch_add(1, Ordering::Relaxed) + 1;
+    if let Some(handle) = progress {
+        handle.set_streaming_progress(f, w, total_items);
+    }
+    Ok(())
 }
 
 pub async fn proxy_item_stream(
@@ -1782,7 +1869,9 @@ async fn ensure_remote_series_folder(
     view_scope: &str,
     view_workspace: &Path,
     library_id: Uuid,
-    series_parent_map: &mut HashMap<String, Uuid>,
+    // PB43：DashMap 提供 per-key 锁 + lock-free 读，多个并发任务处理同一 source 的不同 series
+    // 时不会互相阻塞；同一 series 的并发请求由 `series_key` 短临界区天然串行。
+    series_parent_map: &DashMap<String, Uuid>,
 ) -> Result<Uuid, AppError> {
     let series_name = remote_series_display_name(item).to_string();
     // 优先使用 SeriesId 做去重 key，避免同名不同剧冲突
@@ -1791,8 +1880,8 @@ async fn ensure_remote_series_folder(
     } else {
         format!("{view_scope}::{}", sanitize_segment(series_name.as_str()))
     };
-    if let Some(existing) = series_parent_map.get(series_key.as_str()).copied() {
-        return Ok(existing);
+    if let Some(existing) = series_parent_map.get(series_key.as_str()) {
+        return Ok(*existing.value());
     }
     // 物理目录：{view_workspace}/{sanitize(series_name)}/
     // 与 build_relative_strm_path 中 episode 落盘目录保持一致，
@@ -1908,12 +1997,12 @@ async fn ensure_remote_season_folder(
     series_parent_id: Uuid,
     view_workspace: &Path,
     library_id: Uuid,
-    season_parent_map: &mut HashMap<String, Uuid>,
+    season_parent_map: &DashMap<String, Uuid>,
 ) -> Result<Uuid, AppError> {
     let season_number = item.item.parent_index_number.unwrap_or(0).clamp(0, 999);
     let season_key = format!("{}::{season_number}", series_parent_id);
-    if let Some(existing) = season_parent_map.get(season_key.as_str()).copied() {
-        return Ok(existing);
+    if let Some(existing) = season_parent_map.get(season_key.as_str()) {
+        return Ok(*existing.value());
     }
     let series_name_raw = remote_series_display_name(item);
     // 物理目录：{view_workspace}/{sanitize(series_name)}/Season {NN}/
@@ -3363,6 +3452,7 @@ fn append_query_pair(url: &str, key: &str, value: &str) -> String {
     }
 }
 
+#[allow(dead_code)] // PB42 之后 sync 路径不再调用；保留给未来"按需刷新 playback 元数据"使用。
 async fn fetch_remote_playback_analysis(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
@@ -3384,6 +3474,37 @@ async fn fetch_remote_playback_analysis(
         media_source_id,
     );
     Ok(media_source.and_then(|source| remote_playback_source_to_analysis(remote_item_id, source)))
+}
+
+/// PB42：用分页请求里 `Fields=MediaSources,MediaStreams` 已经带回的数据，
+/// 在**不发额外 HTTP**的前提下重建 `MediaAnalysisResult`。
+///
+/// 之前同步阶段每条目都会再发一次 `POST /Items/{id}/PlaybackInfo`：
+/// - 每条 +1 次远端 RTT（典型 150-300ms）
+/// - 在 32 万级别的库上累计 ~22 小时纯网络等待
+/// - 带回的字段（MediaSources/MediaStreams/Chapters）几乎全部已经在分页响应里了
+///
+/// `BaseItemDto.media_sources` 在 Emby 标准响应里会附带完整的 `MediaSource` 结构（含
+/// `MediaStreams[]` 全字段），所以**完全够构造 analysis**。仅有 `Chapters` 在 BaseItemDto 里
+/// 不强制返回——但同步阶段的 `update_media_item_metadata` 不依赖 chapters，所以即使为空也
+/// 不影响落库结果。真正需要 chapters 的播放路径仍旧走 `fetch_remote_playback_analysis`。
+fn synthesize_analysis_from_base_item(
+    item: &RemoteBaseItem,
+    media_source_id: Option<&str>,
+) -> Option<MediaAnalysisResult> {
+    let sources = item.media_sources.as_ref()?;
+    if sources.is_empty() {
+        return None;
+    }
+    let media_source = if let Some(want) = media_source_id.filter(|s| !s.trim().is_empty()) {
+        sources
+            .iter()
+            .find(|ms| ms.id.as_deref().map(str::trim) == Some(want.trim()))
+            .or_else(|| sources.first())
+    } else {
+        sources.first()
+    }?;
+    remote_playback_source_to_analysis(item.id.as_str(), media_source)
 }
 
 fn remote_playback_source_to_analysis(
@@ -3891,18 +4012,21 @@ fn build_tvshow_nfo_xml_from_episode(item: &RemoteSyncItem) -> String {
 fn media_source_row<'a>(
     item: &'a RemoteBaseItem,
     preferred_msid: Option<&str>,
-) -> Option<(&'a str, &'a [RemoteItemMediaStream])> {
+) -> Option<(&'a str, &'a [RemotePlaybackMediaStream])> {
     let sources = item.media_sources.as_ref()?;
     if let Some(want) = preferred_msid.filter(|s| !s.trim().is_empty()) {
         for ms in sources {
-            if ms.id.trim() == want.trim() {
-                return Some((ms.id.as_str(), ms.media_streams.as_slice()));
+            if let Some(id) = ms.id.as_deref().map(str::trim) {
+                if id == want.trim() && !id.is_empty() {
+                    return Some((id, ms.media_streams.as_slice()));
+                }
             }
         }
     }
-    sources
-        .first()
-        .map(|ms| (ms.id.as_str(), ms.media_streams.as_slice()))
+    sources.first().and_then(|ms| {
+        let id = ms.id.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+        Some((id, ms.media_streams.as_slice()))
+    })
 }
 
 
@@ -3939,7 +4063,9 @@ async fn write_remote_strm_bundle(
     playback_token: &str,
     item: &RemoteSyncItem,
     media_source_id: Option<&str>,
-    tvshow_written: &mut HashSet<PathBuf>,
+    // PB43：tvshow.nfo 每个 Series 目录只写一次的去重集合。DashSet 让并发任务能 lock-free
+    // 检查 + insert（DashSet::insert 返回 bool 表示是否新插入，与 HashSet 语义一致）。
+    tvshow_written: &DashSet<PathBuf>,
     // true = 增量「改」场景：远端在 last_sync_at 之后被修改，sidecar 需要覆盖以同步最新元数据。
     // false = 首次/恢复同步：尊重已存在文件（用户手动 Refresh / 旧版本沉淀），不覆盖。
     force_refresh: bool,
@@ -3986,9 +4112,6 @@ async fn write_remote_strm_bundle(
             .map_err(|e| AppError::Internal(format!("写入 STRM 失败: {e}")))?;
     }
 
-    // 下载侧车文件（图片/NFO/字幕）仍需直连远端服务器
-    let base = normalize_server_url(&source.server_url);
-
     let mut local_poster: Option<PathBuf> = None;
     let mut local_backdrop: Option<PathBuf> = None;
     let mut local_logo: Option<PathBuf> = None;
@@ -3997,138 +4120,37 @@ async fn write_remote_strm_bundle(
         .parent()
         .ok_or_else(|| AppError::Internal("STRM 缺父目录".into()))?;
 
-    // Episode 与 Movie 共用同一目录的情况不同：
-    // - Movie：每部电影独占一个文件夹，使用 poster.jpg / backdrop.jpg / logo.png 即可
-    // - Episode：同一季所有集共享 Season XX/ 目录，必须用 strm 文件名做前缀，避免互相覆盖
-    let is_episode = item.item.item_type.eq_ignore_ascii_case("Episode");
-    let strm_stem = strm_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("media")
-        .to_string();
-    let poster_filename = if is_episode {
-        format!("{strm_stem}-thumb.jpg")
-    } else {
-        "poster.jpg".to_string()
-    };
-    let backdrop_filename = if is_episode {
-        format!("{strm_stem}-fanart.jpg")
-    } else {
-        "backdrop.jpg".to_string()
-    };
-    let logo_filename = if is_episode {
-        format!("{strm_stem}-clearlogo.png")
-    } else {
-        "logo.png".to_string()
-    };
+    // PB42：Movie / Episode 的"封面 / 背景 / Logo"侧车文件名按 strm 路径推导，
+    // 与后台 sidecar_image_download_loop 的命名规则完全一致——保证后台 worker
+    // 把 jpg 落到这里之后，下次同步前台跑 sidecar_exists_nonempty 检查就能命中
+    // 已下载文件，把 DB 里的远端 URL 替换成本地 path。
+    let (poster_filename, backdrop_filename, logo_filename) =
+        sidecar_image_filenames_for_strm(&strm_path, &item.item.item_type);
 
     if source.sync_metadata {
-        // 下载 Primary 封面（poster）
-        {
-            let path = sidecar_dir.join(&poster_filename);
-            let already_exists = sidecar_exists_nonempty(&path).await;
-            if already_exists && !force_refresh {
-                local_poster = Some(path);
-            } else {
-                let primary_tag = item
-                    .item
-                    .image_tags
-                    .as_ref()
-                    .and_then(|v| v.as_object())
-                    .and_then(|m| m.get("Primary").and_then(Value::as_str));
-                let url = if let Some(tag) = primary_tag {
-                    append_remote_api_key_param(
-                        remote_image_url(base.as_str(), item.item.id.as_str(), "Primary", tag).as_str(),
-                        playback_token.trim(),
-                    )
-                } else {
-                    append_remote_api_key_param(
-                        &format!(
-                            "{}/emby/Items/{}/Images/Primary?quality=90&maxWidth=1920",
-                            base.trim_end_matches('/'),
-                            item.item.id
-                        ),
-                        playback_token.trim(),
-                    )
-                };
-                let downloaded = match emby_download_bytes(source, playback_token, url.as_str()).await {
-                    Ok(bytes) if !bytes.is_empty() => {
-                        tokio::fs::write(&path, &bytes).await.is_ok()
-                    }
-                    _ => false,
-                };
-                if downloaded || already_exists {
-                    local_poster = Some(path);
-                }
+        // PB42：图片下载从前台拆出，前台只做"已下载文件检测 + 命名规划 + NFO 写入"。
+        // 真正的远端图片下载交给 sidecar_image_download_loop 后台 worker 异步完成：
+        //   - 主同步循环每条目省下 3 张图（~1.2 秒）+ 字幕 N 张的远端 RTT
+        //   - DB 里 image_primary_path/backdrop_path/logo_path 先存远端 URL，
+        //     `routes/images.rs` 已识别 http(s) 前缀做代理回源，前端立刻可见图片
+        //   - worker 落盘成功后通过 update_media_item_image_path 改成本地绝对路径
+        //   - 跨进程重启天然续传：worker 启动时就直接 `WHERE *_path LIKE 'http%'` 过滤
+        //
+        // force_refresh = true（增量「改」）：远端 ImageTag 变了，本地缓存的 jpg 已过期。
+        // 直接物理删除老 jpg，让本轮 upsert 写回远端 URL，worker 后续按新 tag 重下。
+        // 缺失或 force_refresh 都会把 slot 留 None，DB 自动 fallback 到 remote_urls 中的远端 URL。
+        for (filename, slot) in [
+            (poster_filename.as_str(), &mut local_poster),
+            (backdrop_filename.as_str(), &mut local_backdrop),
+            (logo_filename.as_str(), &mut local_logo),
+        ] {
+            let path = sidecar_dir.join(filename);
+            if force_refresh {
+                let _ = tokio::fs::remove_file(&path).await;
+                continue;
             }
-        }
-
-        // 下载 Backdrop（背景图）
-        {
-            let path = sidecar_dir.join(&backdrop_filename);
-            let already_exists = sidecar_exists_nonempty(&path).await;
-            if already_exists && !force_refresh {
-                local_backdrop = Some(path);
-            } else {
-                let backdrop_tag = item.item.backdrop_image_tags.as_ref().and_then(|tags| match tags {
-                    Value::Array(arr) => arr.first().and_then(Value::as_str),
-                    Value::Object(map) => map.values().next().and_then(Value::as_str),
-                    Value::String(s) => Some(s.as_str()),
-                    _ => None,
-                });
-                let url = if let Some(tag) = backdrop_tag {
-                    append_remote_api_key_param(
-                        remote_image_url(base.as_str(), item.item.id.as_str(), "Backdrop", tag).as_str(),
-                        playback_token.trim(),
-                    )
-                } else {
-                    append_remote_api_key_param(
-                        &format!(
-                            "{}/emby/Items/{}/Images/Backdrop?quality=90&maxWidth=1920",
-                            base.trim_end_matches('/'),
-                            item.item.id
-                        ),
-                        playback_token.trim(),
-                    )
-                };
-                let downloaded = match emby_download_bytes(source, playback_token, url.as_str()).await {
-                    Ok(bytes) if !bytes.is_empty() => {
-                        tokio::fs::write(&path, &bytes).await.is_ok()
-                    }
-                    _ => false,
-                };
-                if downloaded || already_exists {
-                    local_backdrop = Some(path);
-                }
-            }
-        }
-
-        // 下载 Logo
-        {
-            let path = sidecar_dir.join(&logo_filename);
-            let already_exists = sidecar_exists_nonempty(&path).await;
-            if already_exists && !force_refresh {
-                local_logo = Some(path);
-            } else if let Some(tag) = item
-                .item
-                .image_tags
-                .as_ref()
-                .and_then(|v| v.as_object())
-                .and_then(|m| m.get("Logo").and_then(Value::as_str))
-            {
-                let url = append_remote_api_key_param(
-                    remote_image_url(base.as_str(), item.item.id.as_str(), "Logo", tag).as_str(),
-                    playback_token.trim(),
-                );
-                let downloaded = match emby_download_bytes(source, playback_token, url.as_str()).await {
-                    Ok(bytes) => tokio::fs::write(&path, &bytes).await.is_ok(),
-                    Err(_) => false,
-                };
-                if downloaded || already_exists {
-                    local_logo = Some(path);
-                }
-            } else if already_exists {
-                local_logo = Some(path);
+            if sidecar_exists_nonempty(&path).await {
+                *slot = Some(path);
             }
         }
 
@@ -4162,6 +4184,9 @@ async fn write_remote_strm_bundle(
 
     if source.sync_subtitles {
         if let Some((ms_id, streams)) = media_source_row(&item.item, media_source_id) {
+            // PB42：外挂字幕仍在前台下载（典型大小 KB 级，且只对带外挂字幕的条目触发，
+            // 总体成本远小于图片）。如果未来确认仍是瓶颈，可以同样下沉到 worker。
+            let base = normalize_server_url(&source.server_url);
             let stem = strm_path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -4203,6 +4228,38 @@ async fn write_remote_strm_bundle(
     }
 
     Ok((strm_path, local_poster, local_backdrop, local_logo))
+}
+
+/// PB42：根据 strm 物理路径 + item_type 推导侧车图片文件名。
+///
+/// - Movie：每部电影独占一个目录 → `poster.jpg / backdrop.jpg / logo.png`
+/// - Episode：同一季所有集共享 `Season XX/` 目录 → 必须用 strm 文件名做前缀防互覆
+///   （`{stem}-thumb.jpg / {stem}-fanart.jpg / {stem}-clearlogo.png`）
+///
+/// 该函数同时被前台 sync 路径（用于"已下载文件存在性检测"）和后台 sidecar 下载 worker 调用，
+/// 只要双方使用同一份命名规则就能保证 worker 落盘后下次同步前台直接命中本地文件。
+pub(crate) fn sidecar_image_filenames_for_strm(
+    strm_path: &Path,
+    item_type: &str,
+) -> (String, String, String) {
+    let is_episode = item_type.eq_ignore_ascii_case("Episode");
+    let stem = strm_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("media");
+    if is_episode {
+        (
+            format!("{stem}-thumb.jpg"),
+            format!("{stem}-fanart.jpg"),
+            format!("{stem}-clearlogo.png"),
+        )
+    } else {
+        (
+            "poster.jpg".to_string(),
+            "backdrop.jpg".to_string(),
+            "logo.png".to_string(),
+        )
+    }
 }
 
 /// 定期强制刷新远端 Emby 登录令牌，确保代理鉴权不过期。
@@ -4263,6 +4320,254 @@ pub async fn remote_emby_token_refresh_loop(pool: sqlx::PgPool) {
             tracing::warn!(error = %error, "远端 Emby token 刷新批次失败");
         }
     }
+}
+
+/// PB42：单次扫描的批量大小。每轮捞 200 条「path 列仍是远端 URL」的条目下载，
+/// 跑完一轮就 sleep 一会再捞下一批，让其他 SQL 流量有空隙。
+const SIDECAR_DOWNLOAD_BATCH_SIZE: i64 = 200;
+/// PB42：worker 池并发度。受限于：
+/// - 远端 Emby 单源 QPS（`request_interval_ms` 节流叠加）
+/// - 本地磁盘随机写带宽
+/// - sqlx 连接池容量
+/// 4 是相对保守的折中，留余量给同步主流程。
+const SIDECAR_DOWNLOAD_CONCURRENCY: usize = 4;
+/// PB42：批次完成后两次扫描之间的间隔。`Duration::from_secs(15)` 让"刚同步进来 → 几十秒
+/// 内开始下图"的体感不超过半分钟，又不会在没有任务时空转浪费 SQL。
+const SIDECAR_DOWNLOAD_IDLE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// PB42：sidecar 图片下载后台 worker。
+///
+/// 设计要点：
+/// 1. **DB 即队列，无需额外表**：SELECT 出"image_primary_path/backdrop_path/logo_path 仍指向
+///    http(s)://" 的 media_items 行——这是同步主流程刚写入的"占位 URL"。任何下载完成后
+///    都会被 `update_media_item_image_path` 替换为本地绝对路径，下次扫描自然就过滤掉了。
+/// 2. **跨进程崩溃安全**：DB 已经持久化"待下载状态"（URL 字段），worker 重启就直接续上。
+///    不需要内存任务队列。
+/// 3. **失败自愈**：单条下载失败不写 DB（保留 URL），下一轮自动重试。
+/// 4. **远端 token 自动跟随**：`emby_download_bytes` 走的就是 source 当前 access_token；
+///    token 刷新由 `remote_emby_token_refresh_loop` 负责，worker 这边自动透传新 token。
+/// 5. **温和限速**：`SIDECAR_DOWNLOAD_CONCURRENCY=4` + per-source `request_interval_ms`
+///    让远端 Emby 不会被瞬间打爆；如果同步主循环也在跑，主循环优先（共享 throttle slot）。
+pub async fn remote_emby_sidecar_download_loop(pool: sqlx::PgPool) {
+    loop {
+        let processed = match run_remote_emby_sidecar_download_pass(&pool).await {
+            Ok(n) => n,
+            Err(error) => {
+                tracing::warn!(error = %error, "PB42 sidecar 图片下载 worker 批次失败");
+                0
+            }
+        };
+        if processed == 0 {
+            tokio::time::sleep(SIDECAR_DOWNLOAD_IDLE_INTERVAL).await;
+        } else {
+            // 还有任务时只 sleep 短暂时间避免空转 / 让 DB CPU 喘口气。
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+/// 单轮扫描 + 并发下载。返回本轮处理的 item 数；为 0 时 worker 进入长 sleep。
+async fn run_remote_emby_sidecar_download_pass(pool: &sqlx::PgPool) -> Result<usize, AppError> {
+    let pending = repository::find_pending_remote_image_downloads(
+        pool,
+        SIDECAR_DOWNLOAD_BATCH_SIZE,
+    )
+    .await?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let total = pending.len();
+    tracing::debug!(
+        pending_count = total,
+        "PB42：开始下载远端 sidecar 图片（poster/backdrop/logo）"
+    );
+
+    // PB42：source_id → DbRemoteEmbySource 缓存，避免每个 item 都查一次 sources 表。
+    // 用 Mutex 包 HashMap，让 buffer_unordered 任务并发读写。
+    let source_cache: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<DbRemoteEmbySource>>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+    let pool_arc = pool.clone();
+    use futures::stream::{self, StreamExt};
+    let download_results = stream::iter(pending.into_iter().map(|task| {
+        let pool = pool_arc.clone();
+        let cache = Arc::clone(&source_cache);
+        async move { process_one_pending_image(&pool, task, cache).await }
+    }))
+    .buffer_unordered(SIDECAR_DOWNLOAD_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    let success = download_results
+        .iter()
+        .filter(|r| matches!(r, Ok(true)))
+        .count();
+    tracing::info!(
+        total = total,
+        success = success,
+        "PB42：sidecar 图片下载批次完成"
+    );
+    Ok(total)
+}
+
+/// 单条任务处理：尝试下载该 item 的 1-3 个仍是远端 URL 的图片字段。
+///
+/// 返回 Ok(true) 表示至少有一张图成功落盘，Ok(false) 表示都失败 / 都跳过，Err 表示底层错误。
+/// 任意一张图失败都不会让别的张失败：每张图独立 try。
+async fn process_one_pending_image(
+    pool: &sqlx::PgPool,
+    task: repository::PendingRemoteImageDownload,
+    source_cache: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<DbRemoteEmbySource>>>>,
+) -> Result<bool, AppError> {
+    // 解析 sidecar 目录与 3 个目标文件名。
+    let strm_path = std::path::Path::new(task.item_path.as_str());
+    let Some(sidecar_dir) = strm_path.parent() else {
+        tracing::debug!(
+            item_id = %task.item_id,
+            path = %task.item_path,
+            "PB42：item path 无父目录，跳过 sidecar 下载"
+        );
+        return Ok(false);
+    };
+    let (poster_filename, backdrop_filename, logo_filename) =
+        sidecar_image_filenames_for_strm(strm_path, task.item_type.as_str());
+
+    // 取出（或加载）source。失败说明源被删，直接跳过——下次 scan 这条 item 也会被
+    // CASCADE 清掉，不会无限堆积。
+    let source = {
+        let mut cache = source_cache.lock().await;
+        if let Some(s) = cache.get(&task.source_id) {
+            Arc::clone(s)
+        } else {
+            let Some(loaded) = repository::get_remote_emby_source(pool, task.source_id).await?
+            else {
+                tracing::debug!(
+                    source_id = %task.source_id,
+                    "PB42：远端源不存在或已删除，sidecar 任务忽略"
+                );
+                return Ok(false);
+            };
+            if !loaded.enabled {
+                tracing::debug!(
+                    source_id = %task.source_id,
+                    "PB42：远端源已禁用，sidecar 任务忽略"
+                );
+                return Ok(false);
+            }
+            let arc = Arc::new(loaded);
+            cache.insert(task.source_id, Arc::clone(&arc));
+            arc
+        }
+    };
+    let token = match source.access_token.as_deref() {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => {
+            tracing::debug!(
+                source_id = %task.source_id,
+                "PB42：远端源缺 access_token，跳过本轮 sidecar 下载（等下次 token 刷新）"
+            );
+            return Ok(false);
+        }
+    };
+
+    // 确保 sidecar 目录存在（增量同步早就创过；防御性 mkdir）
+    if let Err(error) = tokio::fs::create_dir_all(sidecar_dir).await {
+        tracing::warn!(
+            sidecar_dir = %sidecar_dir.to_string_lossy(),
+            error = %error,
+            "PB42：sidecar 目录创建失败，跳过本条"
+        );
+        return Ok(false);
+    }
+
+    let mut any_success = false;
+
+    // 三种类型走完全相同的"下载→落盘→UPDATE DB"循环。
+    let plans: [(&str, &Option<String>, &str); 3] = [
+        ("primary", &task.remote_primary_url, poster_filename.as_str()),
+        ("backdrop", &task.remote_backdrop_url, backdrop_filename.as_str()),
+        ("logo", &task.remote_logo_url, logo_filename.as_str()),
+    ];
+    for (image_type, url_opt, filename) in plans {
+        let Some(url) = url_opt.as_deref().filter(|u| !u.trim().is_empty()) else {
+            continue;
+        };
+        let dest = sidecar_dir.join(filename);
+        // 已经落过盘但 DB 还没追上（比如崩溃在 write 和 update 之间）：也走 UPDATE 一次。
+        let already_local = sidecar_exists_nonempty(&dest).await;
+        let bytes_result = if already_local {
+            Ok(Vec::<u8>::new())
+        } else {
+            // 远端 URL 在 sync 阶段已带过 api_key 参数（来自 extract_remote_image_urls_full
+            // 拼出来的纯 URL）— 但为了 token 刷新后旧 URL 仍能续命，这里也再追加一次最新 token。
+            let url_with_token = append_remote_api_key_param(url, token);
+            emby_download_bytes(source.as_ref(), token, url_with_token.as_str()).await
+        };
+        match bytes_result {
+            Ok(bytes) => {
+                // 已存在场景：bytes 是空 Vec，跳过写盘；否则写一份原子的 .tmp 再 rename
+                if !already_local {
+                    if bytes.is_empty() {
+                        tracing::debug!(
+                            item_id = %task.item_id,
+                            image_type,
+                            "PB42：远端返回 0 字节，跳过"
+                        );
+                        continue;
+                    }
+                    let tmp = dest.with_extension("tmp");
+                    if let Err(error) = tokio::fs::write(&tmp, &bytes).await {
+                        tracing::warn!(
+                            item_id = %task.item_id,
+                            image_type,
+                            error = %error,
+                            "PB42：sidecar 落盘失败"
+                        );
+                        continue;
+                    }
+                    if let Err(error) = tokio::fs::rename(&tmp, &dest).await {
+                        let _ = tokio::fs::remove_file(&tmp).await;
+                        tracing::warn!(
+                            item_id = %task.item_id,
+                            image_type,
+                            error = %error,
+                            "PB42：sidecar 重命名失败"
+                        );
+                        continue;
+                    }
+                }
+                let local_path_str = dest.to_string_lossy().to_string();
+                if let Err(error) = repository::update_media_item_image_path(
+                    pool,
+                    task.item_id,
+                    image_type,
+                    Some(local_path_str.as_str()),
+                    None,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        item_id = %task.item_id,
+                        image_type,
+                        error = %error,
+                        "PB42：UPDATE media_items 图片路径失败"
+                    );
+                    continue;
+                }
+                any_success = true;
+            }
+            Err(error) => {
+                tracing::debug!(
+                    item_id = %task.item_id,
+                    image_type,
+                    error = %error,
+                    url,
+                    "PB42：远端 sidecar 图片下载失败（保留 URL，下轮重试）"
+                );
+            }
+        }
+    }
+    Ok(any_success)
 }
 
 /// 远端 Emby 源「定时增量同步」循环：每 60 秒检查一次每个源，
@@ -4500,7 +4805,8 @@ fn first_media_source_id(item: &RemoteSyncItem) -> Option<&str> {
         .media_sources
         .as_ref()
         .and_then(|sources| sources.first())
-        .map(|source| source.id.trim())
+        .and_then(|source| source.id.as_deref())
+        .map(str::trim)
         .filter(|value| !value.is_empty())
 }
 
