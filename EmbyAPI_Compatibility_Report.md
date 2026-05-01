@@ -3437,3 +3437,113 @@ process_one_remote_sync_item(Episode):
 - `EmbyAPI_Compatibility_Report.md`
 
 ---
+
+## 第四十七批（2026-05-01）：修复 PB45 暴露的"id 漂移"老行 race（PB47）
+
+### 触发场景
+PB45 部署后用户上报：
+
+```
+最近任务失败 · 已运行 607 秒
+阶段 Failed
+远端抓取 3759 / 325338
+入库条目 3759
+数据库错误: error returned from database:
+  duplicate key value violates unique constraint "media_items_library_id_path_key"
+```
+
+注意约束名是 `media_items_library_id_path_key`（即 `UNIQUE (library_id, path)`），**不是 PB45 修过的** `media_items_pkey`。这是另一类失败模式——PB45 把 arbiter 改成 PK `(id)` 之后，把 `(library_id, path)` UNIQUE 暴露成了显式错误。
+
+### 根因分析（PB45 的盲点）
+
+PB45 修复假设了一个**未验证的前提**：
+> "id = `Uuid::new_v5(library_id, path)` 是双射，所以 ON CONFLICT (id) 和 (library_id, path) 等价"
+
+只有**所有现存行的 id 都等于 v5(lib, path)** 时这个等价才成立。但生产 DB 里历史上写过的 `media_items` 行可能 id ≠ v5：
+
+| 来源 | 时机 |
+|---|---|
+| `Uuid::new_v4()` 随机派生 | 早期版本/分支的 scanner、第三方导入工具 |
+| 手动 INSERT | 调试 / 数据迁移 / SQL 直接写入 |
+| 别的派生方式 | 历史代码路径里曾经短暂用过其他 hash 来源 |
+
+PB45 之前 `ON CONFLICT (library_id, path) DO UPDATE` 路径下，这些"id 漂移"老行被静默吞掉——SET 子句不更新 id 列，UPDATE 命中老行后老 id 保持不变，新内容写入。从未暴露过。
+
+PB45 改用 `(id)` arbiter 之后，新算的 v5 id ≠ 老行 id，PG 检查 INSERT：
+
+```
+INSERT id=v5_new, library_id=L, path=P
+   ↓ 检查唯一约束:
+   ├─ media_items_pkey (id=v5_new): 不冲突（库里没有这个 id）
+   └─ media_items_library_id_path_key (L, P): 冲突（老行用着）
+   ↓ ON CONFLICT (id) 是否匹配上面的冲突?
+      不匹配 (id arbiter 没收到 PK 冲突)
+   ↓ → 把 (lib, path) UNIQUE 违例直接抛出来
+```
+
+整次同步因此中断在 3759 条。
+
+### 修复
+
+`upsert_media_item` 入口加一次 SELECT，**优先复用现存行的 id**：
+
+```rust
+let existing_id: Option<Uuid> = sqlx::query_scalar(
+    "SELECT id FROM media_items WHERE library_id = $1 AND path = $2",
+)
+.bind(input.library_id)
+.bind(path_text.as_str())
+.fetch_optional(pool)
+.await?;
+let id = existing_id
+    .unwrap_or_else(|| Uuid::new_v5(&input.library_id, path_text.as_bytes()));
+```
+
+### 各场景下的行为
+
+| 场景 | SELECT 结果 | 用的 id | INSERT 行为 |
+|---|---|---|---|
+| 首次写入（无老行） | None | `v5(lib, path)` | INSERT 成功 |
+| 老 v5 行（同步重跑） | `v5_old`（= `v5(lib, path)`） | `v5_old` | PK 冲突 → ON CONFLICT (id) → UPDATE ✓ |
+| **老漂移行**（历史 v4 / 手动） | `v4_old`（≠ `v5(lib, path)`） | `v4_old` | PK 冲突 → ON CONFLICT (id) → UPDATE ✓（id 保持不变） |
+| 并发同 (lib, path) 全新行 (A, B) | A: None, B: None | 都用 `v5` | A INSERT 成功；B PK 冲突 → UPDATE ✓ |
+| 并发同 (lib, path) 漂移老行 (A, B) | 都拿到 `existing_id` | 都用 `existing_id` | A INSERT → PK 冲突 → UPDATE；B INSERT → PK 冲突 → UPDATE ✓ |
+
+### 关键设计决策
+
+1. **为什么不直接给老行做 schema migration 把 id 改成 v5？**
+   - 不安全：`media_items.id` 被 `media_streams` / `person_roles` / `playlist_items` 等多张表外键引用，CASCADE 改 id 等于动半张库
+   - 没必要：SELECT-first 自然处理了，性能影响可忽略
+2. **为什么不改回 `ON CONFLICT (library_id, path)`？**
+   - PB45 解决的并发 PK race 仍然存在；改回去会让 `media_items_pkey` 错误重现
+   - 现在 SELECT-first + ON CONFLICT (id) 同时解决两个问题
+3. **SELECT 性能开销**
+   - 走 `UNIQUE (library_id, path)` 索引，O(log n) 单点查询，几 μs
+   - 32 万条目同步多 32 万次 SELECT ≈ 几秒额外耗时
+   - 与 PB42 省下的 `fetch_remote_playback_analysis` HTTP（每条目 ~200ms）相比完全可忽略
+4. **TOCTOU race**
+   - 理论上 SELECT 完到 INSERT 之间老行可能被并发 DELETE
+   - 实际中 cleanup 路径只在源被删 / `delete_stale_items_for_source` 阶段（同步 PruningStaleItems 阶段，与 SyncingRemoteItems 串行）触发，不会并发跑
+   - 即使发生：INSERT existing_id → 没冲突 → 直接成功；后续同步会再 SELECT 拿到这个新 id，无副作用
+
+### 改动清单
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB47-1 | `backend/src/repository.rs::upsert_media_item` | 在 `id` 派生位置之前加 `existing_id` SELECT；`id` 改为 `existing_id.unwrap_or_else(\|\| Uuid::new_v5(...))`。补注释解释 PB45 盲点 + 各场景行为表。 |
+
+### 验证
+
+- `cargo check -p movie-rust-backend`：0 error，41 个旧 warning（全为预存在 dead code 告警）。
+- `cargo test --bin movie-rust-backend`：60 passed; 0 failed。
+- `ReadLints` on `repository.rs`：0 lint。
+- 修复后预期：
+  - 之前已入库的 3759 条不丢失：再次同步 SELECT 命中老行 id → UPDATE
+  - 后续 32 万条目同步不再被 `media_items_library_id_path_key` 阻断
+  - 历史"id 漂移"老行被静默接纳（id 保持不变，其他字段更新）
+
+### 影响文件
+- `backend/src/repository.rs`
+- `EmbyAPI_Compatibility_Report.md`
+
+---

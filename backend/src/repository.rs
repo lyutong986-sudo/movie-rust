@@ -8818,15 +8818,42 @@ pub async fn upsert_media_item(
         .disc_path
         .map(|value| value.to_string_lossy().to_string());
     let backdrop_paths_vec: Vec<String> = input.backdrop_paths.to_vec();
-    // PB45：id 是 `(library_id, path)` 的确定性 UUID v5，本来就和 `(library_id, path)` 一一对应。
-    // 之前 ON CONFLICT 用 (library_id, path) 作为 arbiter，但**并发**两条 task 同时 upsert 同一
-    // (library_id, path) 时，PG 会先在 PK 索引（`id` 列）上触发唯一约束违例——因为两个 task 计算
-    // 出的 id 一样。`ON CONFLICT (library_id, path)` 不覆盖 PK arbiter，于是 PG 把 PK 违例直接
-    // 抛出来：`duplicate key value violates unique constraint "media_items_pkey"`。
+    // PB45：id 由 `Uuid::new_v5(library_id, path)` 派生，本来想让 `(library_id, path)` 与
+    // PK `(id)` 在新数据上一一对应；ON CONFLICT 改成 PK arbiter 来避开并发下 PK 先冲突
+    // 没法被 (lib, path) arbiter 接住的 race。
     //
-    // 改用 `ON CONFLICT (id)` 后 PK 自身就是 arbiter，并发同 path 会被正常路由到 UPDATE 分支。
-    // (library_id, path) 这条 UNIQUE 约束仍然存在（schema 0001:259），用作老路径下的去重保险。
-    let id = Uuid::new_v5(&input.library_id, path_text.as_bytes());
+    // PB47：但 PB45 漏了一种"id 漂移"老行——库里历史上写过的某些 media_items 行，其 id
+    // 不等于 `Uuid::new_v5(library_id, path)`。可能来源：
+    //   1) 之前某个版本的 scanner 用过 Uuid::new_v4()
+    //   2) 手动 INSERT / 数据导入脚本/迁移
+    //   3) 同步路径中曾经短暂用过别的派生方式
+    // PB45 之前 ON CONFLICT (library_id, path) 路径下，这些漂移行被 UPDATE 吞掉（SET 子句
+    // 不修改 id 列），从未暴露。PB45 改 (id) 之后，新算的 v5 id ≠ 老行 id，PG 看到：
+    //   - PK (id=v5_new): 不冲突（库里没有这个 id）
+    //   - UNIQUE (library_id, path): 冲突
+    //   - arbiter 是 (id), 不匹配 (lib, path) UNIQUE
+    //   → 抛 `duplicate key value violates unique constraint "media_items_library_id_path_key"`
+    //
+    // 修复方案：SELECT-first 拿到现存行的 id 优先复用——这样
+    //   - 老漂移行：用其原 id INSERT → PK 命中 (id) arbiter → UPDATE 老行（保留 id 不变）
+    //   - 全新行：SELECT 返回 None → 用 v5 → INSERT 成功
+    //   - 并发同 (lib, path) 全新行：两 task 都 SELECT None，都用相同 v5 id；
+    //     第一个 INSERT 成功，第二个 PK 冲突 → ON CONFLICT (id) → UPDATE
+    //   - 并发同 (lib, path) 漂移老行：两 task 都 SELECT 拿到同一 existing_id；
+    //     第一个 INSERT id=existing_id → PK 冲突 → UPDATE；
+    //     第二个 INSERT id=existing_id → PK 冲突 → UPDATE
+    //
+    // 性能：SELECT 走 UNIQUE (library_id, path) 索引，O(log n) 单点查询，几 μs 级；
+    // 同步阶段每条目多一次但与之前 fetch_remote_playback_analysis 省下的开销相比可忽略。
+    let existing_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM media_items WHERE library_id = $1 AND path = $2",
+    )
+    .bind(input.library_id)
+    .bind(path_text.as_str())
+    .fetch_optional(pool)
+    .await?;
+    let id = existing_id
+        .unwrap_or_else(|| Uuid::new_v5(&input.library_id, path_text.as_bytes()));
     let sort_name = sort_name_for_item(&input);
 
     sqlx::query(
