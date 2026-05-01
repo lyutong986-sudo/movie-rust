@@ -2417,10 +2417,23 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 
 **已知限制（与 Emby/Jellyfin 类似）：**
 
-1. **章节图片**：`.strm` 指向远端代理 URL 时在扫描阶段仍跳过 ffmpeg 抽取；只对真实媒体容器文件有效。
+1. **章节图片**：~~`.strm` 指向远端代理 URL 时在扫描阶段仍跳过 ffmpeg 抽取~~。**已修复（2026-05-01）**：`.strm` 内 `http/https` URL（含 `/api/remote-emby/proxy/`）扫描阶段等同远程 URL，走 `ffprobe`（`analyze_remote_media`）写入章节；`extract_chapter_images` 对上述 URL 使用 `ffmpeg -i <url>` 抽帧。注意高并发对本机 HTTP 回环的请求压力。
 2. **占位缺集 / 合集 / 缺失剧集：** 远端条目结构与 TMDB「占位」可能叠加，需结合实际数据观察。
 3. **手工删除 `.strm` 与远端仍存在条目：** 只要下一次 **远端增量同步** 仍会拉取该条目，`write_remote_strm_bundle` **会重新写出 `.strm`**。若需在库中永久移除而远端仍存在，须在远端下架或另行做「服务端黑名单」（当前未实现）。若远端已下架，下一轮同步会通过 `delete_stale_items_for_source` 收敛。
 
 **影响文件：** `backend/src/file_watcher.rs`、`backend/src/routes/admin.rs`（`incremental_update_library`）、`backend/src/scanner.rs`、`backend/src/repository.rs`（`library_scan_paths_union_remote_strm`）、`backend/src/remote_emby.rs`（`strm_watch_directories_for_sources`）。
+
+### 远端 STRM（`/api/remote-emby/proxy/`）扫描期 ffprobe + 章节图（2026-05-01）
+
+**目标：** `EnableChapterImageExtraction` / `ExtractChapterImagesDuringLibraryScan` 对指向本机代理播放地址的 `.strm` 与实际开发一致，不再「假兼容」跳过探测。
+
+| 项 | 说明 |
+|----|------|
+| 扫描元数据 | `scanner::analyze_imported_media`：`.strm` 解析出 URL 后**不再**因 `remote-emby/proxy` 提前返回，统一 `media_analyzer::analyze_remote_media`（ffprobe，含章节）。 |
+| 章节缩略图 | `scanner::extract_chapter_images`：若 `.strm` 首行 URL 为 `http://`/`https://`，`ffmpeg -ss … -i <url> …`；否则仍跳过（本地相对路径 STRM 等与旧行为一致）。 |
+| PlaybackInfo | `routes/items.rs`：元数据缺失时对代理 `.strm` 与其它 http(s) STRM 同样尝试 `analyze_remote_media`（与非代理 STRM 对齐）。 |
+| 远端 DB 标记条目 | 若 `remote_marker_for_db_item` 仍为真，PlaybackInfo 仍会整体跳过「按需本地探测」分支；章节与缩略图主要由**库扫描**路径填充。 |
+
+**影响文件：** `backend/src/scanner.rs`、`backend/src/routes/items.rs`
 
 ---

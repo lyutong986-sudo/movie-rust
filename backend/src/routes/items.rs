@@ -4594,42 +4594,35 @@ async fn playback_info(
                     match std::fs::read_to_string(path) {
                         Ok(content) => {
                             if let Some(target_url) = naming::strm_target_from_text(&content) {
-                                if target_url.contains("/api/remote-emby/proxy/") {
-                                    tracing::debug!(
-                                    "PlaybackInfo 跳过远端 Emby 代理 .strm URL 直连分析，改由远端 PlaybackInfo 元数据补全: {}",
-                                    path.display()
-                                );
-                                } else {
-                                    tracing::debug!("分析.strm文件远程URL: {}", target_url);
-                                    let _analysis_permit = state
-                                        .work_limiters
-                                        .acquire(WorkLimiterKind::MediaAnalysis)
-                                        .await;
-                                    match media_analyzer::analyze_remote_media(&target_url).await {
-                                        Ok(analysis) => {
-                                            repository::update_media_item_metadata(
-                                                &state.pool,
-                                                item_id,
-                                                &analysis,
-                                            )
-                                            .await?;
-                                            item = repository::get_media_item(&state.pool, item_id)
-                                                .await?
-                                                .ok_or_else(|| {
-                                                    AppError::NotFound("媒体条目不存在".to_string())
-                                                })?;
-                                            tracing::info!(
-                                                "已更新.strm文件远程媒体元数据: {}",
-                                                path.display()
-                                            );
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "无法分析.strm远程媒体 {}: {}",
-                                                target_url,
-                                                e
-                                            );
-                                        }
+                                tracing::debug!("分析.strm文件远程URL: {}", target_url);
+                                let _analysis_permit = state
+                                    .work_limiters
+                                    .acquire(WorkLimiterKind::MediaAnalysis)
+                                    .await;
+                                match media_analyzer::analyze_remote_media(&target_url).await {
+                                    Ok(analysis) => {
+                                        repository::update_media_item_metadata(
+                                            &state.pool,
+                                            item_id,
+                                            &analysis,
+                                        )
+                                        .await?;
+                                        item = repository::get_media_item(&state.pool, item_id)
+                                            .await?
+                                            .ok_or_else(|| {
+                                                AppError::NotFound("媒体条目不存在".to_string())
+                                            })?;
+                                        tracing::info!(
+                                            "已更新.strm文件远程媒体元数据: {}",
+                                            path.display()
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "无法分析.strm远程媒体 {}: {}",
+                                            target_url,
+                                            e
+                                        );
                                     }
                                 }
                             } else {

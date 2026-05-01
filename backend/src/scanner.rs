@@ -1610,13 +1610,6 @@ async fn analyze_imported_media(
                     );
                     return Ok(());
                 };
-                if target_url.contains("/api/remote-emby/proxy/") {
-                    tracing::debug!(
-                        "扫描阶段跳过远端 Emby 代理 .strm URL 分析，由 PlaybackInfo 负责元数据补全: {}",
-                        file.display()
-                    );
-                    return Ok(());
-                }
 
                 match media_analyzer::analyze_remote_media(&target_url).await {
                     Ok(analysis) => analysis,
@@ -3101,16 +3094,39 @@ mod tests {
     }
 }
 
-/// 提取章节缩略图：对每个章节使用 ffmpeg 截图并保存到缓存目录
+/// 提取章节缩略图：对每个章节使用 ffmpeg 截图并保存到缓存目录。
+/// `.strm` 且内容为 `http/https` URL（含本机远端 Emby 代理）时对该 URL 拉流截图。
 async fn extract_chapter_images(
     pool: &sqlx::PgPool,
     config: &Config,
     item_id: uuid::Uuid,
     file: &Path,
 ) {
-    if !file.exists() || naming::is_strm(file) {
+    if !file.exists() {
         return;
     }
+
+    enum FfmpegInput {
+        LocalPath(std::path::PathBuf),
+        RemoteUrl(String),
+    }
+
+    let input = if naming::is_strm(file) {
+        let Ok(content) = tokio::fs::read_to_string(file).await else {
+            return;
+        };
+        let Some(target) = naming::strm_target_from_text(&content) else {
+            return;
+        };
+        if target.starts_with("http://") || target.starts_with("https://") {
+            FfmpegInput::RemoteUrl(target)
+        } else {
+            return;
+        }
+    } else {
+        FfmpegInput::LocalPath(file.to_path_buf())
+    };
+
     let chapters = match repository::get_media_chapters(pool, item_id).await {
         Ok(c) => c,
         Err(_) => return,
@@ -3134,13 +3150,21 @@ async fn extract_chapter_images(
         }
         let seconds = (chapter.start_position_ticks as f64) / 10_000_000.0;
         let out_path = chapter_dir.join(format!("chapter_{}.jpg", chapter.chapter_index));
-        let result = tokio::process::Command::new(ffmpeg)
-            .args([
-                "-ss",
-                &format!("{seconds:.3}"),
-                "-i",
-            ])
-            .arg(file.as_os_str())
+        let mut cmd = tokio::process::Command::new(ffmpeg);
+        cmd.args([
+            "-ss",
+            &format!("{seconds:.3}"),
+            "-i",
+        ]);
+        match &input {
+            FfmpegInput::LocalPath(p) => {
+                cmd.arg(p.as_os_str());
+            }
+            FfmpegInput::RemoteUrl(url) => {
+                cmd.arg(url);
+            }
+        }
+        let result = cmd
             .args([
                 "-frames:v", "1",
                 "-q:v", "6",
