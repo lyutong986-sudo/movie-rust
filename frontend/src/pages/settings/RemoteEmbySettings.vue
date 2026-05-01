@@ -450,6 +450,8 @@ async function saveEditor() {
       TokenRefreshIntervalSecs: number;
       ProxyMode: 'proxy' | 'redirect';
       AutoSyncIntervalMinutes: number;
+      PageSize: number;
+      RequestIntervalMs: number;
     } = {
       Name: p.name.trim(),
       ServerUrl: p.serverUrl.trim(),
