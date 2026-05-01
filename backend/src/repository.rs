@@ -8818,6 +8818,14 @@ pub async fn upsert_media_item(
         .disc_path
         .map(|value| value.to_string_lossy().to_string());
     let backdrop_paths_vec: Vec<String> = input.backdrop_paths.to_vec();
+    // PB45：id 是 `(library_id, path)` 的确定性 UUID v5，本来就和 `(library_id, path)` 一一对应。
+    // 之前 ON CONFLICT 用 (library_id, path) 作为 arbiter，但**并发**两条 task 同时 upsert 同一
+    // (library_id, path) 时，PG 会先在 PK 索引（`id` 列）上触发唯一约束违例——因为两个 task 计算
+    // 出的 id 一样。`ON CONFLICT (library_id, path)` 不覆盖 PK arbiter，于是 PG 把 PK 违例直接
+    // 抛出来：`duplicate key value violates unique constraint "media_items_pkey"`。
+    //
+    // 改用 `ON CONFLICT (id)` 后 PK 自身就是 arbiter，并发同 path 会被正常路由到 UPDATE 分支。
+    // (library_id, path) 这条 UNIQUE 约束仍然存在（schema 0001:259），用作老路径下的去重保险。
     let id = Uuid::new_v5(&input.library_id, path_text.as_bytes());
     let sort_name = sort_name_for_item(&input);
 
@@ -8848,7 +8856,7 @@ pub async fn upsert_media_item(
                 $45,
                 now()
             )
-        ON CONFLICT (library_id, path)
+        ON CONFLICT (id)
         DO UPDATE SET
             parent_id = EXCLUDED.parent_id,
             name = EXCLUDED.name,
