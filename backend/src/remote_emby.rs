@@ -3223,6 +3223,31 @@ async fn write_remote_strm_bundle(
         .parent()
         .ok_or_else(|| AppError::Internal("STRM 缺父目录".into()))?;
 
+    // Episode 与 Movie 共用同一目录的情况不同：
+    // - Movie：每部电影独占一个文件夹，使用 poster.jpg / backdrop.jpg / logo.png 即可
+    // - Episode：同一季所有集共享 Season XX/ 目录，必须用 strm 文件名做前缀，避免互相覆盖
+    let is_episode = item.item.item_type.eq_ignore_ascii_case("Episode");
+    let strm_stem = strm_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("media")
+        .to_string();
+    let poster_filename = if is_episode {
+        format!("{strm_stem}-thumb.jpg")
+    } else {
+        "poster.jpg".to_string()
+    };
+    let backdrop_filename = if is_episode {
+        format!("{strm_stem}-fanart.jpg")
+    } else {
+        "backdrop.jpg".to_string()
+    };
+    let logo_filename = if is_episode {
+        format!("{strm_stem}-clearlogo.png")
+    } else {
+        "logo.png".to_string()
+    };
+
     if source.sync_metadata {
         // 下载 Primary 封面（poster）
         {
@@ -3249,7 +3274,7 @@ async fn write_remote_strm_bundle(
             };
             match emby_download_bytes(source, playback_token, url.as_str()).await {
                 Ok(bytes) if !bytes.is_empty() => {
-                    let path = sidecar_dir.join("poster.jpg");
+                    let path = sidecar_dir.join(&poster_filename);
                     if tokio::fs::write(&path, &bytes).await.is_ok() {
                         local_poster = Some(path);
                     }
@@ -3283,7 +3308,7 @@ async fn write_remote_strm_bundle(
             };
             match emby_download_bytes(source, playback_token, url.as_str()).await {
                 Ok(bytes) if !bytes.is_empty() => {
-                    let path = sidecar_dir.join("backdrop.jpg");
+                    let path = sidecar_dir.join(&backdrop_filename);
                     if tokio::fs::write(&path, &bytes).await.is_ok() {
                         local_backdrop = Some(path);
                     }
@@ -3305,7 +3330,7 @@ async fn write_remote_strm_bundle(
                 playback_token.trim(),
             );
             if let Ok(bytes) = emby_download_bytes(source, playback_token, url.as_str()).await {
-                let path = sidecar_dir.join("logo.png");
+                let path = sidecar_dir.join(&logo_filename);
                 if tokio::fs::write(&path, &bytes).await.is_ok() {
                     local_logo = Some(path);
                 }
