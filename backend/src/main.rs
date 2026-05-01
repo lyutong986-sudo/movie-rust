@@ -297,6 +297,26 @@ async fn run_startup_schema_tasks(pool: &sqlx::PgPool) -> Result<()> {
     }
 
     ensure_schema_compatibility(pool).await?;
+
+    // PB24：启动时一次性清理孤儿远端虚拟路径——历史上 PB23 修复之前删除过的远端
+    // 源在 libraries 表里残留的 `__remote_view_<source_id>_*` 独立库 / merge 库
+    // PathInfos entry。仅删那些 source_id 已不存在的孤儿；现存远端源的虚拟路径不动。
+    // 幂等、纯 SQL，几个 ms 就能跑完，对启动时间几乎无影响；失败仅 warn 不阻塞启动。
+    match repository::cleanup_orphan_remote_view_paths(pool).await {
+        Ok((deleted, updated, orphan_ids)) if deleted > 0 || updated > 0 => {
+            tracing::info!(
+                deleted_libraries = deleted,
+                updated_libraries = updated,
+                orphan_source_ids = orphan_ids,
+                "启动清理：发现并清掉历史孤儿远端虚拟路径"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, "启动清理孤儿远端虚拟路径失败（不阻塞启动）");
+        }
+    }
+
     Ok(())
 }
 

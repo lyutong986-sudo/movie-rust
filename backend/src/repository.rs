@@ -3328,6 +3328,119 @@ pub async fn ensure_remote_view_path_in_library(
     Ok(())
 }
 
+/// PB24：一次性清理「孤儿远端虚拟路径」——`libraries` 表里所有挂着的
+/// `__remote_view_<source_id>_*` 路径，但其 `<source_id>` 在 `remote_emby_sources` 表里
+/// 已经不存在的那些。这是对应 PB23 修复**之前**已经累积下来的历史残留：用户多次
+/// 删除远端源、或迁移过项目，会留下 separate 模式的孤儿独立库 + merge 模式的孤儿
+/// PathInfos entry。一次性清理不会触碰当前仍存在的远端源（它们的虚拟路径仍由活跃
+/// 的同步流程在维护）。
+///
+/// 返回 `(deleted_libraries, updated_libraries, scanned_orphan_source_ids)`：分别是被
+/// 整体删除的库数 / 被剥离的库数 / 检测到的孤儿 source_id 数量（含未触发实际删除的）。
+pub async fn cleanup_orphan_remote_view_paths(
+    pool: &sqlx::PgPool,
+) -> Result<(u64, u64, u64), AppError> {
+    // 现有远端源的 simple-uuid 集合（小写、无连字符）。
+    let live_source_ids: Vec<Uuid> =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM remote_emby_sources")
+            .fetch_all(pool)
+            .await?;
+    let live_simple: std::collections::HashSet<String> = live_source_ids
+        .iter()
+        .map(|id| id.simple().to_string().to_ascii_lowercase())
+        .collect();
+
+    // 第一遍：扫所有 `path` 形如 `__remote_view_<simple>_*` 的库。
+    let standalone: Vec<DbLibrary> = sqlx::query_as::<_, DbLibrary>(
+        r#"
+        SELECT id, name, collection_type, path, library_options, created_at,
+               primary_image_path, primary_image_tag
+        FROM libraries
+        WHERE path LIKE '__remote_view_%'
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut deleted = 0u64;
+    let mut orphan_ids = std::collections::HashSet::<String>::new();
+    for lib in &standalone {
+        // path 形如 `__remote_view_<simple>_<view_id>`，按下划线切出 simple。
+        let rest = lib.path.trim_start_matches("__remote_view_");
+        let Some((simple, _)) = rest.split_once('_') else {
+            continue;
+        };
+        let simple_lower = simple.to_ascii_lowercase();
+        if !live_simple.contains(&simple_lower) {
+            orphan_ids.insert(simple_lower);
+            let res = sqlx::query("DELETE FROM libraries WHERE id = $1")
+                .bind(lib.id)
+                .execute(pool)
+                .await?;
+            deleted += res.rows_affected();
+        }
+    }
+
+    // 第二遍：扫所有 library_options.PathInfos 含 `__remote_view_*` 的库，剥掉那些
+    // source_id 已不存在的 entry。
+    let merge_candidates: Vec<DbLibrary> = sqlx::query_as::<_, DbLibrary>(
+        r#"
+        SELECT id, name, collection_type, path, library_options, created_at,
+               primary_image_path, primary_image_tag
+        FROM libraries
+        WHERE library_options::text LIKE '%__remote_view_%'
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut updated = 0u64;
+    for lib in &merge_candidates {
+        let mut options = lib.library_options.clone();
+        let mut dirty = false;
+        if let Some(arr) = options
+            .as_object_mut()
+            .and_then(|obj| obj.get_mut("PathInfos"))
+            .and_then(|v| v.as_array_mut())
+        {
+            let before = arr.len();
+            arr.retain(|p| {
+                let path_str = match p.get("Path").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => return true,
+                };
+                if !path_str.starts_with("__remote_view_") {
+                    return true; // 非远端虚拟路径，保留。
+                }
+                let rest = path_str.trim_start_matches("__remote_view_");
+                let simple = match rest.split_once('_') {
+                    Some((s, _)) => s.to_ascii_lowercase(),
+                    None => return false, // 格式异常的也视为孤儿剥掉。
+                };
+                if live_simple.contains(&simple) {
+                    true
+                } else {
+                    orphan_ids.insert(simple);
+                    false
+                }
+            });
+            if arr.len() != before {
+                dirty = true;
+            }
+        }
+        if dirty {
+            sqlx::query(
+                "UPDATE libraries SET library_options = $1, date_modified = now() WHERE id = $2",
+            )
+            .bind(&options)
+            .bind(lib.id)
+            .execute(pool)
+            .await?;
+            updated += 1;
+        }
+    }
+
+    Ok((deleted, updated, orphan_ids.len() as u64))
+}
+
 /// PB23：删除远端源时配套清理 libraries 表里挂着的虚拟路径。
 /// 包含两类清理：
 ///   1) **Separate 模式**：path 形如 `__remote_view_<source_id>_*` 的整条 library 记录

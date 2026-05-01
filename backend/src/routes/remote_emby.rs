@@ -67,9 +67,38 @@ pub fn router() -> Router<AppState> {
             post(cancel_remote_emby_sync_operation),
         )
         .route(
+            "/api/admin/remote-emby/cleanup-orphan-libraries",
+            post(cleanup_orphan_remote_libraries),
+        )
+        .route(
             "/api/remote-emby/proxy/{source_id}/{remote_item_id}",
             get(proxy_remote_emby_item).head(proxy_remote_emby_item),
         )
+}
+
+/// PB24：管理员一次性清理"孤儿远端虚拟路径"——历史上 PB23 修复之前删除过的远端源
+/// 在 `libraries` 表里残留的 `__remote_view_<source_id>_*` 独立库 / merge 库 PathInfos entry。
+/// 现存远端源的虚拟路径不动；仅删那些 source_id 已不存在的孤儿。
+///
+/// 返回 `{ "deleted_libraries": u64, "updated_libraries": u64, "orphan_source_ids": u64 }`。
+async fn cleanup_orphan_remote_libraries(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth::require_admin(&session)?;
+    let (deleted, updated, orphan_ids) =
+        repository::cleanup_orphan_remote_view_paths(&state.pool).await?;
+    tracing::info!(
+        deleted_libraries = deleted,
+        updated_libraries = updated,
+        orphan_source_ids = orphan_ids,
+        "管理员手动触发：清理孤儿远端虚拟路径完成"
+    );
+    Ok(Json(serde_json::json!({
+        "DeletedLibraries": deleted,
+        "UpdatedLibraries": updated,
+        "OrphanSourceIds": orphan_ids,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

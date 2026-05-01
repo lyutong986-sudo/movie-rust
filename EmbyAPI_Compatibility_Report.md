@@ -2592,3 +2592,41 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 **影响文件：** `backend/src/remote_emby.rs`、`backend/src/repository.rs`、`EmbyAPI_Compatibility_Report.md`。
 
 ---
+
+## 第三十三批（2026-05-01）：清理 PB23 修复前累积的孤儿远端虚拟路径 — PB24
+
+**触发场景：** 用户报告：`/settings/libraries` 仍残留大量「不存在远程媒体库」的虚拟路径绑定（如 `__remote_view_<historic_source_id>_*`）——这些是 PB23 修复**之前**删除过的远端源遗留。PB23 只修复了「未来删除的清理」，但已经累积的历史残留需要一次性扫干净。
+
+### P1 — 历史残留兜底
+
+| # | 文件 | 修复 |
+|---|------|------|
+| PB24 | `repository.rs::cleanup_orphan_remote_view_paths` 新增 + `routes/remote_emby.rs::cleanup_orphan_remote_libraries` + `main.rs::run_startup_schema_tasks` | 新增 `cleanup_orphan_remote_view_paths(pool) -> (deleted, updated, orphan_ids)` 一次性扫两遍：1) `libraries.path LIKE '__remote_view_%'` 全表扫，按 `__remote_view_<simple>_<view>` 切出 `simple`，与 `SELECT id FROM remote_emby_sources` 的 simple-uuid 集合做差，**仅孤儿**整条 DELETE；2) `library_options::text LIKE '%__remote_view_%'` 粗筛后逐库 `PathInfos.retain`，剥掉所有 source_id 已不存在的 entry，保留仍活跃的（不会误伤当前同步中的源）。**启动时自动跑一次**（`run_startup_schema_tasks` 末尾），失败仅 `warn` 不阻塞启动；同时挂 admin 端点 `POST /api/admin/remote-emby/cleanup-orphan-libraries` 让用户随时手动触发，返回 `{ DeletedLibraries, UpdatedLibraries, OrphanSourceIds }`。 |
+
+### 用法
+
+启动后会自动看到日志：
+```
+INFO 启动清理：发现并清掉历史孤儿远端虚拟路径 deleted_libraries=N updated_libraries=M orphan_source_ids=K
+```
+
+如果想随时再触发一次（比如手动删了某些 source 表行后），调：
+```
+POST /api/admin/remote-emby/cleanup-orphan-libraries
+```
+（需 admin 鉴权），返回 JSON 即触发结果。
+
+### 边界
+
+- 当前仍存在的远端源的虚拟路径**绝不删除**——靠的是与 `remote_emby_sources.id` 集合做差。
+- Separate 模式（独立库）：整条 `libraries` 行 DELETE，关联的 `media_paths` / `media_items` 由外键 `ON DELETE CASCADE` 一并清理。
+- Merge 模式（用户原有库）：仅从 `library_options.PathInfos` 里 `retain` 掉孤儿 entry，库本身不动。
+- 幂等：跑完没有孤儿时返回 `(0, 0, 0)`，不写任何 SQL（除两条 SELECT）。
+
+### 验证
+
+- `cargo check` 通过；启动后日志可见清理报告；调 admin 端点亦返回真实数字。
+
+**影响文件：** `backend/src/repository.rs`、`backend/src/routes/remote_emby.rs`、`backend/src/main.rs`、`EmbyAPI_Compatibility_Report.md`。
+
+---
