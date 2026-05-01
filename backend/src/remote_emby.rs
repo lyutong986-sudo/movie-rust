@@ -3195,20 +3195,19 @@ async fn write_remote_strm_bundle(
             .map_err(|e| AppError::Internal(format!("创建 STRM 目录失败: {e}")))?;
     }
 
-    // redirect 模式：写入远端直链 URL（含 api_key），客户端直连远端，不消耗本地带宽。
-    // proxy 模式（默认）：写入本地代理 URL，所有流量通过本地 Movie Rust 转发。
-    let stream_line = if source.is_redirect_mode() {
-        build_remote_stream_redirect_url(source, item.item.id.as_str(), media_source_id, playback_token)
-    } else {
-        let signature = build_proxy_signature(source.source_secret, item.item.id.as_str(), media_source_id);
-        build_local_proxy_url(
-            &state.config,
-            source.id,
-            item.item.id.as_str(),
-            media_source_id,
-            signature.as_str(),
-        )
-    };
+    // 无论 proxy_mode 是 proxy 还是 redirect，strm 文件统一写入本地代理 URL，
+    // 不向磁盘暴露远端服务器地址、api_key 或 token。
+    // - proxy 模式：服务端在收到代理请求时流式中转远端响应。
+    // - redirect 模式：服务端在收到代理请求时返回 302，动态构建远端直链（包含最新 token）。
+    // 这样可以避免 token 刷新后 strm 文件失效，也避免直链信息持久化到磁盘。
+    let signature = build_proxy_signature(source.source_secret, item.item.id.as_str(), media_source_id);
+    let stream_line = build_local_proxy_url(
+        &state.config,
+        source.id,
+        item.item.id.as_str(),
+        media_source_id,
+        signature.as_str(),
+    );
     tokio::fs::write(&strm_path, format!("{}\n", stream_line.trim()))
         .await
         .map_err(|e| AppError::Internal(format!("写入 STRM 失败: {e}")))?;
