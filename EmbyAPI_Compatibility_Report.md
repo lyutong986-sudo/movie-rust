@@ -2500,3 +2500,53 @@ GET {server}/emby/videos/{id}/stream?Static=true&MediaSourceId={msid}&DeviceId={
 **影响文件：** `backend/src/routes/items.rs`、`backend/src/routes/shows.rs`、`backend/src/routes/webhooks.rs`、`backend/src/remote_emby.rs`、`backend/src/repository.rs`、`backend/src/metadata/tmdb.rs`、`backend/src/models.rs`、`backend/migrations/0001_schema.sql`、`backend/Cargo.toml`、`EmbyAPI_Compatibility_Report.md`。
 
 ---
+
+## 第三十一批（2026-05-01）：第二轮链路审计 PB13-PB21
+
+**审计动机：** 在第三十批基础上重做"权限边界 + 三方契约 + 远端鉴权时序 + WS 升级 + 字幕韧性"五条主干链路审计，找出报告里仍未真正贯通的越权 / 信息泄露 / hook 缺位 / 缓存陈旧 / 鉴权口径不一致问题。
+
+### P0 — 越权 / hook 缺位
+
+| # | 文件 | 修复 |
+|---|------|------|
+| PB13 | `routes/items.rs::search_hints` ~5996 | `/Search/Hints` 路径里 `UserId` 仅被透传进 `list_media_items`，**未** `ensure_user_access`：非 admin 可冒用别人的 UserId 拿提示绕过 `effective_library_filter_for_user`。补 `ensure_user_access(&session, user_id)?`，与 `/Genres` / `/Users/{id}/Items` 同口径。 |
+| PB14 | `webhooks.rs::events` + `routes/items.rs::delete_item / delete_items_bulk` + `scanner.rs::scan_libraries` | 1) `events::ALL` 补常量 `ITEM_DELETED = "item.deleted"`、`LIBRARY_SCAN_START = "library.scan.start"`、`LIBRARY_SCAN_COMPLETE = "library.scan.complete"`，让 `/Notifications/Types` 真实暴露这三类。2) DELETE 单条 / 批量在 `delete_media_item` 前先 `get_media_item` 拍快照，删成功后 `webhooks::dispatch ITEM_DELETED`，payload 含 `Item.{Id,Name,Type,SeriesName}`。3) `scan_libraries` 入口/出口分别 `dispatch_library_scan_event`，payload 含 `Library:[{Id,Name},...]`，`scan.complete` 在主流程 Phase B 结束时即派发，不等 trickplay 等延迟资产，与 Emby Webhooks plugin 行为一致。 |
+
+### P1 — 远端 / 权限 / 性能 / 韧性
+
+| # | 文件 | 修复 |
+|---|------|------|
+| PB15 | `remote_emby.rs::ensure_authenticated / refresh_single_remote_token` ~38-79 / ~2842-2853 / ~3454-3463 | 远端 token 刷新或重登拿到新 `access_token` 后，按 `source_id` 前缀失效 `PLAYBACK_INFO_CACHE`：`invalidate_playback_info_cache_for_source(Uuid)`。`refresh_single_remote_token` 成功路径无条件失效；`ensure_authenticated(force=true)` 路径仅在 token 真的换了时失效（避免无谓抖动）。配合既有的 401/403/404 清缓存路径，token 生命周期与缓存生命周期严格对齐，下次 PlaybackInfo 一定拿带新 token 的直链。 |
+| PB16 | `remote_emby.rs::write_remote_strm_bundle` ~3236-3247 | `.strm` 写入前先 `tokio::fs::read` 现有内容做 `as_slice() == new_content.as_bytes()` 比对，相同则跳过磁盘写。代理 URL 与远端是否变更无关（由 `source.id + item.id + media_source_id + source_secret` 决定），同条目反复同步绝大多数情况内容完全一致——避免无谓 SSD 写、不污染 mtime（不打扰 inotify/同步工具的判定）。 |
+| PB17 | `routes/sessions.rs::session_play_queue` ~329-348 | `/Sessions/{id}/PlayQueue` 之前用调用者 `session.user_id` 当 `s.user_id = $1` 过滤参数；admin 在 Web 控制台查看其他设备 NowPlayingQueue 时永远命中不到（恒空）。改为先 `find_active_session(token)` 拿到目标 session 的真实 `user_id`，再传给 `repository::session_play_queue`。`ensure_session_control_access` 仍在前面把守，不增加新越权面。 |
+| PB18 | `routes/items.rs::studios/tags/years/official_ratings/containers/audio_codecs/video_codecs/subtitle_codecs` + `repository.rs::aggregate_*` + `repo_cache.rs` | 八个聚合 endpoint 之前都是 `DISTINCT unnest(...)` 全表扫描，**无库白名单** —— 受限用户可枚举出隐藏库内的工作室/标签/年份/分级/容器/编码名称。所有 `aggregate_text_values / aggregate_array_values / aggregate_years / aggregate_stream_codecs` 都加 `allowed_library_ids: Option<&[Uuid]>` 参数：`None` 表示无可见性约束（admin/全局缓存路径）；`Some(&[])` 直接返回空；`Some(&[..])` 走 `library_id = ANY($)` 谓词。`repo_cache` 路径仅在 `None` 时命中（admin 享缓存），受限用户走 uncached SQL。`aggregate_stream_codecs` 改为 `INNER JOIN media_items` 走 `mi.library_id = ANY(...)`。 |
+| PB19 | `routes/items.rs::item_critic_reviews / item_external_id_infos / intro_timestamps` + `routes/images.rs::list_item_remote_images` | 四个 endpoint 之前只做 `ensure_media_item_exists` 存在性校验，受限用户拿到 itemId 即可读评分/外部 GUID/intro 时间戳/远端图片候选，绕过 `effective_library_filter_for_user`。统一加 `if !session.is_admin { ensure_user_can_access_item(...) }`（或等价 `repository::user_can_access_item` 调用），admin 豁免。 |
+| PB20 | `routes/websocket.rs::emby_websocket_handler` + `routes/mod.rs` | WS 升级之前**只**认 query 的 `token` / `api_key`，与 REST 入口 `AuthSession` 对 `Authorization: MediaBrowser Token="..."` / `Authorization: Bearer ...` / `X-Emby-Token` / `X-MediaBrowser-Token` header 的支持不一致——使用 header 鉴权的桌面/原生客户端无法升级。新增 `extract_token_from_headers(&HeaderMap)` 帮助函数，按与 REST 完全一致的优先级解析 token；query 命中优先（因为浏览器 WS 升级无法附自定义 header），否则回落 header。同时在 `routes/mod.rs` 补 `/websocket` 与 `/Socket` 路由别名（已有 `/embywebsocket` + `/socket`），覆盖 SDK 在不同客户端上的拼写差异。 |
+| PB21 | `metadata/opensubtitles.rs::OpenSubtitlesProvider` | 之前 `download_subtitle` 是 `&self`，token 失效（401/403）时直接返回 Err 字符串，不重登也不重试。改造：1) 结构体加 `credentials: Option<(String, String)>`，`login` 成功时缓存。2) `download_subtitle` 改为 `&mut self`，内部走 `try_download_once → DownloadError::{Unauthorized, Other}` 二级错误模型——遇 401/403 清 token、按缓存凭据自动 `login` 一次、重试一次；其他错误透传。3) 调用方零侵入（已经是 `let mut provider`），失败一次后续登并 retry，对端 token TTL 短/服务端轮换不再让用户看到下载失败。 |
+
+### 文档勘误（第三十一批）
+
+- `webhooks::events::ALL` 现含 13 类（原 10 类 + ITEM_DELETED + LIBRARY_SCAN_START + LIBRARY_SCAN_COMPLETE）；`/Notifications/Types` 列表与真实 dispatch hook 点完全对齐。
+- HMAC 签名格式：`X-Webhook-Signature: sha256=<hex>`（**hex 非 base64**），与 Sakura/下游对齐说明应明确这一点。
+- WS 路径：当前真实路由有 `/embywebsocket` / `/socket` / `/websocket` / `/Socket` 四个别名同走 `emby_websocket_handler`；token 来源支持 query + 4 类 header（`Authorization`/`X-Emby-Token`/`X-MediaBrowser-Token`）。
+- `aggregate_*` 系函数公开签名加 `allowed_library_ids: Option<&[Uuid]>`，调用方需要从 `effective_library_filter_for_user(pool, session.user_id)` 拿到的 `Option<Vec<Uuid>>` 上 `as_deref()`。
+- `OpenSubtitlesProvider::download_subtitle` 现在是 `&mut self`；调用方需要 `let mut provider = ...`。
+- `/Sessions/{id}/PlayQueue` 与 `/Sessions/PlayQueue` 现在语义不同：前者按目标 session 用户解析，后者按调用者用户解析。
+- 第二十九批关于"远端 STRM 增量同步"的"未变跳过 IO"说法在 PB16 后真正落实到 `.strm` 内容比对（之前仅 sidecar/NFO 走 `force_refresh` 跳过，STRM 文件本身仍然每次写盘）。
+
+### 已知未在本批处理（保留下批继续）
+
+- `R151-R158` 提示的 `PlaySessionId` 跨表持久化（`sessions` 表写入 / `record_playback_event` 透传）需要 schema + 数据流一并改造，仍标"已知保留项"。
+- Legacy `/PlayingItems*` 没有 `SessionsChanged` WS 派发（仅 `record_report` 路径派发），需要在 legacy 上报路径补 dispatch。
+- `submit_custom_query` Pattern #5/#6/#7 的 `ReplaceUserId` 对反查类报表（按 IP/设备查 UserId）尚未生效，留给下批专项处理。
+- 跨库扫描 `JoinSet` 入队是「先穷尽当前库再下一库」，单超大库会饿死其它库；需要 round-robin 入队策略，留给下批架构改造。
+- `/Library/MediaFolders` 对非 admin 仍返回 `list_libraries` 全量并逐库 N+1 计数；后续应改走 `visible_libraries_for_user + batch_library_stats`。
+- `/Persons` 列表/详情仍来自 `persons` 全表，未按可见库参演关系裁剪。
+
+### 验证
+
+- `cargo check` 通过；`cargo test --bin movie-rust-backend` 60/60 通过（含 `playback_info_builds_emby_original_direct_stream_urls_for_local_player` 等回归用例）。
+
+**影响文件：** `backend/src/webhooks.rs`、`backend/src/scanner.rs`、`backend/src/remote_emby.rs`、`backend/src/repository.rs`、`backend/src/repo_cache.rs`、`backend/src/routes/items.rs`、`backend/src/routes/images.rs`、`backend/src/routes/sessions.rs`、`backend/src/routes/websocket.rs`、`backend/src/routes/mod.rs`、`backend/src/metadata/opensubtitles.rs`、`EmbyAPI_Compatibility_Report.md`。
+
+---

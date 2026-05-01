@@ -41,7 +41,7 @@ pub async fn cached_aggregate_years(pool: &sqlx::PgPool) -> Result<Vec<i32>, App
     if let Some(cached) = YEARS_CACHE.get(&()).await {
         return Ok(cached);
     }
-    let result = super::repository::aggregate_years_uncached(pool).await?;
+    let result = super::repository::aggregate_years_uncached(pool, None).await?;
     YEARS_CACHE.insert((), result.clone()).await;
     Ok(result)
 }
@@ -54,7 +54,7 @@ pub async fn cached_aggregate_array_values(
     if let Some(cached) = ARRAY_VALUES_CACHE.get(&key).await {
         return Ok(cached);
     }
-    let result = super::repository::aggregate_array_values_uncached(pool, field).await?;
+    let result = super::repository::aggregate_array_values_uncached(pool, field, None).await?;
     ARRAY_VALUES_CACHE.insert(key, result.clone()).await;
     Ok(result)
 }

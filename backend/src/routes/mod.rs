@@ -48,6 +48,16 @@ fn api_router() -> Router<AppState> {
             "/socket",
             axum::routing::get(websocket::emby_websocket_handler),
         )
+        // PB20：补充 `/websocket`、`/Socket` 别名。Emby SDK 在不同客户端上对端点大小写
+        // 与拼写有差异（Web/原生/移动），全部指到同一个 handler，避免 404 升级失败。
+        .route(
+            "/websocket",
+            axum::routing::get(websocket::emby_websocket_handler),
+        )
+        .route(
+            "/Socket",
+            axum::routing::get(websocket::emby_websocket_handler),
+        )
         .merge(system::router())
         .merge(startup::router())
         .merge(users::router())

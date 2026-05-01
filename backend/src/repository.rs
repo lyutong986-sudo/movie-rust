@@ -5806,91 +5806,111 @@ pub async fn media_stream_codecs_for_items(
     .await?)
 }
 
+/// PB18：聚合 endpoint 的统一思路——
+/// `allowed_library_ids = None` 表示「无库可见性约束」（admin 或没启用隐藏库的场景），
+/// 走 `repo_cache` 全局缓存路径；`Some(&[])` 表示「显式 zero 可见」直接返回空；
+/// `Some(&[..])` 走未缓存的 SQL，并把库白名单注入到 `library_id = ANY(...)` 谓词，
+/// 防止隐藏库里的 studios/tags/genres/years/codecs 通过聚合接口泄露给受限用户。
 pub async fn aggregate_text_values(
     pool: &sqlx::PgPool,
     field: &str,
+    allowed_library_ids: Option<&[Uuid]>,
 ) -> Result<Vec<String>, AppError> {
-    let sql = match field {
-        "container" => {
-            r#"
-            SELECT DISTINCT container AS value
-            FROM media_items
-            WHERE container IS NOT NULL AND btrim(container) <> ''
-            ORDER BY container
-            "#
-        }
-        "official_rating" => {
-            r#"
-            SELECT DISTINCT official_rating AS value
-            FROM media_items
-            WHERE official_rating IS NOT NULL AND btrim(official_rating) <> ''
-            ORDER BY official_rating
-            "#
-        }
+    if matches!(allowed_library_ids, Some(ids) if ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+    let column = match field {
+        "container" => "container",
+        "official_rating" => "official_rating",
         _ => return Ok(Vec::new()),
     };
-
-    Ok(sqlx::query_scalar::<_, String>(sql).fetch_all(pool).await?)
+    let sql = format!(
+        r#"
+        SELECT DISTINCT {col} AS value
+        FROM media_items
+        WHERE {col} IS NOT NULL AND btrim({col}) <> ''
+          AND ($1::uuid[] IS NULL OR library_id = ANY($1))
+        ORDER BY {col}
+        "#,
+        col = column
+    );
+    Ok(sqlx::query_scalar::<_, String>(&sql)
+        .bind(allowed_library_ids.map(<[Uuid]>::to_vec))
+        .fetch_all(pool)
+        .await?)
 }
 
 pub async fn aggregate_array_values(
     pool: &sqlx::PgPool,
     field: &str,
+    allowed_library_ids: Option<&[Uuid]>,
 ) -> Result<Vec<String>, AppError> {
-    crate::repo_cache::cached_aggregate_array_values(pool, field).await
+    if matches!(allowed_library_ids, Some(ids) if ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+    // 仅 admin / 全可见情况下命中全局缓存；受限用户走 uncached 的 library_id 过滤路径。
+    if allowed_library_ids.is_none() {
+        return crate::repo_cache::cached_aggregate_array_values(pool, field).await;
+    }
+    aggregate_array_values_uncached(pool, field, allowed_library_ids).await
 }
 
 pub async fn aggregate_array_values_uncached(
     pool: &sqlx::PgPool,
     field: &str,
+    allowed_library_ids: Option<&[Uuid]>,
 ) -> Result<Vec<String>, AppError> {
-    let sql = match field {
-        "tags" => {
-            r#"
-            SELECT DISTINCT value
-            FROM media_items, unnest(tags) AS value
-            WHERE btrim(value) <> ''
-            ORDER BY value
-            LIMIT 1000
-            "#
-        }
-        "studios" => {
-            r#"
-            SELECT DISTINCT value
-            FROM media_items, unnest(studios) AS value
-            WHERE btrim(value) <> ''
-            ORDER BY value
-            LIMIT 1000
-            "#
-        }
-        "genres" => {
-            r#"
-            SELECT DISTINCT value
-            FROM media_items, unnest(genres) AS value
-            WHERE btrim(value) <> ''
-            ORDER BY value
-            LIMIT 500
-            "#
-        }
+    let (column, limit) = match field {
+        "tags" => ("tags", 1000),
+        "studios" => ("studios", 1000),
+        "genres" => ("genres", 500),
         _ => return Ok(Vec::new()),
     };
-
-    Ok(sqlx::query_scalar::<_, String>(sql).fetch_all(pool).await?)
+    let sql = format!(
+        r#"
+        SELECT DISTINCT value
+        FROM media_items, unnest({col}) AS value
+        WHERE btrim(value) <> ''
+          AND ($1::uuid[] IS NULL OR library_id = ANY($1))
+        ORDER BY value
+        LIMIT {lim}
+        "#,
+        col = column,
+        lim = limit
+    );
+    Ok(sqlx::query_scalar::<_, String>(&sql)
+        .bind(allowed_library_ids.map(<[Uuid]>::to_vec))
+        .fetch_all(pool)
+        .await?)
 }
 
-pub async fn aggregate_years(pool: &sqlx::PgPool) -> Result<Vec<i32>, AppError> {
-    crate::repo_cache::cached_aggregate_years(pool).await
+pub async fn aggregate_years(
+    pool: &sqlx::PgPool,
+    allowed_library_ids: Option<&[Uuid]>,
+) -> Result<Vec<i32>, AppError> {
+    if matches!(allowed_library_ids, Some(ids) if ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+    if allowed_library_ids.is_none() {
+        return crate::repo_cache::cached_aggregate_years(pool).await;
+    }
+    aggregate_years_uncached(pool, allowed_library_ids).await
 }
 
-pub async fn aggregate_years_uncached(pool: &sqlx::PgPool) -> Result<Vec<i32>, AppError> {
+pub async fn aggregate_years_uncached(
+    pool: &sqlx::PgPool,
+    allowed_library_ids: Option<&[Uuid]>,
+) -> Result<Vec<i32>, AppError> {
     Ok(sqlx::query_scalar::<_, i32>(
         r#"
         SELECT DISTINCT production_year
         FROM media_items
         WHERE production_year IS NOT NULL
+          AND ($1::uuid[] IS NULL OR library_id = ANY($1))
         ORDER BY production_year DESC
         "#,
     )
+    .bind(allowed_library_ids.map(<[Uuid]>::to_vec))
     .fetch_all(pool)
     .await?)
 }
@@ -5898,18 +5918,25 @@ pub async fn aggregate_years_uncached(pool: &sqlx::PgPool) -> Result<Vec<i32>, A
 pub async fn aggregate_stream_codecs(
     pool: &sqlx::PgPool,
     stream_type: &str,
+    allowed_library_ids: Option<&[Uuid]>,
 ) -> Result<Vec<String>, AppError> {
+    if matches!(allowed_library_ids, Some(ids) if ids.is_empty()) {
+        return Ok(Vec::new());
+    }
     Ok(sqlx::query_scalar::<_, String>(
         r#"
-        SELECT DISTINCT codec
-        FROM media_streams
-        WHERE stream_type = $1
-          AND codec IS NOT NULL
-          AND btrim(codec) <> ''
-        ORDER BY codec
+        SELECT DISTINCT ms.codec
+        FROM media_streams ms
+        INNER JOIN media_items mi ON mi.id = ms.media_item_id
+        WHERE ms.stream_type = $1
+          AND ms.codec IS NOT NULL
+          AND btrim(ms.codec) <> ''
+          AND ($2::uuid[] IS NULL OR mi.library_id = ANY($2))
+        ORDER BY ms.codec
         "#,
     )
     .bind(stream_type)
+    .bind(allowed_library_ids.map(<[Uuid]>::to_vec))
     .fetch_all(pool)
     .await?)
 }

@@ -67,6 +67,17 @@ async fn set_cached_playback_info(key: String, info: RemotePlaybackInfo) {
     }
     cache.insert(key, CachedPlaybackInfo { info, inserted_at: Instant::now() });
 }
+
+/// PB15：远端 token 刷新 / 失效时调用，按 source_id 前缀清除全部 PlaybackInfo 缓存。
+/// 缓存 key 格式 `<source_id>:<remote_item_id>:<media_source_id>`，token 写入新值后
+/// 历史缓存内的直链可能仍带旧 api_key，命中即触发 401/403 → 浪费一次重试；这里在
+/// `update_remote_emby_source_access_token` / 自动刷新 / 401 续签等路径上主动失效，
+/// 让下一次 PlaybackInfo 走真实远端拿到带新 token 的直链。
+pub async fn invalidate_playback_info_cache_for_source(source_id: Uuid) {
+    let prefix = format!("{}:", source_id);
+    let mut cache = PLAYBACK_INFO_CACHE.write().await;
+    cache.retain(|k, _| !k.starts_with(&prefix));
+}
 const DEFAULT_SPOOFED_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) EmbyTheater/3.0.20 Chrome/124.0.0.0 Safari/537.36";
 const REMOTE_DISPLAY_MODE_SEPARATE: &str = "separate";
 const REMOTE_DISPLAY_MODE_MERGE: &str = "merge";
@@ -2820,6 +2831,7 @@ async fn ensure_authenticated(
     }
 
     let login = login_remote(source).await?;
+    let token_changed = source.access_token.as_deref() != Some(login.access_token.as_str());
     repository::update_remote_emby_source_auth_state(
         pool,
         source.id,
@@ -2829,6 +2841,11 @@ async fn ensure_authenticated(
     .await?;
     source.remote_user_id = Some(login.user.id.clone());
     source.access_token = Some(login.access_token.clone());
+    // PB15：force_refresh 路径或首次 token 变更后清掉本源的 PlaybackInfo 缓存，
+    // 避免跨 token 复用旧直链。仅在 token 真的换了时清，避免无谓抖动。
+    if token_changed {
+        invalidate_playback_info_cache_for_source(source.id).await;
+    }
     Ok(login.user.id)
 }
 
@@ -3203,9 +3220,21 @@ async fn write_remote_strm_bundle(
         media_source_id,
         signature.as_str(),
     );
-    tokio::fs::write(&strm_path, format!("{}\n", stream_line.trim()))
-        .await
-        .map_err(|e| AppError::Internal(format!("写入 STRM 失败: {e}")))?;
+    // PB16：内容未变就跳过磁盘写。`stream_line` 由 `source.id + item_id + media_source_id +
+    // source_secret` 决定，与远端是否变更无关；也就是说同一条目反复同步时绝大多数情况下
+    // 内容会完全一致，直接 `tokio::fs::write` 等于无脑覆盖文件 mtime + 触发 IO。
+    // 改为先 read → 比对 → 不一致才写，省下一次 SSD 写以及避免触发其它工具基于 mtime 的
+    // 误判（比如挂在 STRM 目录上的 inotify/同步工具）。
+    let new_content = format!("{}\n", stream_line.trim());
+    let need_write = match tokio::fs::read(&strm_path).await {
+        Ok(existing) => existing.as_slice() != new_content.as_bytes(),
+        Err(_) => true,
+    };
+    if need_write {
+        tokio::fs::write(&strm_path, new_content.as_bytes())
+            .await
+            .map_err(|e| AppError::Internal(format!("写入 STRM 失败: {e}")))?;
+    }
 
     // 下载侧车文件（图片/NFO/字幕）仍需直连远端服务器
     let base = normalize_server_url(&source.server_url);
@@ -3434,6 +3463,9 @@ async fn refresh_single_remote_token(
 ) -> Result<(), AppError> {
     ensure_authenticated(pool, source, true).await?;
     repository::update_remote_emby_source_last_token_refresh(pool, source.id).await?;
+    // PB15：token 刷新成功后清掉这个源的 PlaybackInfo 缓存，避免下游继续命中带旧
+    // api_key 的直链导致 401/403 浪费一次重试。
+    invalidate_playback_info_cache_for_source(source.id).await;
     Ok(())
 }
 

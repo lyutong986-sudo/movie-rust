@@ -328,11 +328,18 @@ async fn session_play_queue(
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     auth::require_interactive_session(&session)?;
     ensure_session_control_access(&state, &session, &id).await?;
+    // PB17：path 里的 session_id 指向「被遥控/被查询的会话」，其 NowPlayingQueue 是
+    // 那个会话所属用户的播放队列；如果继续用调用者 `session.user_id` 当过滤条件，admin
+    // 在 Web 控制台查看其他设备的 PlayQueue 时会恒空（query 的 `s.user_id = $1` 永远不
+    // 命中）。这里改为先按 session_id 反查目标会话，拿到真实归属用户后再交给 repository。
+    let target = repository::find_active_session(&state.pool, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("会话不存在".to_string()))?;
     let result = repository::session_play_queue(
         &state.pool,
         Some(&id),
         query.device_id.as_deref(),
-        session.user_id,
+        target.user_id,
         state.config.server_id,
     )
     .await?;

@@ -64,6 +64,38 @@ fn notify_item_added(
     );
 }
 
+/// PB14：在扫描入口/出口派发 `library.scan.start` / `library.scan.complete`，与 Emby
+/// Webhooks plugin 行为对齐。`libraries` 为本次任务覆盖的全部库（单库扫描时长度=1，
+/// 全库扫描时为已枚举到的全部库）；payload 形如：
+/// ```json
+/// {"Library":[{"Id":"...","Name":"..."}, ...]}
+/// ```
+fn dispatch_library_scan_event(
+    pool: &sqlx::PgPool,
+    config: &Config,
+    event: &'static str,
+    libraries: &[DbLibrary],
+) {
+    let library_payload: Vec<Value> = libraries
+        .iter()
+        .map(|l| {
+            json!({
+                "Id":   crate::models::uuid_to_emby_guid(&l.id),
+                "Name": l.name,
+            })
+        })
+        .collect();
+    crate::webhooks::dispatch_raw(
+        pool.clone(),
+        config.server_id,
+        config.server_name.clone(),
+        event.to_owned(),
+        json!({
+            "Library": library_payload,
+        }),
+    );
+}
+
 /// 扫描进度快照，用于前端实时展示
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -317,6 +349,14 @@ async fn scan_libraries(
     progress: Option<ScanProgress>,
     db_semaphore: Option<Arc<tokio::sync::Semaphore>>,
 ) -> Result<ScanSummary, AppError> {
+    // PB14：在扫描入口派发 library.scan.start。即使 libraries 为空也派发（让下游知道有
+    // 一次扫描请求），与 Emby Webhooks plugin 的「扫描事件总是成对出现」语义一致。
+    dispatch_library_scan_event(
+        pool,
+        config,
+        crate::webhooks::events::LIBRARY_SCAN_START,
+        &libraries,
+    );
     let startup = repository::startup_configuration(pool, config).await?;
     let limits = WorkLimiterConfig {
         library_scan_limit: startup.library_scan_thread_count.max(1) as u32,
@@ -532,6 +572,16 @@ async fn scan_libraries(
     if let Some(p) = &progress {
         p.mark_post_scan(1.0);
     }
+
+    // PB14：扫描出口派发 library.scan.complete。注意 Phase C 的后扫描任务（trickplay 等）
+    // 是 spawn 出去的后台任务，不阻塞主流程；与 Emby plugin 一致——scan.complete 在主流
+    // 程入库结束时即派发，不等待延迟生成的衍生资产。
+    dispatch_library_scan_event(
+        pool,
+        config,
+        crate::webhooks::events::LIBRARY_SCAN_COMPLETE,
+        &libraries,
+    );
 
     Ok(ScanSummary {
         libraries: libraries.len() as i64,

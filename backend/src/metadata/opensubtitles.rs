@@ -11,6 +11,9 @@ pub struct OpenSubtitlesProvider {
     client: Client,
     token: Option<String>,
     api_key: String,
+    /// PB21：缓存凭据用于 401 自动续登。仅在 `login` 成功后写入，外部仍可通过普通的
+    /// `login()` / `download_subtitle()` 流程使用，零侵入。
+    credentials: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +135,7 @@ impl OpenSubtitlesProvider {
             client,
             token: None,
             api_key: key,
+            credentials: None,
         }
     }
 
@@ -179,6 +183,8 @@ impl OpenSubtitlesProvider {
 
         if let Some(token) = login.token {
             self.token = Some(token);
+            // PB21：缓存凭据，便于后续 401 自动续登。
+            self.credentials = Some((username.to_string(), password.to_string()));
             Ok(())
         } else {
             tracing::warn!(body = %raw, status = ?login.status, "OpenSubtitles 登录响应缺少 token");
@@ -300,14 +306,42 @@ impl OpenSubtitlesProvider {
     }
 
     pub async fn download_subtitle(
-        &self,
+        &mut self,
         file_id: i64,
         sub_format: &str,
     ) -> Result<SubtitleDownloadResult, String> {
+        // PB21：核心调用走带 401 重试的内部实现。
+        // 第一次失败若是 401/403，则清掉缓存 token、按缓存凭据重 login、再重试一次。
+        match self.try_download_once(file_id, sub_format).await {
+            Ok(result) => Ok(result),
+            Err(DownloadError::Unauthorized) => {
+                self.token = None;
+                let creds = self.credentials.clone();
+                let (user, pass) = creds.ok_or_else(|| {
+                    "OpenSubtitles 凭据已失效（401），且本会话未缓存登录用户名/密码以重试".to_string()
+                })?;
+                tracing::info!("OpenSubtitles token 失效（401），尝试自动续登并重试一次");
+                self.login(&user, &pass).await?;
+                self.try_download_once(file_id, sub_format)
+                    .await
+                    .map_err(|e| match e {
+                        DownloadError::Unauthorized => "OpenSubtitles 续登后仍 401".to_string(),
+                        DownloadError::Other(msg) => msg,
+                    })
+            }
+            Err(DownloadError::Other(msg)) => Err(msg),
+        }
+    }
+
+    async fn try_download_once(
+        &self,
+        file_id: i64,
+        sub_format: &str,
+    ) -> Result<SubtitleDownloadResult, DownloadError> {
         let token = self
             .token
             .as_ref()
-            .ok_or_else(|| "需要先登录 OpenSubtitles 才能下载字幕".to_string())?;
+            .ok_or_else(|| DownloadError::Other("需要先登录 OpenSubtitles 才能下载字幕".to_string()))?;
 
         let body = serde_json::json!({
             "file_id": file_id,
@@ -324,22 +358,27 @@ impl OpenSubtitlesProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("OpenSubtitles download request failed: {e}"))?;
+            .map_err(|e| DownloadError::Other(format!("OpenSubtitles download request failed: {e}")))?;
 
         let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(DownloadError::Unauthorized);
+        }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("OpenSubtitles download HTTP {status}: {body}"));
+            return Err(DownloadError::Other(format!(
+                "OpenSubtitles download HTTP {status}: {body}"
+            )));
         }
 
         let dl_info: DownloadResponse = resp
             .json()
             .await
-            .map_err(|e| format!("OpenSubtitles download parse failed: {e}"))?;
+            .map_err(|e| DownloadError::Other(format!("OpenSubtitles download parse failed: {e}")))?;
 
         let link = dl_info
             .link
-            .ok_or_else(|| "OpenSubtitles 未返回下载链接".to_string())?;
+            .ok_or_else(|| DownloadError::Other("OpenSubtitles 未返回下载链接".to_string()))?;
 
         let content_resp = self
             .client
@@ -348,18 +387,24 @@ impl OpenSubtitlesProvider {
             .header("User-Agent", USER_AGENT)
             .send()
             .await
-            .map_err(|e| format!("下载字幕文件失败: {e}"))?;
+            .map_err(|e| DownloadError::Other(format!("下载字幕文件失败: {e}")))?;
 
         let content = content_resp
             .text()
             .await
-            .map_err(|e| format!("读取字幕内容失败: {e}"))?;
+            .map_err(|e| DownloadError::Other(format!("读取字幕内容失败: {e}")))?;
 
         Ok(SubtitleDownloadResult {
             content,
             format: sub_format.to_string(),
         })
     }
+}
+
+/// 下载内部错误：仅 401/403 走自动续登路径，其余错误透传。
+enum DownloadError {
+    Unauthorized,
+    Other(String),
 }
 
 #[derive(Debug, Clone)]

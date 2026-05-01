@@ -307,10 +307,12 @@ async fn user_item_counts(
 }
 
 async fn studios(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    let items = repository::aggregate_array_values(&state.pool, "studios")
+    // PB18：受限用户只能聚合自己可见库的工作室列表，避免隐藏库的工作室名称泄露。
+    let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
+    let items = repository::aggregate_array_values(&state.pool, "studios", allowed.as_deref())
         .await?
         .into_iter()
         .map(|name| virtual_folder_item(&name, "Studio", state.config.server_id))
@@ -383,10 +385,12 @@ async fn studio_items(
 }
 
 async fn tags(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    let items = repository::aggregate_array_values(&state.pool, "tags")
+    // PB18：tags 同 studios，按可见库收敛。
+    let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
+    let items = repository::aggregate_array_values(&state.pool, "tags", allowed.as_deref())
         .await?
         .into_iter()
         .map(|name| virtual_folder_item(&name, "Tag", state.config.server_id))
@@ -416,55 +420,65 @@ async fn tag_items(
 }
 
 async fn official_ratings(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
+    // PB18：official_rating 列表按可见库收敛。
+    let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
     Ok(Json(string_list_result(
-        repository::aggregate_text_values(&state.pool, "official_rating").await?,
+        repository::aggregate_text_values(&state.pool, "official_rating", allowed.as_deref()).await?,
     )))
 }
 
 async fn containers(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
+    // PB18：container 列表按可见库收敛。
+    let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
     Ok(Json(string_list_result(
-        repository::aggregate_text_values(&state.pool, "container").await?,
+        repository::aggregate_text_values(&state.pool, "container", allowed.as_deref()).await?,
     )))
 }
 
 async fn audio_codecs(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
+    // PB18：codec 聚合需要 JOIN media_items 后按可见库收敛。
+    let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
     Ok(Json(string_list_result(
-        repository::aggregate_stream_codecs(&state.pool, "Audio").await?,
+        repository::aggregate_stream_codecs(&state.pool, "Audio", allowed.as_deref()).await?,
     )))
 }
 
 async fn video_codecs(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
+    let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
     Ok(Json(string_list_result(
-        repository::aggregate_stream_codecs(&state.pool, "Video").await?,
+        repository::aggregate_stream_codecs(&state.pool, "Video", allowed.as_deref()).await?,
     )))
 }
 
 async fn subtitle_codecs(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
+    let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
     Ok(Json(string_list_result(
-        repository::aggregate_stream_codecs(&state.pool, "Subtitle").await?,
+        repository::aggregate_stream_codecs(&state.pool, "Subtitle", allowed.as_deref()).await?,
     )))
 }
 
 async fn years(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    let items = repository::aggregate_years(&state.pool)
+    // PB18：years 列表按可见库收敛。
+    let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
+    let items = repository::aggregate_years(&state.pool, allowed.as_deref())
         .await?
         .into_iter()
         .map(|year| {
@@ -1733,7 +1747,7 @@ async fn item_ancestors(
 }
 
 async fn item_critic_reviews(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
 ) -> Result<Json<Value>, AppError> {
@@ -1742,6 +1756,11 @@ async fn item_critic_reviews(
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    // PB19：评分元数据本身有信息泄露价值（受限用户能从隐藏库条目反推存在性），
+    // 与 user_item_by_id 同口径加 user_can_access_item 校验。admin 豁免。
+    if !session.is_admin {
+        ensure_user_can_access_item(&state, session.user_id, item_id).await?;
+    }
     Ok(Json(json!({
         "TotalRecordCount": 0,
         "Items": [],
@@ -1753,7 +1772,7 @@ async fn item_critic_reviews(
 }
 
 async fn item_external_id_infos(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
 ) -> Result<Json<Vec<Value>>, AppError> {
@@ -1762,6 +1781,10 @@ async fn item_external_id_infos(
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    // PB19：external id 含 IMDB/TMDb GUID，受限用户隔离需与可见库一致；admin 豁免。
+    if !session.is_admin {
+        ensure_user_can_access_item(&state, session.user_id, item_id).await?;
+    }
     let mut items = Vec::new();
     if let Some(provider_ids) = item.provider_ids.as_object() {
         for (provider, value) in provider_ids {
@@ -2168,8 +2191,25 @@ async fn delete_item(
     }
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {}", item_id_str)))?;
+    // PB14：删除前先取条目元数据，方便派发 item.deleted webhook（按 Emby Webhooks plugin 规范，
+    // payload 里 Item 字段在条目已经从 DB 移除时就拿不到了）。
+    let deleted_snapshot = repository::get_media_item(&state.pool, item_id).await?;
     if !repository::delete_media_item(&state.pool, item_id).await? {
         return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    }
+    if let Some(item) = deleted_snapshot {
+        crate::webhooks::dispatch(
+            &state,
+            crate::webhooks::events::ITEM_DELETED,
+            serde_json::json!({
+                "Item": {
+                    "Id":         crate::models::uuid_to_emby_guid(&item.id),
+                    "Name":       item.name,
+                    "Type":       item.item_type,
+                    "SeriesName": item.series_name.unwrap_or_default(),
+                }
+            }),
+        );
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2613,7 +2653,26 @@ async fn delete_items_bulk(
     }
     let item_ids = parse_emby_uuid_list(query.ids.as_deref());
     for item_id in item_ids {
-        let _ = repository::delete_media_item(&state.pool, item_id).await?;
+        // PB14：批量删除也派发 item.deleted webhook。批量场景为每条单独 dispatch，
+        // 与 Emby Webhooks plugin 行为一致；下游可按 ItemId 自行去重/合并。
+        let snapshot = repository::get_media_item(&state.pool, item_id).await?;
+        let removed = repository::delete_media_item(&state.pool, item_id).await?;
+        if removed {
+            if let Some(item) = snapshot {
+                crate::webhooks::dispatch(
+                    &state,
+                    crate::webhooks::events::ITEM_DELETED,
+                    serde_json::json!({
+                        "Item": {
+                            "Id":         crate::models::uuid_to_emby_guid(&item.id),
+                            "Name":       item.name,
+                            "Type":       item.item_type,
+                            "SeriesName": item.series_name.unwrap_or_default(),
+                        }
+                    }),
+                );
+            }
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -3344,13 +3403,17 @@ async fn special_features(
 }
 
 async fn intro_timestamps(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let item_id = emby_id_to_uuid(&item_id_str)
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
     ensure_media_item_exists(&state, item_id).await?;
+    // PB19：intro/credit 时间戳是隐藏库条目「存在性」的旁路指针，按可见库校验。
+    if !session.is_admin {
+        ensure_user_can_access_item(&state, session.user_id, item_id).await?;
+    }
     let chapters = repository::get_media_chapters(&state.pool, item_id).await?;
     let intro_start = marker_ticks(&chapters, "IntroStart");
     let intro_end = marker_ticks(&chapters, "IntroEnd");
@@ -5992,6 +6055,9 @@ async fn search_hints(
         .as_deref()
         .and_then(|s| crate::models::emby_id_to_uuid(s).ok())
         .unwrap_or(session.user_id);
+    // PB13：与 /Users/{id}/Items 同级口径——非 admin 不允许冒用别人的 UserId
+    // 拿搜索提示，否则会越过 effective_library_filter_for_user 暴露隐藏库内容。
+    ensure_user_access(&session, user_id)?;
 
     let search_term = query
         .search_term

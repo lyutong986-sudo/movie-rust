@@ -1,5 +1,6 @@
 use axum::{
     extract::{ws::WebSocket, Query, State, WebSocketUpgrade},
+    http::HeaderMap,
     response::Response,
 };
 use serde::Deserialize;
@@ -7,6 +8,49 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{error::AppError, state::AppState};
+
+/// PB20：解析 Authorization / X-Emby-Token / X-Emby-Authorization header 里的 token，
+/// 与 REST 入口 `crate::auth::AuthSession` 的提取顺序一致；用于 WS 升级补全 header 鉴权。
+fn extract_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    if let Some(value) = headers
+        .get("X-Emby-Token")
+        .and_then(|v| v.to_str().ok())
+    {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Some(value) = headers
+        .get("X-MediaBrowser-Token")
+        .and_then(|v| v.to_str().ok())
+    {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Some(value) = headers.get("Authorization").and_then(|v| v.to_str().ok()) {
+        let raw = value.trim();
+        if let Some(stripped) = raw.strip_prefix("Bearer ") {
+            let token = stripped.trim();
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+        // Emby 风格 `Authorization: MediaBrowser Token="..."`
+        if let Some(start) = raw.find("Token=\"") {
+            let rest = &raw[start + 7..];
+            if let Some(end) = rest.find('"') {
+                let token = rest[..end].trim();
+                if !token.is_empty() {
+                    return Some(token.to_string());
+                }
+            }
+        }
+    }
+    None
+}
 
 #[derive(Debug, Deserialize)]
 pub struct WebSocketQuery {
@@ -29,15 +73,25 @@ pub struct WebSocketSession {
 pub async fn emby_websocket_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<WebSocketQuery>,
+    headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Result<Response, AppError> {
+    // PB20：兼容 Emby SDK 客户端的所有 token 携带方式：
+    //   1. query `?token=...` / `?api_key=...`（Web 客户端常用，浏览器拒绝在 WS 升级时附自定义 header）
+    //   2. `Authorization: MediaBrowser Token="..."` 或 `Bearer <token>`
+    //   3. `X-Emby-Token` / `X-MediaBrowser-Token`（部分桌面/原生客户端用）
+    // 任意一处命中即可，确保 WS 鉴权口径与 REST AuthSession 一致。
+    let header_token = extract_token_from_headers(&headers);
     let token = query
         .token
         .as_deref()
         .or(query.api_key.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or(header_token)
         .ok_or(AppError::Unauthorized)?;
+    let token = token.as_str();
 
     let mut access_token = None;
     let user_id = if state

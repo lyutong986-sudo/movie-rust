@@ -293,7 +293,7 @@ async fn item_image_url_response(
 }
 
 async fn list_item_remote_images(
-    _session: AuthSession,
+    session: AuthSession,
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
     Query(query): Query<RemoteImagesQuery>,
@@ -303,6 +303,13 @@ async fn list_item_remote_images(
     let item = repository::get_media_item(&state.pool, item_id)
         .await?
         .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+    // PB19：远端图列表暴露的是 TMDb/Fanart 等外部图候选，受限用户即便能拿到 itemId 也不
+    // 应该能枚举出隐藏库条目的候选海报；这里加 user_can_access_item，admin 豁免。
+    if !session.is_admin
+        && !repository::user_can_access_item(&state.pool, session.user_id, item_id).await?
+    {
+        return Err(AppError::NotFound("媒体条目不存在".to_string()));
+    }
     let images = remote_images_for_item(
         &state,
         &item,

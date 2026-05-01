@@ -42,7 +42,14 @@ type HmacSha256 = Hmac<Sha256>;
 /// 防止两侧 typo 不一致。
 pub mod events {
     pub const ITEM_ADDED: &str = "item.added";
+    /// PB14：单条/批量删除媒体条目时派发，payload 形如 `{"Item":{"Id","Name","Type","SeriesName"}}`，
+    /// 用于 Sakura/Telegram Bot 等下游做"被删媒体"的全局通告。
+    pub const ITEM_DELETED: &str = "item.deleted";
     pub const LIBRARY_NEW: &str = "library.new";
+    /// PB14：library 扫描开始/结束时派发，payload 形如 `{"Library":{"Id","Name"}}`，
+    /// 与 Emby Webhooks plugin 的 scan 生命周期事件等价；用于下游"扫描中禁推送"等节流策略。
+    pub const LIBRARY_SCAN_START: &str = "library.scan.start";
+    pub const LIBRARY_SCAN_COMPLETE: &str = "library.scan.complete";
     pub const PLAYBACK_START: &str = "playback.start";
     pub const PLAYBACK_PROGRESS: &str = "playback.progress";
     pub const PLAYBACK_STOP: &str = "playback.stop";
@@ -55,7 +62,10 @@ pub mod events {
     /// 上游 emby/jellyfin Webhooks plugin 暴露的全部事件名（用于 /Notifications/Types 列表）。
     pub const ALL: &[&str] = &[
         ITEM_ADDED,
+        ITEM_DELETED,
         LIBRARY_NEW,
+        LIBRARY_SCAN_START,
+        LIBRARY_SCAN_COMPLETE,
         PLAYBACK_START,
         PLAYBACK_PROGRESS,
         PLAYBACK_STOP,
