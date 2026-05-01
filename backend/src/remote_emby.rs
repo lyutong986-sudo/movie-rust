@@ -1545,29 +1545,102 @@ fn remote_image_url(server_url: &str, remote_item_id: &str, image_type: &str, ta
     )
 }
 
-fn extract_remote_image_urls(
+/// PB40：远端图片 URL 全采集。让 7 类海报 + 全部 Backdrops 一次性从远端 BaseItemDto
+/// 派生出来，不再只保留 Primary + 第一张 Backdrop（以前只取 (Option<String>, Option<String>)
+/// 的方式让 Logo/Thumb/Banner/Art/Disc 全部丢失，详情页不得不去 TMDB 二次拉取）。
+#[derive(Debug, Default, Clone)]
+struct RemoteImageUrls {
+    /// `ImageTags.Primary` → `/Items/{id}/Images/Primary?tag=...`
+    primary: Option<String>,
+    /// `ImageTags.Logo` → `/Items/{id}/Images/Logo?tag=...`
+    logo: Option<String>,
+    /// `ImageTags.Thumb`
+    thumb: Option<String>,
+    /// `ImageTags.Banner`
+    banner: Option<String>,
+    /// `ImageTags.Art`
+    art: Option<String>,
+    /// `ImageTags.Disc`
+    disc: Option<String>,
+    /// `BackdropImageTags[]` → 多张：`/Items/{id}/Images/Backdrop/{idx}?tag=...`
+    /// 第一张兼容存到 `media_items.backdrop_path`，全部存到 `backdrop_paths` 数组列。
+    backdrops: Vec<String>,
+}
+
+impl RemoteImageUrls {
+    fn first_backdrop(&self) -> Option<&str> {
+        self.backdrops.first().map(|s| s.as_str())
+    }
+}
+
+/// 远端 backdrop 多张时，索引化生成 URL：`/Images/Backdrop/0`、`/Images/Backdrop/1` 等。
+/// Emby 服务端按顺序返回 BackdropImageTags，索引等于数组下标。
+fn remote_backdrop_indexed_url(
+    server_url: &str,
+    remote_item_id: &str,
+    index: usize,
+    tag: &str,
+) -> String {
+    let base = server_url.trim_end_matches('/');
+    format!(
+        "{base}/emby/Items/{remote_item_id}/Images/Backdrop/{index}?tag={tag}&quality=90&maxWidth=1920"
+    )
+}
+
+fn extract_image_tag_field<'a>(image_tags: &'a Option<Value>, key: &str) -> Option<&'a str> {
+    match image_tags.as_ref()? {
+        Value::Object(map) => map.get(key).and_then(Value::as_str),
+        _ => None,
+    }
+}
+
+fn extract_remote_image_urls_full(
     server_url: &str,
     remote_item_id: &str,
     image_tags: &Option<Value>,
     backdrop_image_tags: &Option<Value>,
-) -> (Option<String>, Option<String>) {
-    let primary = image_tags.as_ref().and_then(|tags| {
-        let tag = match tags {
-            Value::Object(map) => map.get("Primary").and_then(Value::as_str),
-            _ => None,
-        };
-        tag.map(|t| remote_image_url(server_url, remote_item_id, "Primary", t))
-    });
-    let backdrop = backdrop_image_tags.as_ref().and_then(|tags| {
-        match tags {
-            Value::Array(arr) => arr.first().and_then(Value::as_str),
-            Value::Object(map) => map.values().next().and_then(Value::as_str),
-            Value::String(s) => Some(s.as_str()),
-            _ => None,
+) -> RemoteImageUrls {
+    // 7 类单图：直接按 ImageTags.Key 取 tag 字符串拼 URL；缺则保持 None，调用方决定是否回退。
+    let url_for = |key: &str| -> Option<String> {
+        extract_image_tag_field(image_tags, key)
+            .map(|tag| remote_image_url(server_url, remote_item_id, key, tag))
+    };
+    // 多张 Backdrop：BackdropImageTags 通常是 `string[]`；个别旧版 Emby 可能返 `Object` 或 `String`，
+    // 这里都兼容下来。索引一律用数组顺序，URL 走 `/Images/Backdrop/{idx}`。
+    let mut backdrops: Vec<String> = Vec::new();
+    if let Some(value) = backdrop_image_tags.as_ref() {
+        match value {
+            Value::Array(arr) => {
+                for (idx, tag) in arr.iter().enumerate() {
+                    if let Some(t) = tag.as_str().filter(|s| !s.is_empty()) {
+                        backdrops.push(remote_backdrop_indexed_url(server_url, remote_item_id, idx, t));
+                    }
+                }
+            }
+            Value::Object(map) => {
+                for (idx, (_, tag)) in map.iter().enumerate() {
+                    if let Some(t) = tag.as_str().filter(|s| !s.is_empty()) {
+                        backdrops.push(remote_backdrop_indexed_url(server_url, remote_item_id, idx, t));
+                    }
+                }
+            }
+            Value::String(s) => {
+                if !s.is_empty() {
+                    backdrops.push(remote_backdrop_indexed_url(server_url, remote_item_id, 0, s));
+                }
+            }
+            _ => {}
         }
-        .map(|t| remote_image_url(server_url, remote_item_id, "Backdrop", t))
-    });
-    (primary, backdrop)
+    }
+    RemoteImageUrls {
+        primary: url_for("Primary"),
+        logo: url_for("Logo"),
+        thumb: url_for("Thumb"),
+        banner: url_for("Banner"),
+        art: url_for("Art"),
+        disc: url_for("Disc"),
+        backdrops,
+    }
 }
 
 fn parse_remote_premiere_date(value: Option<&str>) -> Option<NaiveDate> {
@@ -1980,14 +2053,17 @@ async fn upsert_remote_media_item(
                 .map(|seconds| (seconds * 10_000_000.0).round() as i64)
         })
     });
-    let (remote_primary, remote_backdrop) = extract_remote_image_urls(
+    // PB40：远端 7 类图 + 多张 Backdrop 一次性提取。之前只取 Primary + 第一张 Backdrop，
+    // 把远端已经提供的 Logo / Thumb / Banner / Art / Disc / 后续 Backdrop 全丢了，
+    // 然后详情页冷启动时再去 TMDB 补回——既慢又浪费配额。
+    let remote_urls = extract_remote_image_urls_full(
         source.server_url.as_str(),
         item.item.id.as_str(),
         &item.item.image_tags,
         &item.item.backdrop_image_tags,
     );
     // Episode 回退：当自身没有 Primary 图时，使用 Series 的 Primary 图
-    let series_fallback_primary = if remote_primary.is_none() && is_episode {
+    let series_fallback_primary = if remote_urls.primary.is_none() && is_episode {
         item.item.series_id.as_deref().map(|sid| {
             if let Some(tag) = item.item.series_primary_image_tag.as_deref() {
                 remote_image_url(source.server_url.as_str(), sid, "Primary", tag)
@@ -1999,33 +2075,73 @@ async fn upsert_remote_media_item(
     } else {
         None
     };
-    let image_primary_path = local_poster
-        .or_else(|| remote_primary.as_ref().map(|s| Path::new(s.as_str())))
-        .or_else(|| series_fallback_primary.as_ref().map(|s| Path::new(s.as_str())));
-    // Episode 回退：当自身没有 Backdrop 时，使用 ParentBackdropItemId 的 Backdrop
-    let series_fallback_backdrop = if remote_backdrop.is_none() && is_episode {
+    // Episode 回退（PB40 扩充）：自身缺 Logo/Backdrop 时分别用 ParentLogo* / ParentBackdrop* 去拼。
+    // ParentLogoItemId / ParentLogoImageTag 是 Emby 在 Episode 上专门暴露的"剧集 Logo"指针。
+    let series_fallback_logo = if remote_urls.logo.is_none() && is_episode {
+        match (
+            item.item.parent_logo_item_id.as_deref(),
+            item.item.parent_logo_image_tag.as_deref(),
+        ) {
+            (Some(lid), Some(tag)) if !lid.is_empty() && !tag.is_empty() => {
+                Some(remote_image_url(source.server_url.as_str(), lid, "Logo", tag))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    // 多 backdrop：自身没有则用 ParentBackdropItemId + ParentBackdropImageTags 数组全量回退。
+    let series_fallback_backdrops: Vec<String> = if remote_urls.backdrops.is_empty() && is_episode {
         let backdrop_item = item
             .item
             .parent_backdrop_item_id
             .as_deref()
             .or(item.item.series_id.as_deref());
-        backdrop_item.and_then(|bid| {
-            let tag = item.item.parent_backdrop_image_tags.as_ref().and_then(|tags| {
-                match tags {
-                    Value::Array(arr) => arr.first().and_then(Value::as_str),
-                    Value::String(s) => Some(s.as_str()),
-                    _ => None,
+        if let Some(bid) = backdrop_item {
+            match item.item.parent_backdrop_image_tags.as_ref() {
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, v)| {
+                        v.as_str()
+                            .filter(|s| !s.is_empty())
+                            .map(|t| remote_backdrop_indexed_url(source.server_url.as_str(), bid, idx, t))
+                    })
+                    .collect(),
+                Some(Value::String(s)) if !s.is_empty() => {
+                    vec![remote_backdrop_indexed_url(source.server_url.as_str(), bid, 0, s)]
                 }
-            });
-            tag.map(|t| remote_image_url(source.server_url.as_str(), bid, "Backdrop", t))
-        })
+                _ => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        }
     } else {
-        None
+        Vec::new()
     };
+
+    let image_primary_path = local_poster
+        .or_else(|| remote_urls.primary.as_ref().map(|s| Path::new(s.as_str())))
+        .or_else(|| series_fallback_primary.as_ref().map(|s| Path::new(s.as_str())));
+    // backdrop_path（兼容字段，单值）取自身第一张；缺则用 episode 的 series 回退第一张。
     let backdrop_path = local_backdrop
-        .or_else(|| remote_backdrop.as_ref().map(|s| Path::new(s.as_str())))
-        .or_else(|| series_fallback_backdrop.as_ref().map(|s| Path::new(s.as_str())));
-    let empty_backdrops = Vec::<String>::new();
+        .or_else(|| remote_urls.first_backdrop().map(Path::new))
+        .or_else(|| series_fallback_backdrops.first().map(|s| Path::new(s.as_str())));
+    // 7 类图剩余 6 类：全部从远端 ImageTags 提取；Logo 单独有 Episode→Series 回退。
+    let logo_path_owned: Option<String> = remote_urls.logo.clone().or(series_fallback_logo);
+    // local_logo 路径（来自 STRM 输出目录的 logo.png 等）优先级最高。
+    let logo_path = local_logo.or_else(|| logo_path_owned.as_ref().map(|s| Path::new(s.as_str())));
+    let thumb_path = remote_urls.thumb.as_ref().map(|s| Path::new(s.as_str()));
+    let banner_path = remote_urls.banner.as_ref().map(|s| Path::new(s.as_str()));
+    let art_path = remote_urls.art.as_ref().map(|s| Path::new(s.as_str()));
+    let disc_path = remote_urls.disc.as_ref().map(|s| Path::new(s.as_str()));
+    // 全部 backdrops（自身全部 + episode 缺则用 series 回退全部）；media_items.backdrop_paths 是 text[]。
+    let all_backdrops: Vec<String> = if !remote_urls.backdrops.is_empty() {
+        remote_urls.backdrops.clone()
+    } else {
+        series_fallback_backdrops.clone()
+    };
+
     // PB34-1：把远端 BaseItemDto 的扩展字段透传到本地 DB（之前一律置 None / 空数组）。
     let trailers = remote_trailers_to_vec(item.item.remote_trailers.as_ref());
     let inserted_id = repository::upsert_media_item(
@@ -2057,12 +2173,12 @@ async fn upsert_remote_media_item(
             production_locations: &item.item.production_locations,
             image_primary_path,
             backdrop_path,
-            logo_path: local_logo,
-            thumb_path: None,
-            art_path: None,
-            banner_path: None,
-            disc_path: None,
-            backdrop_paths: &empty_backdrops,
+            logo_path,
+            thumb_path,
+            art_path,
+            banner_path,
+            disc_path,
+            backdrop_paths: &all_backdrops,
             remote_trailers: &trailers,
             series_name: item.item.series_name.as_deref(),
             season_name: item.item.season_name.as_deref(),
@@ -2250,20 +2366,25 @@ async fn fetch_and_upsert_series_detail(
     };
 
     let series_name = detail.name.clone();
-    let (remote_primary, remote_backdrop) = extract_remote_image_urls(
+    // PB40：Series 详情同样把 7 类图 + 全部 Backdrop 一次性提取，避免详情页二次回 TMDB。
+    let remote_urls = extract_remote_image_urls_full(
         source.server_url.as_str(),
         remote_series_id,
         &detail.image_tags,
         &detail.backdrop_image_tags,
     );
-    let primary_path = remote_primary.as_deref().map(Path::new);
-    let backdrop_path = remote_backdrop.as_deref().map(Path::new);
+    let primary_path = remote_urls.primary.as_deref().map(Path::new);
+    let backdrop_path = remote_urls.first_backdrop().map(Path::new);
+    let logo_path = remote_urls.logo.as_deref().map(Path::new);
+    let thumb_path = remote_urls.thumb.as_deref().map(Path::new);
+    let banner_path = remote_urls.banner.as_deref().map(Path::new);
+    let art_path = remote_urls.art.as_deref().map(Path::new);
+    let disc_path = remote_urls.disc.as_deref().map(Path::new);
     let provider_ids = merge_provider_ids(
         &detail.provider_ids,
         remote_marker_provider_ids(source.id, Some(remote_series_id), Some(view_id), None),
     );
     let empty = Vec::<String>::new();
-    let empty_paths = Vec::<String>::new();
     let trailers = remote_trailers_to_vec(detail.remote_trailers.as_ref());
 
     if let Err(error) = repository::upsert_media_item(
@@ -2295,12 +2416,12 @@ async fn fetch_and_upsert_series_detail(
             production_locations: &detail.production_locations,
             image_primary_path: primary_path,
             backdrop_path,
-            logo_path: None,
-            thumb_path: None,
-            art_path: None,
-            banner_path: None,
-            disc_path: None,
-            backdrop_paths: &empty_paths,
+            logo_path,
+            thumb_path,
+            art_path,
+            banner_path,
+            disc_path,
+            backdrop_paths: &remote_urls.backdrops,
             remote_trailers: &trailers,
             series_name: Some(series_name.as_str()),
             season_name: None,
@@ -4484,4 +4605,51 @@ fn is_hop_by_hop_header(name: &str) -> bool {
             | "transfer-encoding"
             | "upgrade"
     )
+}
+
+/// PB40：管理员诊断接口的支撑函数。直接命中 `/Users/{uid}/Items?ParentId=...&Fields=<fields>`
+/// 并把远端 **原始 JSON 响应** 透传回来——让前端 / 用户能在浏览器里实地核对：
+/// - 远端到底返回了哪些字段？（ImageTags / BackdropImageTags 是否覆盖 7 类图？）
+/// - 我们 sync 时丢了哪些（之前只取 Primary + 第一张 Backdrop）？
+/// - 是否还有 TMDB 才能补的缺口？
+///
+/// 返回 `serde_json::Value`：保留远端 PascalCase / 嵌套结构原状。
+pub async fn diagnostic_fetch_sample_items(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    parent_id: Option<&str>,
+    fields: Option<&str>,
+    limit: i64,
+) -> Result<serde_json::Value, AppError> {
+    let mut source = repository::get_remote_emby_source(pool, source_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("远端 Emby 源不存在".to_string()))?;
+    let user_id = ensure_authenticated(pool, &mut source, false).await?;
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    // 默认请求所有可能影响 sync 的字段；用户也可显式覆盖
+    let default_fields = "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,\
+        OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,\
+        ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,\
+        ImageTags,BackdropImageTags,SeriesId,SeasonId,\
+        SeriesPrimaryImageTag,ParentBackdropImageTags,ParentBackdropItemId,\
+        ParentLogoItemId,ParentLogoImageTag,ParentThumbItemId,ParentThumbImageTag,\
+        ParentArtItemId,ParentArtImageTag,Status,EndDate,People,\
+        OriginalTitle,SortName,Taglines,ProductionLocations,\
+        AirDays,AirTime,RemoteTrailers,DateCreated,Path,Container,\
+        UserData,DisplayPreferencesId,Studios,GenreItems,TagItems,Chapters";
+    let mut query = vec![
+        ("Recursive".to_string(), "true".to_string()),
+        ("IncludeItemTypes".to_string(), "Movie,Episode,Series".to_string()),
+        ("Fields".to_string(), fields.unwrap_or(default_fields).to_string()),
+        ("EnableTotalRecordCount".to_string(), "true".to_string()),
+        ("EnableImageTypes".to_string(), "Primary,Backdrop,Logo,Thumb,Banner,Art,Disc,Box,BoxRear,Menu".to_string()),
+        ("ImageTypeLimit".to_string(), "10".to_string()),
+        ("StartIndex".to_string(), "0".to_string()),
+        ("Limit".to_string(), limit.clamp(1, 50).to_string()),
+    ];
+    if let Some(pid) = parent_id.filter(|p| !p.trim().is_empty()) {
+        query.push(("ParentId".to_string(), pid.trim().to_string()));
+    }
+    get_json_with_retry::<serde_json::Value>(pool, &mut source, &endpoint, &query).await
 }

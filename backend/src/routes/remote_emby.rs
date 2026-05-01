@@ -70,6 +70,12 @@ pub fn router() -> Router<AppState> {
             "/api/admin/remote-emby/cleanup-orphan-libraries",
             post(cleanup_orphan_remote_libraries),
         )
+        // PB40：诊断接口——拉取远端原始 BaseItemDto 列表，让管理员 / 测试脚本能在浏览器里
+        // 实地核对远端返回的字段（ImageTags / BackdropImageTags 是否覆盖 7 类图、是否需要 TMDB 兜底）。
+        .route(
+            "/api/admin/remote-emby/sources/{source_id}/diagnostic/sample-items",
+            get(diagnostic_remote_emby_sample_items),
+        )
         .route(
             "/api/remote-emby/proxy/{source_id}/{remote_item_id}",
             get(proxy_remote_emby_item).head(proxy_remote_emby_item),
@@ -81,6 +87,36 @@ pub fn router() -> Router<AppState> {
 /// 现存远端源的虚拟路径不动；仅删那些 source_id 已不存在的孤儿。
 ///
 /// 返回 `{ "deleted_libraries": u64, "updated_libraries": u64, "orphan_source_ids": u64 }`。
+/// PB40：诊断接口查询参数。`ParentId` 为远端视图 ID（可选）；`Fields` 不传时用全字段默认；
+/// `Limit` 默认 5，clamp [1, 50]，避免管理员误请求过大返回。
+#[derive(Debug, Deserialize)]
+struct DiagnosticSampleItemsQuery {
+    #[serde(default, alias = "parentId", alias = "parent_id", alias = "ParentId")]
+    parent_id: Option<String>,
+    #[serde(default, alias = "fields", alias = "Fields")]
+    fields: Option<String>,
+    #[serde(default, alias = "limit", alias = "Limit")]
+    limit: Option<i64>,
+}
+
+async fn diagnostic_remote_emby_sample_items(
+    session: AuthSession,
+    State(state): State<AppState>,
+    Path(source_id): Path<Uuid>,
+    Query(query): Query<DiagnosticSampleItemsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth::require_admin(&session)?;
+    let raw = remote_emby::diagnostic_fetch_sample_items(
+        &state.pool,
+        source_id,
+        query.parent_id.as_deref(),
+        query.fields.as_deref(),
+        query.limit.unwrap_or(5),
+    )
+    .await?;
+    Ok(Json(raw))
+}
+
 async fn cleanup_orphan_remote_libraries(
     session: AuthSession,
     State(state): State<AppState>,

@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-05-01（第三十九批：远端 source 单设备身份伪装 PB39 — 去 `MovieRustTransit / MovieRustProxy / movie-rust-{uuid}` 自爆字符串，统一伪装成一台 Infuse-Direct on Apple TV / 8.2.4，DeviceId 32 位 hex 永不改变）
+> 对比时间：2026-05-01（第四十批：远端 BaseItemDto **图片字段全采集** PB40 — 远端同步一次性写入 7 类图（Primary / Logo / Thumb / Banner / Art / Disc + 多张 Backdrop），不再只取 Primary + 第一张 Backdrop；去 TMDB 兜底依赖；新增 `/api/admin/remote-emby/sources/{id}/diagnostic/sample-items` 诊断接口）
 
 ---
 
@@ -2998,6 +2998,100 @@ do_refresh_item_metadata_with
 - `backend/src/routes/remote_emby.rs`
 - `frontend/src/api/emby.ts`
 - `frontend/src/pages/settings/RemoteEmbySettings.vue`
+- `EmbyAPI_Compatibility_Report.md`
+
+---
+
+## 第四十批（2026-05-01）：远端 BaseItemDto **图片字段全采集** PB40 — 远端 sync 一次性吃下 7 类图 + 全部 Backdrop，去 TMDB 兜底依赖
+
+### 触发场景
+用户使用 chrome-devtools MCP 实地观察远端源 `https://rais115.huuwnb.cn`（共 11 个媒体库、约 160 万条目）的同步链路，提出关键问题：
+
+> "查看网络日志对比 远程媒体获取端点是否使用正确，元数据，演职人员，图片海报，徽标，缩略图，横幅图，光盘封面，艺术图，壁纸 ，**因为如果能完整获取，就不需要 tmdb 重复获取**"
+
+链路审计后发现：远端 Emby `BaseItemDto` 已经把 **Primary / Logo / Thumb / Banner / Art / Disc + 多张 Backdrop** 全部用 `ImageTags{}` / `BackdropImageTags[]` 一次返回，而当前同步代码只取 **Primary + 第一张 Backdrop**，把 Logo / Thumb / Banner / Art / Disc + 后续 Backdrop **全部丢弃**，详情页冷启动只能再去 TMDB 兜底——既慢又浪费 TMDB 配额，远端 Emby 早就提供了的图全白浪费。
+
+### 综合根因清单
+
+| 问题 ID | 优先级 | 缺陷位置 | 现象 |
+|---|---|---|---|
+| PB40-A | P0 | `remote_emby.rs::extract_remote_image_urls` | 函数签名 `(Option<String>, Option<String>)` 写死只返回 (Primary, 第一张 Backdrop)；`ImageTags.Logo/Thumb/Banner/Art/Disc` 全部读不出来。 |
+| PB40-B | P0 | `remote_emby.rs::upsert_remote_media_item`（Movie / Episode 同步） | `logo_path: local_logo`（只用 STRM 旁挂的本地 logo.png，不走远端）、`thumb_path/art_path/banner_path/disc_path: None`、`backdrop_paths: &empty_backdrops`——5 类图直接置 None，多 Backdrop 直接置空数组。 |
+| PB40-C | P0 | `remote_emby.rs::fetch_and_upsert_series_detail`（Series 详情同步） | 同上 5 类图全部置 None；`backdrop_paths: &empty_paths`。 |
+| PB40-D | P1 | `remote_emby.rs` Episode 回退链 | 自身没有 Logo 时不会去用 `ParentLogoItemId / ParentLogoImageTag`（这两个字段已经在 Fields 请求里了），导致 Episode 即使父剧集有 Logo 也展示不出来。 |
+| PB40-E | P1 | `remote_emby.rs` Episode 多 Backdrop 回退 | 自身没 Backdrop 时只用 `ParentBackdropImageTags[0]` 一张，剩余多张丢失。 |
+| PB40-F | P2 | 诊断不足 | 没有便捷接口能让管理员/测试脚本核对"远端实际返回了什么字段"，每次都得改代码 + 部署。 |
+
+### 改动清单
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB40-1 | `backend/src/remote_emby.rs` | 新增 `RemoteImageUrls` 结构体（`primary / logo / thumb / banner / art / disc: Option<String>` + `backdrops: Vec<String>`）；新增 `extract_remote_image_urls_full()` 一次性提取**全部 7 类图 + 全部 Backdrops**；多 Backdrop URL 改为索引化 `/Images/Backdrop/{idx}?tag=...`，避免 Emby 返多张时回源 collisions。删除旧的 `extract_remote_image_urls` 双值版本（无外部调用）。 |
+| PB40-2 | `backend/src/remote_emby.rs::upsert_remote_media_item` | 用 `RemoteImageUrls` 替换原 `(Option<String>, Option<String>)`，写入时 `logo_path / thumb_path / art_path / banner_path / disc_path` 全部从 `remote_urls.{logo,thumb,art,banner,disc}` 派生；`backdrop_paths` 写 `remote_urls.backdrops` 完整数组（兼容字段 `backdrop_path` 仍取第一张）。Episode 增 **ParentLogo 回退**：`logo_path` 为 `None` 时用 `(ParentLogoItemId, ParentLogoImageTag)` 拼 Series 的 Logo URL。Episode 多 Backdrop 回退：自身 Backdrops 为空时用 `ParentBackdropItemId + ParentBackdropImageTags` 数组**全量回退**（不仅仅是第一张）。 |
+| PB40-3 | `backend/src/remote_emby.rs::fetch_and_upsert_series_detail` | 同上写入全部 7 类图 + 全部 Backdrops；`backdrop_paths: &remote_urls.backdrops`。 |
+| PB40-4 | `backend/src/remote_emby.rs` | 新增 `pub async fn diagnostic_fetch_sample_items(pool, source_id, parent_id?, fields?, limit) -> Value`：用 source 已存的 access_token 命中 `/Users/{uid}/Items?ParentId=...&Fields=<all>&EnableImageTypes=Primary,Backdrop,Logo,Thumb,Banner,Art,Disc,Box,BoxRear,Menu&ImageTypeLimit=10&Limit=<1-50>`，**透传**远端原始 JSON 响应给调用方；让管理员/脚本能在不部署的前提下核对远端字段。 |
+| PB40-5 | `backend/src/routes/remote_emby.rs` | 新增 `GET /api/admin/remote-emby/sources/{source_id}/diagnostic/sample-items?ParentId=...&Fields=...&Limit=...`，admin 限定。query 参数支持 PascalCase / camelCase / snake_case 三种命名。 |
+| PB40-6 | `scripts/verify_remote_emby_fields.py` | 新增 Python 校验脚本：调诊断接口取样、对每个 item 统计 7 类图覆盖率 / 平均 Backdrop 数 / People 占比 / 基础字段（Overview/Genres/Studios/Tags/Taglines/Status/EndDate/AirDays/AirTime…）覆盖率，**输出图片缺口百分比**——用户可以直接判断"还需不需要 TMDB 兜底"。 |
+
+### 字段映射对照表（远端 → 本地）
+
+| 远端 BaseItemDto | 本地 `media_items` 列 | PB40 之前 | PB40 之后 |
+|---|---|---|---|
+| `ImageTags.Primary` | `image_primary_path` | ✅ 写入 | ✅ 写入 |
+| `ImageTags.Logo` | `logo_path` | ❌ 只用 `local_logo`（STRM 同目录的 `logo.png`） | ✅ 写远端 URL；Episode 缺时回退 `ParentLogo*` |
+| `ImageTags.Thumb` | `thumb_path` | ❌ `None` | ✅ 写远端 URL |
+| `ImageTags.Banner` | `banner_path` | ❌ `None` | ✅ 写远端 URL |
+| `ImageTags.Art` | `art_path` | ❌ `None` | ✅ 写远端 URL |
+| `ImageTags.Disc` | `disc_path` | ❌ `None` | ✅ 写远端 URL |
+| `BackdropImageTags[0]` | `backdrop_path`（兼容字段） | ✅ 写第一张 | ✅ 写第一张 |
+| `BackdropImageTags[*]` | `backdrop_paths`（数组列） | ❌ 空数组 | ✅ 写**全部** N 张 |
+| `ParentLogoItemId / ParentLogoImageTag` | Episode `logo_path` 回退 | ❌ 不用 | ✅ Episode 自身缺 Logo 时使用 |
+| `ParentBackdropItemId / ParentBackdropImageTags[*]` | Episode `backdrop_paths` 回退 | ❌ 只回退 `[0]` | ✅ Episode 自身缺 Backdrop 时**全数组**回退 |
+| `People[]` | `persons` + `person_roles` | ✅ Movie/Episode 已写入（PB31）；Series 已写入（PB31-2 已有的二次调用） | ✅ 不变 |
+| 其它（Overview / Genres / Studios / Tags / Taglines / Status / EndDate / AirDays / AirTime / ProductionLocations / RemoteTrailers） | 各自列 | ✅ PB31/PB34 已写入 | ✅ 不变 |
+
+### 关键设计决策
+
+1. **远端 URL 直存 DB，不主动下载**：`logo_path / thumb_path / banner_path / art_path / disc_path` 列允许 `http://...` 字符串；`routes/images.rs::serve_image` 已识别远端 URL 并自动 ETag 代理（PB35 P2-2）。这样大库一次同步几十万条目时不用为每张图都打远端 IO，详情页访问到时再走代理。
+2. **多 Backdrop 索引化 URL**：`/Images/Backdrop/{idx}?tag=...` 而不是 `/Images/Backdrop?tag=...`，让 Emby 服务端能精确返回第 N 张（旧形式只能拿默认那张）。
+3. **诊断接口防误用**：`Limit` clamp 到 [1, 50]，避免管理员误请求 10000 条把内存撑爆；`auth::require_admin` 锁定权限。
+4. **不变更 schema**：`logo_path / thumb_path / banner_path / art_path / disc_path / backdrop_paths` 这些列从一开始就在 `0001_schema.sql` 里，PB40 只是**真正利用起来**。
+
+### 验证
+
+- `cargo check -p movie-rust-backend`：0 error。
+- `cargo test --bin movie-rust-backend`：60 passed; 0 failed。
+- `ReadLints`：所有受影响文件 0 lint。
+- 诊断脚本（部署后跑）：
+  ```
+  python scripts/verify_remote_emby_fields.py \
+      --backend https://test.emby.yun:4443 \
+      --token   <admin X-Emby-Token> \
+      --source  a3e3ef82-36dd-4bab-a1f4-bfbaaa369658 \
+      --view    3 \
+      --limit   10
+  ```
+  输出每类图的覆盖率、平均 Backdrop 数、People 占比，便于直接判断 TMDB 兜底是否还有必要。
+
+### chrome-devtools MCP 链路审计实录
+
+通过 chrome-devtools MCP 命中 `https://test.emby.yun:4443/api/admin/remote-emby/sources` 取得现状：
+
+| Source | LastSync | 状态 | 备注 |
+|---|---|---|---|
+| `Raisemby-众映` (a3e3ef82-…) | `null` | `LastSyncError = "请求参数错误: 同步任务已被取消"`；`HasAccessToken = true` | 1.6M 级条目正在 FetchingRemoteIndex 阶段（4%），ID 索引页大小 1000，预计需 ~30 分钟才能进入 upsert 阶段。 |
+| `吹大牛Emby` (f3a8e51d-…) | `null` | 同上 | 也未完成首次同步。 |
+
+由于两个源都未完成首次同步，本地 DB 里没有任何远端来的 `media_items` 行，无法在浏览器侧直接对比"现在 logo_path 为 NULL"。但代码层面已确认：
+- `remote_emby.rs::upsert_remote_media_item` 行 `2061-2065` 显示 5 类图全是 `None`、`backdrop_paths: &empty_backdrops`。
+- `remote_emby.rs::fetch_and_upsert_series_detail` 行 `2298-2303` 同样 5 类图 `None`、`backdrop_paths: &empty_paths`。
+
+**结论**：bug 100% 存在；即便等 1.6M 同步完，logo / thumb / banner / art / disc / 多 backdrop 列都会是 NULL；详情页访问时被迫走 TMDB 二次拉取——正是用户痛点。PB40 修复后**首次新同步**即可消除这一缺口。
+
+### 影响文件
+- `backend/src/remote_emby.rs`
+- `backend/src/routes/remote_emby.rs`
+- `scripts/verify_remote_emby_fields.py`（新增）
 - `EmbyAPI_Compatibility_Report.md`
 
 ---
