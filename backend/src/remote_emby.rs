@@ -1944,6 +1944,38 @@ pub async fn cleanup_source_mapped_items(
         }
     }
 
+    // 当前版本同步真正写 STRM 的根目录是 `{source.strm_output_path}/{sanitize(source.name)}/`
+    // （由 `try_strm_workspace_for_source` 计算，与 `sync_source_inner` 写盘 / watcher 监控一致）。
+    // 上面的 `source_root` 是早期 strm 内嵌在 library 内部时的 legacy 路径，几乎从不命中，
+    // 仅当作历史残留兜底；如果只删 `source_root`，用户在 strm_output_path 下仍会看到一个
+    // 鬼魂 `{源名}/{视图名}/...` 子树（含历史 strm 与 sidecar），既占盘也容易被 watcher 误捡。
+    // 这里专门补一次：删 source 时把当前 strm 工作目录整棵砍掉，与同步写盘路径形成闭环。
+    if let Some(strm_workspace) = try_strm_workspace_for_source(source) {
+        match tokio::fs::remove_dir_all(&strm_workspace).await {
+            Ok(_) => {
+                tracing::info!(
+                    source_id = %source.id,
+                    strm_workspace = %strm_workspace.to_string_lossy(),
+                    "已删除远端 Emby 源对应的 STRM 工作目录"
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    source_id = %source.id,
+                    strm_workspace = %strm_workspace.to_string_lossy(),
+                    error = %error,
+                    "删除远端 Emby STRM 工作目录失败"
+                );
+            }
+        }
+    } else {
+        tracing::debug!(
+            source_id = %source.id,
+            "源未配置 strm_output_path，跳过 STRM 工作目录删除"
+        );
+    }
+
     Ok(deleted)
 }
 
