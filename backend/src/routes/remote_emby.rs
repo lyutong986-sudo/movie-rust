@@ -612,6 +612,20 @@ async fn delete_remote_emby_source(
     let source = repository::get_remote_emby_source(&state.pool, source_id)
         .await?
         .ok_or_else(|| AppError::NotFound("远端 Emby 源不存在".to_string()))?;
+
+    // P0：先取消正在跑的 sync 并等其退出，再做物理 / DB 清理。
+    //
+    // 否则会出现「源已删但 strm 又被重新写出来」的并发残留路径——sync 任务持有
+    // `Arc<DbRemoteEmbySource>` 的副本，删除路由 `cleanup_source_mapped_items` 把
+    // strm_workspace 整棵 remove_dir_all 之后，sync 的 `process_one_remote_sync_item`
+    // 会接着 `tokio::fs::create_dir_all(view_strm_workspace)` 把目录又建出来，继续写
+    // .strm / sidecar；merge 模式下 DB 层 upsert 也照样成功（用户原始 library 还在），
+    // 留下 RemoteEmbySourceId 指向已删 UUID 的孤儿 media_items。
+    //
+    // sync_source_inner 已经在每页 / 每条 item 边界检查 `progress.is_cancelled`，
+    // 30s 足够走到至少一次检查点；超时则放弃等待（退化到旧行为，但不阻塞删除）。
+    cancel_active_sync_and_wait(source_id, Duration::from_secs(30)).await;
+
     if !query.keep_mapped_items {
         let deleted = remote_emby::cleanup_source_mapped_items(&state.pool, &source).await?;
         tracing::info!(
@@ -622,7 +636,101 @@ async fn delete_remote_emby_source(
         );
     }
     repository::delete_remote_emby_source(&state.pool, source_id).await?;
+
+    // P1：清理两处仅活在内存里、不会随 source 行删除自动消失的残留状态：
+    //   1. PLAYBACK_INFO_CACHE：按 `{source_id}:` 前缀缓存的 PlaybackInfo，TTL 5min；
+    //      不主动失效会让短期内（删除后立刻新建同 source_id 的极小概率场景）
+    //      命中陈旧条目，且占用全局 cache 容量。
+    //   2. sync_registry：`active_operation_ids` + `operations` 里属于该 source 的
+    //      条目，不清的话 listing 接口仍能返回这些已无意义的旧操作记录，要等
+    //      KEEP_LATEST=100 自然淘汰才消失。
+    remote_emby::invalidate_playback_info_cache_for_source(source_id).await;
+    {
+        let mut registry = remote_emby_sync_registry().write().await;
+        registry.active_operation_ids.remove(&source_id);
+        registry.operations.retain(|_, op| op.source_id != source_id);
+    }
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// P0 配套：在删除/重置 source 前，向其当前 active sync 发取消信号，并 poll
+/// 直到 task 真正退出（status 进入 `Succeeded / Failed / Cancelled`）。
+///
+/// `max_wait` 内仍未退出 → 记 WARN 后 fall-through，调用方继续后续清理；
+/// 这是为了避免「sync 卡死时永远删不掉源」的死锁路径，靠 sync 本身的取消检查点
+/// （`fetch_all_remote_item_ids` 每页 / `process_one_remote_sync_item` 入口 / 主循环
+/// 每页边界）来兜住绝大多数情况。
+async fn cancel_active_sync_and_wait(source_id: Uuid, max_wait: Duration) {
+    let started = std::time::Instant::now();
+
+    // Phase 1：找 active operation；若不存在 / 已 done / 仅在 Queued，要么直接返回，
+    //          要么就地置 Cancelled 不进入等待循环。
+    let active_id_and_handle: Option<(Uuid, Option<remote_emby::RemoteSyncProgress>)> = {
+        let mut registry = remote_emby_sync_registry().write().await;
+        let Some(active_id) = registry.active_operation_ids.get(&source_id).copied() else {
+            return;
+        };
+        let Some(operation) = registry.operations.get_mut(&active_id) else {
+            registry.active_operation_ids.remove(&source_id);
+            return;
+        };
+        if operation.is_done() {
+            registry.active_operation_ids.remove(&source_id);
+            return;
+        }
+        operation.cancel_requested = true;
+        if operation.status == "Queued" {
+            // 仍在队列里、spawn task 还没把状态翻成 Running——直接置 Cancelled，
+            // 不需要等待循环（spawn task 起飞时会 observe 到 cancel_requested 并立刻收尾）。
+            operation.status = "Cancelled";
+            operation.phase = "Cancelled".to_string();
+            operation.progress = 100.0;
+            operation.completed_at = Some(Utc::now());
+            registry.active_operation_ids.remove(&source_id);
+            return;
+        }
+        operation.status = "Cancelling";
+        Some((active_id, operation.sync_progress_handle.clone()))
+    };
+
+    let Some((active_id, handle_opt)) = active_id_and_handle else {
+        return;
+    };
+    if let Some(handle) = handle_opt {
+        handle.request_cancel();
+    }
+
+    // Phase 2：poll 等待 spawn task 自行收尾（is_done 由 enqueue_remote_emby_sync 末尾
+    // 在写完 status = Succeeded/Failed/Cancelled 之后翻为 true）。
+    let poll_interval = Duration::from_millis(200);
+    loop {
+        if started.elapsed() >= max_wait {
+            tracing::warn!(
+                source_id = %source_id,
+                operation_id = %active_id,
+                waited_ms = started.elapsed().as_millis() as u64,
+                "等待远端同步任务退出超时，继续执行删除（极小概率会留下少量正在写盘的 strm 文件）"
+            );
+            return;
+        }
+        tokio::time::sleep(poll_interval).await;
+        let registry = remote_emby_sync_registry().read().await;
+        let done = registry
+            .operations
+            .get(&active_id)
+            .map(|op| op.is_done())
+            .unwrap_or(true);
+        if done {
+            tracing::info!(
+                source_id = %source_id,
+                operation_id = %active_id,
+                waited_ms = started.elapsed().as_millis() as u64,
+                "已取消并等待远端同步任务退出"
+            );
+            return;
+        }
+    }
 }
 
 async fn sync_remote_emby_source(
