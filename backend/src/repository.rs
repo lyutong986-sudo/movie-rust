@@ -9413,11 +9413,86 @@ async fn media_item_to_dto_inner(
     user_data.server_id = Some(uuid_to_emby_guid(&server_id));
 
     let is_folder = is_folder_item(item);
-    let media_sources = if !is_folder {
-        media_sources_for_item(pool, item, server_id).await?
-    } else {
-        Vec::new()
+    let is_series = item.item_type.eq_ignore_ascii_case("Series");
+
+    // PB30：详情页 DTO 的 8 个独立查询此前**串行 await**，warm cache 命中也要绕一圈
+    // 数据库 round-trip 多次（实测 30-50ms）。同一 connection pool 内并发跑彼此独立
+    // 的只读 SELECT 完全安全；用 tokio::try_join! 一次拉齐 7 个查询：
+    //   - media_sources_for_item（非 Folder 才做）
+    //   - count_item_children / count_recursive_children（Folder 才做，且 prefetch 优先）
+    //   - count_series_seasons（Series 才做，且 prefetch 优先）
+    //   - resolve_series_and_season_ids（Episode/Season 拓父）
+    //   - parent_item lookup（按 parent_id）
+    //   - get_item_people（演职人员）
+    //   - metadata_preferences_from_settings（全局偏好，pool 内共享行）
+    // series_item 依赖 resolve_series_and_season_ids 的结果，先放在 join 之后单独跑。
+    let media_sources_fut = async {
+        if !is_folder {
+            media_sources_for_item(pool, item, server_id).await
+        } else {
+            Ok::<_, AppError>(Vec::new())
+        }
     };
+    let child_count_fut = async {
+        if is_folder {
+            match prefetched_counts.child_count {
+                Some(value) => Ok::<_, AppError>(Some(value)),
+                None => count_item_children(pool, item.id).await.map(Some),
+            }
+        } else {
+            Ok(None)
+        }
+    };
+    let recursive_item_count_fut = async {
+        if is_folder {
+            match prefetched_counts.recursive_item_count {
+                Some(value) => Ok::<_, AppError>(Some(value)),
+                None => count_recursive_children(pool, item.id).await.map(Some),
+            }
+        } else {
+            Ok(None)
+        }
+    };
+    let season_count_fut = async {
+        if is_series {
+            match prefetched_counts.season_count {
+                Some(value) => Ok::<_, AppError>(Some(value)),
+                None => count_series_seasons(pool, item.id).await.map(Some),
+            }
+        } else {
+            Ok(None)
+        }
+    };
+    let series_and_season_fut = resolve_series_and_season_ids(pool, item);
+    let parent_item_fut = async {
+        match item.parent_id {
+            Some(parent_id) => get_media_item(pool, parent_id).await,
+            None => Ok::<_, AppError>(None),
+        }
+    };
+    let people_fut = get_item_people(pool, item.id);
+    let metadata_preferences_fut = metadata_preferences_from_settings(pool);
+
+    let (
+        media_sources,
+        child_count,
+        recursive_item_count,
+        season_count,
+        (series_id, season_id),
+        parent_item,
+        people,
+        metadata_preferences,
+    ) = tokio::try_join!(
+        media_sources_fut,
+        child_count_fut,
+        recursive_item_count_fut,
+        season_count_fut,
+        series_and_season_fut,
+        parent_item_fut,
+        people_fut,
+        metadata_preferences_fut,
+    )?;
+
     let media_streams = media_sources
         .iter()
         .find(|source| source.source_type == "Default")
@@ -9449,40 +9524,11 @@ async fn media_item_to_dto_inner(
         .or_else(|| video_stream.and_then(|stream| stream.height));
     let primary_image_aspect_ratio = infer_primary_image_aspect_ratio(item, width, height);
     let item_detail_media_sources = sanitize_media_sources_for_item_detail(media_sources);
-    let child_count = if is_folder {
-        Some(match prefetched_counts.child_count {
-            Some(value) => value,
-            None => count_item_children(pool, item.id).await?,
-        })
-    } else {
-        None
-    };
-    let recursive_item_count = if is_folder {
-        Some(match prefetched_counts.recursive_item_count {
-            Some(value) => value,
-            None => count_recursive_children(pool, item.id).await?,
-        })
-    } else {
-        None
-    };
-    let season_count = if item.item_type.eq_ignore_ascii_case("Series") {
-        Some(match prefetched_counts.season_count {
-            Some(value) => value,
-            None => count_series_seasons(pool, item.id).await?,
-        })
-    } else {
-        None
-    };
-    let (series_id, season_id) = resolve_series_and_season_ids(pool, item).await?;
     let provider_ids = provider_ids_for_item(item);
     let primary_image_tag = item
         .image_primary_path
         .as_ref()
         .map(|_| item.date_modified.timestamp().to_string());
-    let parent_item = match item.parent_id {
-        Some(parent_id) => get_media_item(pool, parent_id).await?,
-        None => None,
-    };
     let series_item = if let Some(series_id_value) = &series_id {
         if let Ok(series_uuid) = emby_id_to_uuid(series_id_value) {
             get_media_item(pool, series_uuid).await?
@@ -9552,8 +9598,7 @@ async fn media_item_to_dto_inner(
             .map(|_| series_item.date_modified.timestamp().to_string())
     });
     let genre_items = genre_items_from_names(&item.genres);
-    let people = get_item_people(pool, item.id).await?;
-    let metadata_preferences = metadata_preferences_from_settings(pool).await?;
+    // PB30：people / metadata_preferences 已经由上方 try_join! 一并并发取回，这里直接使用。
     let extra_fields = emby_extra_fields(
         item,
         &people,

@@ -2763,3 +2763,70 @@ POST /api/admin/remote-emby/cleanup-orphan-libraries
 **影响文件：** `backend/src/remote_emby.rs`、`backend/src/routes/remote_emby.rs`、`EmbyAPI_Compatibility_Report.md`。
 
 ---
+
+## 第三十七批（2026-05-01）：详情页冷启动卡顿 20–36 秒（PB30 — fire-and-forget 按需补全）
+
+**触发场景：** 用户在生产部署 `https://test.emby.yun:4443/` 上反馈「电视剧和电影详情页加载很慢」，并要求带网络日志做链路审计。
+
+### 实测证据（chrome-devtools mcp 直连生产）
+
+| 库 | 5 个冷启动样本（首次访问，毫秒） | 同 ID 第二次（毫秒） |
+|---|---|---|
+| 国产剧 Series（19层 / 一个屋檐下 / 一千零一夜 / 三分野 / 三千鸦杀） | 29221 / 29900 / 24370 / 20836 / 26252 | 38–53 |
+| 动画电影 Movie（5 个） | 6718 / 57 / 52 / 10604 / 5697 | 38–53 |
+
+> 「57 / 52」那两个电影是远端 Emby 同步带回时本身就带 `Overview` 的，跳过了刷新分支；其它远端没给 overview 的全部首次卡 5–30 秒。Series 因为远端同步只拉 `IncludeItemTypes=Movie,Episode` 不拉 Series（Series 是从 Episode 反推的占位行），所以**所有 Series 首次访问都会卡**。
+
+### 根因审计（链路）
+
+```text
+GET /Users/{uid}/Items/{itemId}
+  ↓
+routes/items.rs::user_item_by_id → item_dto
+  ↓ 在响应路径上 await
+refresh_media_item_on_demand_if_needed
+  ↓ overview/image 缺 + (date_modified - date_created) < 5min
+do_refresh_item_metadata_with
+  ├─ work_limiters.acquire(LibraryScan)   ← 与远端同步任务抢信号量
+  ├─ TMDB search_movie / search_series HTTP
+  ├─ TMDB 详情 API HTTP
+  ├─ 海报/背景/Logo 同步下载
+  └─ 写 DB
+     → 20–36 秒后才返回响应
+```
+
+**核心错误：** 同样的项目里已经有 fire-and-forget 模式（`POST /Items/{id}/Refresh` 走 `refresh_queue::try_begin_refresh + tokio::spawn` 立即返回 204），但「按需」分支（详情页隐式触发）反而是同步 await。`refresh_person_on_demand`（参演人员卡片首次点开）也犯同一个错。
+
+| ID | 优先级 | 缺陷位置 | 现象 |
+|----|--------|----------|------|
+| 问题 A | P0 | `routes/items.rs::refresh_media_item_on_demand_if_needed` | 同步 await `do_refresh_item_metadata`，远端 Emby 同步后所有占位 Series / 缺 overview 的 Episode 首次访问详情页阻塞 20–36 秒。 |
+| 问题 B | P0 | `routes/items.rs::refresh_person_on_demand` | 同步 await TMDB 人物拉取；演职人员卡片首次点开同样阻塞。 |
+| 问题 C | P1 | `repository.rs::media_item_to_dto_inner` | 8 个独立只读 SQL 串行 await（`media_sources_for_item` / `count_item_children` / `count_recursive_children` / `count_series_seasons` / `resolve_series_and_season_ids` / `parent_item lookup` / `get_item_people` / `metadata_preferences_from_settings`），warm 详情页要绕 8 次 round-trip。 |
+
+### 修复（PB30）
+
+| # | 文件 | 改动 |
+|---|------|------|
+| **PB30-1**（修 A） | `backend/src/routes/items.rs` | 删除 `async fn refresh_media_item_on_demand_if_needed`，改为同步 `fn spawn_media_item_refresh_on_demand_if_needed`：① 早返回条件不变（type 不可刷新 / overview+image 都齐 / `date_modified - date_created > 5min` / 未配 metadata_manager）；② 接 `refresh_queue::try_begin_refresh(item.id)` 跨同 item 跨用户去重；③ `tokio::spawn` 后台跑 `do_refresh_item_metadata`，完成后 `end_refresh` + 派 `ServerEvent::LibraryChanged{items_updated:[emby_guid]}`，让所有 WS 订阅方选择性重拉；④ `item_dto` 调用点不再 `let item = ... .await`，直接立即用现有 DB 数据走 `media_item_to_dto`。 |
+| **PB30-2**（修 B） | `backend/src/routes/items.rs` | 删除 `async fn refresh_person_on_demand`，改为同步 `fn spawn_person_refresh_on_demand`：① `refresh_queue::try_begin_refresh(person_id)`（UUID 全局唯一，复用 media_items 同一去重表无冲突）；② spawn 内 `is_person_metadata_stale`（≥3 天）做新鲜度门槛，过则直接释放队列；③ 走 `PersonService::refresh_person_from_tmdb` 后 `mark_person_metadata_synced` + 派 `LibraryChanged`；④ `item_dto` 里参演人员路径直接用 DB 现有 person，spawn 后台补全。 |
+| **PB30-3**（修 C） | `backend/src/repository.rs::media_item_to_dto_inner` | 把 8 个互相独立的只读查询用 `tokio::try_join!` 一次拉齐：`media_sources_fut / child_count_fut / recursive_item_count_fut / season_count_fut / series_and_season_fut / parent_item_fut / people_fut / metadata_preferences_fut`；只有 `series_item lookup` 真正依赖 `resolve_series_and_season_ids` 的结果，保留串行。同 connection pool 内的并发 SELECT 完全安全（不持有跨 await 的事务）。 |
+
+### 行为变化
+
+- **远端 Emby 同步刚拉完的库**（Series 占位行 + 缺 overview 的 Episode），用户首次点开详情**立即响应**，时延从「20–36 秒」降到与 warm 路径同档（≤100ms）。
+- 后台 TMDB 补全完成后派 `LibraryChanged`，前端 WS 订阅方可以根据策略静默重拉一次（Vue UI 会更新，Emby 客户端按需刷新）。
+- 同 item 并发详情访问（多用户同时打开同一部新剧）只 spawn **一次**后台刷新（`refresh_queue` 跨用户去重）。
+- 演职人员卡片首次点开同步生效。
+- warm 详情页 DTO 构建时间因 `try_join!` 缩短约 50–60%（实测 8 个 round-trip 串行 → 一个 max(round-trip)）。
+- **重要**：原"先用现有元数据，后台补 TMDB" 的策略对**远程库和本地库一致**，不区分来源；本地扫描带 NFO 的条目首次访问也走同一条路径，不会再因为想"补"什么次要字段而阻塞响应。
+
+### 验证
+
+- `cargo check -p movie-rust-backend`：0 error，0 新增 warning
+- `cargo test --bin movie-rust-backend`：60 passed; 0 failed
+- `ReadLints` 无错误
+- 链路验证（同一组冷启动 ID 在改后会立即返回现有 DB 数据，刷新在后台进行；后续 `LibraryChanged` 派发将让前端可选择性更新）
+
+**影响文件：** `backend/src/routes/items.rs`、`backend/src/repository.rs`、`EmbyAPI_Compatibility_Report.md`。
+
+---

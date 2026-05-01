@@ -3601,16 +3601,13 @@ async fn item_dto(
     let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
         // AfuseKt / Hills 等在「参演人员」等界面用 `/Users/.../Items/{id}` 拉人物详情；
         // ID 指向 `persons` 而非 `media_items`，与官方 Emby 行为一致。
-        if let Some(mut person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
-            // Emby/Jellyfin: RefreshItemOnDemandIfNeeded — 人物缺 Overview 或 Primary 图时同步拉取
+        if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
+            // PB30：参演人员页响应路径上**不**再 await TMDB；缺 Overview / 头像时
+            // 仅 spawn 后台刷新，立即用现有数据响应；与媒体条目按需刷新策略对齐。
             let needs_refresh = person.overview.as_deref().unwrap_or("").trim().is_empty()
                 || person.primary_image_tag.is_none();
             if needs_refresh {
-                if let Some(refreshed) =
-                    refresh_person_on_demand(state, item_id).await
-                {
-                    person = refreshed;
-                }
+                spawn_person_refresh_on_demand(state, item_id);
             }
             return Ok(Json(crate::routes::persons::person_to_base_item(
                 person,
@@ -3624,8 +3621,11 @@ async fn item_dto(
         return Err(AppError::NotFound("媒体条目不存在".to_string()));
     }
 
-    // 媒体条目按需元数据刷新：如果 overview/图片/人物缺失且从未刷新过，同步触发 TMDB
-    let item = refresh_media_item_on_demand_if_needed(state, item).await;
+    // PB30：详情页采用「先用现有元数据立即响应 + 后台异步补全 TMDB」的 Emby 标准策略。
+    // 不再在响应路径上 await `do_refresh_item_metadata`，避免远端 Emby 同步刚拉回来
+    // 的占位条目（overview/image 缺失）首次访问时阻塞 20–30 秒。后台刷新完成后通过
+    // `ServerEvent::LibraryChanged` 派 WebSocket 事件，让前端选择性自动重拉。
+    spawn_media_item_refresh_on_demand_if_needed(state, &item);
 
     Ok(Json(
         repository::media_item_to_dto(&state.pool, &item, Some(user_id), state.config.server_id)
@@ -3633,89 +3633,143 @@ async fn item_dto(
     ))
 }
 
-/// 媒体条目按需元数据刷新：仅当 overview 和 primary image 都缺失时触发（首次访问补全）。
-/// 避免对已有元数据的条目重复触发，使用 date_modified 判断是否已刷新过。
-async fn refresh_media_item_on_demand_if_needed(
+/// PB30：媒体条目按需元数据补全 — fire-and-forget 模式。
+///
+/// **核心策略**（与 Emby 官方 RefreshItemOnDemand 行为一致）：
+/// 1. 详情页响应路径**永远**用 DB 里现有的元数据立即返回，绝不阻塞；
+/// 2. 当 `overview` 或 `image_primary_path` 仍缺失，且条目从未刷新过（date_modified
+///    与 date_created 相差不到 5 分钟，主要是远端 Emby 刚同步进来的占位条目）时，
+///    在后台 `tokio::spawn` 拉一次 TMDB；
+/// 3. 用 `refresh_queue::try_begin_refresh` 跨同 item 去重，避免并发用户访问同一条
+///    详情页时重复 spawn；
+/// 4. 后台刷新完成后派 `ServerEvent::LibraryChanged`，已连 WebSocket 的客户端可以
+///    选择性重拉这条 item，UI 自然补齐 overview/海报。
+///
+/// 设计考量：远端 Emby 同步本身已经把对方有的 `overview` / `Primary` 图片带回写入
+/// 本地 DB（参 `remote_emby.rs::upsert_remote_movie_or_episode`，Fields 中包含
+/// `Overview, ImageTags`），所以**首次响应大多数情况下并不空**；TMDB 兜底只是给
+/// 那些远端自己也没元数据 / 占位 Series 行 / 本地 nfo 缺失等场景做后台补全。
+fn spawn_media_item_refresh_on_demand_if_needed(
     state: &AppState,
-    item: crate::models::DbMediaItem,
-) -> crate::models::DbMediaItem {
+    item: &crate::models::DbMediaItem,
+) {
     let kind = item.item_type.as_str();
     let is_refreshable = kind.eq_ignore_ascii_case("Movie")
         || kind.eq_ignore_ascii_case("Series")
         || kind.eq_ignore_ascii_case("Season")
         || kind.eq_ignore_ascii_case("Episode");
     if !is_refreshable {
-        return item;
+        return;
     }
 
     let overview_missing = item.overview.as_deref().unwrap_or("").trim().is_empty();
     let image_missing = item.image_primary_path.is_none();
     if !overview_missing && !image_missing {
-        return item;
+        return;
     }
 
-    // 避免频繁刷新：如果 date_modified 与 date_created 相差 >5 分钟说明已经被刷新过
+    // 避免频繁刷新：date_modified 与 date_created 相差 >5 分钟说明已经被刷新过
+    // （即使刷新没找到 TMDB 数据，date_modified 也会被推到 NOW，所以下次会跳过）。
     let already_refreshed = (item.date_modified - item.date_created).num_minutes() > 5;
     if already_refreshed {
-        return item;
+        return;
     }
 
     if state.metadata_manager.is_none() {
-        return item;
+        return;
+    }
+
+    if !crate::refresh_queue::try_begin_refresh(item.id) {
+        // 已经有同 item 后台刷新在跑，直接跳过；用户当前响应使用现有 DB 数据，
+        // 后台任务结束后会派 LibraryChanged 让所有 WS 订阅方刷新。
+        return;
     }
 
     tracing::info!(
         item_id = %item.id,
         name = %item.name,
-        "按需触发媒体元数据刷新（overview/image 缺失）"
+        item_type = %item.item_type,
+        "按需后台补全媒体元数据（overview/image 缺失）— 详情页立即用现有数据响应"
     );
 
-    if let Err(err) = do_refresh_item_metadata(state, item.id).await {
-        tracing::warn!(item_id = %item.id, ?err, "按需媒体元数据刷新失败");
-        return item;
-    }
-
-    // Re-fetch the updated item
-    match repository::get_media_item(&state.pool, item.id).await {
-        Ok(Some(updated)) => updated,
-        _ => item,
-    }
+    let state_owned = state.clone();
+    let item_id = item.id;
+    let emby_id = crate::models::uuid_to_emby_guid(&item_id);
+    tokio::spawn(async move {
+        let result = do_refresh_item_metadata(&state_owned, item_id).await;
+        crate::refresh_queue::end_refresh(item_id);
+        match result {
+            Ok(()) => {
+                tracing::info!(item_id = %item_id, "按需后台补全完成");
+                let _ = state_owned
+                    .event_tx
+                    .send(crate::state::ServerEvent::LibraryChanged {
+                        items_added: Vec::new(),
+                        items_updated: vec![emby_id],
+                        items_removed: Vec::new(),
+                    });
+            }
+            Err(err) => {
+                tracing::warn!(item_id = %item_id, ?err, "按需后台补全失败");
+            }
+        }
+    });
 }
 
-/// Emby/Jellyfin `RefreshItemOnDemandIfNeeded` — 人物缺少简介或头像时，同步触发 TMDB 拉取。
-/// 条件：距上次同步 ≥3 天（避免频繁请求 TMDB）。
-async fn refresh_person_on_demand(
-    state: &AppState,
-    person_id: Uuid,
-) -> Option<crate::models::PersonDto> {
-    let stale = repository::is_person_metadata_stale(&state.pool, person_id)
-        .await
-        .unwrap_or(true);
-    if !stale {
-        return None;
+/// PB30：人物按需元数据补全 — fire-and-forget 模式。
+///
+/// 与 [`spawn_media_item_refresh_on_demand_if_needed`] 同一策略：参演人员卡片首次
+/// 点开时，若缺简介或头像，立即用 DB 里现有数据响应，把真正的 TMDB 拉取放到后台。
+/// 用 `refresh_queue` 复用同一套去重表（UUID 全局唯一，与 media_items 不会冲突）。
+/// 用 `is_person_metadata_stale`（≥3 天未同步）做新鲜度门槛，已 spawn 的不会被重复触发。
+fn spawn_person_refresh_on_demand(state: &AppState, person_id: Uuid) {
+    if state.metadata_manager.is_none() {
+        return;
+    }
+    if !crate::refresh_queue::try_begin_refresh(person_id) {
+        return;
     }
 
-    let metadata_manager = state.metadata_manager.as_ref()?;
-    let service = PersonService::new(state.pool.clone(), metadata_manager.clone());
-    match service
-        .refresh_person_from_tmdb(person_id, &state.config.static_dir, false)
-        .await
-    {
-        Ok(Some(_report)) => {
-            repository::get_person_by_uuid(&state.pool, person_id)
-                .await
-                .ok()
-                .flatten()
+    let state_owned = state.clone();
+    tokio::spawn(async move {
+        // 1) 新鲜度门槛：≥3 天未同步才真正出 TMDB 请求；不达标就直接释放队列。
+        let stale = repository::is_person_metadata_stale(&state_owned.pool, person_id)
+            .await
+            .unwrap_or(true);
+        if !stale {
+            crate::refresh_queue::end_refresh(person_id);
+            return;
         }
-        Ok(None) => {
-            repository::mark_person_metadata_synced(&state.pool, person_id).await;
-            None
+
+        let Some(metadata_manager) = state_owned.metadata_manager.as_ref().cloned() else {
+            crate::refresh_queue::end_refresh(person_id);
+            return;
+        };
+        let service = PersonService::new(state_owned.pool.clone(), metadata_manager);
+        let result = service
+            .refresh_person_from_tmdb(person_id, &state_owned.config.static_dir, false)
+            .await;
+        match result {
+            Ok(Some(_report)) => {
+                tracing::info!(person_id = %person_id, "按需后台补全人物元数据完成");
+                let _ = state_owned
+                    .event_tx
+                    .send(crate::state::ServerEvent::LibraryChanged {
+                        items_added: Vec::new(),
+                        items_updated: vec![crate::models::uuid_to_emby_guid(&person_id)],
+                        items_removed: Vec::new(),
+                    });
+            }
+            Ok(None) => {
+                // 没找到 TMDB id 或 provider 未注册：标记 synced_at，避免下次再触发。
+                repository::mark_person_metadata_synced(&state_owned.pool, person_id).await;
+            }
+            Err(err) => {
+                tracing::warn!(person_id = %person_id, ?err, "按需后台补全人物元数据失败");
+            }
         }
-        Err(err) => {
-            tracing::warn!(person_id = %person_id, ?err, "按需刷新人物元数据失败");
-            None
-        }
-    }
+        crate::refresh_queue::end_refresh(person_id);
+    });
 }
 
 /// Emby SDK `POST /Items/{Id}/Refresh` 的 query 参数。
