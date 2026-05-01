@@ -1500,13 +1500,7 @@ async fn ensure_remote_series_folder(
     library_id: Uuid,
     series_parent_map: &mut HashMap<String, Uuid>,
 ) -> Result<Uuid, AppError> {
-    let raw_series_name = item
-        .item
-        .series_name
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("Unknown Series");
-    let series_name = raw_series_name.trim().to_string();
+    let series_name = remote_series_display_name(item).to_string();
     // 优先使用 SeriesId 做去重 key，避免同名不同剧冲突
     let series_key = if let Some(sid) = item.item.series_id.as_deref().filter(|s| !s.trim().is_empty()) {
         format!("{view_scope}::{sid}")
@@ -1637,12 +1631,7 @@ async fn ensure_remote_season_folder(
     if let Some(existing) = season_parent_map.get(season_key.as_str()).copied() {
         return Ok(existing);
     }
-    let series_name_raw = item
-        .item
-        .series_name
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("Unknown Series");
+    let series_name_raw = remote_series_display_name(item);
     // 物理目录：{view_workspace}/{sanitize(series_name)}/Season {NN}/
     // 与 build_relative_strm_path 中 episode 落盘的 Season 目录完全一致。
     let season_dir = view_workspace
@@ -2867,6 +2856,18 @@ async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse
     parse_remote_json_response(response, endpoint.as_str()).await
 }
 
+/// Series 目录显示名兜底逻辑。统一供 `build_relative_strm_path`、
+/// `ensure_remote_series_folder`、`ensure_remote_season_folder` 共用，
+/// 防止三者因为兜底不一致而把 series sidecar 与 episode strm 拆到两个目录。
+fn remote_series_display_name(item: &RemoteSyncItem) -> &str {
+    item.item
+        .series_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Unknown Series")
+}
+
 /// 构建 STRM 在 view workspace 内的相对路径。
 /// 注意：view 子目录已由调用方（view_strm_workspace）提供，此处不再重复拼 view_name。
 fn build_relative_strm_path(item: &RemoteSyncItem) -> Option<PathBuf> {
@@ -2887,8 +2888,7 @@ fn build_relative_strm_path(item: &RemoteSyncItem) -> Option<PathBuf> {
     }
 
     if item_type == "episode" {
-        let series_name =
-            sanitize_segment(item.item.series_name.as_deref().unwrap_or("Unknown Series"));
+        let series_name = sanitize_segment(remote_series_display_name(item));
         let season_number = item.item.parent_index_number.unwrap_or(0).clamp(0, 999);
         let episode_number = item.item.index_number.unwrap_or(0).clamp(0, 9999);
         let title = sanitize_segment(item.item.name.as_str());
