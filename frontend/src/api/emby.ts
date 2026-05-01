@@ -590,6 +590,16 @@ export interface RemoteEmbySource {
    * peak QPS ≈ 1000 / RequestIntervalMs；例：200 ms 即每秒 ≤ 5 次请求。
    */
   RequestIntervalMs?: number;
+  /**
+   * PB39：单设备身份伪装。让远端 Devices 表里这一行显示成一个常见 Emby 真客户端，
+   * 不再带 `MovieRustTransit / MovieRustProxy / movie-rust-{uuid}` 等自爆字符串。
+   * 默认 Infuse-Direct on Apple TV / 8.2.4，可按客户端预设一键填值。
+   */
+  SpoofedClient?: string;
+  SpoofedDeviceName?: string;
+  /** 32 位 hex（不带项目名前缀），首次创建时由后端 `Uuid::new_v4` 派生，之后**永不变**。 */
+  SpoofedDeviceId?: string;
+  SpoofedAppVersion?: string;
   CreatedAt: string;
   UpdatedAt: string;
 }
@@ -1566,6 +1576,11 @@ export class EmbyApi {
     PageSize?: number;
     /** 拉取速率：两次请求最小间隔（毫秒，0–60000，默认 0=不限） */
     RequestIntervalMs?: number;
+    /** PB39：单设备身份伪装四元组。空值由后端兜底为 Infuse-Direct on Apple TV / 8.2.4。 */
+    SpoofedClient?: string;
+    SpoofedDeviceName?: string;
+    SpoofedDeviceId?: string;
+    SpoofedAppVersion?: string;
   }) {
     return this.request<RemoteEmbySource>('/api/admin/remote-emby/sources', {
       method: 'POST',
@@ -1597,6 +1612,14 @@ export class EmbyApi {
       PageSize?: number;
       /** 拉取速率：两次请求最小间隔（毫秒，0–60000，默认 0=不限） */
       RequestIntervalMs?: number;
+      /**
+       * PB39：单设备身份伪装四元组。空字符串由后端处理为「保留 DB 原值」，
+       * 不会把已有的稳定 DeviceId 覆盖成空（避免远端 Devices 表突然换 ID 触发告警）。
+       */
+      SpoofedClient?: string;
+      SpoofedDeviceName?: string;
+      SpoofedDeviceId?: string;
+      SpoofedAppVersion?: string;
     }
   ) {
     return this.request<RemoteEmbySource>(`/api/admin/remote-emby/sources/${encodeURIComponent(sourceId)}`, {

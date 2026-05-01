@@ -90,6 +90,20 @@ pub struct DbRemoteEmbySource {
     /// 在远端有 QPS / WAF / 反爬保护被 429/502 频繁打回时手动降速。
     #[sqlx(default)]
     pub request_interval_ms: i32,
+    /// PB39：单设备身份伪装。让远端 Devices 表里这一行不再带 "MovieRustTransit /
+    /// MovieRustProxy / movie-rust-{uuid}" 等自爆字符串，统一伪装成一个常见 Emby 真客户端。
+    /// 默认 Infuse-Direct on Apple TV，可在管理面板修改。
+    #[sqlx(default)]
+    pub spoofed_client: String,
+    #[sqlx(default)]
+    pub spoofed_device_name: String,
+    /// 32 位 hex 字符串（不含 'movie-rust-' 前缀），首次创建时由 repository 用 Uuid::new_v4 派生；
+    /// 旧 source 在 `ensure_schema_compatibility` 升级时一次性回填为 `replace(id::text, '-', '')`。
+    /// 一旦写入即固定，避免在远端 Devices 表里频繁产生新设备触发管理员告警。
+    #[sqlx(default)]
+    pub spoofed_device_id: String,
+    #[sqlx(default)]
+    pub spoofed_app_version: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -98,6 +112,47 @@ impl DbRemoteEmbySource {
     /// 是否为直链重定向模式（302 redirect，客户端直连远端）
     pub fn is_redirect_mode(&self) -> bool {
         self.proxy_mode.trim().eq_ignore_ascii_case("redirect")
+    }
+
+    /// PB39：身份伪装兜底。`spoofed_client` 空 → `Infuse-Direct`。
+    pub fn effective_spoofed_client(&self) -> &str {
+        let trimmed = self.spoofed_client.trim();
+        if trimmed.is_empty() {
+            "Infuse-Direct"
+        } else {
+            trimmed
+        }
+    }
+
+    /// PB39：`spoofed_device_name` 空 → `Apple TV`。
+    pub fn effective_spoofed_device_name(&self) -> &str {
+        let trimmed = self.spoofed_device_name.trim();
+        if trimmed.is_empty() {
+            "Apple TV"
+        } else {
+            trimmed
+        }
+    }
+
+    /// PB39：`spoofed_device_id` 空 → 用 `source.id` 派生 32 位 hex。
+    /// 这样升级旧 source 行没回填、或意外被清空，仍有稳定的 device id 可用。
+    pub fn effective_spoofed_device_id(&self) -> String {
+        let trimmed = self.spoofed_device_id.trim();
+        if trimmed.is_empty() {
+            self.id.simple().to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    /// PB39：`spoofed_app_version` 空 → `8.2.4`（Infuse 8.x 常见版本）。
+    pub fn effective_spoofed_app_version(&self) -> &str {
+        let trimmed = self.spoofed_app_version.trim();
+        if trimmed.is_empty() {
+            "8.2.4"
+        } else {
+            trimmed
+        }
     }
 }
 

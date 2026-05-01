@@ -13,6 +13,19 @@ import { api, isAdmin } from '../../store/app';
 const DEFAULT_SPOOFED_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) EmbyTheater/3.0.20 Chrome/124.0.0.0 Safari/537.36';
 
+/** PB39：常见 Emby 真客户端预设。下拉一键填入「客户端 / 设备名 / 应用版本」三件套，
+ * DeviceId 由后端自动派生 32 位 hex（不带项目名前缀），首次创建后**永不变**。
+ * 默认 Infuse-Direct on Apple TV 是最不容易被远端管理员识别为"网关"的伪装组合。 */
+const SPOOFED_CLIENT_PRESETS = [
+  { label: 'Infuse-Direct on Apple TV（推荐）', client: 'Infuse-Direct', device: 'Apple TV', version: '8.2.4' },
+  { label: 'Infuse-Direct on iPhone', client: 'Infuse-Direct', device: 'iPhone', version: '8.2.4' },
+  { label: 'Emby Web on Chrome / Windows', client: 'Emby Web', device: 'Chrome on Windows', version: '4.7.10.0' },
+  { label: 'Emby for iOS', client: 'Emby for iOS', device: 'iPhone', version: '2.0.86' },
+  { label: 'Emby for Android', client: 'Emby for Android', device: 'Android', version: '3.5.20' },
+  { label: 'Emby Theater on Apple TV', client: 'Emby Theater', device: 'Apple TV', version: '4.6.4' }
+];
+const DEFAULT_SPOOFED_PRESET = SPOOFED_CLIENT_PRESETS[0];
+
 const loading = ref(true);
 const saving = ref(false);
 const error = ref('');
@@ -44,7 +57,10 @@ const form = ref({
   proxyMode: 'proxy' as 'proxy' | 'redirect',
   autoSyncIntervalMinutes: 0,
   pageSize: 200,
-  requestIntervalMs: 0
+  requestIntervalMs: 0,
+  spoofedClient: DEFAULT_SPOOFED_PRESET.client,
+  spoofedDeviceName: DEFAULT_SPOOFED_PRESET.device,
+  spoofedAppVersion: DEFAULT_SPOOFED_PRESET.version
 });
 
 const editOpen = ref(false);
@@ -69,8 +85,21 @@ const editForm = ref({
   autoSyncIntervalMinutes: 0,
   pageSize: 200,
   requestIntervalMs: 0,
+  /** PB39：身份伪装四元组。SpoofedDeviceId 在 source 创建后**永不展示编辑**——
+   * 它是远端 Devices 表那行的稳定 ID，编辑一次=远端就出现一台"新设备"，反而引人注意。 */
+  spoofedClient: DEFAULT_SPOOFED_PRESET.client,
+  spoofedDeviceName: DEFAULT_SPOOFED_PRESET.device,
+  spoofedAppVersion: DEFAULT_SPOOFED_PRESET.version,
+  spoofedDeviceId: '',
   mergedRemoteViews: [] as RemoteEmbyView[]
 });
+
+/** PB39：把表单的伪装预设应用到一组字段（client/device/version），DeviceId 不动。 */
+function applySpoofedPreset(target: { spoofedClient: string; spoofedDeviceName: string; spoofedAppVersion: string }, preset: typeof SPOOFED_CLIENT_PRESETS[number]) {
+  target.spoofedClient = preset.client;
+  target.spoofedDeviceName = preset.device;
+  target.spoofedAppVersion = preset.version;
+}
 
 const sourceCount = computed(() => sources.value.length);
 const enabledCount = computed(() => sources.value.filter((source) => source.Enabled).length);
@@ -389,6 +418,10 @@ function openEditor(source: RemoteEmbySource) {
     autoSyncIntervalMinutes: Math.max(0, Number(source.AutoSyncIntervalMinutes ?? 0) || 0),
     pageSize: Math.max(50, Math.min(1000, Number(source.PageSize ?? 200) || 200)),
     requestIntervalMs: Math.max(0, Math.min(60000, Number(source.RequestIntervalMs ?? 0) || 0)),
+    spoofedClient: source.SpoofedClient || DEFAULT_SPOOFED_PRESET.client,
+    spoofedDeviceName: source.SpoofedDeviceName || DEFAULT_SPOOFED_PRESET.device,
+    spoofedAppVersion: source.SpoofedAppVersion || DEFAULT_SPOOFED_PRESET.version,
+    spoofedDeviceId: source.SpoofedDeviceId || '',
     mergedRemoteViews: [...merged.values()]
   };
   editOpen.value = true;
@@ -452,6 +485,9 @@ async function saveEditor() {
       AutoSyncIntervalMinutes: number;
       PageSize: number;
       RequestIntervalMs: number;
+      SpoofedClient: string;
+      SpoofedDeviceName: string;
+      SpoofedAppVersion: string;
     } = {
       Name: p.name.trim(),
       ServerUrl: p.serverUrl.trim(),
@@ -473,7 +509,10 @@ async function saveEditor() {
       ProxyMode: p.proxyMode,
       AutoSyncIntervalMinutes: Math.max(0, Math.min(60 * 24 * 7, Number(p.autoSyncIntervalMinutes) || 0)),
       PageSize: Math.max(50, Math.min(1000, Number(p.pageSize) || 200)),
-      RequestIntervalMs: Math.max(0, Math.min(60000, Number(p.requestIntervalMs) || 0))
+      RequestIntervalMs: Math.max(0, Math.min(60000, Number(p.requestIntervalMs) || 0)),
+      SpoofedClient: p.spoofedClient.trim(),
+      SpoofedDeviceName: p.spoofedDeviceName.trim(),
+      SpoofedAppVersion: p.spoofedAppVersion.trim()
     };
     if (p.password.trim()) {
       payload.Password = p.password;
@@ -560,7 +599,10 @@ async function createSource() {
       ProxyMode: payload.proxyMode,
       AutoSyncIntervalMinutes: Math.max(0, Math.min(60 * 24 * 7, Number(payload.autoSyncIntervalMinutes) || 0)),
       PageSize: Math.max(50, Math.min(1000, Number(payload.pageSize) || 200)),
-      RequestIntervalMs: Math.max(0, Math.min(60000, Number(payload.requestIntervalMs) || 0))
+      RequestIntervalMs: Math.max(0, Math.min(60000, Number(payload.requestIntervalMs) || 0)),
+      SpoofedClient: payload.spoofedClient.trim(),
+      SpoofedDeviceName: payload.spoofedDeviceName.trim(),
+      SpoofedAppVersion: payload.spoofedAppVersion.trim()
     });
     saved.value = `已创建远端源：${payload.name.trim()}`;
     form.value.name = '';
@@ -836,6 +878,36 @@ onBeforeUnmount(() => {
               class="w-full"
               placeholder="填写你要用于远端请求的 UA"
             />
+          </UFormField>
+          <UFormField class="lg:col-span-2" label="身份伪装预设（远端 Devices 表显示的客户端）">
+            <USelect
+              :model-value="form.spoofedClient + ' | ' + form.spoofedDeviceName + ' | ' + form.spoofedAppVersion"
+              @update:model-value="(value: string) => {
+                const preset = SPOOFED_CLIENT_PRESETS.find((p) => `${p.client} | ${p.device} | ${p.version}` === value);
+                if (preset) applySpoofedPreset(form, preset);
+              }"
+              :items="SPOOFED_CLIENT_PRESETS.map((p) => ({ label: p.label, value: `${p.client} | ${p.device} | ${p.version}` }))"
+              value-key="value"
+              class="w-full max-w-md"
+            />
+            <p class="text-muted mt-1 text-xs">
+              选中预设后 <strong>客户端 / 设备 / 版本</strong> 三件套自动填入下方表单。<br />
+              远端 Emby 在 <code>Devices</code> 表里只看见<strong>这一台</strong>「{{ form.spoofedClient }} on {{ form.spoofedDeviceName }} v{{ form.spoofedAppVersion }}」，
+              不再带 <code>MovieRustTransit / movie-rust-{...}</code> 自爆字符串。
+            </p>
+          </UFormField>
+          <UFormField label="伪装 Client（应用名）">
+            <UInput v-model="form.spoofedClient" class="w-full" placeholder="Infuse-Direct" />
+          </UFormField>
+          <UFormField label="伪装 Device（设备名）">
+            <UInput v-model="form.spoofedDeviceName" class="w-full" placeholder="Apple TV" />
+          </UFormField>
+          <UFormField label="伪装 App Version（版本号）" class="lg:col-span-2">
+            <UInput v-model="form.spoofedAppVersion" class="w-full max-w-xs" placeholder="8.2.4" />
+            <p class="text-muted mt-1 text-xs">
+              <strong>DeviceId 不在此处编辑</strong>：source 创建时由后端自动派生 32 位 hex（不带项目名前缀），
+              此后**永不改变**——同一个 source 在远端 Devices 表里永远是同一行设备，符合真人客户端长期使用画像。
+            </p>
           </UFormField>
           <UFormField
             class="lg:col-span-2"
@@ -1218,6 +1290,32 @@ onBeforeUnmount(() => {
             </UFormField>
             <UFormField class="lg:col-span-2" label="伪装 User-Agent">
               <UTextarea v-model="editForm.spoofedUserAgent" :rows="2" class="w-full" />
+            </UFormField>
+            <UFormField class="lg:col-span-2" label="身份伪装预设（远端 Devices 表显示的客户端）">
+              <USelect
+                :model-value="editForm.spoofedClient + ' | ' + editForm.spoofedDeviceName + ' | ' + editForm.spoofedAppVersion"
+                @update:model-value="(value: string) => {
+                  const preset = SPOOFED_CLIENT_PRESETS.find((p) => `${p.client} | ${p.device} | ${p.version}` === value);
+                  if (preset) applySpoofedPreset(editForm, preset);
+                }"
+                :items="SPOOFED_CLIENT_PRESETS.map((p) => ({ label: p.label, value: `${p.client} | ${p.device} | ${p.version}` }))"
+                value-key="value"
+                class="w-full max-w-md"
+              />
+            </UFormField>
+            <UFormField label="伪装 Client（应用名）">
+              <UInput v-model="editForm.spoofedClient" class="w-full" placeholder="Infuse-Direct" />
+            </UFormField>
+            <UFormField label="伪装 Device（设备名）">
+              <UInput v-model="editForm.spoofedDeviceName" class="w-full" placeholder="Apple TV" />
+            </UFormField>
+            <UFormField label="伪装 App Version" class="lg:col-span-2">
+              <UInput v-model="editForm.spoofedAppVersion" class="w-full max-w-xs" placeholder="8.2.4" />
+              <p class="text-muted mt-1 text-xs">
+                DeviceId =
+                <code class="bg-muted px-1 rounded text-xs font-mono">{{ editForm.spoofedDeviceId || '（保存后由后端派生）' }}</code>
+                <span class="ml-2">— 一旦写入永不改变，避免远端 Devices 表频繁出现"新设备"触发管理员告警。</span>
+              </p>
             </UFormField>
             <UFormField
               class="lg:col-span-2"

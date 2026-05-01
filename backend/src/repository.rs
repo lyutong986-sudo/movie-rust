@@ -3897,6 +3897,8 @@ pub async fn list_remote_emby_sources(
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
             view_library_map, proxy_mode, auto_sync_interval_minutes,
+            page_size, request_interval_ms,
+            spoofed_client, spoofed_device_name, spoofed_device_id, spoofed_app_version,
             created_at, updated_at
         FROM remote_emby_sources
         ORDER BY name
@@ -3919,6 +3921,8 @@ pub async fn find_remote_sources_for_library(
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
             view_library_map, proxy_mode, auto_sync_interval_minutes,
+            page_size, request_interval_ms,
+            spoofed_client, spoofed_device_name, spoofed_device_id, spoofed_app_version,
             created_at, updated_at
         FROM remote_emby_sources
         WHERE enabled = true
@@ -3943,6 +3947,8 @@ pub async fn get_remote_emby_source(
             enabled, remote_user_id, access_token, source_secret, last_sync_at, last_sync_error,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, last_token_refresh_at,
             view_library_map, proxy_mode, auto_sync_interval_minutes,
+            page_size, request_interval_ms,
+            spoofed_client, spoofed_device_name, spoofed_device_id, spoofed_app_version,
             created_at, updated_at
         FROM remote_emby_sources
         WHERE id = $1
@@ -3974,6 +3980,12 @@ pub async fn create_remote_emby_source(
     auto_sync_interval_minutes: i32,
     page_size: i32,
     request_interval_ms: i32,
+    // PB39：身份伪装四元组。任一为 None / 空字符串时回落到 Infuse-Direct on Apple TV 默认。
+    // spoofed_device_id 为 None 时由本函数用 Uuid::new_v4 派生 32 位 hex（不带 'movie-rust-' 前缀）。
+    spoofed_client: Option<&str>,
+    spoofed_device_name: Option<&str>,
+    spoofed_device_id: Option<&str>,
+    spoofed_app_version: Option<&str>,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
     let server_url = server_url.trim().trim_end_matches('/');
@@ -4089,15 +4101,37 @@ pub async fn create_remote_emby_source(
     // remote_views 列类型为 jsonb（单个 JSON 数组），必须 wrap 成 Value::Array
     let remote_views_json = Value::Array(sanitized_remote_views);
     let vlm = view_library_map.cloned().unwrap_or_else(|| serde_json::json!({}));
+
+    // PB39：身份伪装。任一为空时回落到 Infuse-Direct on Apple TV 默认；spoofed_device_id 缺失
+    // 时用 `Uuid::new_v4` 派生 32 位 hex（不带 'movie-rust-' 前缀），首次创建即固定。
+    let spoofed_client = spoofed_client
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Infuse-Direct");
+    let spoofed_device_name = spoofed_device_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Apple TV");
+    let spoofed_device_id = spoofed_device_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+    let spoofed_app_version = spoofed_app_version
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("8.2.4");
+
     sqlx::query(
         r#"
         INSERT INTO remote_emby_sources (
             id, name, server_url, username, password, spoofed_user_agent, target_library_id,
             display_mode, remote_view_ids, remote_views, enabled, source_secret,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, proxy_mode,
-            view_library_map, auto_sync_interval_minutes, page_size, request_interval_ms
+            view_library_map, auto_sync_interval_minutes, page_size, request_interval_ms,
+            spoofed_client, spoofed_device_name, spoofed_device_id, spoofed_app_version
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
         "#,
     )
     .bind(row_id)
@@ -4121,6 +4155,10 @@ pub async fn create_remote_emby_source(
     .bind(auto_sync_interval_minutes)
     .bind(page_size)
     .bind(request_interval_ms)
+    .bind(spoofed_client)
+    .bind(spoofed_device_name)
+    .bind(spoofed_device_id)
+    .bind(spoofed_app_version)
     .execute(pool)
     .await?;
 
@@ -4141,6 +4179,9 @@ pub async fn delete_remote_emby_source(pool: &sqlx::PgPool, id: Uuid) -> Result<
 }
 
 /// 更新远端 Emby 源。`password` 为 `None` 或未填则保留数据库中原密码。
+/// PB39：`spoofed_client / spoofed_device_name / spoofed_device_id / spoofed_app_version`
+/// 同样为 `Option<&str>`，未传或空字符串则保留 DB 原值（**重要**：不能覆盖为空，
+/// 否则远端 Devices 表里这台 device 突然换 ID 会触发 admin 告警）。
 pub async fn update_remote_emby_source(
     pool: &sqlx::PgPool,
     id: Uuid,
@@ -4163,6 +4204,10 @@ pub async fn update_remote_emby_source(
     auto_sync_interval_minutes: i32,
     page_size: i32,
     request_interval_ms: i32,
+    spoofed_client: Option<&str>,
+    spoofed_device_name: Option<&str>,
+    spoofed_device_id: Option<&str>,
+    spoofed_app_version: Option<&str>,
 ) -> Result<DbRemoteEmbySource, AppError> {
     let name = name.trim();
     let server_url = server_url.trim().trim_end_matches('/');
@@ -4273,6 +4318,13 @@ pub async fn update_remote_emby_source(
     let page_size = if page_size <= 0 { 200 } else { page_size.clamp(50, 1000) };
     let request_interval_ms = request_interval_ms.max(0).min(60_000);
 
+    // PB39：四个 spoofed_* 入参 → Option<&str>，None / 空字符串都按 None 处理，
+    // SQL 用 `COALESCE(NULLIF($::text, ''), 列)` 在写入时保留旧值。
+    let spoofed_client_param = spoofed_client.map(str::trim).filter(|s| !s.is_empty());
+    let spoofed_device_name_param = spoofed_device_name.map(str::trim).filter(|s| !s.is_empty());
+    let spoofed_device_id_param = spoofed_device_id.map(str::trim).filter(|s| !s.is_empty());
+    let spoofed_app_version_param = spoofed_app_version.map(str::trim).filter(|s| !s.is_empty());
+
     let vlm = view_library_map.cloned().unwrap_or_else(|| serde_json::json!({}));
     let rows = if let Some(pw) = password.filter(|p| !p.trim().is_empty()) {
         sqlx::query(
@@ -4285,6 +4337,10 @@ pub async fn update_remote_emby_source(
                 token_refresh_interval_secs = $15, proxy_mode = $16,
                 view_library_map = $17, auto_sync_interval_minutes = $18,
                 page_size = $19, request_interval_ms = $20,
+                spoofed_client       = COALESCE(NULLIF($21::text, ''), spoofed_client),
+                spoofed_device_name  = COALESCE(NULLIF($22::text, ''), spoofed_device_name),
+                spoofed_device_id    = COALESCE(NULLIF($23::text, ''), spoofed_device_id),
+                spoofed_app_version  = COALESCE(NULLIF($24::text, ''), spoofed_app_version),
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -4309,6 +4365,10 @@ pub async fn update_remote_emby_source(
         .bind(auto_sync_interval_minutes)
         .bind(page_size)
         .bind(request_interval_ms)
+        .bind(spoofed_client_param)
+        .bind(spoofed_device_name_param)
+        .bind(spoofed_device_id_param)
+        .bind(spoofed_app_version_param)
         .execute(pool)
         .await?
     } else {
@@ -4322,6 +4382,10 @@ pub async fn update_remote_emby_source(
                 token_refresh_interval_secs = $14, proxy_mode = $15,
                 view_library_map = $16, auto_sync_interval_minutes = $17,
                 page_size = $18, request_interval_ms = $19,
+                spoofed_client       = COALESCE(NULLIF($20::text, ''), spoofed_client),
+                spoofed_device_name  = COALESCE(NULLIF($21::text, ''), spoofed_device_name),
+                spoofed_device_id    = COALESCE(NULLIF($22::text, ''), spoofed_device_id),
+                spoofed_app_version  = COALESCE(NULLIF($23::text, ''), spoofed_app_version),
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -4345,6 +4409,10 @@ pub async fn update_remote_emby_source(
         .bind(auto_sync_interval_minutes)
         .bind(page_size)
         .bind(request_interval_ms)
+        .bind(spoofed_client_param)
+        .bind(spoofed_device_name_param)
+        .bind(spoofed_device_id_param)
+        .bind(spoofed_app_version_param)
         .execute(pool)
         .await?
     };

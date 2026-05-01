@@ -157,6 +157,17 @@ struct CreateRemoteEmbySourceRequest {
     /// 拉取速率：两次 HTTP 请求最小间隔（毫秒），默认 0=不限，clamp [0, 60000]。
     #[serde(default, alias = "requestIntervalMs", alias = "request_interval_ms")]
     request_interval_ms: Option<i32>,
+    /// PB39：单设备身份伪装。前端可通过「常见客户端预设」一键填入，
+    /// 默认 Infuse-Direct on Apple TV / 8.2.4。空值由 repository 层兜底。
+    #[serde(default, alias = "spoofedClient", alias = "spoofed_client")]
+    spoofed_client: Option<String>,
+    #[serde(default, alias = "spoofedDeviceName", alias = "spoofed_device_name")]
+    spoofed_device_name: Option<String>,
+    /// 32 位 hex；不传由 repository 用 `Uuid::new_v4` 派生一个。
+    #[serde(default, alias = "spoofedDeviceId", alias = "spoofed_device_id")]
+    spoofed_device_id: Option<String>,
+    #[serde(default, alias = "spoofedAppVersion", alias = "spoofed_app_version")]
+    spoofed_app_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,6 +226,16 @@ struct UpdateRemoteEmbySourceRequest {
     /// 拉取速率：两次 HTTP 请求最小间隔（毫秒），默认 0=不限，clamp [0, 60000]。
     #[serde(default, alias = "requestIntervalMs", alias = "request_interval_ms")]
     request_interval_ms: Option<i32>,
+    /// PB39：单设备身份伪装。Update 路径下未传或空字符串则保留 DB 原值（不能覆盖为空，
+    /// 否则远端 Devices 表里这台 device 突然换 ID 会触发 admin 告警）。
+    #[serde(default, alias = "spoofedClient", alias = "spoofed_client")]
+    spoofed_client: Option<String>,
+    #[serde(default, alias = "spoofedDeviceName", alias = "spoofed_device_name")]
+    spoofed_device_name: Option<String>,
+    #[serde(default, alias = "spoofedDeviceId", alias = "spoofed_device_id")]
+    spoofed_device_id: Option<String>,
+    #[serde(default, alias = "spoofedAppVersion", alias = "spoofed_app_version")]
+    spoofed_app_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -273,6 +294,11 @@ struct RemoteEmbySourceDto {
     page_size: i32,
     /// 拉取速率：两次请求之间最小间隔（毫秒）。默认 0 = 不限，可调 0–60000。
     request_interval_ms: i32,
+    /// PB39：身份伪装四元组（默认 Infuse-Direct / Apple TV / 8.2.4，DeviceId 32 位 hex）。
+    spoofed_client: String,
+    spoofed_device_name: String,
+    spoofed_device_id: String,
+    spoofed_app_version: String,
     created_at: String,
     updated_at: String,
 }
@@ -462,6 +488,10 @@ async fn create_remote_emby_source(
         payload.auto_sync_interval_minutes.unwrap_or(0),
         payload.page_size.unwrap_or(200),
         payload.request_interval_ms.unwrap_or(0),
+        payload.spoofed_client.as_deref(),
+        payload.spoofed_device_name.as_deref(),
+        payload.spoofed_device_id.as_deref(),
+        payload.spoofed_app_version.as_deref(),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))
@@ -508,6 +538,10 @@ async fn update_remote_emby_source(
         payload.auto_sync_interval_minutes.unwrap_or(0),
         payload.page_size.unwrap_or(200),
         payload.request_interval_ms.unwrap_or(0),
+        payload.spoofed_client.as_deref(),
+        payload.spoofed_device_name.as_deref(),
+        payload.spoofed_device_id.as_deref(),
+        payload.spoofed_app_version.as_deref(),
     )
     .await?;
     Ok(Json(remote_emby_source_to_dto(source)))
@@ -887,6 +921,11 @@ fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> Remot
                     })
                     .collect()
             });
+    // PB39：先把伪装四元组从 source 借出（effective_* 内部 trim 后回落到默认），再 move 其它字段。
+    let spoofed_client = source.effective_spoofed_client().to_string();
+    let spoofed_device_name = source.effective_spoofed_device_name().to_string();
+    let spoofed_device_id = source.effective_spoofed_device_id();
+    let spoofed_app_version = source.effective_spoofed_app_version().to_string();
     RemoteEmbySourceDto {
         id: source.id.to_string(),
         name: source.name,
@@ -921,6 +960,10 @@ fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> Remot
         },
         page_size: if source.page_size <= 0 { 200 } else { source.page_size },
         request_interval_ms: source.request_interval_ms.max(0),
+        spoofed_client,
+        spoofed_device_name,
+        spoofed_device_id,
+        spoofed_app_version,
         created_at: source.created_at.to_rfc3339(),
         updated_at: source.updated_at.to_rfc3339(),
     }

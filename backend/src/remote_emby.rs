@@ -737,8 +737,10 @@ pub async fn preview_remote_views(
         return Err(AppError::BadRequest("伪装 User-Agent 不能为空".to_string()));
     }
 
-    let source_id = Uuid::new_v4();
-    let device_id = format!("movie-rust-preview-{}", source_id.simple());
+    // PB39：preview（创建 source 前的「连通性测试」）也走伪装链路，避免在远端 Devices 表
+    // 先留一个 `movie-rust-preview-...` 痕迹再被覆盖；32 位 hex device_id 不含项目名前缀，
+    // `emby_auth_header_for_device` 内部已经默认 Infuse-Direct on Apple TV / 8.2.4。
+    let device_id = Uuid::new_v4().simple().to_string();
     let client = &*crate::http_client::SHARED;
     let auth_endpoint = format!("{server_url}/Users/AuthenticateByName");
     let login_response = client
@@ -2790,7 +2792,10 @@ async fn send_remote_stream_request(
             .clone()
             .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
         let server_url = normalize_server_url(&source.server_url);
-        let device_id = format!("movie-rust-{}", source.id.simple());
+        // PB39：DeviceId 改为读 `source.spoofed_device_id`（首次 create 派生为 32 位 hex），
+        // 不再用 `movie-rust-{uuid}` 这种自爆前缀。空值由 `effective_spoofed_device_id` 回落到
+        // `source.id` 的 32 位 hex，仍然不带项目名前缀。
+        let device_id = source.effective_spoofed_device_id();
 
         // ── 快速路径：直接构造 Static URL，跳过 PlaybackInfo 往返 ──
         let static_url = build_remote_static_stream_url(
@@ -4378,25 +4383,49 @@ fn first_media_source_id(item: &RemoteSyncItem) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
+/// PB39：从 source 取出"已伪装的"四元组（Client / Device / DeviceId / Version），
+/// 让远端 Devices 表里这一行不再带 `MovieRustTransit / MovieRustProxy / movie-rust-{uuid}`
+/// 等自爆字符串。所有调用点（Static URL、PlaybackInfo、items 列表拉取、登录预览）
+/// 统一走这里，确保**同一个 source 永远展示同一台"设备"**，符合真人客户端长期使用的画像。
 fn emby_auth_header(source: &DbRemoteEmbySource, token: Option<&str>) -> String {
-    let device_id = format!("movie-rust-{}", source.id.simple());
-    emby_auth_header_for_device(device_id.as_str(), token)
+    emby_auth_header_for_identity(
+        source.effective_spoofed_client(),
+        source.effective_spoofed_device_name(),
+        source.effective_spoofed_device_id().as_str(),
+        source.effective_spoofed_app_version(),
+        token,
+    )
 }
 
+/// 不带 source 上下文（preview / 一次性预登录场景）时的伪装头构造。
+/// 调用方负责传入随机 device_id 并选好 client / device 名。
 fn emby_auth_header_for_device(device_id: &str, token: Option<&str>) -> String {
-    let client = "MovieRustTransit";
-    let device = "MovieRustProxy";
-    let version = "1.0.0";
+    emby_auth_header_for_identity("Infuse-Direct", "Apple TV", device_id, "8.2.4", token)
+}
+
+fn emby_auth_header_for_identity(
+    client: &str,
+    device: &str,
+    device_id: &str,
+    version: &str,
+    token: Option<&str>,
+) -> String {
     if let Some(token) = token.filter(|value| !value.trim().is_empty()) {
         format!(
-            "MediaBrowser Client=\"{client}\", Device=\"{device}\", DeviceId=\"{}\", Version=\"{version}\", Token=\"{}\"",
+            "MediaBrowser Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\", Token=\"{}\"",
+            client.trim(),
+            device.trim(),
             device_id.trim(),
+            version.trim(),
             token.trim()
         )
     } else {
         format!(
-            "MediaBrowser Client=\"{client}\", Device=\"{device}\", DeviceId=\"{}\", Version=\"{version}\"",
-            device_id.trim()
+            "MediaBrowser Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\"",
+            client.trim(),
+            device.trim(),
+            device_id.trim(),
+            version.trim()
         )
     }
 }

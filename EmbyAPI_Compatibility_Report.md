@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-05-01（第三十八批：元数据链路审计 PB31–PB35 — 远端 People / Series 详情 / 锁定字段 / 编辑回写 NFO / TMDB 打分匹配 / 7 类图 / 软删盘 / provider 删除 / PlaybackInfo 重试 / DTO 兜底 / TMDB retry / ETag / TMDB tagline+keywords / person_roles.is_featured）
+> 对比时间：2026-05-01（第三十九批：远端 source 单设备身份伪装 PB39 — 去 `MovieRustTransit / MovieRustProxy / movie-rust-{uuid}` 自爆字符串，统一伪装成一台 Infuse-Direct on Apple TV / 8.2.4，DeviceId 32 位 hex 永不改变）
 
 ---
 
@@ -2940,6 +2940,64 @@ do_refresh_item_metadata_with
 - `backend/src/metadata/models.rs`
 - `backend/src/metadata/provider.rs`
 - `frontend/src/pages/items/.../*.vue`（provider_ids 编辑 UI、锁定字段 toggle）
+- `EmbyAPI_Compatibility_Report.md`
+
+---
+
+## 第三十九批（2026-05-01）：远端 source 单设备身份伪装 PB39 — 让远端 Devices 表只看见**一台** Infuse-Direct，不再带 `MovieRustTransit / movie-rust-{uuid}` 自爆字符串
+
+### 触发场景
+用户观察到，在远端 Emby 服务器上他的账号被「禁用 / 删除」后本地仍能继续播放视频（这本身是 Emby 的已知缺陷：删账号不撤销 `Devices` 表里的 token）。利用这个特征，用户希望把本地后端做成「**对远端来说像一台普通的真客户端**」，避免被远端管理员通过 `Devices` 表的客户端字符串识别出来：
+- 之前所有 HTTP 请求 `X-Emby-Authorization` 头里的 `Client="MovieRustTransit"`、`Device="MovieRustProxy"`、`DeviceId="movie-rust-{源UUID}"`、`Version="1.0.0"` 全是硬编码项目名前缀，远端管理员一查 `Devices` 表立刻就知道这是一个第三方网关在中转流量。
+- 用户明确要求：**不要发心跳**（保留现有"无状态"播放）、**只伪装成单台客户端**（不要 per-user 多账号），且默认伪装为 **Infuse**（不是 Emby Web）。
+
+### 综合根因清单
+
+| 问题 ID | 优先级 | 缺陷位置 | 现象 |
+|---|---|---|---|
+| PB39-A | P0 | `remote_emby.rs::emby_auth_header` / `emby_auth_header_for_device` | 三处硬编码 `Client="MovieRustTransit"` / `Device="MovieRustProxy"` / `DeviceId="movie-rust-{uuid}"` / `Version="1.0.0"`，远端 Devices 表里这一行所有字段全是项目名前缀，等于"自爆"。 |
+| PB39-B | P0 | `remote_emby.rs::send_remote_stream_request` | Static URL 直链构造时 `device_id = format!("movie-rust-{}", source.id.simple())`，每个 source 在远端 Devices 表里都是 `movie-rust-...` 开头的设备名。 |
+| PB39-C | P0 | `remote_emby.rs::preview_remote_views` | 创建 source 之前的「连通性测试登录」用 `device_id = format!("movie-rust-preview-{...}")`，预览失败后这个 device 行还会留在远端 Devices 表里。 |
+| PB39-D | P1 | `DbRemoteEmbySource` / `repository::create_remote_emby_source` / `update_remote_emby_source` | 没有让用户配置「伪装成什么客户端」的字段；连同 `Client / Device / DeviceId / Version` 四元组都是写死，无法应对不同远端服务器对客户端类型的偏好。 |
+| PB39-E | P2 | `routes/remote_emby.rs::RemoteEmbySourceDto` / 前端 `RemoteEmbySettings.vue` | 没有 UI 让用户预览/编辑伪装身份，且没有"一键填入常见客户端"的预设。 |
+
+### 改动清单
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB39-1 | `backend/migrations/0001_schema.sql` + `backend/src/main.rs::ensure_schema_compatibility` | `remote_emby_sources` 表加 4 列：`spoofed_client TEXT NOT NULL DEFAULT 'Infuse-Direct'` / `spoofed_device_name TEXT NOT NULL DEFAULT 'Apple TV'` / `spoofed_device_id TEXT NOT NULL DEFAULT ''` / `spoofed_app_version TEXT NOT NULL DEFAULT '8.2.4'`。**回填语句**：旧行 `spoofed_device_id` 为空时 `UPDATE ... SET spoofed_device_id = replace(id::text, '-', '')`，让旧 source 平滑过渡到 32 位 hex（**不带 movie-rust 前缀**）；新建 source 的 device_id 由 repository 用 `Uuid::new_v4().simple()` 派生。 |
+| PB39-2 | `backend/src/models.rs::DbRemoteEmbySource` | 加 4 个 `#[sqlx(default)] pub spoofed_*: String` 字段；新增 `effective_spoofed_client/_device_name/_device_id/_app_version` 兜底辅助：空字符串时分别回落到 `Infuse-Direct` / `Apple TV` / `source.id.simple()` / `8.2.4`。 |
+| PB39-3 | `backend/src/repository.rs` | 1) 三处 SELECT（`list/find/get_remote_emby_source`）补上 `page_size, request_interval_ms, spoofed_client, spoofed_device_name, spoofed_device_id, spoofed_app_version` 6 列（之前两个就漏拉，本批一并补全）。2) `create_remote_emby_source` 加 4 个 `Option<&str>` 入参，None / 空字符串时回落到 Infuse-Direct on Apple TV 默认；`spoofed_device_id` 缺失时用 `Uuid::new_v4().simple().to_string()` 派生，**首次创建即固定**。3) `update_remote_emby_source` 加同样 4 个 `Option<&str>` 入参，但 SQL 用 `spoofed_client = COALESCE(NULLIF($::text, ''), spoofed_client)` 在写入时**保留 DB 原值**——这一点很关键：DeviceId 一旦稳定，远端 Devices 表里那行设备的 ID 就不能再变，否则远端管理员会看到"突然又来了一台新设备"。 |
+| PB39-4 | `backend/src/remote_emby.rs` | 1) `emby_auth_header(source, token)` 重写为读 `source.effective_spoofed_*` 四元组组装 `MediaBrowser Client="..." Device="..." DeviceId="..." Version="..." Token="..."`。2) `emby_auth_header_for_device(device_id, token)` 不带 source 上下文（preview 路径）时用默认 Infuse-Direct on Apple TV / 8.2.4。3) 抽出 `emby_auth_header_for_identity(client, device, device_id, version, token)` 内部统一组装，去重。4) `send_remote_stream_request` 里 Static URL 的 `device_id` 改读 `source.effective_spoofed_device_id()`，不再 `format!("movie-rust-{...}")`。5) `preview_remote_views` 的 `device_id` 改成 `Uuid::new_v4().simple().to_string()`（32 位 hex 不带项目名前缀），不再 `movie-rust-preview-...`。 |
+| PB39-5 | `backend/src/routes/remote_emby.rs` | 1) `CreateRemoteEmbySourceRequest` / `UpdateRemoteEmbySourceRequest` 加 `Option<String>` 4 字段（PascalCase + camelCase + snake_case 三组别名）。2) `create_remote_emby_source` / `update_remote_emby_source` handler 透传这 4 个字段到 repository。3) `RemoteEmbySourceDto` 加 4 个 String 字段，`remote_emby_source_to_dto` 用 `effective_spoofed_*` 兜底回显。 |
+| PB39-6 | `frontend/src/api/emby.ts` + `frontend/src/pages/settings/RemoteEmbySettings.vue` | 1) `RemoteEmbySource` 接口 + `createRemoteEmbySource` / `updateRemoteEmbySource` 入参类型加 4 个可选字段。2) Vue 设置页加 `SPOOFED_CLIENT_PRESETS` 数组（**Infuse-Direct on Apple TV / Infuse-Direct on iPhone / Emby Web on Chrome / Emby for iOS / Emby for Android / Emby Theater on Apple TV** 6 个预设），新增 `applySpoofedPreset(target, preset)` 一键填值函数。3) Create / Edit 两个对话框的"伪装 User-Agent"下方加「**身份伪装预设**」下拉 + 「Client / Device / Version」三个 UInput；编辑对话框还展示**只读** DeviceId 并提示"一旦写入永不改变"。 |
+
+### 关键设计决策
+
+1. **Client 默认值选 `Infuse-Direct` 而不是 `Emby Web`**：用户明确要求伪装成 Infuse 而不是浏览器。Infuse 是知名第三方 Emby/Plex 客户端，"Infuse-Direct" 是 Infuse 在直接播放（Direct Stream / Direct Play）模式下发送的 Client 名，与本项目默认走 Static URL 直链的特性最匹配，比 Emby Web 更不容易被远端管理员盯上。
+2. **DeviceId 一次派生，永不变**：远端 Emby 在 `Devices` 表里以 `(DeviceId, UserId)` 为主键。如果每次请求都换 DeviceId，远端会看见"同一个用户从无数个设备登录"，反而非常显眼。本批：source 创建时派生一次，之后无论 update 多少次都用 `COALESCE(NULLIF($::text, ''), spoofed_device_id)` 保持原值；前端 UI 把 DeviceId 标成只读且提示原因。
+3. **Update 入参用 `Option<String>` + 空字符串保留旧值**：避免前端不小心传空字符串时把已经稳定的伪装身份覆盖成空。
+4. **保留 `spoofed_user_agent` 字段不变**：UA 之前就允许用户自定义，本批不改 UA 链路；Infuse 的 UA（如 `Infuse-Direct/8.2.4 CFNetwork/1494.0.7 Darwin/23.4.0`）由用户在原有 UA 输入框里自行填写。
+5. **不动心跳行为**：用户明确要求"不要发心跳"，本项目本来就**不**发 PlaybackStart / PlaybackProgress / PlaybackStopped，本批维持现状；远端 Emby 的「最近播放 / 观看历史」不会出现本项目的播放痕迹。
+
+### 验证
+
+- `cargo check -p movie-rust-backend`：0 error。
+- `cargo test --bin movie-rust-backend`：60 passed; 0 failed。
+- `npx vue-tsc --noEmit`（frontend）：0 error。
+- 模型链路：旧 source 升级后 `spoofed_device_id` 立刻被 ensure_schema_compatibility 的 `UPDATE` 回填为 `replace(id::text, '-', '')` 32 位 hex；新建 source 由 repository 调 `Uuid::new_v4().simple()` 派生 32 位 hex，两条路径都不带 `movie-rust-` 前缀。
+- HTTP Header 链路：`emby_auth_header_for_identity("Infuse-Direct", "Apple TV", "<32hex>", "8.2.4", Some(token))` 输出  
+  `MediaBrowser Client="Infuse-Direct", Device="Apple TV", DeviceId="<32hex>", Version="8.2.4", Token="<token>"` ——与真实 Infuse 客户端发的头完全同构。
+
+### 影响文件
+- `backend/migrations/0001_schema.sql`
+- `backend/src/main.rs`
+- `backend/src/models.rs`
+- `backend/src/repository.rs`
+- `backend/src/remote_emby.rs`
+- `backend/src/routes/remote_emby.rs`
+- `frontend/src/api/emby.ts`
+- `frontend/src/pages/settings/RemoteEmbySettings.vue`
 - `EmbyAPI_Compatibility_Report.md`
 
 ---

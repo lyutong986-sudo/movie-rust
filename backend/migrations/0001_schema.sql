@@ -761,6 +761,23 @@ ALTER TABLE remote_emby_sources
     ADD COLUMN IF NOT EXISTS page_size INTEGER NOT NULL DEFAULT 200;
 ALTER TABLE remote_emby_sources
     ADD COLUMN IF NOT EXISTS request_interval_ms INTEGER NOT NULL DEFAULT 0;
+-- PB39：单设备身份伪装。让远端 Devices 表里这一行不再带 "MovieRustTransit / MovieRustProxy /
+-- movie-rust-{uuid}" 这些自爆字符串，统一伪装成一个常见 Emby 真客户端
+-- （默认 Infuse-Direct on Apple TV，可在管理面板修改）。
+-- spoofed_device_id 在创建 source 时自动派生为 32 位 hex（不含 'movie-rust-' 前缀）。
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS spoofed_client TEXT NOT NULL DEFAULT 'Infuse-Direct';
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS spoofed_device_name TEXT NOT NULL DEFAULT 'Apple TV';
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS spoofed_device_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS spoofed_app_version TEXT NOT NULL DEFAULT '8.2.4';
+-- 已有行 spoofed_device_id 仍为空：填一个稳定的 32 位 hex（基于 source.id），让旧 source
+-- 平滑过渡到 PB39 伪装链路。后续新建 source 在 repository 层会用 Uuid::new_v4 派生新值。
+UPDATE remote_emby_sources
+   SET spoofed_device_id = replace(id::text, '-', '')
+ WHERE spoofed_device_id IS NULL OR spoofed_device_id = '';
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique
     ON remote_emby_sources(lower(name));
