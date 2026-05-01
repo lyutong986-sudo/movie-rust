@@ -3547,3 +3547,141 @@ let id = existing_id
 - `EmbyAPI_Compatibility_Report.md`
 
 ---
+
+## 第四十八批（2026-05-01）：`upsert_media_item` finite retry 防御层（PB48 — 兜住 PB47 没盖到的极端 race）
+
+### 触发场景
+
+PB47 部署后用户再次上报：
+
+```
+最近任务失败 · 已运行 592 秒
+阶段 Failed
+远端抓取 1767 / 325342
+入库条目 1767
+数据库错误: error returned from database:
+  duplicate key value violates unique constraint "media_items_library_id_path_key"
+```
+
+约束名仍是 `media_items_library_id_path_key`，但这是 PB47 SELECT-first **没覆盖**的另一种 race。
+
+### 根因分析（PB47 的盲点）
+
+PB47 的 SELECT-first 假设：**两个并发任务 A、B 对同一 `(library_id, path)` 跑 SELECT，要么都拿到同一 `existing_id`，要么都拿到 None**。
+
+但有一种 race 让 A 拿到 `existing_id` 而 B 拿到 None：
+
+```
+前提：库里有一条历史漂移行 R0，id=X（v4 / 手动 INSERT），lib=L, path=P
+
+T0  A SELECT(L, P) → X        （R0 此时存在）
+T1  R0 被并发删除              （cascade DELETE / prune / 用户手动 / ON DELETE CASCADE 链）
+T2  B SELECT(L, P) → None      （R0 已没）
+T3  A INSERT id=X              → R0 已不存在 → 无 PK 冲突 → 无 (L,P) 冲突 → INSERT 成功 → 新 R1(id=X, L, P)
+T4  B INSERT id=v5(L,P)         → id 不冲突（v5 ≠ X 不在表里）
+                                → (L, P) 撞 R1 → 抛 media_items_library_id_path_key
+```
+
+这是 PG `ON CONFLICT` **单仲裁器**的固有局限：副 UNIQUE 索引冲突时 arbiter (`id`) 接不住，PG 把违例直接抛出来。PB47 的 SELECT-first 可以在并发任务**同时**拿到同一现实状态时收敛，但只要 SELECT 之间夹了一个 DELETE，两个任务的"现实状态"就出现分歧——A 看到的是 R0 时代，B 看到的是 R0 不存在的时代——id 算出来不一样，race 就成立。
+
+PB47 报告 §3 第 4 点把这种情况判为"实际中不会触发"是基于"prune 和 sync 串行"的假设；真实路径下还有：
+- 用户在前端 admin 接口手动删除某条媒体项
+- `media_items.parent_id REFERENCES media_items(id) ON DELETE CASCADE` 链——series 行被删时，episode 行随之 cascade 删
+- libraries / remote_emby_sources 删除时的级联清理
+
+任意一个并发跑过都能命中。
+
+### 修复设计
+
+把 SELECT + INSERT **整段**包进 finite retry：
+
+```rust
+const UPSERT_MAX_ATTEMPTS: usize = 3;
+for attempt in 0..UPSERT_MAX_ATTEMPTS {
+    let existing_id = SELECT id FROM media_items WHERE library_id=$1 AND path=$2;
+    let id = existing_id.unwrap_or_else(|| Uuid::new_v5(L, P));
+
+    match INSERT ... ON CONFLICT (id) DO UPDATE.execute(pool).await {
+        Ok(_) => return Ok((id, was_inserted));
+        Err(sqlx::Error::Database(e))
+            if e.constraint() == Some("media_items_library_id_path_key")
+                && attempt + 1 < UPSERT_MAX_ATTEMPTS =>
+        {
+            // race：另一并发写入抢先 INSERT 了 (L, P) 但用了 ≠v5 的 id
+            // 重试时 SELECT 会拿到对方刚 commit 的行的 id，下一轮 INSERT id=对方id
+            // → ON CONFLICT (id) → DO UPDATE → 收敛成功
+            tracing::warn!(...);
+            continue;
+        }
+        Err(e) => return Err(e.into()),
+    }
+}
+```
+
+### 各场景下的行为对比
+
+| 场景 | PB47 单次（旧） | PB48 retry（新） |
+|---|---|---|
+| 首次写入（无老行） | 1 SELECT + 1 INSERT → 成功 | 1 SELECT + 1 INSERT → 成功（与 PB47 完全一致） |
+| 老 v5 行（同步重跑） | SELECT v5_old → INSERT id=v5_old → ON CONFLICT (id) → UPDATE | 同上（attempt=0 即返回） |
+| 老漂移行（v4 / 手动）单写入 | SELECT drift_id → INSERT → ON CONFLICT (id) → UPDATE | 同上 |
+| **漂移老行 + 并发删除 + 并发写入** | 抛 `media_items_library_id_path_key` ❌ | attempt=0 抛冲突 → 重试 attempt=1 → SELECT 拿到对手刚 INSERT 的 id → INSERT 走 ON CONFLICT (id) UPDATE → 成功 ✓ |
+| 极端连续冲突（≥3 并发删除+插入） | 抛错 | attempt 0/1/2 全抛冲突 → 让原 error 抛出去（保留可观测性，不进入死循环） |
+
+### 关键设计决策
+
+1. **为什么是 finite retry，不是 unbounded？**
+   - 防御编程边界：超出 3 次说明同一 `(L, P)` 上有 ≥ 3 个并发删除+插入，已不是同步路径正常工作流，应让上层看到错误而不是无限自旋
+   - 实践上 1 次重试就足够（race 只在 SELECT 后到 INSERT 前的几 ms 窗口里发生，第二轮 SELECT 已经稳态）；3 次纯属冗余
+
+2. **为什么不直接 `BEGIN; LOCK ROW; SELECT; INSERT; COMMIT`？**
+   - 真用 row lock：要先 `INSERT ... ON CONFLICT DO NOTHING` 占位，再 `UPDATE`——多一次 round trip
+   - 用 advisory lock（`pg_advisory_xact_lock(hash(L, P))`）：每条目多两次 PG round trip（lock + unlock），32 万条目就是 64 万次额外 RTT，性能损耗远高于"绝大多数情况下不重试"的 PB48
+   - finite retry 在**正常路径零额外开销**——稳态下 attempt=0 就成功返回
+
+3. **SELECT-first 是否还有用？**
+   - 是的，仍然是第一道防线：
+     - 90%+ 的"老行已在库里"场景，attempt=0 就拿到 existing_id 收敛
+     - retry 只兜 SELECT-first 没盖住的 5% 极端 race
+   - 删掉 SELECT-first 直接 retry 可以工作，但每次都要先 INSERT 一次"用 v5"再退到 retry 拿 existing_id，浪费一次 SQL
+
+4. **为什么所有 owned binding 改成 by-ref？**
+   - 重写前 `.bind(sort_name)` / `.bind(path_text)` / `.bind(image_text)` 等都 move 进 `Query`，retry 时 owned 数据已被消费，编译错
+   - 改用 `.bind(sort_name.as_str())` / `.bind(image_text.as_deref())` 之后 retry 可以多次借用同一份数据，无 clone 开销
+   - 副作用：所有 binding 整理成统一缩进风格（之前几行有错位空格）
+
+5. **常量 vs 配置**
+   - `UPSERT_MAX_ATTEMPTS = 3` 写死成 const 而非配置项——这是数据库一致性的安全网，不是用户可调参数。改值需要改代码 + 走 PR review，避免运维误调
+
+### 改动清单
+
+| # | 文件 | 改动 |
+|---|------|------|
+| PB48-1 | `backend/src/repository.rs::upsert_media_item` | 整段 SELECT + INSERT 包进 `for attempt in 0..UPSERT_MAX_ATTEMPTS` 循环；`Err` 分支匹配 `sqlx::Error::Database(db_err)` 且 `db_err.constraint() == Some("media_items_library_id_path_key")` 时 `continue`，其它 `Err` 直接 `return Err(e.into())`；末尾 `unreachable!` 兜底。补 PB48 注释解释 race 场景 + 重试条件。 |
+| PB48-2 | `backend/src/repository.rs::upsert_media_item` | 把 `sort_name` / `path_text` / `image_text` / `backdrop_text` / `logo_text` / `thumb_text` / `art_text` / `banner_text` / `disc_text` 的 `.bind(...)` 改成 `.bind(...).as_str()` / `.as_deref()` 借用形式，让 retry 可以多次重用同一份 owned 数据。同步整理 binding 缩进风格。 |
+| PB48-3 | `EmbyAPI_Compatibility_Report.md` | 新增本批次记录。 |
+
+### 验证
+
+- `cargo check -p movie-rust-backend`：0 error，41 个旧 warning（全为预存在 dead code 告警）。
+- `cargo test`：60 passed; 0 failed。
+- `ReadLints` on `repository.rs`：0 lint。
+- 与 PB47 行为对比：
+  - 正常路径（无冲突）：1 次 SELECT + 1 次 INSERT，与 PB47 完全一致，零额外开销
+  - 单次 race：PB47 抛错中断同步；PB48 重试 1 次自动收敛
+  - 持续 race（理论上）：PB48 最多重试 3 次，超过则抛原 error，不会无限自旋
+- 与"重置数据库"对比：
+  - 重置后所有行 id = `v5(library_id, path)`，PB47 单次足以收敛，**永不触发 PB48 retry 路径**
+  - 不重置时 PB48 处理历史漂移行 + 各种并发删除 race，让同步**不必依赖数据库重置**就能跑通
+
+### 配套建议（用户层面）
+
+1. **首选：先重置数据库**（清掉历史漂移行）。这能立即解锁 32 万条目同步，PB48 主要作为**未来防御**而存在
+2. **如果不便重置**：PB48 retry 层会自动接住漂移行 race，可以直接重新启动同步
+3. **观察日志**：搜 `PB48：检测到 (library_id, path) 唯一约束冲突` 可以看到实际发生的 race 频次。如果频次 > 1% 条目数，说明并发删除路径异常活跃，需要排查
+
+### 影响文件
+- `backend/src/repository.rs`
+- `EmbyAPI_Compatibility_Report.md`
+
+---

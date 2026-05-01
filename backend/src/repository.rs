@@ -8818,6 +8818,7 @@ pub async fn upsert_media_item(
         .disc_path
         .map(|value| value.to_string_lossy().to_string());
     let backdrop_paths_vec: Vec<String> = input.backdrop_paths.to_vec();
+    let sort_name = sort_name_for_item(&input);
     // PB45：id 由 `Uuid::new_v5(library_id, path)` 派生，本来想让 `(library_id, path)` 与
     // PK `(id)` 在新数据上一一对应；ON CONFLICT 改成 PK arbiter 来避开并发下 PK 先冲突
     // 没法被 (lib, path) arbiter 接住的 race。
@@ -8834,7 +8835,7 @@ pub async fn upsert_media_item(
     //   - arbiter 是 (id), 不匹配 (lib, path) UNIQUE
     //   → 抛 `duplicate key value violates unique constraint "media_items_library_id_path_key"`
     //
-    // 修复方案：SELECT-first 拿到现存行的 id 优先复用——这样
+    // PB47 修复：SELECT-first 拿到现存行的 id 优先复用——这样
     //   - 老漂移行：用其原 id INSERT → PK 命中 (id) arbiter → UPDATE 老行（保留 id 不变）
     //   - 全新行：SELECT 返回 None → 用 v5 → INSERT 成功
     //   - 并发同 (lib, path) 全新行：两 task 都 SELECT None，都用相同 v5 id；
@@ -8843,152 +8844,191 @@ pub async fn upsert_media_item(
     //     第一个 INSERT id=existing_id → PK 冲突 → UPDATE；
     //     第二个 INSERT id=existing_id → PK 冲突 → UPDATE
     //
+    // PB48：PB47 仍漏一种极端 race——漂移老行 R0(id=X) 在 SELECT 之后被并发删除
+    // （prune / cascade / 用户手动删），随后两个并发任务一个用 X 一个用 v5：
+    //     T0 A SELECT(L, P) → X
+    //     T1 R0 被删
+    //     T2 B SELECT(L, P) → None（R0 已没）
+    //     T3 A INSERT id=X → 行不存在 → 成功 → 新 R1(id=X, lib=L, path=P)
+    //     T4 B INSERT id=v5 → PK 不冲突，但 (lib, path) 撞 R1 → 抛 (lib, path) 违例
+    // 这是 PG ON CONFLICT 单仲裁器（只能一个）的固有局限：副 UNIQUE 索引冲突时
+    // arbiter 接不住。
+    //
+    // 修复方案：finite retry。捕获到 `media_items_library_id_path_key` 时
+    // 重新跑一次 SELECT-first——这次 R1 已可见，新一轮拿到 R1.id=X，重新 INSERT
+    // id=X 走 ON CONFLICT (id) → DO UPDATE，收敛成功。
+    //
+    // 重试 3 次保底；超出说明热点异常密集（同一 (lib, path) 上有 ≥3 个并发删除+插入），
+    // 这种情况已经不是同步路径正常工作流，让原 error 抛出去由上层处理。
+    //
     // 性能：SELECT 走 UNIQUE (library_id, path) 索引，O(log n) 单点查询，几 μs 级；
-    // 同步阶段每条目多一次但与之前 fetch_remote_playback_analysis 省下的开销相比可忽略。
-    let existing_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM media_items WHERE library_id = $1 AND path = $2",
-    )
-    .bind(input.library_id)
-    .bind(path_text.as_str())
-    .fetch_optional(pool)
-    .await?;
-    let id = existing_id
-        .unwrap_or_else(|| Uuid::new_v5(&input.library_id, path_text.as_bytes()));
-    let sort_name = sort_name_for_item(&input);
+    // 重试只在真冲突时发生（正常路径 0 重试），无稳态开销。
+    const UPSERT_MAX_ATTEMPTS: usize = 3;
+    for attempt in 0..UPSERT_MAX_ATTEMPTS {
+        let existing_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM media_items WHERE library_id = $1 AND path = $2",
+        )
+        .bind(input.library_id)
+        .bind(path_text.as_str())
+        .fetch_optional(pool)
+        .await?;
+        let id = existing_id
+            .unwrap_or_else(|| Uuid::new_v5(&input.library_id, path_text.as_bytes()));
 
-    sqlx::query(
-        r#"
-        INSERT INTO media_items
-            (
-                id, library_id, parent_id, name, original_title, sort_name, item_type, media_type, path,
-                container, overview, production_year, official_rating, community_rating, critic_rating,
-                runtime_ticks, premiere_date, status, end_date, air_days, air_time,
-                provider_ids, genres, studios, tags, production_locations,
-                image_primary_path, backdrop_path, logo_path, thumb_path,
-                art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                series_name, season_name, index_number,
-                index_number_end, parent_index_number, width, height, video_codec, audio_codec,
-                series_id,
-                date_modified
-            )
-        VALUES
-            (
-                $1, $2, $3, $4, $5, $6, $7, $8,
-                $9, $10, $11, $12, $13, $14,
-                $15, $16, $17, $18, $19, $20,
-                $21, $22, $23, $24, $25,
-                $26, $27, $28, $29, $30, $31, $32, $33, $34,
-                $35, $36, $37, $38, $39, $40,
-                $41, $42, $43, $44,
-                $45,
-                now()
-            )
-        ON CONFLICT (id)
-        DO UPDATE SET
-            parent_id = EXCLUDED.parent_id,
-            name = EXCLUDED.name,
-            original_title = EXCLUDED.original_title,
-            sort_name = EXCLUDED.sort_name,
-            item_type = EXCLUDED.item_type,
-            media_type = EXCLUDED.media_type,
-            container = EXCLUDED.container,
-            overview = EXCLUDED.overview,
-              production_year = EXCLUDED.production_year,
-              official_rating = EXCLUDED.official_rating,
-              community_rating = EXCLUDED.community_rating,
-              critic_rating = EXCLUDED.critic_rating,
-              runtime_ticks = EXCLUDED.runtime_ticks,
-            premiere_date = EXCLUDED.premiere_date,
-            status = EXCLUDED.status,
-            end_date = EXCLUDED.end_date,
-            air_days = EXCLUDED.air_days,
-            air_time = EXCLUDED.air_time,
-            provider_ids = EXCLUDED.provider_ids,
-            genres = EXCLUDED.genres,
-            studios = EXCLUDED.studios,
-            tags = EXCLUDED.tags,
-            production_locations = EXCLUDED.production_locations,
-            image_primary_path = EXCLUDED.image_primary_path,
-            backdrop_path = EXCLUDED.backdrop_path,
-            logo_path = EXCLUDED.logo_path,
-            thumb_path = EXCLUDED.thumb_path,
-            art_path = EXCLUDED.art_path,
-            banner_path = EXCLUDED.banner_path,
-            disc_path = EXCLUDED.disc_path,
-            backdrop_paths = EXCLUDED.backdrop_paths,
-            remote_trailers = EXCLUDED.remote_trailers,
-            series_name = EXCLUDED.series_name,
-            season_name = EXCLUDED.season_name,
-            index_number = EXCLUDED.index_number,
-            index_number_end = EXCLUDED.index_number_end,
-            parent_index_number = EXCLUDED.parent_index_number,
-            width = EXCLUDED.width,
-            height = EXCLUDED.height,
-            video_codec = EXCLUDED.video_codec,
-            audio_codec = EXCLUDED.audio_codec,
-            series_id = COALESCE(EXCLUDED.series_id, media_items.series_id),
-            date_modified = now()
-        "#,
-    )
-    .bind(id)
-    .bind(input.library_id)
-    .bind(input.parent_id)
-    .bind(input.name)
-    .bind(input.original_title)
-    .bind(sort_name)
-    .bind(input.item_type)
-    .bind(input.media_type)
-    .bind(path_text)
-    .bind(input.container)
-    .bind(input.overview)
-      .bind(input.production_year)
-      .bind(input.official_rating)
-      .bind(input.community_rating)
-      .bind(input.critic_rating)
-      .bind(input.runtime_ticks)
-    .bind(input.premiere_date)
-    .bind(input.status)
-    .bind(input.end_date)
-    .bind(input.air_days)
-    .bind(input.air_time)
-    .bind(&input.provider_ids)
-    .bind(input.genres)
-    .bind(input.studios)
-    .bind(input.tags)
-    .bind(input.production_locations)
-    .bind(image_text)
-    .bind(backdrop_text)
-    .bind(logo_text)
-    .bind(thumb_text)
-    .bind(art_text)
-    .bind(banner_text)
-    .bind(disc_text)
-    .bind(&backdrop_paths_vec)
-    .bind(input.remote_trailers)
-    .bind(input.series_name)
-    .bind(input.season_name)
-    .bind(input.index_number)
-    .bind(input.index_number_end)
-    .bind(input.parent_index_number)
-    .bind(input.width)
-    .bind(input.height)
-    .bind(input.video_codec)
-    .bind(input.audio_codec)
-    .bind(input.series_id)
-    .execute(pool)
-    .await?;
+        let insert_result = sqlx::query(
+            r#"
+            INSERT INTO media_items
+                (
+                    id, library_id, parent_id, name, original_title, sort_name, item_type, media_type, path,
+                    container, overview, production_year, official_rating, community_rating, critic_rating,
+                    runtime_ticks, premiere_date, status, end_date, air_days, air_time,
+                    provider_ids, genres, studios, tags, production_locations,
+                    image_primary_path, backdrop_path, logo_path, thumb_path,
+                    art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
+                    series_name, season_name, index_number,
+                    index_number_end, parent_index_number, width, height, video_codec, audio_codec,
+                    series_id,
+                    date_modified
+                )
+            VALUES
+                (
+                    $1, $2, $3, $4, $5, $6, $7, $8,
+                    $9, $10, $11, $12, $13, $14,
+                    $15, $16, $17, $18, $19, $20,
+                    $21, $22, $23, $24, $25,
+                    $26, $27, $28, $29, $30, $31, $32, $33, $34,
+                    $35, $36, $37, $38, $39, $40,
+                    $41, $42, $43, $44,
+                    $45,
+                    now()
+                )
+            ON CONFLICT (id)
+            DO UPDATE SET
+                parent_id = EXCLUDED.parent_id,
+                name = EXCLUDED.name,
+                original_title = EXCLUDED.original_title,
+                sort_name = EXCLUDED.sort_name,
+                item_type = EXCLUDED.item_type,
+                media_type = EXCLUDED.media_type,
+                container = EXCLUDED.container,
+                overview = EXCLUDED.overview,
+                production_year = EXCLUDED.production_year,
+                official_rating = EXCLUDED.official_rating,
+                community_rating = EXCLUDED.community_rating,
+                critic_rating = EXCLUDED.critic_rating,
+                runtime_ticks = EXCLUDED.runtime_ticks,
+                premiere_date = EXCLUDED.premiere_date,
+                status = EXCLUDED.status,
+                end_date = EXCLUDED.end_date,
+                air_days = EXCLUDED.air_days,
+                air_time = EXCLUDED.air_time,
+                provider_ids = EXCLUDED.provider_ids,
+                genres = EXCLUDED.genres,
+                studios = EXCLUDED.studios,
+                tags = EXCLUDED.tags,
+                production_locations = EXCLUDED.production_locations,
+                image_primary_path = EXCLUDED.image_primary_path,
+                backdrop_path = EXCLUDED.backdrop_path,
+                logo_path = EXCLUDED.logo_path,
+                thumb_path = EXCLUDED.thumb_path,
+                art_path = EXCLUDED.art_path,
+                banner_path = EXCLUDED.banner_path,
+                disc_path = EXCLUDED.disc_path,
+                backdrop_paths = EXCLUDED.backdrop_paths,
+                remote_trailers = EXCLUDED.remote_trailers,
+                series_name = EXCLUDED.series_name,
+                season_name = EXCLUDED.season_name,
+                index_number = EXCLUDED.index_number,
+                index_number_end = EXCLUDED.index_number_end,
+                parent_index_number = EXCLUDED.parent_index_number,
+                width = EXCLUDED.width,
+                height = EXCLUDED.height,
+                video_codec = EXCLUDED.video_codec,
+                audio_codec = EXCLUDED.audio_codec,
+                series_id = COALESCE(EXCLUDED.series_id, media_items.series_id),
+                date_modified = now()
+            "#,
+        )
+        .bind(id)
+        .bind(input.library_id)
+        .bind(input.parent_id)
+        .bind(input.name)
+        .bind(input.original_title)
+        .bind(sort_name.as_str())
+        .bind(input.item_type)
+        .bind(input.media_type)
+        .bind(path_text.as_str())
+        .bind(input.container)
+        .bind(input.overview)
+        .bind(input.production_year)
+        .bind(input.official_rating)
+        .bind(input.community_rating)
+        .bind(input.critic_rating)
+        .bind(input.runtime_ticks)
+        .bind(input.premiere_date)
+        .bind(input.status)
+        .bind(input.end_date)
+        .bind(input.air_days)
+        .bind(input.air_time)
+        .bind(&input.provider_ids)
+        .bind(input.genres)
+        .bind(input.studios)
+        .bind(input.tags)
+        .bind(input.production_locations)
+        .bind(image_text.as_deref())
+        .bind(backdrop_text.as_deref())
+        .bind(logo_text.as_deref())
+        .bind(thumb_text.as_deref())
+        .bind(art_text.as_deref())
+        .bind(banner_text.as_deref())
+        .bind(disc_text.as_deref())
+        .bind(&backdrop_paths_vec)
+        .bind(input.remote_trailers)
+        .bind(input.series_name)
+        .bind(input.season_name)
+        .bind(input.index_number)
+        .bind(input.index_number_end)
+        .bind(input.parent_index_number)
+        .bind(input.width)
+        .bind(input.height)
+        .bind(input.video_codec)
+        .bind(input.audio_codec)
+        .bind(input.series_id)
+        .execute(pool)
+        .await;
 
-    // INSERT 路径：xmax=0 → 此前 0 行影响转 1 行；ON CONFLICT UPDATE 路径会改 xmax≠0，
-    // 但 affected row 也是 1。所以单看 affected 区分不了，要再补一个 SELECT。
-    let was_inserted: bool = sqlx::query_scalar(
-        "SELECT (xmax = 0) FROM media_items WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?
-    .unwrap_or(false);
-
-    Ok((id, was_inserted))
+        match insert_result {
+            Ok(_) => {
+                // INSERT 路径：xmax=0 → 此前 0 行影响转 1 行；ON CONFLICT UPDATE 路径会改 xmax≠0，
+                // 但 affected row 也是 1。所以单看 affected 区分不了，要再补一个 SELECT。
+                let was_inserted: bool = sqlx::query_scalar(
+                    "SELECT (xmax = 0) FROM media_items WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_optional(pool)
+                .await?
+                .unwrap_or(false);
+                return Ok((id, was_inserted));
+            }
+            Err(sqlx::Error::Database(ref db_err))
+                if db_err.constraint() == Some("media_items_library_id_path_key")
+                    && attempt + 1 < UPSERT_MAX_ATTEMPTS =>
+            {
+                tracing::warn!(
+                    library_id = %input.library_id,
+                    path = %path_text,
+                    attempt = attempt + 1,
+                    "PB48：检测到 (library_id, path) 唯一约束冲突（漂移行 race），重试 SELECT-first"
+                );
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // 上面 for 循环要么 return Ok / return Err，要么 continue；走到这里说明
+    // 用尽了重试次数都没成功——这条分支由最后一次循环里的 `attempt + 1 < MAX` 守卫
+    // 决定不重试而直接 return Err，所以理论上不可达。
+    unreachable!("PB48 retry loop exited without resolution")
 }
 
 pub fn user_to_dto(user: &DbUser, server_id: Uuid) -> UserDto {
