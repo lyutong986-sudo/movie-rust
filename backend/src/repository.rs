@@ -4049,6 +4049,7 @@ pub async fn list_remote_emby_sources(
             view_library_map, proxy_mode, auto_sync_interval_minutes,
             page_size, request_interval_ms,
             spoofed_client, spoofed_device_name, spoofed_device_id, spoofed_app_version,
+            enable_auto_delete,
             created_at, updated_at
         FROM remote_emby_sources
         ORDER BY name
@@ -4073,6 +4074,7 @@ pub async fn find_remote_sources_for_library(
             view_library_map, proxy_mode, auto_sync_interval_minutes,
             page_size, request_interval_ms,
             spoofed_client, spoofed_device_name, spoofed_device_id, spoofed_app_version,
+            enable_auto_delete,
             created_at, updated_at
         FROM remote_emby_sources
         WHERE enabled = true
@@ -4099,6 +4101,7 @@ pub async fn get_remote_emby_source(
             view_library_map, proxy_mode, auto_sync_interval_minutes,
             page_size, request_interval_ms,
             spoofed_client, spoofed_device_name, spoofed_device_id, spoofed_app_version,
+            enable_auto_delete,
             created_at, updated_at
         FROM remote_emby_sources
         WHERE id = $1

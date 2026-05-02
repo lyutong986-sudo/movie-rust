@@ -327,7 +327,13 @@ function syncButtonLabel(source: RemoteEmbySource) {
 
 function buildOperationMap(operations: RemoteEmbySyncOperation[]) {
   const next: Record<string, RemoteEmbySyncOperation> = {};
-  for (const operation of operations) {
+  const sorted = [...operations].sort((a, b) => {
+    if (a.Done !== b.Done) return a.Done ? 1 : -1;
+    const bTime = new Date(b.CreatedAt || 0).getTime();
+    const aTime = new Date(a.CreatedAt || 0).getTime();
+    return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+  });
+  for (const operation of sorted) {
     if (!operation?.SourceId) continue;
     if (!next[operation.SourceId]) {
       next[operation.SourceId] = operation;
@@ -746,8 +752,16 @@ async function syncSource(source: RemoteEmbySource) {
   error.value = '';
   saved.value = '';
   try {
+    if (operation?.Done) {
+      const next = { ...operationBySourceId.value };
+      delete next[source.Id];
+      operationBySourceId.value = next;
+    }
     const queued = await api.startRemoteEmbySync(source.Id);
-    operationBySourceId.value[source.Id] = queued.Operation;
+    operationBySourceId.value = {
+      ...operationBySourceId.value,
+      [source.Id]: queued.Operation
+    };
     saved.value = queued.Message || `已提交同步任务：${source.Name}`;
     startPolling();
   } catch (err) {

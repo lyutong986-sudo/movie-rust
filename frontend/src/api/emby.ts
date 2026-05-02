@@ -590,6 +590,11 @@ export interface RemoteEmbySource {
    */
   AutoSyncIntervalMinutes?: number;
   /**
+   * 自动删除：同步时清理远端已下架的本地映射条目。
+   * 默认 false，避免远端分页/网络抖动时误删。
+   */
+  EnableAutoDelete: boolean;
+  /**
    * 拉取速率：每页拉取条目数。默认 200，可调 50–1000。
    * 越小越平稳但请求次数越多；越大单次返回越多，对端单页 IO 越大。
    */
@@ -1594,6 +1599,7 @@ export class EmbyApi {
     TokenRefreshIntervalSecs?: number;
     ProxyMode?: 'proxy' | 'redirect';
     AutoSyncIntervalMinutes?: number;
+    EnableAutoDelete?: boolean;
     /** 拉取速率：每页条目数（50–1000，默认 200） */
     PageSize?: number;
     /** 拉取速率：两次请求最小间隔（毫秒，0–60000，默认 0=不限） */
@@ -1630,6 +1636,7 @@ export class EmbyApi {
       TokenRefreshIntervalSecs?: number;
       ProxyMode?: 'proxy' | 'redirect';
       AutoSyncIntervalMinutes?: number;
+      EnableAutoDelete?: boolean;
       /** 拉取速率：每页条目数（50–1000，默认 200） */
       PageSize?: number;
       /** 拉取速率：两次请求最小间隔（毫秒，0–60000，默认 0=不限） */

@@ -814,10 +814,10 @@ async fn list_remote_emby_sync_operations(
     auth::require_admin(&session)?;
     let limit = query.limit.unwrap_or(20).clamp(1, 200) as usize;
     let registry = remote_emby_sync_registry().read().await;
-    let operations = registry
-        .operations
-        .values()
-        .rev()
+    let mut operation_states = registry.operations.values().cloned().collect::<Vec<_>>();
+    operation_states.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let operations = operation_states
+        .iter()
         .take(limit)
         .map(RemoteEmbySyncOperationState::to_dto)
         .collect::<Vec<_>>();
