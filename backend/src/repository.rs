@@ -4714,7 +4714,9 @@ pub async fn clear_source_view_progress(
     source_id: Uuid,
 ) -> Result<u64, AppError> {
     let result = sqlx::query(
-        "DELETE FROM remote_emby_source_view_progress WHERE source_id = $1",
+        "UPDATE remote_emby_source_view_progress \
+         SET last_start_index = 0, incremental_since = NULL, total_record_count = 0, updated_at = now() \
+         WHERE source_id = $1",
     )
     .bind(source_id)
     .execute(pool)

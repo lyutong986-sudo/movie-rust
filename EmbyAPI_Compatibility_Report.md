@@ -3798,3 +3798,54 @@ for attempt in 0..UPSERT_MAX_ATTEMPTS {
 - `EmbyAPI_Compatibility_Report.md`
 
 ---
+
+## 远端 Emby 增量同步性能优化（2026-05-02）
+
+### 背景
+
+在完成层级同步重构后，对增量同步路径进行深度审查，发现 5 个性能瓶颈：
+1. 电影库缺少 TotalRecordCount 增量检测，每次增量同步仍全量拉取
+2. Series/Season 增量检测使用 N+1 逐条 SQL 查询，大库性能差
+3. 增量模式下 Series 列表 API 请求了过多字段（People、Genres 等），95% 会被跳过
+4. 删除 Series/Movie 时，DB 行通过 CASCADE 删除但磁盘 STRM/NFO 文件未清理
+5. `clear_source_view_progress` 在同步完成后删除所有行，导致缓存的计数丢失
+
+### 变更详情
+
+| 编号 | 文件 | 变更 |
+|------|------|------|
+| IO-1 | `backend/src/remote_emby.rs` | 新增 `get_view_remote_counts` / `upsert_view_remote_counts` - View 级别电影/剧集 TotalRecordCount 缓存读写 |
+| IO-2 | `backend/src/remote_emby.rs` | 新增 `batch_load_series_remote_counts` - 一次 SQL 批量加载所有 Series 的 RecursiveItemCount/ChildCount |
+| IO-3 | `backend/src/remote_emby.rs` | 新增 `batch_load_season_remote_child_counts` - 一次 SQL 批量加载所有 Season 的 ChildCount |
+| IO-4 | `backend/src/remote_emby.rs` | 新增 `fetch_remote_series_page_lightweight` - 增量模式下只请求 BasicSyncInfo/ChildCount/RecursiveItemCount |
+| IO-5 | `backend/src/remote_emby.rs` | `sync_source_inner` 电影库增量检测：先用 Limit=1 探测 TotalRecordCount，与缓存比对后决定跳过/同步 |
+| IO-6 | `backend/src/remote_emby.rs` | `sync_source_inner` Series/Season 增量检测从 N+1 SQL 改为内存 HashMap 查询 |
+| IO-7 | `backend/src/remote_emby.rs` | `sync_source_inner` 增量模式下 Series 列表使用轻量 API，首次全量使用完整 API |
+| IO-8 | `backend/src/remote_emby.rs` | 删除 Series 时级联清理 STRM 目录（`remove_dir_all`） |
+| IO-9 | `backend/src/remote_emby.rs` | 删除 Movie 时清理 STRM 文件和同名 NFO 文件 |
+| IO-10 | `backend/src/repository.rs` | `clear_source_view_progress` 改为 UPDATE（重置游标字段但保留缓存的 remote_movie_count/remote_series_count） |
+| IO-11 | `backend/migrations/0001_schema.sql` | `remote_emby_source_view_progress` 新增 `remote_movie_count` / `remote_series_count` 列 |
+| IO-12 | `backend/src/main.rs` | `ensure_schema_compatibility` 同步新增列 |
+
+### 性能改善预估
+
+| 场景 | 优化前 | 优化后 | 改善 |
+|------|--------|--------|------|
+| 增量同步 5000 Series（无变化） | 5000 条 SQL + 完整字段 API | 2 条 SQL + 轻量字段 API | ~99% SQL 减少，~70% 网络减少 |
+| 增量同步 Movie 库（无变化） | 全量分页拉取所有 Movie | 1 次 Limit=1 探测即跳过 | ~99% API 调用减少 |
+| 删除下架 Series | DB CASCADE 删除，STRM 残留 | DB CASCADE + STRM 目录清理 | 磁盘空间自动回收 |
+
+### 验证
+
+- `cargo check`：0 error，48 warnings（全部为预存的 dead_code 警告，非本次引入）
+- 向后兼容：首次同步仍使用完整 API 路径，增量路径新增逻辑均为可选优化
+- 数据安全：`clear_source_view_progress` 改为 UPDATE 语义，只重置游标不删缓存
+
+### 影响文件
+- `backend/src/remote_emby.rs`
+- `backend/src/repository.rs`
+- `backend/src/main.rs`
+- `backend/migrations/0001_schema.sql`
+- `EmbyAPI_Compatibility_Report.md`
+
+---

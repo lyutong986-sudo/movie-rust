@@ -923,6 +923,8 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             PRIMARY KEY (source_id, view_id)
         )"#,
         r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_source_view_progress_source ON remote_emby_source_view_progress(source_id)"#,
+        r#"ALTER TABLE remote_emby_source_view_progress ADD COLUMN IF NOT EXISTS remote_movie_count bigint"#,
+        r#"ALTER TABLE remote_emby_source_view_progress ADD COLUMN IF NOT EXISTS remote_series_count bigint"#,
         // PB49 (B2)：远端 Series 详情已拉取标记表（与 0001_schema.sql 同步）
         r#"CREATE TABLE IF NOT EXISTS remote_emby_series_detail_synced (
             source_id        uuid NOT NULL REFERENCES remote_emby_sources(id) ON DELETE CASCADE,

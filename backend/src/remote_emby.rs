@@ -1329,7 +1329,42 @@ async fn sync_source_inner(
     let written_files = Arc::new(AtomicU64::new(0));
     let skipped_unchanged_series = Arc::new(AtomicU64::new(0));
     let skipped_unchanged_seasons = Arc::new(AtomicU64::new(0));
+    let skipped_unchanged_movie_views = Arc::new(AtomicU64::new(0));
     let source_arc: Arc<DbRemoteEmbySource> = Arc::new(source.clone());
+
+    // 增量模式：批量预加载 Series/Season 的 remote counts（消除 N+1 查询）
+    let series_counts_cache: HashMap<String, (Option<i64>, Option<i32>)> = if is_incremental {
+        match batch_load_series_remote_counts(&state.pool, source.id).await {
+            Ok(map) => {
+                if !map.is_empty() {
+                    tracing::info!(source_id = %source.id, count = map.len(), "批量预加载 Series remote counts");
+                }
+                map
+            }
+            Err(e) => {
+                tracing::warn!(source_id = %source.id, error = %e, "批量预加载 Series counts 失败，降级为逐条查询");
+                HashMap::new()
+            }
+        }
+    } else {
+        HashMap::new()
+    };
+    let season_counts_cache: HashMap<String, i32> = if is_incremental {
+        match batch_load_season_remote_child_counts(&state.pool, source.id).await {
+            Ok(map) => {
+                if !map.is_empty() {
+                    tracing::info!(source_id = %source.id, count = map.len(), "批量预加载 Season remote child counts");
+                }
+                map
+            }
+            Err(e) => {
+                tracing::warn!(source_id = %source.id, error = %e, "批量预加载 Season counts 失败，降级为逐条查询");
+                HashMap::new()
+            }
+        }
+    } else {
+        HashMap::new()
+    };
 
     let series_detail_semaphore = Arc::new(tokio::sync::Semaphore::new(SERIES_DETAIL_CONCURRENCY));
     let series_detail_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
@@ -1373,6 +1408,35 @@ async fn sync_source_inner(
 
         if is_movies {
             // ── 电影库：直接拉 Movie 列表 ──────────────────────────
+
+            // 增量检测：先用轻量请求获取 TotalRecordCount，与上次缓存对比
+            if is_incremental {
+                let probe = fetch_remote_movies_page(
+                    &state.pool,
+                    source,
+                    user_id.as_str(),
+                    view.id.as_str(),
+                    0,
+                    1, // 只拉 1 条以获取 TotalRecordCount
+                )
+                .await?;
+                let remote_total = probe.total_record_count;
+                if let Ok(Some((Some(cached_movie_count), _))) =
+                    get_view_remote_counts(&state.pool, source.id, &view.id).await
+                {
+                    if cached_movie_count == remote_total {
+                        skipped_unchanged_movie_views.fetch_add(1, Ordering::Relaxed);
+                        tracing::info!(
+                            source_id = %source.id,
+                            view = %view.name,
+                            movie_count = remote_total,
+                            "增量跳过：电影库 TotalRecordCount 未变化，跳过整个 View"
+                        );
+                        continue;
+                    }
+                }
+            }
+
             tracing::info!(
                 source_id = %source.id,
                 view = %view.name,
@@ -1381,6 +1445,7 @@ async fn sync_source_inner(
 
             let mut movie_ids: HashSet<String> = HashSet::new();
             let mut start_index: i64 = 0;
+            let mut view_movie_total: i64 = -1;
 
             loop {
                 if let Some(handle) = &progress {
@@ -1398,6 +1463,7 @@ async fn sync_source_inner(
                     page_size,
                 )
                 .await?;
+                view_movie_total = page.total_record_count;
 
                 if page.items.is_empty() {
                     break;
@@ -1487,6 +1553,18 @@ async fn sync_source_inner(
                 }
             }
 
+            // 缓存 View 级别 Movie TotalRecordCount，下次增量可跳过
+            if let Err(e) = upsert_view_remote_counts(
+                &state.pool,
+                source.id,
+                &view.id,
+                Some(view_movie_total),
+                None,
+            ).await {
+                tracing::warn!(source_id = %source.id, view = %view.name, error = %e,
+                    "缓存 Movie TotalRecordCount 失败");
+            }
+
             remote_movie_ids_by_view.insert(view.id.clone(), movie_ids);
         } else if is_tvshows {
             // ── 电视剧库：层级拉取 Series -> Seasons -> Episodes ──
@@ -1497,19 +1575,34 @@ async fn sync_source_inner(
             );
 
             // 1. 分页拉取所有 Series
+            //    增量模式：使用轻量 API（只含 Id/Name/RecursiveItemCount/ChildCount），
+            //    大幅减少网络传输（跳过 People/Genres/Studios 等大字段）。
+            //    首次全量：使用完整 API 以一次性获取所有元数据。
             let mut all_series: Vec<RemoteSeriesItem> = Vec::new();
             let mut start_index: i64 = 0;
             let mut _total_series_count: i64 = 0;
             loop {
-                let page = fetch_remote_series_page(
-                    &state.pool,
-                    source,
-                    user_id.as_str(),
-                    view.id.as_str(),
-                    start_index,
-                    page_size,
-                )
-                .await?;
+                let page = if is_incremental {
+                    fetch_remote_series_page_lightweight(
+                        &state.pool,
+                        source,
+                        user_id.as_str(),
+                        view.id.as_str(),
+                        start_index,
+                        page_size,
+                    )
+                    .await?
+                } else {
+                    fetch_remote_series_page(
+                        &state.pool,
+                        source,
+                        user_id.as_str(),
+                        view.id.as_str(),
+                        start_index,
+                        page_size,
+                    )
+                    .await?
+                };
 
                 _total_series_count = page.total_record_count;
                 if page.items.is_empty() {
@@ -1555,21 +1648,16 @@ async fn sync_source_inner(
                     );
                 }
 
-                // ── 增量检测：比对 RecursiveItemCount ──
+                // ── 增量检测：比对 RecursiveItemCount + ChildCount ──
                 if is_incremental {
-                    if let Ok(Some((local_recursive, _local_child))) =
-                        get_local_series_remote_counts(
-                            &state.pool,
-                            source.id,
-                            &remote_series.id,
-                        )
-                        .await
+                    if let Some((local_recursive, local_child)) =
+                        series_counts_cache.get(&remote_series.id)
                     {
                         let remote_recursive = remote_series.recursive_item_count;
                         let remote_child = remote_series.child_count;
 
-                        if local_recursive == remote_recursive
-                            && _local_child.map(|c| c as i32) == remote_child
+                        if *local_recursive == remote_recursive
+                            && local_child.map(|c| c as i32) == remote_child
                         {
                             skipped_unchanged_series.fetch_add(1, Ordering::Relaxed);
                             tracing::debug!(
@@ -1663,15 +1751,10 @@ async fn sync_source_inner(
 
                     let season_number = remote_season.index_number.unwrap_or(1);
 
-                    // ── 增量检测：比对 Season ChildCount ──
+                    // ── 增量检测：比对 Season ChildCount（从批量缓存读取）──
                     if is_incremental {
-                        if let Ok(Some(local_child_count)) =
-                            get_local_season_remote_child_count(
-                                &state.pool,
-                                source.id,
-                                &remote_season.id,
-                            )
-                            .await
+                        if let Some(&local_child_count) =
+                            season_counts_cache.get(&remote_season.id)
                         {
                             if let Some(remote_child_count) = remote_season.child_count {
                                 if local_child_count == remote_child_count {
@@ -2001,10 +2084,10 @@ async fn sync_source_inner(
 
         if is_tvshows {
             if let Some(remote_series_ids) = remote_series_ids_by_view.get(&view.id) {
-                // 查找本地有但远端没有的 Series -> 级联删除
-                let local_series: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+                // 查找本地有但远端没有的 Series -> 级联删除 + STRM 目录清理
+                let local_series: Vec<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
                     r#"
-                    SELECT id, provider_ids->>'RemoteEmbySeriesId' AS remote_sid
+                    SELECT id, provider_ids->>'RemoteEmbySeriesId' AS remote_sid, path
                     FROM media_items
                     WHERE provider_ids->>'RemoteEmbySourceId' = $1
                       AND item_type = 'Series'
@@ -2017,10 +2100,16 @@ async fn sync_source_inner(
                 .await?;
 
                 let mut stale_series_db_ids: Vec<Uuid> = Vec::new();
-                for (db_id, remote_sid) in &local_series {
+                let mut stale_series_paths: Vec<String> = Vec::new();
+                for (db_id, remote_sid, path) in &local_series {
                     if let Some(sid) = remote_sid {
                         if !remote_series_ids.contains(sid) {
                             stale_series_db_ids.push(*db_id);
+                            if let Some(p) = path {
+                                if !p.is_empty() {
+                                    stale_series_paths.push(p.clone());
+                                }
+                            }
                         }
                     }
                 }
@@ -2041,14 +2130,29 @@ async fn sync_source_inner(
                         .await?;
                         total_deleted += deleted.rows_affected();
                     }
+                    // 清理孤儿 STRM 目录（Series 目录及其子内容）
+                    for series_path in &stale_series_paths {
+                        let dir = Path::new(series_path);
+                        if dir.exists() {
+                            if let Err(e) = tokio::fs::remove_dir_all(dir).await {
+                                tracing::warn!(
+                                    path = %series_path,
+                                    error = %e,
+                                    "清理已删除 Series 的 STRM 目录失败"
+                                );
+                            } else {
+                                tracing::debug!(path = %series_path, "已清理已删除 Series 的 STRM 目录");
+                            }
+                        }
+                    }
                 }
             }
         } else if is_movies {
             if let Some(remote_movie_ids) = remote_movie_ids_by_view.get(&view.id) {
-                // 查找本地有但远端没有的 Movie -> 删除
-                let local_movies: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+                // 查找本地有但远端没有的 Movie -> 删除 + STRM 文件清理
+                let local_movies: Vec<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
                     r#"
-                    SELECT id, provider_ids->>'RemoteEmbyItemId' AS remote_mid
+                    SELECT id, provider_ids->>'RemoteEmbyItemId' AS remote_mid, path
                     FROM media_items
                     WHERE provider_ids->>'RemoteEmbySourceId' = $1
                       AND item_type = 'Movie'
@@ -2061,10 +2165,16 @@ async fn sync_source_inner(
                 .await?;
 
                 let mut stale_movie_db_ids: Vec<Uuid> = Vec::new();
-                for (db_id, remote_mid) in &local_movies {
+                let mut stale_movie_paths: Vec<String> = Vec::new();
+                for (db_id, remote_mid, path) in &local_movies {
                     if let Some(mid) = remote_mid {
                         if !remote_movie_ids.contains(mid) {
                             stale_movie_db_ids.push(*db_id);
+                            if let Some(p) = path {
+                                if !p.is_empty() {
+                                    stale_movie_paths.push(p.clone());
+                                }
+                            }
                         }
                     }
                 }
@@ -2084,6 +2194,19 @@ async fn sync_source_inner(
                         .execute(&state.pool)
                         .await?;
                         total_deleted += deleted.rows_affected();
+                    }
+                    // 清理孤儿 STRM/NFO 文件（Movie 的 STRM 文件及同名 NFO）
+                    for movie_path in &stale_movie_paths {
+                        let strm = Path::new(movie_path);
+                        if strm.exists() {
+                            if let Err(e) = tokio::fs::remove_file(strm).await {
+                                tracing::warn!(path = %movie_path, error = %e, "清理已删除 Movie 的 STRM 文件失败");
+                            }
+                        }
+                        let nfo = strm.with_extension("nfo");
+                        if nfo.exists() {
+                            let _ = tokio::fs::remove_file(&nfo).await;
+                        }
                     }
                 }
             }
@@ -2126,6 +2249,7 @@ async fn sync_source_inner(
     let strm_missing_reprocessed_count = strm_missing_reprocessed.load(Ordering::Relaxed);
     let skipped_series = skipped_unchanged_series.load(Ordering::Relaxed);
     let skipped_seasons = skipped_unchanged_seasons.load(Ordering::Relaxed);
+    let skipped_movie_views = skipped_unchanged_movie_views.load(Ordering::Relaxed);
 
     let mode_label = if is_incremental {
         "增量(层级)"
@@ -2140,6 +2264,7 @@ async fn sync_source_inner(
         skipped_existing = skipped_existing_count,
         skipped_unchanged_series = skipped_series,
         skipped_unchanged_seasons = skipped_seasons,
+        skipped_unchanged_movie_views = skipped_movie_views,
         strm_missing_reprocessed = strm_missing_reprocessed_count,
         deleted_stale = total_deleted,
         "远端 Emby 层级同步完成"
@@ -3994,6 +4119,34 @@ async fn fetch_remote_series_page(
     get_json_with_retry(pool, source, &endpoint, &query).await
 }
 
+/// 增量模式下拉取 Series 列表的轻量版——只请求增量检测所需的最少字段
+async fn fetch_remote_series_page_lightweight(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    user_id: &str,
+    view_id: &str,
+    start_index: i64,
+    limit: i64,
+) -> Result<RemoteSeriesResult, AppError> {
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let query = vec![
+        ("Recursive".to_string(), "true".to_string()),
+        ("ParentId".to_string(), view_id.to_string()),
+        ("IncludeItemTypes".to_string(), "Series".to_string()),
+        (
+            "Fields".to_string(),
+            "BasicSyncInfo,ChildCount,RecursiveItemCount".to_string(),
+        ),
+        ("EnableTotalRecordCount".to_string(), "true".to_string()),
+        ("SortBy".to_string(), "SortName".to_string()),
+        ("SortOrder".to_string(), "Ascending".to_string()),
+        ("StartIndex".to_string(), start_index.to_string()),
+        ("Limit".to_string(), limit.to_string()),
+    ];
+    get_json_with_retry(pool, source, &endpoint, &query).await
+}
+
 /// 分页拉取某个 movies 库下的 Movie 列表（直接使用 RemoteItemsResult）
 async fn fetch_remote_movies_page(
     pool: &sqlx::PgPool,
@@ -4080,6 +4233,7 @@ async fn fetch_remote_episodes_for_season(
 }
 
 /// 拉取某个 Series 下所有 Episode（不限 Season，用于获取全量 Episode ID）
+#[allow(dead_code)]
 async fn fetch_remote_all_episodes_for_series(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
@@ -4107,7 +4261,8 @@ async fn fetch_remote_all_episodes_for_series(
     get_json_with_retry(pool, source, &endpoint, &query).await
 }
 
-/// 查询本地 DB 中某个 Series 的 remote_recursive_item_count（存储在 provider_ids 中）
+/// 查询本地 DB 中某个 Series 的 remote counts（逐条查询版，已被 batch_load_series_remote_counts 替代）
+#[allow(dead_code)]
 async fn get_local_series_remote_counts(
     pool: &sqlx::PgPool,
     source_id: Uuid,
@@ -4178,7 +4333,8 @@ async fn update_local_series_remote_counts(
     Ok(())
 }
 
-/// 获取本地 DB 中某个 Season 的 remote child_count
+/// 获取本地 DB 中某个 Season 的 remote child_count（逐条查询版，已被 batch_load_season_remote_child_counts 替代）
+#[allow(dead_code)]
 async fn get_local_season_remote_child_count(
     pool: &sqlx::PgPool,
     source_id: Uuid,
@@ -4225,13 +4381,136 @@ async fn update_local_season_remote_child_count(
     Ok(())
 }
 
-/// 仅拉取远端条目的 Id 列表（用于增量刷新中的删除检测）
+// ═══════════════════════════════════════════════════════════════════════════
+// View 级别增量计数：Movie TotalRecordCount / Series TotalRecordCount
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn get_view_remote_counts(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    view_id: &str,
+) -> Result<Option<(Option<i64>, Option<i64>)>, AppError> {
+    let row: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
+        r#"
+        SELECT remote_movie_count, remote_series_count
+        FROM remote_emby_source_view_progress
+        WHERE source_id = $1 AND view_id = $2
+        "#,
+    )
+    .bind(source_id)
+    .bind(view_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+async fn upsert_view_remote_counts(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    view_id: &str,
+    movie_count: Option<i64>,
+    series_count: Option<i64>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO remote_emby_source_view_progress
+            (source_id, view_id, remote_movie_count, remote_series_count, updated_at)
+        VALUES ($1, $2, $3, $4, now())
+        ON CONFLICT (source_id, view_id) DO UPDATE SET
+            remote_movie_count  = COALESCE($3, remote_emby_source_view_progress.remote_movie_count),
+            remote_series_count = COALESCE($4, remote_emby_source_view_progress.remote_series_count),
+            updated_at = now()
+        "#,
+    )
+    .bind(source_id)
+    .bind(view_id)
+    .bind(movie_count)
+    .bind(series_count)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 批量预加载 Series/Season 的 remote counts（消除 N+1 查询）
+// ═══════════════════════════════════════════════════════════════════════════
+
+async fn batch_load_series_remote_counts(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+) -> Result<HashMap<String, (Option<i64>, Option<i32>)>, AppError> {
+    let rows: Vec<(Option<String>, Value)> = sqlx::query_as(
+        r#"
+        SELECT provider_ids->>'RemoteEmbySeriesId', provider_ids
+        FROM media_items
+        WHERE provider_ids->>'RemoteEmbySourceId' = $1
+          AND item_type = 'Series'
+          AND provider_ids->>'RemoteEmbySeriesId' IS NOT NULL
+        "#,
+    )
+    .bind(source_id.to_string())
+    .fetch_all(pool)
+    .await?;
+
+    let mut map = HashMap::with_capacity(rows.len());
+    for (series_id_opt, pids) in rows {
+        if let Some(series_id) = series_id_opt {
+            let recursive = pids
+                .get("RemoteRecursiveItemCount")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<i64>().ok());
+            let child = pids
+                .get("RemoteChildCount")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<i32>().ok());
+            map.insert(series_id, (recursive, child));
+        }
+    }
+    Ok(map)
+}
+
+async fn batch_load_season_remote_child_counts(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+) -> Result<HashMap<String, i32>, AppError> {
+    let rows: Vec<(Option<String>, Value)> = sqlx::query_as(
+        r#"
+        SELECT provider_ids->>'RemoteEmbySeasonId', provider_ids
+        FROM media_items
+        WHERE provider_ids->>'RemoteEmbySourceId' = $1
+          AND item_type = 'Season'
+          AND provider_ids->>'RemoteEmbySeasonId' IS NOT NULL
+        "#,
+    )
+    .bind(source_id.to_string())
+    .fetch_all(pool)
+    .await?;
+
+    let mut map = HashMap::with_capacity(rows.len());
+    for (season_id_opt, pids) in rows {
+        if let Some(season_id) = season_id_opt {
+            if let Some(child_count) = pids
+                .get("RemoteChildCount")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<i32>().ok())
+            {
+                map.insert(season_id, child_count);
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// 仅拉取远端条目的 Id 列表（用于增量刷新中的删除检测，已被层级删除检测替代）
+#[allow(dead_code)]
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct RemoteItemIdEntry {
+    #[allow(dead_code)]
     id: String,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct RemoteItemIdsResult {
@@ -4240,8 +4519,10 @@ struct RemoteItemIdsResult {
     total_record_count: i64,
 }
 
+#[allow(dead_code)]
 const REMOTE_ID_PAGE_SIZE: i64 = 1000;
 
+#[allow(dead_code)]
 async fn fetch_remote_item_ids_page(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
@@ -4271,7 +4552,8 @@ async fn fetch_remote_item_ids_page(
     get_json_with_retry(pool, source, &endpoint, &query).await
 }
 
-/// 拉取所有视图下的远端条目 ID 集合，用于增量同步时检测已删除的条目
+/// 拉取所有视图下的远端条目 ID 集合（已被层级删除检测替代）
+#[allow(dead_code)]
 async fn fetch_all_remote_item_ids(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
@@ -4327,13 +4609,14 @@ async fn fetch_all_remote_item_ids(
     Ok(all_ids)
 }
 
-/// 删除本地 DB 中不再存在于远端的条目，并清理对应的 STRM 文件。
+/// 删除本地 DB 中不再存在于远端的条目（旧版全量 ID 比对方式，已被层级删除检测替代）
 ///
 /// 内置「prune 比例安全阀」：当 `候选行数 ≥ PRUNE_GUARD_MIN_CANDIDATES` 且
 /// 「待删 / 候选」超过 `PRUNE_GUARD_RATIO`（10%）时，判定 `remote_id_set`
 /// 大概率不完整（典型场景：远端分页抖动 / 中途被 kill 重启再跑），整次
 /// prune 直接跳过并 WARN，等下一次同步用更完整的 ID 集合重新判定，
 /// 避免「重启 → 误删上千条 → 用户必须靠扫描所有媒体库恢复」灾难路径。
+#[allow(dead_code)]
 async fn delete_stale_items_for_source(
     pool: &sqlx::PgPool,
     source_id: Uuid,
