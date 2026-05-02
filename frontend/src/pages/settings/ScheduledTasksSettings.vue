@@ -116,6 +116,69 @@ function statusColor(status?: string) {
   return 'neutral';
 }
 
+// PB49 (UX)：把后端 task:library-scan:progress_detail 写入的 Phase 字段
+// 翻译成中文。同 LibrarySettings 的映射保持一致——这里复制一份避免引入跨页耦合，
+// 因为这两个页面的字段来源不同（一个是 ScanOperation，一个是 ScheduledTaskInfo）。
+function taskPhaseLabel(phase?: string | null): string {
+  if (!phase) return '';
+  const retry = /^Retrying\((\d+)\/(\d+)\)$/.exec(phase);
+  if (retry) return `重试中 ${retry[1]}/${retry[2]}`;
+  if (phase.startsWith('RemoteSync/')) {
+    const remote = phase.slice('RemoteSync/'.length);
+    switch (remote) {
+      case 'FetchingRemoteIndex':
+        return '远端 ID 索引中';
+      case 'FetchingRemoteItems':
+        return '远端条目获取中';
+      case 'SyncingRemoteItems':
+      case 'UpsertingVirtualItems':
+        return '远端条目入库中';
+      case 'PruningStaleItems':
+        return '清理远端已删条目';
+      case 'FinalizingSeriesDetails':
+        return '剧集元数据收尾';
+      case 'Completed':
+        return '远端同步已完成';
+      default:
+        return remote ? `远端 · ${remote}` : '远端同步中';
+    }
+  }
+  switch (phase) {
+    case 'CollectingFiles':
+      return '收集文件中';
+    case 'Importing':
+      return '入库中';
+    case 'PostProcessing':
+      return '后处理';
+    case 'Completed':
+      return '已完成';
+    case 'Cancelled':
+      return '已取消';
+    case 'Failed':
+      return '已失败';
+    case 'Queued':
+      return '排队中';
+    default:
+      return phase;
+  }
+}
+
+function taskCounterText(task: ScheduledTaskInfo): string {
+  const parts: string[] = [];
+  const total = task.TotalFiles ?? 0;
+  const scanned = task.ScannedFiles ?? 0;
+  if (total > 0 || scanned > 0) {
+    parts.push(total > 0 ? `${scanned} / ${total}` : `${scanned}`);
+  }
+  if ((task.ImportedItems ?? 0) > 0) {
+    parts.push(`入库 ${task.ImportedItems}`);
+  }
+  if ((task.SkippedRemoteStrm ?? 0) > 0) {
+    parts.push(`STRM 短路跳过 ${task.SkippedRemoteStrm}`);
+  }
+  return parts.join(' · ');
+}
+
 async function load() {
   if (!isAdmin.value) return;
   loading.value = true;
@@ -358,6 +421,22 @@ onBeforeUnmount(() => stopPolling());
               color="warning"
               size="sm"
             />
+
+            <!-- PB49 (UX)：library-scan 等任务的实时阶段细节 -->
+            <div
+              v-if="task.State === 'Running' && (task.Phase || task.CurrentLibrary || taskCounterText(task))"
+              class="rounded-lg border border-default bg-elevated/40 p-3 text-xs space-y-1"
+            >
+              <div v-if="task.Phase" class="text-highlighted font-medium">
+                阶段：{{ taskPhaseLabel(task.Phase) }}
+              </div>
+              <div v-if="task.CurrentLibrary" class="text-muted">
+                当前：{{ task.CurrentLibrary }}
+              </div>
+              <div v-if="taskCounterText(task)" class="text-muted">
+                {{ taskCounterText(task) }}
+              </div>
+            </div>
 
             <!-- 信息行 -->
             <div class="grid gap-3 sm:grid-cols-3">

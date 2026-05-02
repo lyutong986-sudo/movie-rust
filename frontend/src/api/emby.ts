@@ -161,6 +161,14 @@ export interface ScheduledTaskInfo {
     ErrorMessage?: string | null;
   } | null;
   IsHidden?: boolean;
+  // PB49 (UX)：library-scan 在运行时由后端 1s 轮询桥接写入的实时阶段细节。
+  // 仅在 State === 'Running' 时有意义；任务结束后由 cleanup 清空回 null。
+  Phase?: string | null;
+  CurrentLibrary?: string | null;
+  TotalFiles?: number | null;
+  ScannedFiles?: number | null;
+  ImportedItems?: number | null;
+  SkippedRemoteStrm?: number | null;
 }
 
 export interface ApiKeyInfo {

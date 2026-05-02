@@ -242,9 +242,55 @@ pub async fn incremental_update_library(
             imported_items: 0,
         };
         for source in &remote_sources {
-            // 远端同步使用独立的 RemoteSyncProgress 体系，与 scanner::ScanProgress 不互通；
-            // 这里传 None，让远端同步自管理日志，与现有 enqueue_library_scan 行为保持一致。
-            match remote_emby::sync_source_with_progress(state, source.id, None).await {
+            // PB49 (UX)：之前这里直接 `progress=None` 调远端 sync，导致 incremental_update_library
+            // 入口（即 settings/libraries 增量扫描 + scheduled-tasks 媒体库扫描）触发的远端
+            // FetchingRemoteIndex / SyncingRemoteItems 阶段对外完全不可见——前端 UI 只能看到
+            // scanner 的「CollectingFiles 0%」一动不动好几分钟，看上去和卡死没区别。
+            //
+            // 现在为每个 source 创建一个独立的 RemoteSyncProgress，再 spawn 一条 1s 桥接任务
+            // 把 remote 的 phase / fetched_items / total_items / written_files 翻译成
+            // scanner::ScanProgress 的 phase + current_library 字段（外层 scan_registry poller
+            // 已经在读这两个字段往 ScanOperationDto 写）。这样：
+            //   - settings/libraries 页：当前正在跑的 source 的远端阶段直接显示在「当前」字样
+            //   - settings/scheduled-tasks 页：phase 字段实时反映远端阶段
+            //   - 桥接任务在 sync 结束（无论 Ok/Err）后立刻 abort，scanner 自身的 phase 接管
+            let remote_progress = remote_emby::RemoteSyncProgress::new();
+            let bridge_handle = progress.as_ref().map(|scan_progress| {
+                let scan_progress = scan_progress.clone();
+                let remote_progress = remote_progress.clone();
+                let source_name = source.name.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                        let snap = remote_progress.snapshot().await;
+                        if snap.phase.is_empty() {
+                            continue;
+                        }
+                        scan_progress.set_phase(format!("RemoteSync/{}", snap.phase));
+                        let label = if snap.total_items > 0 {
+                            format!(
+                                "{} · 远端 {} / {}",
+                                source_name, snap.fetched_items, snap.total_items
+                            )
+                        } else if snap.fetched_items > 0 {
+                            format!("{} · 远端 ID 索引 {}", source_name, snap.fetched_items)
+                        } else {
+                            source_name.clone()
+                        };
+                        scan_progress.set_current_library(Some(label));
+                    }
+                })
+            });
+            let sync_result = remote_emby::sync_source_with_progress(
+                state,
+                source.id,
+                Some(remote_progress),
+            )
+            .await;
+            if let Some(handle) = bridge_handle {
+                handle.abort();
+            }
+            match sync_result {
                 Ok(result) => {
                     summary.libraries += 1;
                     summary.scanned_files += result.scan_summary.scanned_files;

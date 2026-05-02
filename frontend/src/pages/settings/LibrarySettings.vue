@@ -77,6 +77,29 @@ const scanPhaseLabel = computed(() => {
   // PB49：后端在自动重试时把 phase 设成 Retrying(N/M)
   const retryMatch = /^Retrying\((\d+)\/(\d+)\)$/.exec(phase);
   if (retryMatch) return `重试中 ${retryMatch[1]}/${retryMatch[2]}`;
+  // PB49 (UX)：incremental_update_library 在跑远端 Emby 同步时会把 scanner.phase
+  // 设成 `RemoteSync/<原始远端阶段>`，这里把它解开做中文化映射。
+  if (phase.startsWith('RemoteSync/')) {
+    const remotePhase = phase.slice('RemoteSync/'.length);
+    switch (remotePhase) {
+      case 'FetchingRemoteIndex':
+        return '远端 ID 索引中';
+      case 'FetchingRemoteItems':
+        return '远端条目获取中';
+      case 'SyncingRemoteItems':
+        return '远端条目入库中';
+      case 'UpsertingVirtualItems':
+        return '远端条目入库中';
+      case 'PruningStaleItems':
+        return '清理远端已删条目';
+      case 'FinalizingSeriesDetails':
+        return '剧集元数据收尾';
+      case 'Completed':
+        return '远端同步已完成';
+      default:
+        return remotePhase ? `远端 · ${remotePhase}` : '远端同步中';
+    }
+  }
   switch (phase) {
     case 'CollectingFiles':
       return '收集文件中';

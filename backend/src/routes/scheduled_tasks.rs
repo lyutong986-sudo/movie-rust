@@ -13,6 +13,7 @@ use crate::{
     auth::{require_admin, AuthSession},
     error::AppError,
     repository,
+    scanner,
     state::AppState,
 };
 
@@ -150,12 +151,18 @@ async fn read_state(pool: &sqlx::PgPool, task_id: &str) -> Result<TaskRuntimeSta
 
     let triggers = repository::get_setting_value(pool, &format!("task:{task_id}:triggers")).await?;
 
+    // PB49 (UX)：library-scan 实时阶段/计数细节，由 run_task 的轮询桥接写入。
+    // 其他任务通常没这条记录，读出来 None 即可。
+    let detail = repository::get_setting_value(pool, &format!("task:{task_id}:progress_detail"))
+        .await?;
+
     Ok(TaskRuntimeState {
         status: running,
         progress,
         last_end_time: last_end,
         last_execution_result: last_exec,
         triggers,
+        detail,
     })
 }
 
@@ -165,12 +172,42 @@ struct TaskRuntimeState {
     last_end_time: Option<DateTime<Utc>>,
     last_execution_result: Option<Value>,
     triggers: Option<Value>,
+    /// PB49 (UX)：实时阶段细节（phase / current_library / 计数）。
+    /// 仅 library-scan 在运行中持续写入；其余任务为 None。
+    detail: Option<Value>,
 }
 
 fn descriptor_to_value(desc: &TaskDescriptor, state: &TaskRuntimeState) -> Value {
     let triggers_value = state.triggers.clone().unwrap_or_else(|| {
         Value::Array(desc.default_triggers.iter().map(|t| t.to_value()).collect())
     });
+
+    // PB49 (UX)：把 library-scan 桥接写入的实时细节展开到顶层字段，前端不用再去
+    // 二次解析 progress_detail JSON。仅在 task 是 Running 状态时有意义；任务
+    // 结束后 cleanup 会把这个键也清掉（见 spawn_task_execution 末尾）。
+    let detail = state.detail.as_ref();
+    let phase = detail
+        .and_then(|d| d.get("Phase"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let current_library = detail
+        .and_then(|d| d.get("CurrentLibrary"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let total_files = detail
+        .and_then(|d| d.get("TotalFiles"))
+        .and_then(|v| v.as_u64());
+    let scanned_files = detail
+        .and_then(|d| d.get("ScannedFiles"))
+        .and_then(|v| v.as_u64());
+    let imported_items = detail
+        .and_then(|d| d.get("ImportedItems"))
+        .and_then(|v| v.as_u64());
+    let skipped_remote_strm = detail
+        .and_then(|d| d.get("SkippedRemoteStrm"))
+        .and_then(|v| v.as_u64());
 
     json!({
         "Name": desc.name,
@@ -183,6 +220,12 @@ fn descriptor_to_value(desc: &TaskDescriptor, state: &TaskRuntimeState) -> Value
         "Triggers": triggers_value,
         "LastExecutionResult": state.last_execution_result,
         "IsHidden": false,
+        "Phase": phase,
+        "CurrentLibrary": current_library,
+        "TotalFiles": total_files,
+        "ScannedFiles": scanned_files,
+        "ImportedItems": imported_items,
+        "SkippedRemoteStrm": skipped_remote_strm,
     })
 }
 
@@ -346,6 +389,14 @@ async fn spawn_task_execution(state: AppState, task_id: String) {
         };
         let _ = repository::set_setting_value(&pool, &format!("task:{task_id_clone}:state"), json!("Idle")).await;
         let _ = repository::set_setting_value(&pool, &format!("task:{task_id_clone}:progress"), json!(100.0)).await;
+        // PB49 (UX)：清掉运行时桥接写入的实时细节，避免下一次 list_tasks 把
+        // 上一轮残留的 phase 当成「正在跑」展示出来。
+        let _ = repository::set_setting_value(
+            &pool,
+            &format!("task:{task_id_clone}:progress_detail"),
+            Value::Null,
+        )
+        .await;
         let _ = repository::set_setting_value(
             &pool,
             &format!("task:{task_id_clone}:last_end"),
@@ -379,12 +430,59 @@ async fn set_progress(pool: &sqlx::PgPool, task_id: &str, pct: f64) {
 async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
     match task_id {
         "library-scan" => {
-            crate::routes::admin::incremental_update_all_libraries(
+            // PB49 (UX)：之前这里 `progress=None`，导致 /settings/scheduled-tasks 页
+            // 在远端 sync 跑了 30 分钟期间只有「Running 0%」一动不动。
+            //
+            // 现在创建一个 ScanProgress 句柄交给 incremental_update_all_libraries——
+            // 该函数会把 phase 写到 ScanProgress（并通过 incremental_update_library 内
+            // 的远端→scanner 桥接把 RemoteSync/FetchingRemoteIndex 等阶段也回填进来），
+            // 我们再起一条 1s 轮询任务把 ScanProgress.snapshot 写到 settings 表，
+            // 前端 /settings/scheduled-tasks 直接读这条记录就能看到实时阶段+计数。
+            //
+            // 桥接任务在主任务结束（无论 Ok/Err）后立刻 abort，避免泄漏；
+            // 然后 spawn_task_execution 末尾的 cleanup 会把 progress_detail 键删掉，
+            // 防止前端在任务结束后继续看到陈旧的 phase。
+            let scan_progress = scanner::ScanProgress::new();
+            let bridge_task_id = task_id.to_string();
+            let bridge_pool = state.pool.clone();
+            let bridge_progress = scan_progress.clone();
+            let bridge_handle = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    let snap = bridge_progress.snapshot().await;
+                    let detail = json!({
+                        "Phase": snap.phase,
+                        "CurrentLibrary": snap.current_library,
+                        "TotalFiles": snap.total_files,
+                        "ScannedFiles": snap.scanned_files,
+                        "ImportedItems": snap.imported_items,
+                        "SkippedRemoteStrm": snap.skipped_remote_strm,
+                        "Percent": snap.percent,
+                    });
+                    let _ = repository::set_setting_value(
+                        &bridge_pool,
+                        &format!("task:{bridge_task_id}:progress_detail"),
+                        detail,
+                    )
+                    .await;
+                    if snap.percent > 0.0 {
+                        let _ = repository::set_setting_value(
+                            &bridge_pool,
+                            &format!("task:{bridge_task_id}:progress"),
+                            json!(snap.percent),
+                        )
+                        .await;
+                    }
+                }
+            });
+            let result = crate::routes::admin::incremental_update_all_libraries(
                 state,
-                None,
+                Some(scan_progress),
                 Some(state.scan_db_semaphore.clone()),
             )
-            .await?;
+            .await;
+            bridge_handle.abort();
+            result?;
             set_progress(&state.pool, task_id, 100.0).await;
             Ok(())
         }
