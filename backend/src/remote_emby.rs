@@ -549,6 +549,8 @@ struct RemoteLibraryView {
     name: String,
     #[serde(default)]
     collection_type: Option<String>,
+    #[serde(default)]
+    etag: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1403,39 +1405,33 @@ async fn sync_source_inner(
 
         let collection_type = view.collection_type.as_deref().unwrap_or("");
         let is_tvshows = collection_type.eq_ignore_ascii_case("tvshows")
-            || collection_type.is_empty(); // 没有 CollectionType 的按电视剧处理（如"国漫"）
+            || collection_type.is_empty();
         let is_movies = collection_type.eq_ignore_ascii_case("movies");
 
-        if is_movies {
-            // ── 电影库：直接拉 Movie 列表 ──────────────────────────
-
-            // 增量检测：先用轻量请求获取 TotalRecordCount，与上次缓存对比
-            if is_incremental {
-                let probe = fetch_remote_movies_page(
-                    &state.pool,
-                    source,
-                    user_id.as_str(),
-                    view.id.as_str(),
-                    0,
-                    1, // 只拉 1 条以获取 TotalRecordCount
-                )
-                .await?;
-                let remote_total = probe.total_record_count;
-                if let Ok(Some((Some(cached_movie_count), _))) =
-                    get_view_remote_counts(&state.pool, source.id, &view.id).await
-                {
-                    if cached_movie_count == remote_total {
-                        skipped_unchanged_movie_views.fetch_add(1, Ordering::Relaxed);
-                        tracing::info!(
-                            source_id = %source.id,
-                            view = %view.name,
-                            movie_count = remote_total,
-                            "增量跳过：电影库 TotalRecordCount 未变化，跳过整个 View"
-                        );
-                        continue;
+        // ── View 级别 Etag 快速跳过（适用于所有类型库）──
+        if is_incremental {
+            if let Some(remote_etag) = &view.etag {
+                if !remote_etag.is_empty() {
+                    if let Ok(Some(cached_etag)) =
+                        get_view_cached_etag(&state.pool, source.id, &view.id).await
+                    {
+                        if cached_etag == *remote_etag {
+                            skipped_unchanged_movie_views.fetch_add(1, Ordering::Relaxed);
+                            tracing::info!(
+                                source_id = %source.id,
+                                view = %view.name,
+                                etag = %remote_etag,
+                                "增量跳过：View Etag 未变化，跳过整个 View"
+                            );
+                            continue;
+                        }
                     }
                 }
             }
+        }
+
+        if is_movies {
+            // ── 电影库：直接拉 Movie 列表 ──────────────────────────
 
             tracing::info!(
                 source_id = %source.id,
@@ -1565,6 +1561,16 @@ async fn sync_source_inner(
                     "缓存 Movie TotalRecordCount 失败");
             }
 
+            // 缓存 View Etag，下次增量可通过 Etag 跳过整个 View
+            if let Some(ref etag) = view.etag {
+                if !etag.is_empty() {
+                    if let Err(e) = upsert_view_etag(&state.pool, source.id, &view.id, etag).await {
+                        tracing::warn!(source_id = %source.id, view = %view.name, error = %e,
+                            "缓存 View Etag 失败");
+                    }
+                }
+            }
+
             remote_movie_ids_by_view.insert(view.id.clone(), movie_ids);
         } else if is_tvshows {
             // ── 电视剧库：层级拉取 Series -> Seasons -> Episodes ──
@@ -1574,16 +1580,21 @@ async fn sync_source_inner(
                 "层级同步：开始处理电视剧库"
             );
 
-            // 1. 分页拉取所有 Series
-            //    增量模式：使用轻量 API（只含 Id/Name/RecursiveItemCount/ChildCount），
-            //    大幅减少网络传输（跳过 People/Genres/Studios 等大字段）。
+            // 1. 分页拉取 Series
+            //    增量模式使用 DateModified 降序 + 早停：只拉取自上次同步以来有变化的 Series，
+            //    遇到 DateModified <= last_sync_at 即停止分页，大幅减少 API 调用。
+            //    删除检测独立使用 ID-only 轻量分页。
             //    首次全量：使用完整 API 以一次性获取所有元数据。
             let mut all_series: Vec<RemoteSeriesItem> = Vec::new();
             let mut start_index: i64 = 0;
             let mut _total_series_count: i64 = 0;
-            loop {
-                let page = if is_incremental {
-                    fetch_remote_series_page_lightweight(
+
+            if is_incremental {
+                // ── 增量模式：按 DateModified 降序拉取，遇到早停条件即停 ──
+                let last_sync = source.last_sync_at;
+                let mut early_stopped = false;
+                loop {
+                    let page = fetch_remote_series_page_by_date_modified(
                         &state.pool,
                         source,
                         user_id.as_str(),
@@ -1591,9 +1602,80 @@ async fn sync_source_inner(
                         start_index,
                         page_size,
                     )
-                    .await?
-                } else {
-                    fetch_remote_series_page(
+                    .await?;
+                    _total_series_count = page.total_record_count;
+                    if page.items.is_empty() {
+                        break;
+                    }
+                    for item in page.items {
+                        if let (Some(dm_str), Some(sync_at)) = (&item.date_modified, last_sync) {
+                            if let Ok(dm) = chrono::DateTime::parse_from_rfc3339(dm_str) {
+                                if dm.with_timezone(&Utc) <= sync_at {
+                                    early_stopped = true;
+                                    break;
+                                }
+                            } else if let Ok(dm) = chrono::NaiveDateTime::parse_from_str(
+                                dm_str.trim_end_matches('Z'),
+                                "%Y-%m-%dT%H:%M:%S%.f",
+                            ) {
+                                if dm.and_utc() <= sync_at {
+                                    early_stopped = true;
+                                    break;
+                                }
+                            }
+                        }
+                        all_series.push(item);
+                    }
+                    if early_stopped {
+                        break;
+                    }
+                    start_index += page_size;
+                    if start_index >= page.total_record_count {
+                        break;
+                    }
+                }
+
+                tracing::info!(
+                    source_id = %source.id,
+                    view = %view.name,
+                    changed_series = all_series.len(),
+                    total_remote = _total_series_count,
+                    early_stopped,
+                    "增量同步：DateModified 早停拉取变更 Series"
+                );
+
+                // 删除检测：使用 ID-only 轻量分页拉取所有远端 Series ID
+                let mut series_ids: HashSet<String> = HashSet::new();
+                for s in &all_series {
+                    series_ids.insert(s.id.clone());
+                }
+                let mut del_start: i64 = 0;
+                loop {
+                    let id_page = fetch_remote_series_ids_page(
+                        &state.pool,
+                        source,
+                        user_id.as_str(),
+                        view.id.as_str(),
+                        del_start,
+                        page_size,
+                    )
+                    .await?;
+                    if id_page.items.is_empty() {
+                        break;
+                    }
+                    for s in &id_page.items {
+                        series_ids.insert(s.id.clone());
+                    }
+                    del_start += page_size;
+                    if del_start >= id_page.total_record_count {
+                        break;
+                    }
+                }
+                remote_series_ids_by_view.insert(view.id.clone(), series_ids);
+            } else {
+                // ── 全量模式：使用完整 Fields 拉取 ──
+                loop {
+                    let page = fetch_remote_series_page(
                         &state.pool,
                         source,
                         user_id.as_str(),
@@ -1601,19 +1683,22 @@ async fn sync_source_inner(
                         start_index,
                         page_size,
                     )
-                    .await?
-                };
-
-                _total_series_count = page.total_record_count;
-                if page.items.is_empty() {
-                    break;
+                    .await?;
+                    _total_series_count = page.total_record_count;
+                    if page.items.is_empty() {
+                        break;
+                    }
+                    all_series.extend(page.items);
+                    start_index += page_size;
+                    if start_index >= page.total_record_count {
+                        break;
+                    }
                 }
-
-                all_series.extend(page.items);
-                start_index += page_size;
-                if start_index >= page.total_record_count {
-                    break;
+                let mut series_ids: HashSet<String> = HashSet::new();
+                for s in &all_series {
+                    series_ids.insert(s.id.clone());
                 }
+                remote_series_ids_by_view.insert(view.id.clone(), series_ids);
             }
 
             tracing::info!(
@@ -1623,13 +1708,6 @@ async fn sync_source_inner(
                 total_record_count = _total_series_count,
                 "层级同步：获取到 Series 列表"
             );
-
-            // 收集远端 Series ID 用于删除检测
-            let mut series_ids: HashSet<String> = HashSet::new();
-            for s in &all_series {
-                series_ids.insert(s.id.clone());
-            }
-            remote_series_ids_by_view.insert(view.id.clone(), series_ids);
 
             // 2. 逐个 Series 处理
             let total_series = all_series.len() as u64;
@@ -1964,6 +2042,16 @@ async fn sync_source_inner(
                     total_series,
                     "层级同步：Series 处理完成"
                 );
+            }
+
+            // 缓存 View Etag，下次增量可通过 Etag 跳过整个 View
+            if let Some(ref etag) = view.etag {
+                if !etag.is_empty() {
+                    if let Err(e) = upsert_view_etag(&state.pool, source.id, &view.id, etag).await {
+                        tracing::warn!(source_id = %source.id, view = %view.name, error = %e,
+                            "缓存 View Etag 失败");
+                    }
+                }
             }
         } else {
             // 未知类型库：使用旧方法 fallback（IncludeItemTypes=Movie,Episode）
@@ -3884,7 +3972,7 @@ async fn fetch_remote_views(
     let query = vec![
         (
             "Fields".to_string(),
-            "CollectionType,ChildCount,RecursiveItemCount".to_string(),
+            "CollectionType,ChildCount,RecursiveItemCount,Etag".to_string(),
         ),
         ("EnableTotalRecordCount".to_string(), "true".to_string()),
     ];
@@ -4015,6 +4103,8 @@ struct RemoteSeriesItem {
     run_time_ticks: Option<i64>,
     #[serde(default)]
     date_created: Option<String>,
+    #[serde(default)]
+    date_modified: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4104,7 +4194,7 @@ async fn fetch_remote_series_page(
         (
             "Fields".to_string(),
             "BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,Status,EndDate,\
-             ChildCount,RecursiveItemCount,DateCreated,Overview,Genres,Studios,Tags,\
+             ChildCount,RecursiveItemCount,DateCreated,DateModified,Overview,Genres,Studios,Tags,\
              ProviderIds,ImageTags,BackdropImageTags,People,OriginalTitle,SortName,\
              Taglines,ProductionLocations,AirDays,AirTime,RemoteTrailers,\
              OfficialRating,CommunityRating,CriticRating,PremiereDate"
@@ -4119,7 +4209,61 @@ async fn fetch_remote_series_page(
     get_json_with_retry(pool, source, &endpoint, &query).await
 }
 
+/// 增量模式下拉取 Series 列表（按 DateModified 降序），用于早停优化
+async fn fetch_remote_series_page_by_date_modified(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    user_id: &str,
+    view_id: &str,
+    start_index: i64,
+    limit: i64,
+) -> Result<RemoteSeriesResult, AppError> {
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let query = vec![
+        ("Recursive".to_string(), "true".to_string()),
+        ("ParentId".to_string(), view_id.to_string()),
+        ("IncludeItemTypes".to_string(), "Series".to_string()),
+        (
+            "Fields".to_string(),
+            "BasicSyncInfo,ChildCount,RecursiveItemCount,DateModified".to_string(),
+        ),
+        ("EnableTotalRecordCount".to_string(), "true".to_string()),
+        ("SortBy".to_string(), "DateModified".to_string()),
+        ("SortOrder".to_string(), "Descending".to_string()),
+        ("StartIndex".to_string(), start_index.to_string()),
+        ("Limit".to_string(), limit.to_string()),
+    ];
+    get_json_with_retry(pool, source, &endpoint, &query).await
+}
+
+/// 仅拉取 Series 的 Id 列表（用于删除检测，不请求任何重量字段）
+async fn fetch_remote_series_ids_page(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    user_id: &str,
+    view_id: &str,
+    start_index: i64,
+    limit: i64,
+) -> Result<RemoteSeriesResult, AppError> {
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let query = vec![
+        ("Recursive".to_string(), "true".to_string()),
+        ("ParentId".to_string(), view_id.to_string()),
+        ("IncludeItemTypes".to_string(), "Series".to_string()),
+        ("Fields".to_string(), "BasicSyncInfo".to_string()),
+        ("EnableTotalRecordCount".to_string(), "true".to_string()),
+        ("SortBy".to_string(), "SortName".to_string()),
+        ("SortOrder".to_string(), "Ascending".to_string()),
+        ("StartIndex".to_string(), start_index.to_string()),
+        ("Limit".to_string(), limit.to_string()),
+    ];
+    get_json_with_retry(pool, source, &endpoint, &query).await
+}
+
 /// 增量模式下拉取 Series 列表的轻量版——只请求增量检测所需的最少字段
+#[allow(dead_code)]
 async fn fetch_remote_series_page_lightweight(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
@@ -4385,6 +4529,7 @@ async fn update_local_season_remote_child_count(
 // View 级别增量计数：Movie TotalRecordCount / Series TotalRecordCount
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[allow(dead_code)]
 async fn get_view_remote_counts(
     pool: &sqlx::PgPool,
     source_id: Uuid,
@@ -4402,6 +4547,21 @@ async fn get_view_remote_counts(
     .fetch_optional(pool)
     .await?;
     Ok(row)
+}
+
+async fn get_view_cached_etag(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    view_id: &str,
+) -> Result<Option<String>, AppError> {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT remote_etag FROM remote_emby_source_view_progress WHERE source_id = $1 AND view_id = $2",
+    )
+    .bind(source_id)
+    .bind(view_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(etag,)| etag))
 }
 
 async fn upsert_view_remote_counts(
@@ -4426,6 +4586,27 @@ async fn upsert_view_remote_counts(
     .bind(view_id)
     .bind(movie_count)
     .bind(series_count)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn upsert_view_etag(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    view_id: &str,
+    etag: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO remote_emby_source_view_progress (source_id, view_id, remote_etag, updated_at)
+        VALUES ($1, $2, $3, now())
+        ON CONFLICT (source_id, view_id) DO UPDATE SET remote_etag = $3, updated_at = now()
+        "#,
+    )
+    .bind(source_id)
+    .bind(view_id)
+    .bind(etag)
     .execute(pool)
     .await?;
     Ok(())

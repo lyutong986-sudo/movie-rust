@@ -3849,3 +3849,75 @@ for attempt in 0..UPSERT_MAX_ATTEMPTS {
 - `EmbyAPI_Compatibility_Report.md`
 
 ---
+
+## 远端 Emby 增量同步深度优化：View Etag + DateModified 早停（2026-05-02）
+
+### 背景
+
+通过 MCP 浏览器对 Emby API 进行深入抓包分析后，发现两个关键优化点：
+1. Emby Views 暴露 `Etag` 字段，内容变化时 Etag 改变 —— 可在增量模式下直接跳过整个 View
+2. Series 支持 `SortBy=DateModified&SortOrder=Descending` —— 按修改时间降序排列后，遇到 `DateModified <= last_sync_at` 即可"早停"，无需遍历所有 Series
+3. 删除检测可使用仅含 Id 的超轻量 API（不请求 Fields），进一步减少网络开销
+
+### 变更详情
+
+| 编号 | 文件 | 变更 |
+|------|------|------|
+| IO-13 | `backend/src/remote_emby.rs` | `RemoteLibraryView` 新增 `etag: Option<String>` 字段 |
+| IO-14 | `backend/src/remote_emby.rs` | `RemoteSeriesItem` 新增 `date_modified: Option<String>` 字段 |
+| IO-15 | `backend/src/remote_emby.rs` | `fetch_remote_views` 请求 Fields 增加 `Etag` |
+| IO-16 | `backend/src/remote_emby.rs` | `fetch_remote_series_page` 完整 Fields 增加 `DateModified` |
+| IO-17 | `backend/src/remote_emby.rs` | 新增 `fetch_remote_series_page_by_date_modified` — 增量模式按 DateModified 降序拉取 Series |
+| IO-18 | `backend/src/remote_emby.rs` | 新增 `fetch_remote_series_ids_page` — 仅拉取 Series Id 列表（删除检测用，不请求重量字段） |
+| IO-19 | `backend/src/remote_emby.rs` | 新增 `get_view_cached_etag` / `upsert_view_etag` — View 级别 Etag 缓存读写 |
+| IO-20 | `backend/src/remote_emby.rs` | `sync_source_inner` 新增 View 级别 Etag 检查：增量模式下 Etag 不变 → 跳过整个 View |
+| IO-21 | `backend/src/remote_emby.rs` | `sync_source_inner` Series 增量拉取重构为三阶段：① Etag 快速跳过 ② DateModified 降序早停 ③ ID-only 删除检测 |
+| IO-22 | `backend/src/remote_emby.rs` | 电影库和电视剧库处理完成后缓存 View Etag |
+| IO-23 | `backend/migrations/0001_schema.sql` | `remote_emby_source_view_progress` 新增 `remote_etag text` 列 |
+| IO-24 | `backend/src/main.rs` | `ensure_schema_compatibility` 同步新增 `remote_etag` 列 |
+
+### 工作原理
+
+#### View Etag 快速跳过
+```
+增量同步开始
+  ├── 获取远端 Views (含 Etag)
+  ├── 对每个 View:
+  │     ├── 比较远端 Etag vs 本地缓存 Etag
+  │     ├── 相同 → 跳过整个 View ✅
+  │     └── 不同 → 继续处理
+```
+
+#### DateModified 早停（电视剧库）
+```
+增量同步处理 tvshows View:
+  ├── Phase 1: 按 DateModified DESC 拉取 Series
+  │     ├── 检查每个 Series 的 DateModified
+  │     ├── DateModified > last_sync_at → 加入变更列表（需同步）
+  │     └── DateModified <= last_sync_at → 早停（后续 Series 均无变化）
+  ├── Phase 2: 仅对变更列表中的 Series 执行 Season/Episode 同步
+  └── Phase 3: ID-only 轻量分页拉取所有 Series Id → 删除检测
+```
+
+### 性能改善预估
+
+| 场景 | 优化前 | 优化后 | 改善 |
+|------|--------|--------|------|
+| 增量同步无变化的 View | 分页拉取所有条目再逐条比对 | 单次 View API 比 Etag 即跳过 | ~99% API 调用减少 |
+| 增量同步 5000 Series（仅 3 个有变化） | 拉取全部 5000 Series（轻量字段） | 拉取第 1 页（~50条）即早停，仅处理 3 条 | ~94% API 调用减少 |
+| 删除检测 5000 Series | 使用 Fields=BasicSyncInfo,ChildCount,RecursiveItemCount | 使用 Fields=BasicSyncInfo（ID-only） | ~50% 网络传输减少 |
+
+### 验证
+
+- `cargo check`：0 error
+- 向后兼容：首次全量同步不走早停逻辑，仍使用完整 API 路径
+- Etag 仅作为加速跳过手段，不影响正确性（Etag 不匹配时回退到常规处理）
+- DateModified 早停后仍通过独立的 ID-only API 拉取全量 Series Id 进行删除检测
+
+### 影响文件
+- `backend/src/remote_emby.rs`
+- `backend/src/main.rs`
+- `backend/migrations/0001_schema.sql`
+- `EmbyAPI_Compatibility_Report.md`
+
+---

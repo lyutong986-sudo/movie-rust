@@ -810,6 +810,8 @@ ALTER TABLE remote_emby_source_view_progress
     ADD COLUMN IF NOT EXISTS remote_movie_count  bigint;
 ALTER TABLE remote_emby_source_view_progress
     ADD COLUMN IF NOT EXISTS remote_series_count bigint;
+ALTER TABLE remote_emby_source_view_progress
+    ADD COLUMN IF NOT EXISTS remote_etag text;
 
 -- ---------------------------------------------------------------------------
 -- remote_emby_series_detail_synced：远端 Series 详情已拉取标记（PB49 B2）
