@@ -73,7 +73,10 @@ const scanProgressText = computed(() => {
 });
 
 const scanPhaseLabel = computed(() => {
-  const phase = scanOperation.value?.Phase;
+  const phase = scanOperation.value?.Phase ?? '';
+  // PB49：后端在自动重试时把 phase 设成 Retrying(N/M)
+  const retryMatch = /^Retrying\((\d+)\/(\d+)\)$/.exec(phase);
+  if (retryMatch) return `重试中 ${retryMatch[1]}/${retryMatch[2]}`;
   switch (phase) {
     case 'CollectingFiles':
       return '收集文件中';
@@ -112,6 +115,25 @@ const scanRateText = computed(() => {
   const rate = scanOperation.value?.ScanRatePerSec;
   if (typeof rate !== 'number' || !Number.isFinite(rate) || rate <= 0) return '';
   return `${rate.toFixed(1)} 文件/秒`;
+});
+
+/**
+ * PB49：媒体库扫描任务支持自动重试（最多 3 次），重试时计数器单调推进，
+ * 不再像旧版本一样回到 0。这里把「正在重试 N/M」的状态文案露出来给用户，
+ * 避免用户看到 phase=Retrying(2/3) 时再次以为扫描卡住或回退。
+ */
+const scanRetryHint = computed(() => {
+  const op = scanOperation.value;
+  if (!op) return '';
+  const phase = op.Phase || '';
+  const match = /^Retrying\((\d+)\/(\d+)\)$/.exec(phase);
+  if (match) {
+    return `第 ${match[1]} / ${match[2]} 次重试中（计数器为已扫高水位线，不会回到 0）`;
+  }
+  if (op.Status === 'Running' && (op.Attempts || 0) > 1) {
+    return `重试 ${op.Attempts} / ${op.MaxAttempts || 3} 次中`;
+  }
+  return '';
 });
 
 function formatTime(value?: string | null) {
@@ -357,8 +379,11 @@ async function submitRename() {
         </template>
         <div class="grid gap-3 md:grid-cols-2">
           <div class="rounded-lg border border-default p-3">
-            <p class="text-muted text-xs">当前媒体库总片源</p>
+            <p class="text-muted text-xs">数据库片源（实时统计）</p>
             <p class="text-highlighted mt-1 text-2xl font-semibold">{{ totalLibraryItems }}</p>
+            <p class="text-muted mt-1 text-xs">
+              所有媒体库的 media_items 行数总和；与本次扫描进度独立。
+            </p>
           </div>
           <div class="rounded-lg border border-default p-3">
             <p class="text-muted text-xs">扫描进度 · {{ scanPhaseLabel }}</p>
@@ -368,6 +393,9 @@ async function submitRename() {
             </p>
             <p v-if="scanOperation?.CurrentLibrary" class="text-muted text-xs">
               当前：{{ scanOperation.CurrentLibrary }}
+            </p>
+            <p v-if="scanRetryHint" class="text-warning mt-1 text-xs">
+              {{ scanRetryHint }}
             </p>
             <UProgress
               class="mt-2"

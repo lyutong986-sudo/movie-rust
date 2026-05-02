@@ -4566,6 +4566,99 @@ pub async fn clear_remote_emby_source_auth_state(
     Ok(())
 }
 
+/// PB49：取出指定 (source, view) 的续抓游标。
+///
+/// 仅当存储的 `incremental_since` 与本次同步语义匹配时才返回 `Some(start_index)`，
+/// 否则返回 None。语义：
+///   - 本次全量（`incremental_since = None`）⇄ 存储的 incremental_since IS NULL
+///   - 本次增量（`incremental_since = Some(t)`）⇄ 存储的 incremental_since = t
+///
+/// 不匹配的旧游标会在后续 `save_view_progress` 时被 UPSERT 覆盖，无需手动清理。
+pub async fn get_view_progress(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    view_id: &str,
+    incremental_since: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Option<i64>, AppError> {
+    struct Row {
+        last_start_index: i64,
+        incremental_since: Option<chrono::DateTime<chrono::Utc>>,
+    }
+    let row_opt: Option<Row> = sqlx::query(
+        r#"
+        SELECT last_start_index, incremental_since
+        FROM remote_emby_source_view_progress
+        WHERE source_id = $1 AND view_id = $2
+        "#,
+    )
+    .bind(source_id)
+    .bind(view_id)
+    .fetch_optional(pool)
+    .await?
+    .map(|r| {
+        use sqlx::Row as _;
+        Row {
+            last_start_index: r.get("last_start_index"),
+            incremental_since: r.get("incremental_since"),
+        }
+    });
+
+    let Some(row) = row_opt else {
+        return Ok(None);
+    };
+    if row.incremental_since == incremental_since {
+        Ok(Some(row.last_start_index))
+    } else {
+        Ok(None)
+    }
+}
+
+/// PB49：保存指定 (source, view) 的续抓游标。UPSERT 语义，每对 (source, view) 至多一行。
+pub async fn save_view_progress(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    view_id: &str,
+    last_start_index: i64,
+    total_record_count: i64,
+    incremental_since: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO remote_emby_source_view_progress
+            (source_id, view_id, last_start_index, total_record_count, incremental_since, updated_at)
+        VALUES ($1, $2, $3, $4, $5, now())
+        ON CONFLICT (source_id, view_id) DO UPDATE SET
+            last_start_index   = EXCLUDED.last_start_index,
+            total_record_count = EXCLUDED.total_record_count,
+            incremental_since  = EXCLUDED.incremental_since,
+            updated_at         = now()
+        "#,
+    )
+    .bind(source_id)
+    .bind(view_id)
+    .bind(last_start_index)
+    .bind(total_record_count)
+    .bind(incremental_since)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// PB49：清空指定 source 的所有续抓游标。在整次 sync 成功完成时调用，
+/// 让下次同步从 start_index=0 重新开始（避免 stale 游标累积）。
+pub async fn clear_source_view_progress(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+) -> Result<u64, AppError> {
+    let result = sqlx::query(
+        "DELETE FROM remote_emby_source_view_progress WHERE source_id = $1",
+    )
+    .bind(source_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn update_remote_emby_source_sync_state(
     pool: &sqlx::PgPool,
     id: Uuid,
@@ -9010,19 +9103,45 @@ pub async fn upsert_media_item(
                 .unwrap_or(false);
                 return Ok((id, was_inserted));
             }
-            Err(sqlx::Error::Database(ref db_err))
-                if db_err.constraint() == Some("media_items_library_id_path_key")
-                    && attempt + 1 < UPSERT_MAX_ATTEMPTS =>
-            {
-                tracing::warn!(
-                    library_id = %input.library_id,
-                    path = %path_text,
-                    attempt = attempt + 1,
-                    "PB48：检测到 (library_id, path) 唯一约束冲突（漂移行 race），重试 SELECT-first"
-                );
-                continue;
+            Err(error) => {
+                if let sqlx::Error::Database(ref db_err) = error {
+                    let constraint = db_err.constraint();
+                    // PB48：(library_id, path) 漂移行 race，仍有重试余量则继续。
+                    if constraint == Some("media_items_library_id_path_key")
+                        && attempt + 1 < UPSERT_MAX_ATTEMPTS
+                    {
+                        tracing::warn!(
+                            library_id = %input.library_id,
+                            path = %path_text,
+                            attempt = attempt + 1,
+                            "PB48：检测到 (library_id, path) 唯一约束冲突（漂移行 race），重试 SELECT-first"
+                        );
+                        continue;
+                    }
+                    // PB49：父行外键违例的诊断埋点。
+                    //
+                    // 这是用户报告的 `media_items_parent_id_fkey` 报错的「现场告警」：
+                    // 在故障真正发生的那一行附上 (库, 路径, 类型, 父行 UUID) 四元组，
+                    // 配合 PB49 的 per-source 互斥 + DetailHandlesGuard，能立即定位到
+                    // 究竟是哪个 Series/Season 父行被并发删了。日志只在出错时记录一次，
+                    // 没有稳态开销。
+                    if constraint == Some("media_items_parent_id_fkey") {
+                        tracing::error!(
+                            library_id = %input.library_id,
+                            parent_id = ?input.parent_id,
+                            item_type = %input.item_type,
+                            path = %path_text,
+                            name = %input.name,
+                            series_id = ?input.series_id,
+                            db_message = %db_err.message(),
+                            "PB49：父行外键违例（media_items_parent_id_fkey）—— \
+                             疑似 Series/Season 父行被并发任务删除后才 INSERT 子行；\
+                             若仍频繁出现，请检查同源是否有未屏蔽的并发同步入口"
+                        );
+                    }
+                }
+                return Err(error.into());
             }
-            Err(error) => return Err(error.into()),
         }
     }
     // 上面 for 循环要么 return Ok / return Err，要么 continue；走到这里说明

@@ -245,6 +245,19 @@ pub async fn incremental_update_library(
                     summary.scanned_files += result.scan_summary.scanned_files;
                     summary.imported_items += result.scan_summary.imported_items;
                 }
+                // PB49：另一个 sync 正在跑（per-source 互斥），跳过本源不算硬失败。
+                // 不识别这条错误的话，定时扫描会被 auto-retry 3 次全部失败，反而
+                // 让用户在 UI 上看到「整轮扫描失败」假象，而真正在跑的手动 sync
+                // 其实仍在正常推进。
+                Err(err) if err.to_string().contains(remote_emby::SOURCE_SYNC_BUSY_TAG) => {
+                    tracing::info!(
+                        source_id = %source.id,
+                        library_id = %library_id,
+                        "跳过远端源同步：另一个同步任务正在进行中（per-source 互斥保护）"
+                    );
+                    summary.libraries += 1;
+                    continue;
+                }
                 Err(err) => {
                     tracing::warn!(
                         source_id = %source.id,
@@ -435,11 +448,30 @@ async fn enqueue_library_scan(
                     break;
                 }
                 operation.status = "Running";
-                operation.phase = "CollectingFiles".to_string();
-                operation.progress = 0.0;
-                operation.total_files = 0;
-                operation.scanned_files = 0;
-                operation.imported_items = 0;
+                // PB49：自动重试时不再重置已扫 / 已入库计数。
+                //
+                // 之前每次进入 attempt 都把 `total_files / scanned_files /
+                // imported_items` 全部清零，配合 poller 把 fresh `ScanProgress`
+                // 的 snap（attempt 内部从 0 开始）写回 operation，导致用户看到
+                // 「11243 → 0 → 11243 → 0 …」反复跳——也就是用户报告的
+                // 「资源会突然归 0 然后又重新开始增加」。
+                //
+                // 现在保留上一次 attempt 的最高水位线，poller 改成
+                // `operation.* = max(operation.*, snap.*)`，UI 上的数字只能涨
+                // 不会缩，重试感知更接近「卡了一下又恢复」而不是「白干一场」。
+                if attempt == 1 {
+                    operation.phase = "CollectingFiles".to_string();
+                    operation.progress = 0.0;
+                    operation.total_files = 0;
+                    operation.scanned_files = 0;
+                    operation.imported_items = 0;
+                } else {
+                    // 重试时让用户明确看到「这是第 N 次尝试」，而不是误以为
+                    // 又回到「收集文件 0%」从零开始。
+                    operation.phase = format!("Retrying({attempt}/{MAX_ATTEMPTS})");
+                    // progress 给个保守的 5%，让进度条不至于回到 0。
+                    operation.progress = operation.progress.max(5.0).min(99.0);
+                }
                 operation.scan_rate_per_sec = 0.0;
                 operation.current_library = None;
                 operation.attempts = attempt;
@@ -479,10 +511,15 @@ async fn enqueue_library_scan(
                         snap.phase.clone()
                     };
                     operation.current_library = snap.current_library.clone();
-                    operation.total_files = snap.total_files;
-                    operation.scanned_files = snap.scanned_files;
-                    operation.imported_items = snap.imported_items;
-                    operation.progress = snap.percent;
+                    // PB49：单调推进——重试时上一次 attempt 的水位线不能被新 attempt
+                    // 的「从 0 重新爬」snap 给覆盖（UI 会出现「归零再涨」的体感）。
+                    // total_files 也用 max：不同 attempt 看到的总文件数偶尔会因为
+                    // 文件系统变化而抖动，max 保证显示「目前已知的最大盘子」。
+                    operation.total_files = operation.total_files.max(snap.total_files);
+                    operation.scanned_files = operation.scanned_files.max(snap.scanned_files);
+                    operation.imported_items = operation.imported_items.max(snap.imported_items);
+                    // progress 也只许涨，避免重试瞬间从 80% 砸回 0%
+                    operation.progress = operation.progress.max(snap.percent);
                     operation.scan_rate_per_sec = scan_rate_per_sec;
                 }
             });
@@ -573,8 +610,16 @@ async fn enqueue_library_scan(
                             operation.status = "Succeeded";
                             operation.progress = 100.0;
                             operation.phase = "Completed".to_string();
-                            operation.scanned_files = summary.scanned_files as u64;
-                            operation.imported_items = summary.imported_items as u64;
+                            // PB49：与 poller 的 max 单调语义保持一致——summary
+                            // 是本次 attempt 的最终值，但若前几次 attempt 留下的
+                            // 水位线更高（每次重试都会重跑同一批文件），这里也
+                            // 不要让 UI 显示出回退。
+                            operation.scanned_files = operation
+                                .scanned_files
+                                .max(summary.scanned_files as u64);
+                            operation.imported_items = operation
+                                .imported_items
+                                .max(summary.imported_items as u64);
                             operation.scan_rate_per_sec = 0.0;
                             if operation.total_files == 0 {
                                 operation.total_files = summary.scanned_files as u64;

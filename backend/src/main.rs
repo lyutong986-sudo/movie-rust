@@ -877,6 +877,17 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         // studios/tags GIN 索引（对 aggregate_array_values 全表扫描优化）
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_studios_gin ON media_items USING gin (studios)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_tags_gin ON media_items USING gin (tags)"#,
+        // PB49：远端同步续抓游标表（与 0001_schema.sql 同步）
+        r#"CREATE TABLE IF NOT EXISTS remote_emby_source_view_progress (
+            source_id          uuid NOT NULL REFERENCES remote_emby_sources(id) ON DELETE CASCADE,
+            view_id            text NOT NULL,
+            last_start_index   bigint NOT NULL DEFAULT 0,
+            incremental_since  timestamptz,
+            total_record_count bigint NOT NULL DEFAULT 0,
+            updated_at         timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (source_id, view_id)
+        )"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_source_view_progress_source ON remote_emby_source_view_progress(source_id)"#,
     ];
 
     for statement in compatibility_sql {

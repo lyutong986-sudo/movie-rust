@@ -60,6 +60,106 @@ static REMOTE_REQUEST_THROTTLE: std::sync::LazyLock<
     RwLock<HashMap<Uuid, Arc<tokio::sync::Mutex<Instant>>>>,
 > = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// PB49：per-source 同步互斥锁。
+///
+/// 旧链路有两条并发入口，互不感知：
+///   1. HTTP `/api/admin/remote-emby/sources/{id}/sync` → `enqueue_remote_emby_sync`
+///      （`active_operation_ids` 自身的 dedup 只覆盖 HTTP 路径）
+///   2. 计划任务 / 媒体库扫描 → `incremental_update_library` →
+///      直接调 `sync_source_with_progress`，**完全绕过** dedup
+///
+/// 当用户手动点「立即同步」恰好和定时任务撞到同一秒，两个 `sync_source_inner`
+/// 同时跑——一个 task 缓存了某个 Series/Season 父行的 UUID，另一个 task
+/// 在 `delete_stale_items_for_source` 里把这条父行 cascade-delete 掉，
+/// 第一个 task 接着 INSERT Episode 用了那个已被删的 parent_id，触发
+/// `media_items_parent_id_fkey` 违例。这是用户报告的 FK 报错的主路径。
+///
+/// 修复：所有 `sync_source_with_progress` 入口共享 per-source `Mutex`。
+/// 用 `try_lock_owned` 而不是 `lock_owned`，让重复触发立刻拿到 BadRequest
+/// 反馈，不在后台累积排队任务。
+static SOURCE_SYNC_LOCKS: std::sync::LazyLock<
+    RwLock<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// PB49：拿不到 per-source sync 锁时返回的 BadRequest 文案的稳定标识子串。
+/// 调用方（如 `incremental_update_library` 在定时任务路径上）用 `err.to_string().contains(...)`
+/// 识别这类「软失败」，记 info 后跳过该源，不让定时扫描整体失败重试 3 次。
+pub const SOURCE_SYNC_BUSY_TAG: &str = "[remote-emby-sync-busy]";
+
+/// 取/创建给定 source_id 的同步互斥锁（始终拿到同一个 Arc）。
+async fn get_source_sync_lock(source_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    if let Some(slot) = SOURCE_SYNC_LOCKS.read().await.get(&source_id).cloned() {
+        return slot;
+    }
+    let mut write = SOURCE_SYNC_LOCKS.write().await;
+    write
+        .entry(source_id)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// PB49：series-detail 后台 spawn 池的 RAII 守卫。
+///
+/// 用户报告的「任务 Failed 但媒体数仍在涨」根因：`sync_source_inner` 的
+/// 主循环用 `?` 早退（比如 FK 违例向上传播）时，`series_detail_handles`
+/// 容器里堆积的 `JoinHandle<()>` 直接被 drop——tokio task 默认 detach 而非
+/// abort，所以一连串 `fetch_and_upsert_series_detail` 仍在背景里继续拉
+/// 远端 HTTP、写 person/person_role 表，前端早就看到「Failed」但 DB 计数
+/// 还在涨。
+///
+/// 修复：进入 buffer_unordered 主循环前用 `DetailHandlesGuard` 包住 spawn 池
+/// + progress；只要走到 `?` 早退路径，guard.drop() 会：
+///   1. `progress.request_cancel()` 让所有 in-flight detail task 在下一次
+///      `is_cancelled()` 检查时立即收尾
+///   2. 把容器里所有 `JoinHandle` 全部 `abort()`，强行打断已经在 await 的
+///      远端 HTTP / DB 写
+/// 正常完成路径在 await 完所有 handle 后调用 `disarm()` 解除上述行为。
+struct DetailHandlesGuard {
+    handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    progress: Option<RemoteSyncProgress>,
+    disarmed: bool,
+}
+
+impl DetailHandlesGuard {
+    fn new(
+        handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+        progress: Option<RemoteSyncProgress>,
+    ) -> Self {
+        Self {
+            handles,
+            progress,
+            disarmed: false,
+        }
+    }
+
+    /// 正常完成路径调用：解除 Drop 时的 abort 行为。
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for DetailHandlesGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        // 先发取消信号让 in-flight 任务自己收尾
+        if let Some(progress) = &self.progress {
+            progress.request_cancel();
+        }
+        // 再 spawn 一个清理协程把容器里的 JoinHandle 全部 abort——
+        // 此处已在 Drop（同步上下文）里，没法 `lock().await`，必须 spawn。
+        // abort() 是同步的、立即返回的，spawn 的协程通常 1 个 tick 内完成。
+        let handles = self.handles.clone();
+        tokio::spawn(async move {
+            let mut guard = handles.lock().await;
+            for jh in guard.drain(..) {
+                jh.abort();
+            }
+        });
+    }
+}
+
 /// 以 `source.request_interval_ms` 为节奏对该源做限速：先取/创建该源的 Mutex 槽，
 /// 进入临界区后计算「距上一次发请求的时间差」，不足 `request_interval_ms` 就 sleep
 /// 补齐，最后把「now」写回作为下一次基准。`request_interval_ms <= 0` 时直接返回。
@@ -866,6 +966,20 @@ pub async fn sync_source_with_progress(
     source_id: Uuid,
     progress: Option<RemoteSyncProgress>,
 ) -> Result<RemoteEmbySyncResult, AppError> {
+    // PB49：per-source 互斥锁。`try_lock_owned` 拿不到就立刻 BadRequest，
+    // 不让两个 sync 在同一 source 上并发跑（避免父行被一方删、另一方还拿着
+    // 父行 UUID 去 INSERT Episode 触发 FK 违例的 race）。
+    //
+    // 错误信息里加 `SOURCE_SYNC_BUSY_TAG` 稳定子串：定时任务路径
+    // (`incremental_update_library`) 用它识别「另一个 sync 正在跑」的软失败，
+    // 记 info 后跳过该源，避免定时任务整轮失败 + auto-retry 3 次。
+    let source_lock = get_source_sync_lock(source_id).await;
+    let _sync_guard = source_lock.try_lock_owned().map_err(|_| {
+        AppError::BadRequest(format!(
+            "该远端源已有同步任务在执行，请等待当前任务结束或先点「中断同步」 {SOURCE_SYNC_BUSY_TAG}"
+        ))
+    })?;
+
     let mut source = repository::get_remote_emby_source(&state.pool, source_id)
         .await?
         .ok_or_else(|| AppError::NotFound("远端 Emby 源不存在".to_string()))?;
@@ -880,6 +994,15 @@ pub async fn sync_source_with_progress(
         }
     }
     let result = sync_source_inner(state, &mut source, progress.clone()).await;
+    // PB49：错误返回时，显式给 progress 推一个 cancel，避免任何「在错误抛出
+    // 之后还可能被 spawn 拿到、并仍认为自己有效」的后台任务继续写库。
+    // sync_source_inner 自身的 DetailHandlesGuard 在错误退出路径上已经 abort
+    // 了所有 series-detail JoinHandle，这里再补一次 cancel 是双保险。
+    if result.is_err() {
+        if let Some(handle) = &progress {
+            handle.request_cancel();
+        }
+    }
     let sync_state_result = match &result {
         Ok(_) => {
             repository::update_remote_emby_source_sync_state(&state.pool, source.id, None).await
@@ -1115,6 +1238,13 @@ async fn sync_source_inner(
     let series_detail_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
+    // PB49：把 series-detail spawn 池套上 RAII Guard。
+    // 任何 `?` 早退路径（FK 违例 / 取消 / DB 致命错误等）都会触发 Drop，
+    // 自动 cancel + abort 所有 in-flight detail task。正常完成路径在
+    // 末尾的 await 循环之后 `disarm()`。
+    let mut detail_handles_guard =
+        DetailHandlesGuard::new(Arc::clone(&series_detail_handles), progress.clone());
+
     for view in &views {
         let item_library_id = *view_library_id_map.get(&view.id).ok_or_else(|| {
             AppError::Internal(format!("View「{}」未找到对应本地库映射", view.name))
@@ -1131,7 +1261,26 @@ async fn sync_source_inner(
             );
         }
 
-        let mut start_index = 0i64;
+        // PB49：尝试从持久化游标处续抓——只有当上次同步语义（incremental_since）
+        // 和本次完全一致时才会返回 Some(idx)；否则总是 0 起步，避免「上次全量
+        // 卡在第 N 页 / 这次想做增量」时错位。
+        let resume_index = repository::get_view_progress(
+            &state.pool,
+            source.id,
+            view.id.as_str(),
+            incremental_since,
+        )
+        .await
+        .unwrap_or(None);
+        let mut start_index = resume_index.unwrap_or(0);
+        if resume_index.is_some() && start_index > 0 {
+            tracing::info!(
+                source_id = %source.id,
+                view = %view.name,
+                resume_start_index = start_index,
+                "PB49：从上次中断处续抓远端 View"
+            );
+        }
         // 拉取速率：单源可调 page_size（50–1000），影响每页带回的条目数（与 request_interval_ms
         // 一起决定单源对远端的实际 QPS / 带宽消耗）。
         let page_size = effective_page_size(source);
@@ -1223,6 +1372,27 @@ async fn sync_source_inner(
             }
 
             start_index += page_size;
+            // PB49：每页处理完都把当前 start_index 持久化为下次续抓的游标。
+            // 写入失败仅 warn 不阻塞主链路——续抓只是性能优化，丢一次 cursor
+            // 大不了下次从 0 重头扫一遍（与不开续抓功能等价），不影响正确性。
+            if let Err(error) = repository::save_view_progress(
+                &state.pool,
+                source.id,
+                view.id.as_str(),
+                start_index,
+                page.total_record_count,
+                incremental_since,
+            )
+            .await
+            {
+                tracing::warn!(
+                    source_id = %source.id,
+                    view = %view.name,
+                    start_index,
+                    error = %error,
+                    "保存远端同步续抓游标失败（不阻塞主链路）"
+                );
+            }
             if start_index >= page.total_record_count {
                 break;
             }
@@ -1252,6 +1422,21 @@ async fn sync_source_inner(
             source_id = %source.id,
             count = pending_count,
             "PB46：所有 Series 详情后台同步完成"
+        );
+    }
+    // PB49：成功走到这里说明所有 detail handle 都已 await 完毕，解除 guard 的
+    // Drop 行为；否则 guard 会在函数末尾 drop 时再 spawn 一次空 abort，浪费但
+    // 无副作用。disarm 必须在所有 `?` 早退之后才发生。
+    detail_handles_guard.disarm();
+
+    // PB49：整次 sync 走到这里说明所有 view 都已扫完且所有 detail handle 都已 await。
+    // 此时清空续抓游标——下次同步将从 start_index=0 重新开始（这是期望行为：
+    // 续抓游标是为「失败重试」准备的，成功完成后 stale 数据应清掉以免污染下次）。
+    if let Err(error) = repository::clear_source_view_progress(&state.pool, source.id).await {
+        tracing::warn!(
+            source_id = %source.id,
+            error = %error,
+            "清空远端同步续抓游标失败（不阻塞主链路；下次同步会用旧游标再处理一次）"
         );
     }
 
@@ -2959,6 +3144,14 @@ async fn delete_stale_items_for_source(
     /// 反过来分页抖动 / 部分视图拉空导致 ID 集合缺失 10% 以上很常见。
     const PRUNE_GUARD_RATIO_NUM: usize = 10;
     const PRUNE_GUARD_RATIO_DEN: usize = 100;
+    /// PB49：单次 prune **绝对量** 上限。
+    ///
+    /// 比例阀只在小库上稳——10 万规模的库 9.9% = 9900 条「正好低于阈值」
+    /// 但仍是不可接受的批量误删（用户报告就是「原先 10 万、现在 3938」）。
+    /// 加一道绝对量保险：单次 stale 超过 5000 条就直接跳过，留给下次同步
+    /// 用更完整的 ID 集合来判定。如果远端真有 >5000 条要下架，多次同步
+    /// 也能渐进收敛。
+    const PRUNE_GUARD_MAX_ABSOLUTE: usize = 5000;
 
     let source_id_str = source_id.to_string();
     struct StaleRow {
@@ -3017,8 +3210,24 @@ async fn delete_stale_items_for_source(
             stale_count,
             remote_id_set_size = remote_id_set.len(),
             ratio_threshold_pct = PRUNE_GUARD_RATIO_NUM,
-            "prune 安全阀触发：本次 stale 比例超过阈值，疑似远端 ID 集合不完整（分页抖动 / 中途取消 / 进程重启等），\
+            "prune 安全阀触发（比例）：本次 stale 比例超过阈值，疑似远端 ID 集合不完整（分页抖动 / 中途取消 / 进程重启等），\
              跳过本次 stale 删除，等下一次同步用更完整的 ID 集合再行判定"
+        );
+        return Ok(0);
+    }
+    // PB49：绝对量保险——比例阀对中大型库（>1 万）保护不够（9.9% 仍可能误删上千条），
+    // 这里再卡一道「单次最多删 N 条」，超过就直接跳过，下次再判。
+    if stale_count > PRUNE_GUARD_MAX_ABSOLUTE {
+        tracing::warn!(
+            source_id = %source_id,
+            candidate_count,
+            stale_count,
+            remote_id_set_size = remote_id_set.len(),
+            absolute_threshold = PRUNE_GUARD_MAX_ABSOLUTE,
+            "PB49：prune 安全阀触发（绝对量）：单次 stale 数超过 {} 条上限，\
+             跳过本次 stale 删除以避免大量误删；如果远端真的下架了 >{} 条，多轮同步会渐进收敛",
+            PRUNE_GUARD_MAX_ABSOLUTE,
+            PRUNE_GUARD_MAX_ABSOLUTE
         );
         return Ok(0);
     }

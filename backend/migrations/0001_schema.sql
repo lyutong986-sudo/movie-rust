@@ -787,6 +787,27 @@ CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_enabled
     ON remote_emby_sources(enabled);
 
 -- ---------------------------------------------------------------------------
+-- remote_emby_source_view_progress：远端 Emby 同步的「续抓游标」（PB49）
+-- ---------------------------------------------------------------------------
+-- 当一次 sync_source_inner 中途因 FK 违例 / DB 致命错误等失败时，下次同步
+-- 不再从 start_index=0 重头扫，而是从这里记录的 last_start_index 续抓。
+--   - PRIMARY KEY (source_id, view_id) 保证一对源 + 视图唯一一行
+--   - incremental_since 与本次 sync 的语义对齐：`Some(t)` 增量、`NULL` 全量；
+--     续抓只在两者相等时生效，避免「上次全量到 7000 / 这次想做增量」时错位
+--   - 整次 sync 成功完成会清空对应 source 的所有 row，重新回到从头开始
+CREATE TABLE IF NOT EXISTS remote_emby_source_view_progress (
+    source_id          uuid NOT NULL REFERENCES remote_emby_sources(id) ON DELETE CASCADE,
+    view_id            text NOT NULL,
+    last_start_index   bigint NOT NULL DEFAULT 0,
+    incremental_since  timestamptz,
+    total_record_count bigint NOT NULL DEFAULT 0,
+    updated_at         timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (source_id, view_id)
+);
+CREATE INDEX IF NOT EXISTS idx_remote_emby_source_view_progress_source
+    ON remote_emby_source_view_progress(source_id);
+
+-- ---------------------------------------------------------------------------
 -- session_play_queue / session_commands：远程控制 & 当前播放队列
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS session_play_queue (
