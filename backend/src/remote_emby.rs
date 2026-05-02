@@ -1219,6 +1219,50 @@ async fn sync_source_inner(
     let season_parent_map: Arc<DashMap<String, Uuid>> = Arc::new(DashMap::new());
     // PB31-2：已成功拉过详情的 series_id 集合，避免每个 episode 都触发一次 Series 详情拉取。
     let series_detail_synced: Arc<DashSet<String>> = Arc::new(DashSet::new());
+
+    // PB49：「已入库」远端 ID 集合——只在「全量/恢复」路径（incremental_since=None）启用，
+    // 用来在主循环里直接跳过那些已经成功落库的 Movie/Episode。
+    //
+    // 用户报告「重试同步从 0 重新开始」时，旧逻辑即使 cursor 续抓也会对前
+    // ~10 万行已存在的条目走完整 upsert + STRM 重写 + series detail 拉取，
+    // 浪费几分钟到几十分钟。这里在主循环开始前一次性把本源已有的
+    // RemoteEmbyItemId 拉到内存，主循环命中后只 bump 进度计数器、立即让位。
+    //
+    // 仅 full sync 启用：incremental sync (force_refresh_sidecar=true) 由远端
+    // `MinDateLastSaved` 过滤过的本来就是变更过的条目，必须重写。
+    let local_synced_ids: Arc<DashSet<String>> = if force_refresh_sidecar {
+        Arc::new(DashSet::new())
+    } else {
+        let rows: Vec<(Option<String>,)> = sqlx::query_as(
+            r#"
+            SELECT provider_ids->>'RemoteEmbyItemId' AS remote_id
+            FROM media_items
+            WHERE provider_ids->>'RemoteEmbySourceId' = $1
+              AND provider_ids->>'RemoteEmbyItemId' IS NOT NULL
+              AND provider_ids->>'RemoteEmbyItemId' <> ''
+            "#,
+        )
+        .bind(source.id.to_string())
+        .fetch_all(&state.pool)
+        .await?;
+        let set: DashSet<String> = DashSet::with_capacity(rows.len());
+        for (remote_id,) in rows {
+            if let Some(id) = remote_id {
+                set.insert(id);
+            }
+        }
+        if !set.is_empty() {
+            tracing::info!(
+                source_id = %source.id,
+                local_synced = set.len(),
+                "PB49：full sync 启用「跳过已入库」加速——主循环将直接跳过本地已有的远端条目"
+            );
+        }
+        Arc::new(set)
+    };
+    // 跳过计数器，sync 结束统一打日志，方便用户验证「跳过」是否真的命中。
+    let skipped_existing = Arc::new(AtomicU64::new(0));
+
     // PB43：进度计数器换成原子，让并发任务无锁累加。
     let fetched_count = Arc::new(AtomicU64::new(0));
     let written_files = Arc::new(AtomicU64::new(0));
@@ -1333,6 +1377,8 @@ async fn sync_source_inner(
                 let written_files = Arc::clone(&written_files);
                 let series_detail_semaphore = Arc::clone(&series_detail_semaphore);
                 let series_detail_handles = Arc::clone(&series_detail_handles);
+                let local_synced_ids = Arc::clone(&local_synced_ids);
+                let skipped_existing = Arc::clone(&skipped_existing);
                 let progress = progress.clone();
                 async move {
                     process_one_remote_sync_item(
@@ -1353,6 +1399,8 @@ async fn sync_source_inner(
                         &written_files,
                         &series_detail_semaphore,
                         &series_detail_handles,
+                        &local_synced_ids,
+                        &skipped_existing,
                         total_items,
                         progress.as_ref(),
                         force_refresh_sidecar,
@@ -1442,6 +1490,7 @@ async fn sync_source_inner(
 
     let fetched_count = fetched_count.load(Ordering::Relaxed);
     let written_files = written_files.load(Ordering::Relaxed) as usize;
+    let skipped_existing_count = skipped_existing.load(Ordering::Relaxed);
 
     let mode_label = if incremental_since.is_some() {
         "增量(增/改/删)"
@@ -1453,6 +1502,7 @@ async fn sync_source_inner(
         mode = mode_label,
         fetched = fetched_count,
         written = written_files,
+        skipped_existing = skipped_existing_count,
         deleted_stale = deleted,
         "远端 Emby 同步完成"
     );
@@ -1501,6 +1551,9 @@ async fn process_one_remote_sync_item(
     // PB46：series detail 后台 spawn 池资源。
     series_detail_semaphore: &Arc<tokio::sync::Semaphore>,
     series_detail_handles: &Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    // PB49：「全量同步路径上跳过已入库条目」的状态。
+    local_synced_ids: &DashSet<String>,
+    skipped_existing: &AtomicU64,
     total_items: u64,
     progress: Option<&RemoteSyncProgress>,
     force_refresh_sidecar: bool,
@@ -1509,6 +1562,31 @@ async fn process_one_remote_sync_item(
         if handle.is_cancelled() {
             return Err(AppError::BadRequest("同步任务已被取消".to_string()));
         }
+    }
+
+    // PB49：full sync 路径上，主循环命中本地已入库的条目就直接跳过。
+    //
+    // 之前即使配合 B-7 续抓游标，每个已落库的 Movie/Episode 仍要走完
+    // 「ensure_series_folder → ensure_season_folder → write_strm_bundle →
+    //  upsert_media_item → save_media_streams → upsert_people」全套流程，
+    // 单条 ~30-100ms，10 万条全量重过一遍可观地拖慢「失败后重试」体验。
+    //
+    // 这里的早退**不影响正确性**：
+    //   - local_synced_ids 仅在 force_refresh_sidecar=false（last_sync_at IS NULL）时
+    //     被填充；增量路径 (last_sync_at=Some) 下集合为空，不会命中。
+    //   - delete_stale_items_for_source 仍照常基于完整的 remote_id_set 跑，
+    //     所以「远端已下架的本地条目」仍会被正常清理（不依赖主循环遍历）。
+    //   - 命中跳过时仍 bump fetched_count + written_files，让 UI 看到的
+    //     「入库条目」反映本地真实存量，避免又出现「明明 11 万在库却显示 400」的
+    //     反直觉。
+    if !force_refresh_sidecar && local_synced_ids.contains(base_item.id.as_str()) {
+        skipped_existing.fetch_add(1, Ordering::Relaxed);
+        let f = fetched_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let w = written_files.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(handle) = progress {
+            handle.set_streaming_progress(f, w, total_items);
+        }
+        return Ok(());
     }
 
     let item = RemoteSyncItem {
