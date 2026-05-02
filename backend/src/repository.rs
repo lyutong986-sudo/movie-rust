@@ -3722,6 +3722,23 @@ pub async fn ensure_remote_view_path_in_library(
 pub async fn cleanup_orphan_remote_view_paths(
     pool: &sqlx::PgPool,
 ) -> Result<(u64, u64, u64), AppError> {
+    // PB49 (D3)：批量删 standalone library 的安全阀。
+    //
+    // 这个函数在每次 backend 启动时跑。如果 `remote_emby_sources` 表因为意外
+    // （DDL 误操作、备份还原顺序错乱、迁移脚本中途失败、用户把表 truncate 了
+    // 想做"软重置"等）暂时为空，naïve 实现会一口气把所有 `__remote_view_*`
+    // standalone library 全删——包括用户可能想保留的、对应的 strm 工作区。
+    // 启动时跑 → 用户来不及看到日志阻止。
+    //
+    // 这里加两道闸：
+    //   - 绝对上限：单次启动最多删 D3_DELETE_HARD_LIMIT 个 standalone 库，超过
+    //     直接 abort 并把"本来要删的 ID 列表"打成 ERROR 日志，要求人工处理。
+    //   - 比例上限：如果 standalone 总数 > 0 且要删的占比 >= D3_DELETE_RATIO，
+    //     同样 abort——这能防住"备份还原后 sources 表是空的、libraries 表完整"
+    //     这种典型脚误场景。
+    const D3_DELETE_HARD_LIMIT: usize = 50;
+    const D3_DELETE_RATIO: f64 = 0.5;
+
     // 现有远端源的 simple-uuid 集合（小写、无连字符）。
     let live_source_ids: Vec<Uuid> =
         sqlx::query_scalar::<_, Uuid>("SELECT id FROM remote_emby_sources")
@@ -3743,23 +3760,69 @@ pub async fn cleanup_orphan_remote_view_paths(
     )
     .fetch_all(pool)
     .await?;
-    let mut deleted = 0u64;
-    let mut orphan_ids = std::collections::HashSet::<String>::new();
+
+    // 先「干跑」一遍：识别本次会被删的孤儿，但暂不真删，给安全阀打分用。
+    struct OrphanLib<'a> {
+        lib: &'a DbLibrary,
+        simple: String,
+    }
+    let mut planned: Vec<OrphanLib> = Vec::new();
     for lib in &standalone {
-        // path 形如 `__remote_view_<simple>_<view_id>`，按下划线切出 simple。
         let rest = lib.path.trim_start_matches("__remote_view_");
         let Some((simple, _)) = rest.split_once('_') else {
             continue;
         };
         let simple_lower = simple.to_ascii_lowercase();
         if !live_simple.contains(&simple_lower) {
-            orphan_ids.insert(simple_lower);
-            let res = sqlx::query("DELETE FROM libraries WHERE id = $1")
-                .bind(lib.id)
-                .execute(pool)
-                .await?;
-            deleted += res.rows_affected();
+            planned.push(OrphanLib {
+                lib,
+                simple: simple_lower,
+            });
         }
+    }
+
+    // 安全阀检查
+    let total_standalone = standalone.len();
+    let plan_count = planned.len();
+    let exceeds_hard_limit = plan_count > D3_DELETE_HARD_LIMIT;
+    let exceeds_ratio = total_standalone > 0
+        && (plan_count as f64 / total_standalone as f64) >= D3_DELETE_RATIO;
+
+    if exceeds_hard_limit || exceeds_ratio {
+        // 不删！把待删 ID 列表打成 ERROR 日志，给运维人工排查。
+        let plan_preview: Vec<String> = planned
+            .iter()
+            .take(20)
+            .map(|p| format!("{} ({})", p.lib.name, p.lib.path))
+            .collect();
+        tracing::error!(
+            plan_count,
+            total_standalone,
+            hard_limit = D3_DELETE_HARD_LIMIT,
+            ratio_threshold = D3_DELETE_RATIO,
+            exceeds_hard_limit,
+            exceeds_ratio,
+            preview = ?plan_preview,
+            "PB49 (D3)：发现疑似批量孤儿远端虚拟库 → 触发安全阀 ABORT。\
+             启动清理一次最多删 {hard} 个或 {ratio_pct}% 比例，超阈值直接放行不删。\
+             如果远端源表确实被清空且本次删除是预期行为，请手工 DELETE FROM libraries \
+             WHERE path LIKE '__remote_view_%' 后重启",
+            hard = D3_DELETE_HARD_LIMIT,
+            ratio_pct = (D3_DELETE_RATIO * 100.0) as u32,
+        );
+        // 注意：返回 0 已删 + 0 更新，让上层 startup 日志看出本次没动手。
+        return Ok((0, 0, plan_count as u64));
+    }
+
+    let mut deleted = 0u64;
+    let mut orphan_ids = std::collections::HashSet::<String>::new();
+    for orphan in &planned {
+        orphan_ids.insert(orphan.simple.clone());
+        let res = sqlx::query("DELETE FROM libraries WHERE id = $1")
+            .bind(orphan.lib.id)
+            .execute(pool)
+            .await?;
+        deleted += res.rows_affected();
     }
 
     // 第二遍：扫所有 library_options.PathInfos 含 `__remote_view_*` 的库，剥掉那些
@@ -4659,6 +4722,131 @@ pub async fn clear_source_view_progress(
     Ok(result.rows_affected())
 }
 
+/// PB49 (B2)：预热「Series 详情已成功拉过」集合，跨 sync 复用。
+///
+/// 旧实现里 series_detail_synced 是 per-run DashSet，每次 sync 整个媒体库
+/// 都要再为每部剧打一发 /Items/{seriesId} 详情拉取。这里在 sync 启动时把
+/// 持久化的标记捞回来，让后续 sync 只为新增 / 用户主动刷新的剧拉详情。
+pub async fn preheat_series_detail_synced(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+) -> Result<Vec<String>, AppError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT remote_series_id FROM remote_emby_series_detail_synced WHERE source_id = $1",
+    )
+    .bind(source_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(s,)| s).collect())
+}
+
+/// PB49 (B2)：标记某 (source_id, remote_series_id) 的详情已成功落库。
+/// 写入失败仅 warn，不影响主链路（下次 sync 重做即可）。
+pub async fn mark_series_detail_synced(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    remote_series_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO remote_emby_series_detail_synced (source_id, remote_series_id, synced_at)
+        VALUES ($1, $2, now())
+        ON CONFLICT (source_id, remote_series_id) DO UPDATE
+            SET synced_at = excluded.synced_at
+        "#,
+    )
+    .bind(source_id)
+    .bind(remote_series_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// PB49 (A2)：序列启动时预热已存在的 Series 行，让本次 sync 的第一个 Episode
+/// 直接命中缓存、跳过一次 DB upsert（对几千部剧的库可省 ~5-15 秒同步前置开销）。
+///
+/// 返回 (view_id, series_name, db_id) 三元组。view_id 取自 provider_ids，
+/// 调用方据此组装 `format!("{view_id}::{sanitize(name)}")` key 写入 series_parent_map。
+pub async fn preheat_series_for_source(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+) -> Result<Vec<(String, String, Uuid)>, AppError> {
+    let rows: Vec<(Option<String>, String, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT
+            provider_ids->>'RemoteEmbyViewId' AS view_id,
+            name,
+            id
+        FROM media_items
+        WHERE provider_ids->>'RemoteEmbySourceId' = $1
+          AND item_type = 'Series'
+        "#,
+    )
+    .bind(source_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(view_id, name, id)| view_id.filter(|v| !v.is_empty()).map(|v| (v, name, id)))
+        .collect())
+}
+
+/// PB49 (A2)：序列启动时预热已存在的 Season 行。返回 (series_db_id, season_number, db_id)。
+/// 调用方据此组装 `format!("{series_db_id}::{season_number}")` key 写入 season_parent_map。
+pub async fn preheat_seasons_for_source(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+) -> Result<Vec<(Uuid, i32, Uuid)>, AppError> {
+    // Season 行的 parent_id 是其 Series 行的 db id；index_number 是季号。
+    let rows: Vec<(Option<Uuid>, Option<i32>, Uuid)> = sqlx::query_as(
+        r#"
+        SELECT parent_id, index_number, id
+        FROM media_items
+        WHERE provider_ids->>'RemoteEmbySourceId' = $1
+          AND item_type = 'Season'
+        "#,
+    )
+    .bind(source_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(parent_id, index_number, id)| {
+            let parent = parent_id?;
+            let number = index_number?;
+            Some((parent, number, id))
+        })
+        .collect())
+}
+
+/// PB49 (C4)：清掉指定 source 下「不在当前 view 列表里」的死 cursor。
+///
+/// 用户在远端管理员侧重建媒体库 / 删 view / 改 view_id 时，旧 view 对应的
+/// cursor 行会永远留在表里且永不会再命中。同步入口处先调用此函数清理，
+/// 既能让表大小有界，也避免「失败时 cursor 续抓表里有 X 行」给运维带来困惑。
+pub async fn prune_source_view_progress_not_in(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    keep_view_ids: &[String],
+) -> Result<u64, AppError> {
+    if keep_view_ids.is_empty() {
+        // 没传当前 view 列表（极端边界），保守起见不动表。
+        return Ok(0);
+    }
+    let result = sqlx::query(
+        r#"
+        DELETE FROM remote_emby_source_view_progress
+        WHERE source_id = $1
+          AND NOT (view_id = ANY($2))
+        "#,
+    )
+    .bind(source_id)
+    .bind(keep_view_ids)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn update_remote_emby_source_sync_state(
     pool: &sqlx::PgPool,
     id: Uuid,
@@ -4667,6 +4855,20 @@ pub async fn update_remote_emby_source_sync_state(
     // 成功（error_message = None）：推进 last_sync_at = now() 并清空 last_sync_error；
     // 失败/中断（error_message = Some）：仅记录错误，**不修改** last_sync_at，
     //   避免上一次成功的增量水位线被失败/中断重写为 now()，导致下次错过远端补全数据。
+    //
+    // PB49 (B3) 设计决策——「软成功」的代价已经被吸收：
+    //   表面上看，永远不更新 last_sync_at 似乎会让一直失败的源永远停在「全量」语义，
+    //   听起来很糟糕。但全量语义在 PB49 后已经几乎无代价：
+    //     1. local_synced_ids 让主循环对已入库 RemoteEmbyItemId 直接跳过 upsert；
+    //     2. remote_emby_source_view_progress 让 fetch 从断点续抓；
+    //     3. remote_emby_series_detail_synced 让 series 详情拉取跨 sync 复用。
+    //   所以「失败后仍然是全量」的开销主要落在远端 ID 索引枚举（FetchingRemoteIndex）
+    //   和「跳过已入库」的廉价 fast path 上，对单源 25 万条目实测 < 1 分钟。
+    //
+    //   反过来：如果失败也写 last_sync_at = now()，将出现「沉默丢数据」的硬故障——
+    //   增量水位线被错误地推进到失败时刻，下一次同步只会拉「失败时刻之后变化的」
+    //   远端条目，永远漏掉「上次成功 → 这次失败」窗口内被改动的条目。
+    //   软成功的代价（性能）远小于硬故障的代价（正确性）。
     if let Some(message) = error_message {
         sqlx::query(
             r#"
@@ -9138,6 +9340,15 @@ pub async fn upsert_media_item(
                              疑似 Series/Season 父行被并发任务删除后才 INSERT 子行；\
                              若仍频繁出现，请检查同源是否有未屏蔽的并发同步入口"
                         );
+                        // PB49：FK 违例不要被 enqueue_library_scan 的 sqlx-retry 守卫
+                        // 反复吞 3 次——重试是治标不治本，每次都打同样的 FK error，
+                        // 上层只会看到「3 次都失败」而看不到第一现场。
+                        // 转成 AppError::Internal（不被 sqlx-retry 捕获）让错误立刻
+                        // 浮到 UI，配合上面的 error! 日志一击命中根因。
+                        return Err(AppError::Internal(format!(
+                            "父行外键违例 (parent_id={:?}, library_id={}, path={}): {}",
+                            input.parent_id, input.library_id, path_text, db_err.message()
+                        )));
                     }
                 }
                 return Err(error.into());

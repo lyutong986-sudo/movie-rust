@@ -635,6 +635,10 @@ export interface RemoteEmbySyncOperation {
   TotalItems: number;
   FetchedItems: number;
   WrittenFiles: number;
+  /** PB49 (C3)：因 PB49 fast path 跳过的已入库条目数。 */
+  SkippedExisting?: number;
+  /** PB49 (C3 / B1)：本地 STRM 文件丢失被强制重写的条目数。 */
+  StrmMissingReprocessed?: number;
   Queued: boolean;
   Running: boolean;
   Done: boolean;

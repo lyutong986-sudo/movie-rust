@@ -311,13 +311,25 @@ async fn run_startup_schema_tasks(pool: &sqlx::PgPool) -> Result<()> {
     // 源在 libraries 表里残留的 `__remote_view_<source_id>_*` 独立库 / merge 库
     // PathInfos entry。仅删那些 source_id 已不存在的孤儿；现存远端源的虚拟路径不动。
     // 幂等、纯 SQL，几个 ms 就能跑完，对启动时间几乎无影响；失败仅 warn 不阻塞启动。
+    //
+    // PB49 (D3)：repo 函数加了批量删除安全阀（绝对上限 50 + 比例阈值 50%）。
+    // 启动日志按"是否真的执行了删除"和"是否触发安全阀拒绝执行"分别用不同
+    // 严重级别打印，避免运维错过任何重要事件。
     match repository::cleanup_orphan_remote_view_paths(pool).await {
+        Ok((deleted, updated, orphan_ids)) if deleted == 0 && updated == 0 && orphan_ids > 0 => {
+            // 安全阀拒绝执行：repo 已经写了 ERROR，这里再补一条 WARN 让运维一眼定位。
+            tracing::warn!(
+                potential_orphan_libraries = orphan_ids,
+                "[PB49-D3] 启动清理：检测到 {orphan_ids} 个潜在孤儿远端虚拟库但被安全阀拒绝执行。\
+                 详见上方 ERROR 日志。如需手动确认删除，请检查 remote_emby_sources 表是否完整后再操作"
+            );
+        }
         Ok((deleted, updated, orphan_ids)) if deleted > 0 || updated > 0 => {
-            tracing::info!(
+            tracing::warn!(
                 deleted_libraries = deleted,
                 updated_libraries = updated,
                 orphan_source_ids = orphan_ids,
-                "启动清理：发现并清掉历史孤儿远端虚拟路径"
+                "[PB24] 启动清理：发现并清掉历史孤儿远端虚拟路径（如非预期请检查 remote_emby_sources 表）"
             );
         }
         Ok(_) => {}
@@ -888,6 +900,14 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             PRIMARY KEY (source_id, view_id)
         )"#,
         r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_source_view_progress_source ON remote_emby_source_view_progress(source_id)"#,
+        // PB49 (B2)：远端 Series 详情已拉取标记表（与 0001_schema.sql 同步）
+        r#"CREATE TABLE IF NOT EXISTS remote_emby_series_detail_synced (
+            source_id        uuid NOT NULL REFERENCES remote_emby_sources(id) ON DELETE CASCADE,
+            remote_series_id text NOT NULL,
+            synced_at        timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (source_id, remote_series_id)
+        )"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_series_detail_synced_source ON remote_emby_series_detail_synced(source_id)"#,
     ];
 
     for statement in compatibility_sql {

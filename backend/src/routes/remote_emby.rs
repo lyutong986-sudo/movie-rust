@@ -361,6 +361,9 @@ struct RemoteEmbySyncOperationDto {
     total_items: u64,
     fetched_items: u64,
     written_files: u64,
+    /// PB49 (C3)：fast-path 跳过 / strm 自愈计数。
+    skipped_existing: u64,
+    strm_missing_reprocessed: u64,
     queued: bool,
     running: bool,
     done: bool,
@@ -384,6 +387,9 @@ struct RemoteEmbySyncOperationState {
     total_items: u64,
     fetched_items: u64,
     written_files: u64,
+    /// PB49 (C3)：fast-path 跳过 / strm 自愈计数（poller 从 snapshot 同步）。
+    skipped_existing: u64,
+    strm_missing_reprocessed: u64,
     cancel_requested: bool,
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
@@ -413,6 +419,8 @@ impl RemoteEmbySyncOperationState {
             total_items: self.total_items,
             fetched_items: self.fetched_items,
             written_files: self.written_files,
+            skipped_existing: self.skipped_existing,
+            strm_missing_reprocessed: self.strm_missing_reprocessed,
             queued: self.status == "Queued",
             running: matches!(self.status, "Running" | "Cancelling"),
             done: self.is_done(),
@@ -913,6 +921,8 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
                 total_items: 0,
                 fetched_items: 0,
                 written_files: 0,
+                skipped_existing: 0,
+                strm_missing_reprocessed: 0,
                 cancel_requested: false,
                 created_at: Utc::now(),
                 started_at: None,
@@ -988,6 +998,9 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
                 operation.total_items = snap.total_items;
                 operation.fetched_items = snap.fetched_items;
                 operation.written_files = snap.written_files;
+                // PB49 (C3)：fast-path 跳过 / 自愈计数同步到 DTO，给前端展示。
+                operation.skipped_existing = snap.skipped_existing;
+                operation.strm_missing_reprocessed = snap.strm_missing_reprocessed;
             }
         });
 

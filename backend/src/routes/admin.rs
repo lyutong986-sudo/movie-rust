@@ -249,13 +249,15 @@ pub async fn incremental_update_library(
                 // 不识别这条错误的话，定时扫描会被 auto-retry 3 次全部失败，反而
                 // 让用户在 UI 上看到「整轮扫描失败」假象，而真正在跑的手动 sync
                 // 其实仍在正常推进。
+                //
+                // 注意：跳过的源不计入 summary.libraries——它根本没参与这一次扫描，
+                // 否则会让上层 UI「本次扫描 X 个库」的统计失真。
                 Err(err) if err.to_string().contains(remote_emby::SOURCE_SYNC_BUSY_TAG) => {
                     tracing::info!(
                         source_id = %source.id,
                         library_id = %library_id,
                         "跳过远端源同步：另一个同步任务正在进行中（per-source 互斥保护）"
                     );
-                    summary.libraries += 1;
                     continue;
                 }
                 Err(err) => {
@@ -314,32 +316,56 @@ pub async fn incremental_update_all_libraries(
     progress: Option<scanner::ScanProgress>,
     db_semaphore: Option<std::sync::Arc<tokio::sync::Semaphore>>,
 ) -> Result<ScanSummary, AppError> {
+    use futures::stream::{self, StreamExt};
+    use std::sync::atomic::{AtomicI64, Ordering};
+
     let libraries = repository::list_libraries(&state.pool).await?;
-    let mut total = ScanSummary {
-        libraries: 0,
-        scanned_files: 0,
-        imported_items: 0,
-    };
-    for library in libraries {
-        match incremental_update_library(state, library.id, progress.clone(), db_semaphore.clone())
-            .await
-        {
-            Ok(s) => {
-                total.libraries += s.libraries.max(1);
-                total.scanned_files += s.scanned_files;
-                total.imported_items += s.imported_items;
+
+    // PB49 (D2)：库间并发度。每个库的 sync_source_with_progress 内部已经
+    // 由 REMOTE_SYNC_INNER_CONCURRENCY 控制单源并发，所以这里 2 是个保守的
+    // 上限——既能让「等远端 ID 索引枚举」的 IO 等待时间和「另一个库的
+    // upsert/STRM 写盘」时间互相重叠，也不会触发远端 Emby 的速率限制。
+    //
+    // 注意 incremental_update_library 内部还会按 source 个数串行——不同库
+    // 的并发不会跟同源 sync 冲突（per-source mutex 拦截）。
+    const LIBRARY_CONCURRENCY: usize = 2;
+
+    let total_libraries = AtomicI64::new(0);
+    let total_scanned = AtomicI64::new(0);
+    let total_imported = AtomicI64::new(0);
+
+    stream::iter(libraries.into_iter())
+        .for_each_concurrent(LIBRARY_CONCURRENCY, |library| {
+            let progress = progress.clone();
+            let db_semaphore = db_semaphore.clone();
+            let total_libraries = &total_libraries;
+            let total_scanned = &total_scanned;
+            let total_imported = &total_imported;
+            async move {
+                match incremental_update_library(state, library.id, progress, db_semaphore).await {
+                    Ok(s) => {
+                        total_libraries.fetch_add(s.libraries.max(1), Ordering::Relaxed);
+                        total_scanned.fetch_add(s.scanned_files, Ordering::Relaxed);
+                        total_imported.fetch_add(s.imported_items, Ordering::Relaxed);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            library_id = %library.id,
+                            library_name = %library.name,
+                            error = %err,
+                            "媒体库增量更新失败，继续处理后续媒体库"
+                        );
+                    }
+                }
             }
-            Err(err) => {
-                tracing::warn!(
-                    library_id = %library.id,
-                    library_name = %library.name,
-                    error = %err,
-                    "媒体库增量更新失败，继续处理后续媒体库"
-                );
-            }
-        }
-    }
-    Ok(total)
+        })
+        .await;
+
+    Ok(ScanSummary {
+        libraries: total_libraries.load(Ordering::Relaxed),
+        scanned_files: total_scanned.load(Ordering::Relaxed),
+        imported_items: total_imported.load(Ordering::Relaxed),
+    })
 }
 
 async fn enqueue_library_scan(

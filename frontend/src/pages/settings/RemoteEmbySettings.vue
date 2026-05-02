@@ -1190,6 +1190,26 @@ onBeforeUnmount(() => {
               <p class="text-muted">入库条目</p>
               <p class="text-highlighted mt-1 font-medium">{{ sourceOperation(source)?.WrittenFiles || 0 }}</p>
             </div>
+            <!-- PB49 (C3)：跳过 / 自愈计数。当存在跳过命中时占满整行展示，让用户直观看到
+                 「绝大多数条目走了 fast path，并不是真的在重写库」。 -->
+            <div
+              v-if="(sourceOperation(source)?.SkippedExisting || 0) > 0
+                || (sourceOperation(source)?.StrmMissingReprocessed || 0) > 0"
+              class="md:col-span-3 flex flex-wrap gap-x-4 gap-y-1 text-muted"
+            >
+              <span v-if="(sourceOperation(source)?.SkippedExisting || 0) > 0">
+                跳过已入库：<span class="text-highlighted font-medium">
+                  {{ sourceOperation(source)?.SkippedExisting || 0 }}
+                </span>
+                <span class="ml-1">（fast path，本地已有则不重写）</span>
+              </span>
+              <span v-if="(sourceOperation(source)?.StrmMissingReprocessed || 0) > 0">
+                STRM 自愈：<span class="text-highlighted font-medium">
+                  {{ sourceOperation(source)?.StrmMissingReprocessed || 0 }}
+                </span>
+                <span class="ml-1">（本地 strm 文件被删，已重写）</span>
+              </span>
+            </div>
             <UProgress
               class="md:col-span-3"
               :model-value="sourceOperation(source)?.Progress || 0"

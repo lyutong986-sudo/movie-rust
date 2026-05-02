@@ -808,6 +808,25 @@ CREATE INDEX IF NOT EXISTS idx_remote_emby_source_view_progress_source
     ON remote_emby_source_view_progress(source_id);
 
 -- ---------------------------------------------------------------------------
+-- remote_emby_series_detail_synced：远端 Series 详情已拉取标记（PB49 B2）
+-- ---------------------------------------------------------------------------
+-- 旧实现里 series_detail_synced 是 per-run 的内存 DashSet：每次 sync 整库
+-- ~几千部剧 → 几千次远端 /Items/{seriesId} 详情拉 → 一次同步多花 5-30 分钟
+-- 在 detail 后台 spawn 池上消化。这张表把「这部剧详情已经成功拉过」持久化，
+-- 让后续同步只为「真正新增 / 用户主动刷新」的剧拉详情。
+--   - PRIMARY KEY (source_id, remote_series_id) 防重
+--   - synced_at 仅作运维诊断与未来「N 天后强制 refresh」策略保留
+--   - 失败路径不会写入此表 → 下次同步会自动再试一次
+CREATE TABLE IF NOT EXISTS remote_emby_series_detail_synced (
+    source_id        uuid NOT NULL REFERENCES remote_emby_sources(id) ON DELETE CASCADE,
+    remote_series_id text NOT NULL,
+    synced_at        timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (source_id, remote_series_id)
+);
+CREATE INDEX IF NOT EXISTS idx_remote_emby_series_detail_synced_source
+    ON remote_emby_series_detail_synced(source_id);
+
+-- ---------------------------------------------------------------------------
 -- session_play_queue / session_commands：远程控制 & 当前播放队列
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS session_play_queue (

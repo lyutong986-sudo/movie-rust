@@ -284,11 +284,30 @@ pub struct RemoteSyncProgressSnapshot {
     pub fetched_items: u64,
     pub written_files: u64, // 兼容前端字段名，语义为已入库条目数
     pub progress: f64,
+    /// PB49 (C3)：因 PB49 「skip-existing」加速跳过的条目数。
+    /// 前端展示成「跳过已入库 N」让用户直观看到「为什么 fetched/written 飙得这么快」。
+    #[serde(default)]
+    pub skipped_existing: u64,
+    /// PB49 (C3)：因 STRM 文件丢失而强制重写的条目数（B1 自愈触发计数）。
+    #[serde(default)]
+    pub strm_missing_reprocessed: u64,
 }
 
+// PB49 (D1)：snapshot 用 std::sync::Mutex 而非 tokio::sync::RwLock。
+//
+// 旧实现里所有 set_* 方法都是「try_write 拿到就写、拿不到就 tokio::spawn 一个 task
+// 异步去写」的模式——这个模式在主循环高频写（每条 episode 一次 set_streaming_progress）、
+// 同时 poller 每秒 read 一次的场景下，会出现：
+//   1. try_write 失败的瞬时争用 → spawn 一个永久存活的 task 占内核 stack（>=2KB）；
+//   2. spawn 出去的写按 tokio scheduler 顺序执行，可能被晚到的 set 覆盖（写顺序错乱）；
+//   3. 每次 set_* 都要做一次 Arc::clone snapshot 准备「可能 spawn」用——分配冗余。
+//
+// snapshot 数据本身是几个 u64 + 一个短 String，临界区 < 1us。换 std::sync::Mutex
+// 的 lock() 是同步的、never-await，写入立刻完成，没有 spawn、没有竞态、没有顺序错乱。
+// 在 tokio 异步上下文里同步锁 < 1us 完全可以接受（不会触发 work-stealing 失衡）。
 #[derive(Clone, Default)]
 pub struct RemoteSyncProgress {
-    snapshot: Arc<RwLock<RemoteSyncProgressSnapshot>>,
+    snapshot: Arc<std::sync::Mutex<RemoteSyncProgressSnapshot>>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -297,21 +316,23 @@ impl RemoteSyncProgress {
         Self::default()
     }
 
+    /// `async` 签名保留是为了向后兼容调用点（poller 用 `.await`）；
+    /// 实现已不再需要 await，但改签名会触发太多改动，得不偿失。
     pub async fn snapshot(&self) -> RemoteSyncProgressSnapshot {
-        self.snapshot.read().await.clone()
+        self.snapshot.lock().expect("RemoteSyncProgress mutex poisoned").clone()
+    }
+
+    fn with_snapshot<F: FnOnce(&mut RemoteSyncProgressSnapshot)>(&self, f: F) {
+        // mutex poisoned 只可能在 panic-while-holding-lock 时发生；这里 panic 比静默
+        // 跳过 UI 更新好——poison 意味着已有更深层 bug，让它表面化。
+        let mut guard = self.snapshot.lock().expect("RemoteSyncProgress mutex poisoned");
+        f(&mut guard);
     }
 
     pub fn set_phase(&self, phase: impl Into<String>, progress: f64) {
         let value = phase.into();
-        let snapshot = self.snapshot.clone();
         let progress = progress.clamp(0.0, 100.0);
-        if let Ok(mut guard) = snapshot.try_write() {
-            guard.phase = value;
-            guard.progress = progress;
-            return;
-        }
-        tokio::spawn(async move {
-            let mut guard = snapshot.write().await;
+        self.with_snapshot(|guard| {
             guard.phase = value;
             guard.progress = progress;
         });
@@ -319,21 +340,7 @@ impl RemoteSyncProgress {
 
     #[allow(dead_code)]
     pub fn set_fetch_progress(&self, fetched_items: u64, total_items: u64) {
-        let snapshot = self.snapshot.clone();
-        if let Ok(mut guard) = snapshot.try_write() {
-            guard.phase = "FetchingRemoteItems".to_string();
-            guard.total_items = total_items;
-            guard.fetched_items = fetched_items.min(total_items);
-            let ratio = if total_items == 0 {
-                1.0
-            } else {
-                guard.fetched_items as f64 / total_items as f64
-            };
-            guard.progress = (5.0 + ratio * 35.0).clamp(5.0, 40.0);
-            return;
-        }
-        tokio::spawn(async move {
-            let mut guard = snapshot.write().await;
+        self.with_snapshot(|guard| {
             guard.phase = "FetchingRemoteItems".to_string();
             guard.total_items = total_items;
             guard.fetched_items = fetched_items.min(total_items);
@@ -348,21 +355,7 @@ impl RemoteSyncProgress {
 
     #[allow(dead_code)]
     pub fn set_write_progress(&self, written_files: u64, total_items: u64) {
-        let snapshot = self.snapshot.clone();
-        if let Ok(mut guard) = snapshot.try_write() {
-            guard.phase = "UpsertingVirtualItems".to_string();
-            guard.total_items = total_items;
-            guard.written_files = written_files.min(total_items);
-            let ratio = if total_items == 0 {
-                1.0
-            } else {
-                guard.written_files as f64 / total_items as f64
-            };
-            guard.progress = (40.0 + ratio * 30.0).clamp(40.0, 70.0);
-            return;
-        }
-        tokio::spawn(async move {
-            let mut guard = snapshot.write().await;
+        self.with_snapshot(|guard| {
             guard.phase = "UpsertingVirtualItems".to_string();
             guard.total_items = total_items;
             guard.written_files = written_files.min(total_items);
@@ -387,44 +380,28 @@ impl RemoteSyncProgress {
         view_index: usize,
         view_count: usize,
     ) {
-        let snapshot = self.snapshot.clone();
         // 每个 view 各占 `1.0 / view_count` 个百分点，平均铺到 [4.0, 5.0)。即使 view
         // 个数 = 0（理论不会）或 page.total_record_count 为 0 也不会除零。
         let view_count_safe = view_count.max(1) as f64;
         let view_idx_clamped = (view_index as f64).min(view_count_safe);
-        let progress = 4.0 + (view_idx_clamped / view_count_safe).min(1.0);
-        let progress = progress.clamp(4.0, 5.0);
-        if let Ok(mut guard) = snapshot.try_write() {
-            guard.phase = "FetchingRemoteIndex".to_string();
-            guard.fetched_items = scanned_ids;
-            guard.progress = progress;
-            return;
-        }
-        tokio::spawn(async move {
-            let mut guard = snapshot.write().await;
+        let progress = (4.0 + (view_idx_clamped / view_count_safe).min(1.0)).clamp(4.0, 5.0);
+        self.with_snapshot(|guard| {
             guard.phase = "FetchingRemoteIndex".to_string();
             guard.fetched_items = scanned_ids;
             guard.progress = progress;
         });
     }
 
+    /// PB49 (C3)：把 PB49 跳过 / 自愈计数推送到前端 snapshot。
+    pub fn set_skipped_counters(&self, skipped_existing: u64, strm_missing_reprocessed: u64) {
+        self.with_snapshot(|guard| {
+            guard.skipped_existing = skipped_existing;
+            guard.strm_missing_reprocessed = strm_missing_reprocessed;
+        });
+    }
+
     pub fn set_streaming_progress(&self, fetched_items: u64, written_files: u64, total_items: u64) {
-        let snapshot = self.snapshot.clone();
-        if let Ok(mut guard) = snapshot.try_write() {
-            guard.phase = "SyncingRemoteItems".to_string();
-            guard.total_items = total_items;
-            guard.fetched_items = fetched_items.min(total_items);
-            guard.written_files = written_files.min(total_items);
-            let ratio = if total_items == 0 {
-                1.0
-            } else {
-                guard.fetched_items as f64 / total_items as f64
-            };
-            guard.progress = (10.0 + ratio * 89.0).clamp(10.0, 99.0);
-            return;
-        }
-        tokio::spawn(async move {
-            let mut guard = snapshot.write().await;
+        self.with_snapshot(|guard| {
             guard.phase = "SyncingRemoteItems".to_string();
             guard.total_items = total_items;
             guard.fetched_items = fetched_items.min(total_items);
@@ -440,23 +417,16 @@ impl RemoteSyncProgress {
 
     #[allow(dead_code)]
     pub fn apply_scan_snapshot(&self, scan: &scanner::ScanProgressSnapshot) {
-        let snapshot = self.snapshot.clone();
         let scan_percent = scan.percent.clamp(0.0, 96.0);
-        let progress = 70.0 + (scan_percent / 96.0) * 30.0;
+        let progress = (70.0 + (scan_percent / 96.0) * 30.0).clamp(70.0, 99.5);
         let phase = if scan.phase.is_empty() {
             "ScanningLibrary".to_string()
         } else {
             format!("ScanningLibrary/{}", scan.phase)
         };
-        if let Ok(mut guard) = snapshot.try_write() {
+        self.with_snapshot(|guard| {
             guard.phase = phase;
-            guard.progress = progress.clamp(70.0, 99.5);
-            return;
-        }
-        tokio::spawn(async move {
-            let mut guard = snapshot.write().await;
-            guard.phase = phase;
-            guard.progress = progress.clamp(70.0, 99.5);
+            guard.progress = progress;
         });
     }
 
@@ -469,14 +439,7 @@ impl RemoteSyncProgress {
     }
 
     pub fn mark_completed(&self) {
-        let snapshot = self.snapshot.clone();
-        if let Ok(mut guard) = snapshot.try_write() {
-            guard.phase = "Completed".to_string();
-            guard.progress = 100.0;
-            return;
-        }
-        tokio::spawn(async move {
-            let mut guard = snapshot.write().await;
+        self.with_snapshot(|guard| {
             guard.phase = "Completed".to_string();
             guard.progress = 100.0;
         });
@@ -1018,10 +981,16 @@ pub async fn sync_source_with_progress(
         }
     };
     if let Err(error) = sync_state_result {
-        tracing::warn!(
+        // PB49 (B4)：写 last_sync_at / last_sync_error 失败是「DB 元数据状态污染」级问题——
+        // 下一次定时扫描会读到错的 last_sync_at 决定是「全量 / 增量」，写不进去意味着整条
+        // sync 决策链已经失真。从 warn 升为 error，并且把当时是「成功 / 失败」也带上，
+        // 让 Loki / 文件日志告警里能直接看到根因。
+        let outcome = if result.is_ok() { "ok" } else { "err" };
+        tracing::error!(
             source_id = %source.id,
+            outcome,
             error = %error,
-            "更新远端 Emby 同步状态失败"
+            "更新远端 Emby 同步状态失败 —— last_sync_at / last_sync_error 没能写进 DB，下次同步策略可能基于过时数据"
         );
     }
     if result.is_ok() {
@@ -1177,6 +1146,35 @@ async fn sync_source_inner(
         .await
         .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
 
+    // PB49 (C4)：先把不在当前 view 列表的死 cursor 清掉，避免远端管理员重建库
+    // / 删 view 后表里堆积无人问津的孤儿 cursor 行。
+    {
+        let live_view_ids: Vec<String> = views.iter().map(|v| v.id.clone()).collect();
+        match repository::prune_source_view_progress_not_in(
+            &state.pool,
+            source.id,
+            &live_view_ids,
+        )
+        .await
+        {
+            Ok(pruned) if pruned > 0 => {
+                tracing::info!(
+                    source_id = %source.id,
+                    pruned,
+                    "PB49 (C4)：清理已不存在 view 的续抓游标"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    source_id = %source.id,
+                    error = %error,
+                    "PB49 (C4)：清理孤儿续抓游标失败（不阻塞主链路）"
+                );
+            }
+        }
+    }
+
     if let Some(handle) = &progress {
         handle.set_phase("FetchingRemoteIndex", 4.0);
     }
@@ -1217,8 +1215,86 @@ async fn sync_source_inner(
     let tvshow_roots_written: Arc<DashSet<PathBuf>> = Arc::new(DashSet::new());
     let series_parent_map: Arc<DashMap<String, Uuid>> = Arc::new(DashMap::new());
     let season_parent_map: Arc<DashMap<String, Uuid>> = Arc::new(DashMap::new());
+
+    // PB49 (A2/C5)：在主循环开始前把数据库里已有的 Series/Season 预热进 DashMap，
+    // 让本次 sync 的「第一个 Episode」直接命中缓存，省掉一次 SELECT-then-UPSERT
+    // round-trip。增量同步同样受益（增量场景每个变更 Episode 都要 ensure parent）。
+    //
+    // 仅按 `view_id::sanitize(name)` 这把「name-based fallback key」写入；ensure_remote_series_folder
+    // 会在 sid-based 主 key miss 时再做一次 name-based 二次查询并 mirror 回来。
+    match repository::preheat_series_for_source(&state.pool, source.id).await {
+        Ok(rows) => {
+            let count = rows.len();
+            for (view_id, name, db_id) in rows {
+                let key = format!("{view_id}::{}", sanitize_segment(&name));
+                series_parent_map.insert(key, db_id);
+            }
+            if count > 0 {
+                tracing::info!(
+                    source_id = %source.id,
+                    series_preheated = count,
+                    "PB49 (A2)：预热 series_parent_map（按 view_id+name fallback key）"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                source_id = %source.id,
+                error = %error,
+                "PB49 (A2)：预热 series_parent_map 失败（不阻塞主链路，cache 由首次 ensure 自填）"
+            );
+        }
+    }
+    match repository::preheat_seasons_for_source(&state.pool, source.id).await {
+        Ok(rows) => {
+            let count = rows.len();
+            for (series_db_id, season_number, db_id) in rows {
+                let key = format!("{series_db_id}::{season_number}");
+                season_parent_map.insert(key, db_id);
+            }
+            if count > 0 {
+                tracing::info!(
+                    source_id = %source.id,
+                    seasons_preheated = count,
+                    "PB49 (A2)：预热 season_parent_map（按 series_db_id+season_number key）"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                source_id = %source.id,
+                error = %error,
+                "PB49 (A2)：预热 season_parent_map 失败（不阻塞主链路，cache 由首次 ensure 自填）"
+            );
+        }
+    }
+
     // PB31-2：已成功拉过详情的 series_id 集合，避免每个 episode 都触发一次 Series 详情拉取。
+    // PB49 (B2)：预热已持久化的 detail-synced 集合，跨 sync 复用——避免每次 sync
+    // 都要为整库每部剧重新拉一遍详情，节省可能十几分钟的后台 detail 排队时间。
     let series_detail_synced: Arc<DashSet<String>> = Arc::new(DashSet::new());
+    match repository::preheat_series_detail_synced(&state.pool, source.id).await {
+        Ok(ids) => {
+            let count = ids.len();
+            for id in ids {
+                series_detail_synced.insert(id);
+            }
+            if count > 0 {
+                tracing::info!(
+                    source_id = %source.id,
+                    series_detail_preheated = count,
+                    "PB49 (B2)：预热 series_detail_synced（跨 sync 复用 detail 拉取标记）"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                source_id = %source.id,
+                error = %error,
+                "PB49 (B2)：预热 series_detail_synced 失败（不阻塞主链路，本次 sync 退化为重新拉所有 series 详情）"
+            );
+        }
+    }
 
     // PB49：「已入库」远端 ID 集合——只在「全量/恢复」路径（incremental_since=None）启用，
     // 用来在主循环里直接跳过那些已经成功落库的 Movie/Episode。
@@ -1230,12 +1306,17 @@ async fn sync_source_inner(
     //
     // 仅 full sync 启用：incremental sync (force_refresh_sidecar=true) 由远端
     // `MinDateLastSaved` 过滤过的本来就是变更过的条目，必须重写。
-    let local_synced_ids: Arc<DashSet<String>> = if force_refresh_sidecar {
-        Arc::new(DashSet::new())
+    // PB49 (B1)：把 DashSet<remote_id> 升级成 DashMap<remote_id, strm_path>，
+    // 让主循环跳过路径在 contains 命中后还能立即拿到 strm 路径做存在性校验。
+    // 这样用户手工删了 strm 文件想触发重生时，不会被「跳过已入库」无声吃掉。
+    let local_synced_ids: Arc<DashMap<String, String>> = if force_refresh_sidecar {
+        Arc::new(DashMap::new())
     } else {
-        let rows: Vec<(Option<String>,)> = sqlx::query_as(
+        let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
             r#"
-            SELECT provider_ids->>'RemoteEmbyItemId' AS remote_id
+            SELECT
+                provider_ids->>'RemoteEmbyItemId' AS remote_id,
+                path
             FROM media_items
             WHERE provider_ids->>'RemoteEmbySourceId' = $1
               AND provider_ids->>'RemoteEmbyItemId' IS NOT NULL
@@ -1245,23 +1326,25 @@ async fn sync_source_inner(
         .bind(source.id.to_string())
         .fetch_all(&state.pool)
         .await?;
-        let set: DashSet<String> = DashSet::with_capacity(rows.len());
-        for (remote_id,) in rows {
+        let map: DashMap<String, String> = DashMap::with_capacity(rows.len());
+        for (remote_id, path) in rows {
             if let Some(id) = remote_id {
-                set.insert(id);
+                map.insert(id, path.unwrap_or_default());
             }
         }
-        if !set.is_empty() {
+        if !map.is_empty() {
             tracing::info!(
                 source_id = %source.id,
-                local_synced = set.len(),
-                "PB49：full sync 启用「跳过已入库」加速——主循环将直接跳过本地已有的远端条目"
+                local_synced = map.len(),
+                "PB49：full sync 启用「跳过已入库」加速——主循环将直接跳过本地已有的远端条目（B1：跳过前会校验 STRM 文件存在性）"
             );
         }
-        Arc::new(set)
+        Arc::new(map)
     };
     // 跳过计数器，sync 结束统一打日志，方便用户验证「跳过」是否真的命中。
     let skipped_existing = Arc::new(AtomicU64::new(0));
+    // B1：因 STRM 文件丢失而强制走完整 upsert 路径的计数，方便用户验证「自愈」是否被触发。
+    let strm_missing_reprocessed = Arc::new(AtomicU64::new(0));
 
     // PB43：进度计数器换成原子，让并发任务无锁累加。
     let fetched_count = Arc::new(AtomicU64::new(0));
@@ -1379,6 +1462,7 @@ async fn sync_source_inner(
                 let series_detail_handles = Arc::clone(&series_detail_handles);
                 let local_synced_ids = Arc::clone(&local_synced_ids);
                 let skipped_existing = Arc::clone(&skipped_existing);
+                let strm_missing_reprocessed = Arc::clone(&strm_missing_reprocessed);
                 let progress = progress.clone();
                 async move {
                     process_one_remote_sync_item(
@@ -1401,6 +1485,7 @@ async fn sync_source_inner(
                         &series_detail_handles,
                         &local_synced_ids,
                         &skipped_existing,
+                        &strm_missing_reprocessed,
                         total_items,
                         progress.as_ref(),
                         force_refresh_sidecar,
@@ -1491,6 +1576,7 @@ async fn sync_source_inner(
     let fetched_count = fetched_count.load(Ordering::Relaxed);
     let written_files = written_files.load(Ordering::Relaxed) as usize;
     let skipped_existing_count = skipped_existing.load(Ordering::Relaxed);
+    let strm_missing_reprocessed_count = strm_missing_reprocessed.load(Ordering::Relaxed);
 
     let mode_label = if incremental_since.is_some() {
         "增量(增/改/删)"
@@ -1503,6 +1589,7 @@ async fn sync_source_inner(
         fetched = fetched_count,
         written = written_files,
         skipped_existing = skipped_existing_count,
+        strm_missing_reprocessed = strm_missing_reprocessed_count,
         deleted_stale = deleted,
         "远端 Emby 同步完成"
     );
@@ -1552,8 +1639,11 @@ async fn process_one_remote_sync_item(
     series_detail_semaphore: &Arc<tokio::sync::Semaphore>,
     series_detail_handles: &Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     // PB49：「全量同步路径上跳过已入库条目」的状态。
-    local_synced_ids: &DashSet<String>,
+    // B1：从 DashSet 升级到 DashMap，value 为该 remote_id 在本地的 STRM 路径，
+    //     用于跳过前的文件存在性自愈校验。
+    local_synced_ids: &DashMap<String, String>,
     skipped_existing: &AtomicU64,
+    strm_missing_reprocessed: &AtomicU64,
     total_items: u64,
     progress: Option<&RemoteSyncProgress>,
     force_refresh_sidecar: bool,
@@ -1579,14 +1669,48 @@ async fn process_one_remote_sync_item(
     //   - 命中跳过时仍 bump fetched_count + written_files，让 UI 看到的
     //     「入库条目」反映本地真实存量，避免又出现「明明 11 万在库却显示 400」的
     //     反直觉。
-    if !force_refresh_sidecar && local_synced_ids.contains(base_item.id.as_str()) {
-        skipped_existing.fetch_add(1, Ordering::Relaxed);
-        let f = fetched_count.fetch_add(1, Ordering::Relaxed) + 1;
-        let w = written_files.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Some(handle) = progress {
-            handle.set_streaming_progress(f, w, total_items);
+    if !force_refresh_sidecar {
+        if let Some(local_path_entry) = local_synced_ids.get(base_item.id.as_str()) {
+            let local_path = local_path_entry.value().clone();
+            drop(local_path_entry);
+            // PB49 (B1)：跳过前先做一次廉价的 STRM 文件存在性校验。
+            // 用户手工 rm 了某个 strm 文件想强制重生，这里如果不校验就会被
+            // 静默吃掉，永远长不回来。stat(2) 在本地盘 ~10us，对全量
+            // 256k 条目最多 ~2.5s 开销；远比一次完整 upsert 链条便宜。
+            //
+            // 注意 path 可能为空（旧版兼容）或不是 .strm 后缀（Series/Season），
+            // 这两种情况都按「无 STRM 可校验」直接走原跳过路径，不影响正确性。
+            let should_skip = if local_path.is_empty() || !local_path.ends_with(".strm") {
+                true
+            } else {
+                tokio::fs::try_exists(&local_path).await.unwrap_or(false)
+            };
+            if should_skip {
+                let s = skipped_existing.fetch_add(1, Ordering::Relaxed) + 1;
+                let f = fetched_count.fetch_add(1, Ordering::Relaxed) + 1;
+                let w = written_files.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(handle) = progress {
+                    handle.set_streaming_progress(f, w, total_items);
+                    // PB49 (C3)：跳过计数也推到 UI，让用户看到「绝大多数条目走的是
+                    // 跳过-已入库 fast path」而不是真的在重写——这条信息能直接平息
+                    // 「为什么数字飞涨」「是不是又重新写库」之类的疑问。
+                    handle.set_skipped_counters(s, strm_missing_reprocessed.load(Ordering::Relaxed));
+                }
+                return Ok(());
+            }
+            // STRM 不存在 → 落到下面的完整路径重写文件 + 重 upsert，并计一笔
+            // 自愈数量到 strm_missing_reprocessed，方便用户通过日志验证。
+            let r = strm_missing_reprocessed.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(handle) = progress {
+                handle.set_skipped_counters(skipped_existing.load(Ordering::Relaxed), r);
+            }
+            tracing::debug!(
+                source_id = %source.id,
+                remote_id = %base_item.id,
+                missing_path = %local_path,
+                "PB49 (B1)：本地 STRM 文件丢失，触发条目重写自愈"
+            );
         }
-        return Ok(());
     }
 
     let item = RemoteSyncItem {
@@ -1658,7 +1782,7 @@ async fn process_one_remote_sync_item(
                         }
                     }
                     let mut source_local = source_owned;
-                    if let Err(error) = fetch_and_upsert_series_detail(
+                    match fetch_and_upsert_series_detail(
                         &pool_owned,
                         &mut source_local,
                         user_id_owned.as_str(),
@@ -1671,12 +1795,32 @@ async fn process_one_remote_sync_item(
                     )
                     .await
                     {
-                        tracing::warn!(
-                            source_id = %source_id_copy,
-                            remote_series_id = %remote_sid_owned,
-                            error = %error,
-                            "PB46：远端 Series 详情后台同步失败，忽略继续"
-                        );
+                        Ok(_) => {
+                            // PB49 (B2)：成功落库才写入持久化标记。失败路径完全不写，
+                            // 让下次 sync 自动重试这部剧（in-memory DashSet 已防本轮重试）。
+                            if let Err(mark_err) = repository::mark_series_detail_synced(
+                                &pool_owned,
+                                source_id_copy,
+                                remote_sid_owned.as_str(),
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    source_id = %source_id_copy,
+                                    remote_series_id = %remote_sid_owned,
+                                    error = %mark_err,
+                                    "PB49 (B2)：写入 series detail 持久化标记失败（不影响内存 dedup，下次 sync 会再拉一次）"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                source_id = %source_id_copy,
+                                remote_series_id = %remote_sid_owned,
+                                error = %error,
+                                "PB46：远端 Series 详情后台同步失败，忽略继续"
+                            );
+                        }
                     }
                 });
                 series_detail_handles.lock().await.push(handle);
@@ -2263,6 +2407,18 @@ async fn ensure_remote_series_folder(
     };
     if let Some(existing) = series_parent_map.get(series_key.as_str()) {
         return Ok(*existing.value());
+    }
+    // PB49 (A2)：sid-based 主 key 没命中时，再走一次 name-based fallback key。
+    // preheat_series_for_source 只能填这把 key（DB 里没存 remote SeriesId），
+    // 所以这里 mirror 一下：name 命中后顺手把 sid-based key 也插进去，
+    // 让同剧的下一集可以走主 key 快路径。
+    let name_fallback_key = format!("{view_scope}::{}", sanitize_segment(series_name.as_str()));
+    if name_fallback_key != series_key {
+        if let Some(existing) = series_parent_map.get(name_fallback_key.as_str()) {
+            let id = *existing.value();
+            series_parent_map.insert(series_key, id);
+            return Ok(id);
+        }
     }
     // 物理目录：{view_workspace}/{sanitize(series_name)}/
     // 与 build_relative_strm_path 中 episode 落盘目录保持一致，
@@ -3310,55 +3466,78 @@ async fn delete_stale_items_for_source(
         return Ok(0);
     }
 
-    let mut deleted = 0u64;
+    // PB49 (A1)：先把待删行集中到 Vec，再一次性批量 DELETE，sidecar 文件清理并发跑。
+    //
+    // 旧逻辑里每条都打一发 `DELETE WHERE id = $1`，对 5000 上限的 prune 就是 5000 次
+    // PG round-trip（远端 DB 单次 ~5ms），最坏 25 秒卡在网络上；同时 sidecar 也是单条
+    // 串行 read_dir + remove_file，磁盘 IO 完全没并发利用。
+    //
+    // 新逻辑：
+    //   1. 一遍扫 rows 收集 (id, path) 待删项；
+    //   2. sidecar 清理用 buffer_unordered(8) 并发跑（C1 顺手修：只删 stem-prefixed，
+    //      公共图片 poster/backdrop/logo/movie.nfo 不再按 Episode 粒度删，留给 Series
+    //      整体下架时由父目录 remove_dir 一并清掉）；
+    //   3. DB 行用 `DELETE WHERE id = ANY($1)` 一发批量删（PG 内部 hash join，N 行也是
+    //      一次 round-trip）。
+    use futures::stream::{self, StreamExt};
+    let mut to_delete_ids: Vec<Uuid> = Vec::new();
+    let mut sidecar_jobs: Vec<(PathBuf, String)> = Vec::new(); // (parent_dir, stem)
     for row in rows {
-        let Some(ref remote_id) = row.remote_id else {
+        let Some(remote_id) = row.remote_id else {
             continue;
         };
-        // 兜底：SQL 已用 <> '' 过滤；这里再防御一次空串，避免误删 Series/Season。
-        if remote_id.trim().is_empty() {
+        if remote_id.trim().is_empty() || remote_id_set.contains(remote_id.as_str()) {
             continue;
         }
-        if remote_id_set.contains(remote_id.as_str()) {
-            continue;
-        }
-        // 清理 STRM 文件及旁路文件
+        to_delete_ids.push(row.id);
         if let Some(workspace) = strm_workspace {
-            if let Some(ref path_str) = row.path {
+            if let Some(path_str) = row.path {
                 let item_path = Path::new(path_str.as_str());
                 if path_str.ends_with(".strm") && item_path.starts_with(workspace) {
-                    // 删除同目录下同文件名前缀的所有旁路文件
-                    if let Some(parent) = item_path.parent() {
-                        if let Some(stem) = item_path.file_stem().and_then(|s| s.to_str()) {
-                            let stem = stem.to_string();
-                            if let Ok(mut dir_entries) = tokio::fs::read_dir(parent).await {
-                                while let Ok(Some(entry)) = dir_entries.next_entry().await {
-                                    let fname = entry.file_name();
-                                    let fname_str = fname.to_string_lossy();
-                                    if fname_str.starts_with(stem.as_str())
-                                        || fname_str == "poster.jpg"
-                                        || fname_str == "backdrop.jpg"
-                                        || fname_str == "logo.png"
-                                        || fname_str == "movie.nfo"
-                                    {
-                                        let _ = tokio::fs::remove_file(entry.path()).await;
-                                    }
-                                }
-                            }
-                            // 尝试删除父目录（如已空）
-                            let _ = tokio::fs::remove_dir(parent).await;
-                        }
+                    if let (Some(parent), Some(stem)) = (
+                        item_path.parent(),
+                        item_path.file_stem().and_then(|s| s.to_str()),
+                    ) {
+                        sidecar_jobs.push((parent.to_path_buf(), stem.to_string()));
                     }
                 }
             }
         }
-        // 删除 DB 记录
-        sqlx::query("DELETE FROM media_items WHERE id = $1")
-            .bind(row.id)
-            .execute(pool)
-            .await?;
-        deleted += 1;
     }
+
+    if to_delete_ids.is_empty() {
+        return Ok(0);
+    }
+
+    // sidecar 清理（C1 修正：只删 stem-prefixed，公共图片不动）
+    let _: Vec<()> = stream::iter(sidecar_jobs.into_iter())
+        .map(|(parent, stem)| async move {
+            if let Ok(mut entries) = tokio::fs::read_dir(&parent).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let fname = entry.file_name();
+                    let fname_str = fname.to_string_lossy();
+                    // C1：只清 strm 同名前缀的旁路（如 S01E05.nfo / S01E05-zh.srt 等）；
+                    // poster / backdrop / logo / movie.nfo 是 Series 或 Season 级公共资源，
+                    // 同目录可能还有其它仍存在的 Episode 在用，这里不能误删——它们应当在
+                    // Series 整体被 prune 时由父目录 remove_dir 一并消失（或者用户手动清）。
+                    if fname_str.starts_with(stem.as_str()) {
+                        let _ = tokio::fs::remove_file(entry.path()).await;
+                    }
+                }
+            }
+            // 尝试 remove_dir：仅当目录已空时成功，否则静默失败（说明同目录还有其它
+            // Episode 没被删，应当保留）。
+            let _ = tokio::fs::remove_dir(&parent).await;
+        })
+        .buffer_unordered(8)
+        .collect()
+        .await;
+
+    let deleted = sqlx::query("DELETE FROM media_items WHERE id = ANY($1)")
+        .bind(&to_delete_ids)
+        .execute(pool)
+        .await?
+        .rows_affected();
     Ok(deleted)
 }
 
