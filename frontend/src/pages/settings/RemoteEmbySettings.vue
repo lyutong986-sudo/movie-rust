@@ -61,7 +61,8 @@ const form = ref({
   requestIntervalMs: 0,
   spoofedClient: DEFAULT_SPOOFED_PRESET.client,
   spoofedDeviceName: DEFAULT_SPOOFED_PRESET.device,
-  spoofedAppVersion: DEFAULT_SPOOFED_PRESET.version
+  spoofedAppVersion: DEFAULT_SPOOFED_PRESET.version,
+  enableAutoDelete: false
 });
 
 const editOpen = ref(false);
@@ -92,6 +93,7 @@ const editForm = ref({
   spoofedDeviceName: DEFAULT_SPOOFED_PRESET.device,
   spoofedAppVersion: DEFAULT_SPOOFED_PRESET.version,
   spoofedDeviceId: '',
+  enableAutoDelete: false,
   mergedRemoteViews: [] as RemoteEmbyView[]
 });
 
@@ -454,6 +456,7 @@ function openEditor(source: RemoteEmbySource) {
     spoofedDeviceName: source.SpoofedDeviceName || DEFAULT_SPOOFED_PRESET.device,
     spoofedAppVersion: source.SpoofedAppVersion || DEFAULT_SPOOFED_PRESET.version,
     spoofedDeviceId: source.SpoofedDeviceId || '',
+    enableAutoDelete: source.EnableAutoDelete === true,
     mergedRemoteViews: [...merged.values()]
   };
   editOpen.value = true;
@@ -520,6 +523,7 @@ async function saveEditor() {
       SpoofedClient: string;
       SpoofedDeviceName: string;
       SpoofedAppVersion: string;
+      EnableAutoDelete: boolean;
     } = {
       Name: p.name.trim(),
       ServerUrl: p.serverUrl.trim(),
@@ -544,7 +548,8 @@ async function saveEditor() {
       RequestIntervalMs: Math.max(0, Math.min(60000, Number(p.requestIntervalMs) || 0)),
       SpoofedClient: p.spoofedClient.trim(),
       SpoofedDeviceName: p.spoofedDeviceName.trim(),
-      SpoofedAppVersion: p.spoofedAppVersion.trim()
+      SpoofedAppVersion: p.spoofedAppVersion.trim(),
+      EnableAutoDelete: p.enableAutoDelete
     };
     if (p.password.trim()) {
       payload.Password = p.password;
@@ -634,7 +639,8 @@ async function createSource() {
       RequestIntervalMs: Math.max(0, Math.min(60000, Number(payload.requestIntervalMs) || 0)),
       SpoofedClient: payload.spoofedClient.trim(),
       SpoofedDeviceName: payload.spoofedDeviceName.trim(),
-      SpoofedAppVersion: payload.spoofedAppVersion.trim()
+      SpoofedAppVersion: payload.spoofedAppVersion.trim(),
+      EnableAutoDelete: payload.enableAutoDelete
     });
     saved.value = `已创建远端源：${payload.name.trim()}`;
     form.value.name = '';
@@ -1003,7 +1009,13 @@ onBeforeUnmount(() => {
               placeholder="0 = 关闭，30 表示每 30 分钟一次"
             />
             <p class="text-muted mt-1 text-xs">
-              0 = 关闭。后台每分钟检查一次该源距离上次同步的时间，达到该间隔即触发增量同步（增 / 改 / 删）。范围 1–10080（最长 7 天）。
+              0 = 关闭。后台每分钟检查一次该源距离上次同步的时间，达到该间隔即触发增量同步（增 / 改）。范围 1–10080（最长 7 天）。
+            </p>
+          </UFormField>
+          <UFormField class="lg:col-span-2" label="自动删除远端已下架条目">
+            <USwitch v-model="form.enableAutoDelete" />
+            <p class="text-muted mt-1 text-xs">
+              开启后，同步时会对比远端与本地的条目列表，自动删除远端已不存在的 Series / Movie 及其 STRM 文件。关闭时仅同步新增和变更，不执行任何删除操作。
             </p>
           </UFormField>
           <UFormField class="lg:col-span-2" label="拉取速率：单页条目数（PageSize）">
@@ -1162,9 +1174,15 @@ onBeforeUnmount(() => {
                 >
                   {{
                     (source.AutoSyncIntervalMinutes ?? 0) > 0
-                      ? `每 ${source.AutoSyncIntervalMinutes} 分钟一次（增/改/删）`
+                      ? `每 ${source.AutoSyncIntervalMinutes} 分钟一次（增/改${source.EnableAutoDelete ? '/删' : ''}）`
                       : '已关闭（仅手动同步或全局计划任务）'
                   }}
+                </span>
+              </p>
+              <p class="text-muted mt-1 text-xs">
+                自动删除：
+                <span :class="source.EnableAutoDelete ? 'text-warning font-medium' : 'text-muted'">
+                  {{ source.EnableAutoDelete ? '已开启（远端下架条目将自动清理）' : '已关闭（仅增/改，不删除）' }}
                 </span>
               </p>
               <p v-if="source.LastTokenRefreshAt" class="text-muted text-xs">
@@ -1461,7 +1479,13 @@ onBeforeUnmount(() => {
                 placeholder="0 = 关闭，30 表示每 30 分钟一次"
               />
               <p class="text-muted mt-1 text-xs">
-                0 = 关闭。后台每分钟检查该源，到达间隔即触发增量同步（增 / 改 / 删）。范围 1–10080（最长 7 天）。
+                0 = 关闭。后台每分钟检查该源，到达间隔即触发增量同步（增 / 改）。范围 1–10080（最长 7 天）。
+              </p>
+            </UFormField>
+            <UFormField class="lg:col-span-2" label="自动删除远端已下架条目">
+              <USwitch v-model="editForm.enableAutoDelete" />
+              <p class="text-muted mt-1 text-xs">
+                开启后，同步时会对比远端与本地的条目列表，自动删除远端已不存在的 Series / Movie 及其 STRM 文件。关闭时仅同步新增和变更，不执行任何删除操作。
               </p>
             </UFormField>
             <UFormField class="lg:col-span-2" label="拉取速率：单页条目数（PageSize）">

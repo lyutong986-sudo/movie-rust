@@ -907,6 +907,7 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         r#"ALTER TABLE remote_emby_sources ADD COLUMN IF NOT EXISTS spoofed_device_name TEXT NOT NULL DEFAULT 'Apple TV'"#,
         r#"ALTER TABLE remote_emby_sources ADD COLUMN IF NOT EXISTS spoofed_device_id TEXT NOT NULL DEFAULT ''"#,
         r#"ALTER TABLE remote_emby_sources ADD COLUMN IF NOT EXISTS spoofed_app_version TEXT NOT NULL DEFAULT '8.2.4'"#,
+        r#"ALTER TABLE remote_emby_sources ADD COLUMN IF NOT EXISTS enable_auto_delete boolean NOT NULL DEFAULT false"#,
         // 旧行回填：spoofed_device_id 为空时用 source.id 派生 32 位 hex（首次升级一次性）。
         r#"UPDATE remote_emby_sources SET spoofed_device_id = replace(id::text, '-', '') WHERE spoofed_device_id IS NULL OR spoofed_device_id = ''"#,
         // studios/tags GIN 索引（对 aggregate_array_values 全表扫描优化）

@@ -104,6 +104,8 @@ pub struct DbRemoteEmbySource {
     pub spoofed_device_id: String,
     #[sqlx(default)]
     pub spoofed_app_version: String,
+    #[sqlx(default)]
+    pub enable_auto_delete: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

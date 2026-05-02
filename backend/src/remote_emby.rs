@@ -1375,7 +1375,8 @@ async fn sync_source_inner(
         DetailHandlesGuard::new(Arc::clone(&series_detail_handles), progress.clone());
 
     // 收集所有远端 Series/Movie ID 集合（用于删除检测——仅与 Series/Movie 层级比对，
-    // 不再全量拉 Episode ID）
+    // 不再全量拉 Episode ID）。仅在 enable_auto_delete=true 时才收集和执行删除。
+    let enable_auto_delete = source.enable_auto_delete;
     let mut remote_series_ids_by_view: HashMap<String, HashSet<String>> = HashMap::new();
     let mut remote_movie_ids_by_view: HashMap<String, HashSet<String>> = HashMap::new();
     let mut total_deleted = 0u64;
@@ -1473,9 +1474,10 @@ async fn sync_source_inner(
                     );
                 }
 
-                // 收集 Movie ID 用于删除检测
-                for item in &page.items {
-                    movie_ids.insert(item.id.clone());
+                if enable_auto_delete {
+                    for item in &page.items {
+                        movie_ids.insert(item.id.clone());
+                    }
                 }
 
                 // 并发处理 Movie 条目（复用已有的 process_one_remote_sync_item）
@@ -1571,7 +1573,9 @@ async fn sync_source_inner(
                 }
             }
 
-            remote_movie_ids_by_view.insert(view.id.clone(), movie_ids);
+            if enable_auto_delete {
+                remote_movie_ids_by_view.insert(view.id.clone(), movie_ids);
+            }
         } else if is_tvshows {
             // ── 电视剧库：层级拉取 Series -> Seasons -> Episodes ──
             tracing::info!(
@@ -1644,34 +1648,36 @@ async fn sync_source_inner(
                     "增量同步：DateModified 早停拉取变更 Series"
                 );
 
-                // 删除检测：使用 ID-only 轻量分页拉取所有远端 Series ID
-                let mut series_ids: HashSet<String> = HashSet::new();
-                for s in &all_series {
-                    series_ids.insert(s.id.clone());
-                }
-                let mut del_start: i64 = 0;
-                loop {
-                    let id_page = fetch_remote_series_ids_page(
-                        &state.pool,
-                        source,
-                        user_id.as_str(),
-                        view.id.as_str(),
-                        del_start,
-                        page_size,
-                    )
-                    .await?;
-                    if id_page.items.is_empty() {
-                        break;
-                    }
-                    for s in &id_page.items {
+                // 删除检测：仅在启用自动删除时才拉取全量 Series ID
+                if enable_auto_delete {
+                    let mut series_ids: HashSet<String> = HashSet::new();
+                    for s in &all_series {
                         series_ids.insert(s.id.clone());
                     }
-                    del_start += page_size;
-                    if del_start >= id_page.total_record_count {
-                        break;
+                    let mut del_start: i64 = 0;
+                    loop {
+                        let id_page = fetch_remote_series_ids_page(
+                            &state.pool,
+                            source,
+                            user_id.as_str(),
+                            view.id.as_str(),
+                            del_start,
+                            page_size,
+                        )
+                        .await?;
+                        if id_page.items.is_empty() {
+                            break;
+                        }
+                        for s in &id_page.items {
+                            series_ids.insert(s.id.clone());
+                        }
+                        del_start += page_size;
+                        if del_start >= id_page.total_record_count {
+                            break;
+                        }
                     }
+                    remote_series_ids_by_view.insert(view.id.clone(), series_ids);
                 }
-                remote_series_ids_by_view.insert(view.id.clone(), series_ids);
             } else {
                 // ── 全量模式：使用完整 Fields 拉取 ──
                 loop {
@@ -1694,11 +1700,13 @@ async fn sync_source_inner(
                         break;
                     }
                 }
-                let mut series_ids: HashSet<String> = HashSet::new();
-                for s in &all_series {
-                    series_ids.insert(s.id.clone());
+                if enable_auto_delete {
+                    let mut series_ids: HashSet<String> = HashSet::new();
+                    for s in &all_series {
+                        series_ids.insert(s.id.clone());
+                    }
+                    remote_series_ids_by_view.insert(view.id.clone(), series_ids);
                 }
-                remote_series_ids_by_view.insert(view.id.clone(), series_ids);
             }
 
             tracing::info!(
@@ -2158,8 +2166,10 @@ async fn sync_source_inner(
     }
 
     // ── 删除检测（层级优化版）──────────────────────────────────
+    // 仅在 enable_auto_delete=true 时执行。
     // 电视剧库：比对 Series 列表（数量远少于 Episode），缺失的 Series -> 级联删除
     // 电影库：比对 Movie ID 列表
+    if enable_auto_delete {
     if let Some(handle) = &progress {
         handle.set_phase("PruningStaleItems", 96.0);
     }
@@ -2308,6 +2318,12 @@ async fn sync_source_inner(
             "层级同步「删」：清理远端已下架条目"
         );
     }
+    } else {
+        tracing::info!(
+            source_id = %source.id,
+            "自动删除已关闭，跳过删除检测"
+        );
+    } // end enable_auto_delete
 
     // 等齐所有 series detail spawn task
     let pending_handles = std::mem::take(&mut *series_detail_handles.lock().await);

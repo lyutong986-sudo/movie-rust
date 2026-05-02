@@ -204,6 +204,13 @@ struct CreateRemoteEmbySourceRequest {
     spoofed_device_id: Option<String>,
     #[serde(default, alias = "spoofedAppVersion", alias = "spoofed_app_version")]
     spoofed_app_version: Option<String>,
+    #[serde(
+        default,
+        alias = "enableAutoDelete",
+        alias = "enable_auto_delete",
+        deserialize_with = "crate::models::deserialize_option_bool_lenient"
+    )]
+    enable_auto_delete: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +279,13 @@ struct UpdateRemoteEmbySourceRequest {
     spoofed_device_id: Option<String>,
     #[serde(default, alias = "spoofedAppVersion", alias = "spoofed_app_version")]
     spoofed_app_version: Option<String>,
+    #[serde(
+        default,
+        alias = "enableAutoDelete",
+        alias = "enable_auto_delete",
+        deserialize_with = "crate::models::deserialize_option_bool_lenient"
+    )]
+    enable_auto_delete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -335,6 +349,7 @@ struct RemoteEmbySourceDto {
     spoofed_device_name: String,
     spoofed_device_id: String,
     spoofed_app_version: String,
+    enable_auto_delete: bool,
     created_at: String,
     updated_at: String,
 }
@@ -546,6 +561,7 @@ async fn create_remote_emby_source(
         payload.auto_sync_interval_minutes.unwrap_or(0),
         payload.page_size.unwrap_or(200),
         payload.request_interval_ms.unwrap_or(0),
+        payload.enable_auto_delete.unwrap_or(false),
         payload.spoofed_client.as_deref(),
         payload.spoofed_device_name.as_deref(),
         payload.spoofed_device_id.as_deref(),
@@ -596,6 +612,7 @@ async fn update_remote_emby_source(
         payload.auto_sync_interval_minutes.unwrap_or(0),
         payload.page_size.unwrap_or(200),
         payload.request_interval_ms.unwrap_or(0),
+        payload.enable_auto_delete.unwrap_or(false),
         payload.spoofed_client.as_deref(),
         payload.spoofed_device_name.as_deref(),
         payload.spoofed_device_id.as_deref(),
@@ -1144,6 +1161,7 @@ fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> Remot
         spoofed_device_name,
         spoofed_device_id,
         spoofed_app_version,
+        enable_auto_delete: source.enable_auto_delete,
         created_at: source.created_at.to_rfc3339(),
         updated_at: source.updated_at.to_rfc3339(),
     }

@@ -3921,3 +3921,58 @@ for attempt in 0..UPSERT_MAX_ATTEMPTS {
 - `EmbyAPI_Compatibility_Report.md`
 
 ---
+
+## 远端 Emby 同步：删除检测可配置化（enable_auto_delete）
+
+### 背景
+
+之前同步逻辑在每次同步（全量/增量）结束后，无条件执行删除检测：收集所有远端 Series/Movie ID，比对本地数据库，删除远端已不存在的条目。这存在以下问题：
+
+1. **不可控**：用户无法选择仅同步新增/变更而不执行删除
+2. **增量模式浪费请求**：即使远端无任何删除，仍需 ID-only 分页拉取全量 Series ID 用于对比
+3. **中断风险**：如果同步中途中断，下次同步可能因不完整的 ID 集误删条目
+
+### 变更
+
+| 编号 | 变更 |
+|------|------|
+| DC-01 | DB: `remote_emby_sources` 新增 `enable_auto_delete boolean NOT NULL DEFAULT false` 字段 |
+| DC-02 | Model: `DbRemoteEmbySource` 新增 `enable_auto_delete: bool` 字段 |
+| DC-03 | `ensure_schema_compatibility` 新增对应 ALTER TABLE |
+| DC-04 | `sync_source_inner` 中删除检测整体包裹在 `if enable_auto_delete { ... }` 中 |
+| DC-05 | Movie 同步循环中 ID 收集逻辑受 `enable_auto_delete` 守护 |
+| DC-06 | 增量模式中 ID-only 轻量分页（仅用于删除检测）在 `enable_auto_delete=false` 时完全跳过 |
+| DC-07 | 全量模式中 Series ID 收集同样受守护 |
+| DC-08 | API Create/Update 请求体新增 `EnableAutoDelete` 可选字段 |
+| DC-09 | API 响应 DTO 新增 `EnableAutoDelete` 字段 |
+| DC-10 | 前端新增表单/编辑表单增加「自动删除远端已下架条目」开关（USwitch） |
+| DC-11 | 前端源卡片显示自动删除状态标识 |
+
+### 工作原理
+
+```
+enable_auto_delete = false （默认）:
+  同步仅执行「增」和「改」→ 跳过所有 ID 收集和删除检测 → 节省 API 请求
+
+enable_auto_delete = true:
+  同步执行「增」「改」「删」→ 收集远端 ID → 比对本地 → 级联删除过期条目 + 清理 STRM
+```
+
+### 性能提升
+
+| 场景 | enable_auto_delete=false | enable_auto_delete=true |
+|------|------|------|
+| 增量模式 5000 Series | 跳过 ID-only 分页拉取，省 ~25 次 API 请求 | 与原逻辑相同 |
+| 全量模式 | 跳过 ID 集收集的内存和 CPU 开销 | 与原逻辑相同 |
+
+### 影响文件
+- `backend/src/remote_emby.rs`
+- `backend/src/repository.rs`
+- `backend/src/routes/remote_emby.rs`
+- `backend/src/models.rs`
+- `backend/src/main.rs`
+- `backend/migrations/0001_schema.sql`
+- `frontend/src/pages/settings/RemoteEmbySettings.vue`
+- `EmbyAPI_Compatibility_Report.md`
+
+---

@@ -4130,8 +4130,7 @@ pub async fn create_remote_emby_source(
     auto_sync_interval_minutes: i32,
     page_size: i32,
     request_interval_ms: i32,
-    // PB39：身份伪装四元组。任一为 None / 空字符串时回落到 Infuse-Direct on Apple TV 默认。
-    // spoofed_device_id 为 None 时由本函数用 Uuid::new_v4 派生 32 位 hex（不带 'movie-rust-' 前缀）。
+    enable_auto_delete: bool,
     spoofed_client: Option<&str>,
     spoofed_device_name: Option<&str>,
     spoofed_device_id: Option<&str>,
@@ -4279,9 +4278,10 @@ pub async fn create_remote_emby_source(
             display_mode, remote_view_ids, remote_views, enabled, source_secret,
             strm_output_path, sync_metadata, sync_subtitles, token_refresh_interval_secs, proxy_mode,
             view_library_map, auto_sync_interval_minutes, page_size, request_interval_ms,
-            spoofed_client, spoofed_device_name, spoofed_device_id, spoofed_app_version
+            spoofed_client, spoofed_device_name, spoofed_device_id, spoofed_app_version,
+            enable_auto_delete
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
         "#,
     )
     .bind(row_id)
@@ -4309,6 +4309,7 @@ pub async fn create_remote_emby_source(
     .bind(spoofed_device_name)
     .bind(spoofed_device_id)
     .bind(spoofed_app_version)
+    .bind(enable_auto_delete)
     .execute(pool)
     .await?;
 
@@ -4354,6 +4355,7 @@ pub async fn update_remote_emby_source(
     auto_sync_interval_minutes: i32,
     page_size: i32,
     request_interval_ms: i32,
+    enable_auto_delete: bool,
     spoofed_client: Option<&str>,
     spoofed_device_name: Option<&str>,
     spoofed_device_id: Option<&str>,
@@ -4491,6 +4493,7 @@ pub async fn update_remote_emby_source(
                 spoofed_device_name  = COALESCE(NULLIF($22::text, ''), spoofed_device_name),
                 spoofed_device_id    = COALESCE(NULLIF($23::text, ''), spoofed_device_id),
                 spoofed_app_version  = COALESCE(NULLIF($24::text, ''), spoofed_app_version),
+                enable_auto_delete   = $25,
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -4519,6 +4522,7 @@ pub async fn update_remote_emby_source(
         .bind(spoofed_device_name_param)
         .bind(spoofed_device_id_param)
         .bind(spoofed_app_version_param)
+        .bind(enable_auto_delete)
         .execute(pool)
         .await?
     } else {
@@ -4536,6 +4540,7 @@ pub async fn update_remote_emby_source(
                 spoofed_device_name  = COALESCE(NULLIF($21::text, ''), spoofed_device_name),
                 spoofed_device_id    = COALESCE(NULLIF($22::text, ''), spoofed_device_id),
                 spoofed_app_version  = COALESCE(NULLIF($23::text, ''), spoofed_app_version),
+                enable_auto_delete   = $24,
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -4563,6 +4568,7 @@ pub async fn update_remote_emby_source(
         .bind(spoofed_device_name_param)
         .bind(spoofed_device_id_param)
         .bind(spoofed_app_version_param)
+        .bind(enable_auto_delete)
         .execute(pool)
         .await?
     };

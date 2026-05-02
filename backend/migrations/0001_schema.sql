@@ -779,6 +779,9 @@ UPDATE remote_emby_sources
    SET spoofed_device_id = replace(id::text, '-', '')
  WHERE spoofed_device_id IS NULL OR spoofed_device_id = '';
 
+ALTER TABLE remote_emby_sources
+    ADD COLUMN IF NOT EXISTS enable_auto_delete boolean NOT NULL DEFAULT false;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_emby_sources_name_unique
     ON remote_emby_sources(lower(name));
 CREATE INDEX IF NOT EXISTS idx_remote_emby_sources_library
