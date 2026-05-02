@@ -11,7 +11,7 @@ use crate::{
     repository::{self, UpsertMediaItem},
     work_limiter::{WorkLimiterConfig, WorkLimiterKind, WorkLimiters},
 };
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 use std::{
@@ -106,6 +106,10 @@ pub struct ScanProgressSnapshot {
     pub scanned_files: u64,
     pub imported_items: u64,
     pub percent: f64,
+    /// PB49 (S1)：scanner 在 Phase B 入口前因「DB 已记录 + 远端 source 管理 + 文件
+    /// 不更新」而短路跳过的文件数。让前端 UI 一眼看出本次本地兜底扫描真正干了多少活。
+    #[serde(default)]
+    pub skipped_remote_strm: u64,
 }
 
 /// 扫描进度句柄。通过原子计数器和 RwLock 在扫描过程中并发更新，
@@ -115,6 +119,7 @@ pub struct ScanProgress {
     total_files: Arc<AtomicU64>,
     scanned_files: Arc<AtomicU64>,
     imported_items: Arc<AtomicU64>,
+    skipped_remote_strm: Arc<AtomicU64>,
     phase: Arc<RwLock<String>>,
     current_library: Arc<RwLock<Option<String>>>,
 }
@@ -159,10 +164,15 @@ impl ScanProgress {
         self.imported_items.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn inc_skipped_remote_strm(&self) {
+        self.skipped_remote_strm.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub async fn snapshot(&self) -> ScanProgressSnapshot {
         let total = self.total_files.load(Ordering::Relaxed);
         let scanned = self.scanned_files.load(Ordering::Relaxed);
         let imported = self.imported_items.load(Ordering::Relaxed);
+        let skipped_remote_strm = self.skipped_remote_strm.load(Ordering::Relaxed);
         // 96% 主扫描 + 4% 后扫描，对齐 Jellyfin ValidateMediaLibraryInternal 的分配。
         let percent = if total == 0 {
             0.0
@@ -178,6 +188,7 @@ impl ScanProgress {
             scanned_files: scanned,
             imported_items: imported,
             percent,
+            skipped_remote_strm,
         }
     }
 
@@ -398,6 +409,52 @@ async fn scan_libraries(
         }
     }
 
+    // ---- Phase A.5（PB49 S1）：远端 STRM 短路过滤
+    //
+    // 远端 sync 刚刚把 N 万个 STRM 文件 + 对应 media_items 行写完后，scanner 默认会
+    // 把同一个 STRM 工作区目录扫一遍——而过去对每个 STRM 都要走完整 import 链路
+    // (read NFO + 3× upsert_media_item + TMDB/OpenSubtitles HTTP + analyze + trickplay
+    // 路径检查)，对 25 万条目可能多花 30-60 分钟纯重复劳动。
+    //
+    // 这里在 Phase B 入口前，把所有收集到的 file path 一次性丢给 DB 反查：
+    //   - 如果 path 在 media_items 里 + 由远端 source 管理（provider_ids 含 RemoteEmbySourceId）
+    //     + 文件 mtime <= DB updated_at（DB 比磁盘新或同步），就直接 skip。
+    //   - 否则（首次扫描的本地文件 / 用户手动改过 STRM token / 物理文件被替换 等）落到
+    //     原 import 链路。
+    //
+    // 计数器：跳过的也照常 inc_scanned（让 UI 上的「已扫文件」看到真正的总数），
+    // 但 inc_imported 只算真正入库 / 更新的，再单独打一个 skipped_remote_strm 给 UI。
+    let total_collected: usize = library_files.iter().map(|(_, _, _, files)| files.len()).sum();
+    let remote_managed_paths = if total_collected > 0 {
+        let all_paths: Vec<String> = library_files
+            .iter()
+            .flat_map(|(_, _, _, files)| files.iter().map(|p| p.to_string_lossy().into_owned()))
+            .collect();
+        match repository::lookup_remote_managed_paths(pool, &all_paths).await {
+            Ok(map) => {
+                if !map.is_empty() {
+                    tracing::info!(
+                        candidate_files = total_collected,
+                        remote_managed_in_db = map.len(),
+                        "PB49 (S1)：scanner 短路预查命中数（满足 mtime <= updated_at 的部分将跳过）"
+                    );
+                }
+                map
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "PB49 (S1)：scanner 短路预查失败，回退为完整扫描（不影响正确性）"
+                );
+                std::collections::HashMap::new()
+            }
+        }
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let mut skipped_remote_strm: i64 = 0;
+
     // ---- Phase B：入库（Jellyfin 的 RootFolder.ValidateChildren 等价物）
     // 跨库并行：所有库的文件统一进入 JoinSet，由 work_limiter 控制并发上限。
     if let Some(p) = &progress {
@@ -407,6 +464,33 @@ async fn scan_libraries(
     let mut tasks = JoinSet::new();
     for (library, library_options, path, files) in library_files {
         for file in files {
+            // PB49 (S1)：在 spawn 之前先做短路检查。命中条件：
+            //   1. 该 path 出现在 lookup_remote_managed_paths 返回集合中
+            //   2. 文件 mtime <= DB updated_at（说明 DB 是最新或同步的）
+            // 任意一条不满足就走原 import 流程。
+            let file_path_str = file.to_string_lossy().into_owned();
+            if let Some(db_updated_at) = remote_managed_paths.get(&file_path_str) {
+                let mtime_ok = match tokio::fs::metadata(&file).await {
+                    Ok(meta) => match meta.modified() {
+                        Ok(sys_time) => {
+                            let mtime: DateTime<Utc> = sys_time.into();
+                            mtime <= *db_updated_at
+                        }
+                        // 拿不到 mtime（极少见，比如某些 FUSE 文件系统），保守地按
+                        // 「不能确认最新」处理 → 走完整 import。
+                        Err(_) => false,
+                    },
+                    Err(_) => false,
+                };
+                if mtime_ok {
+                    skipped_remote_strm += 1;
+                    if let Some(p) = &progress {
+                        p.inc_scanned();
+                        p.inc_skipped_remote_strm();
+                    }
+                    continue;
+                }
+            }
             while tasks.len() >= limits.library_scan_limit as usize {
                 match tasks.join_next().await {
                     Some(joined) => match joined {
@@ -582,6 +666,15 @@ async fn scan_libraries(
         crate::webhooks::events::LIBRARY_SCAN_COMPLETE,
         &libraries,
     );
+
+    if skipped_remote_strm > 0 {
+        tracing::info!(
+            skipped_remote_strm,
+            scanned_files,
+            imported_items,
+            "PB49 (S1)：scanner 完成，远端 STRM 短路跳过 / 总扫 / 入库 数据"
+        );
+    }
 
     Ok(ScanSummary {
         libraries: libraries.len() as i64,

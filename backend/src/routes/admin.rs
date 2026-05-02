@@ -122,6 +122,8 @@ struct ScanOperationDto {
     total_files: u64,
     scanned_files: u64,
     imported_items: u64,
+    /// PB49 (S1)：scanner 短路跳过的远端 STRM 数量。
+    skipped_remote_strm: u64,
     scan_rate_per_sec: f64,
     queued: bool,
     running: bool,
@@ -151,6 +153,8 @@ struct ScanOperationState {
     total_files: u64,
     scanned_files: u64,
     imported_items: u64,
+    /// PB49 (S1)：poller 从 ScanProgressSnapshot 同步过来。
+    skipped_remote_strm: u64,
     scan_rate_per_sec: f64,
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
@@ -185,6 +189,7 @@ impl ScanOperationState {
             total_files: self.total_files,
             scanned_files: self.scanned_files,
             imported_items: self.imported_items,
+            skipped_remote_strm: self.skipped_remote_strm,
             scan_rate_per_sec: self.scan_rate_per_sec,
             queued: self.status == "Queued",
             running: matches!(self.status, "Running" | "Cancelling"),
@@ -271,29 +276,42 @@ pub async fn incremental_update_library(
                 }
             }
         }
-        match scanner::scan_single_library_with_db_semaphore(
-            &state.pool,
-            state.metadata_manager.clone(),
-            &state.config,
-            state.work_limiters.clone(),
-            library_id,
-            progress,
-            db_semaphore.clone(),
-        )
-        .await
-        {
-            Ok(scan_sum) => {
-                summary.scanned_files += scan_sum.scanned_files;
-                summary.imported_items += scan_sum.imported_items;
+        // PB49 (S2)：是否在远端 sync 完成后再串一次本地兜底扫描。
+        // 默认 true（兼容旧行为）。即使开着，PB49 (S1) 的 scanner 短路过滤也会
+        // 让本地扫描在远端 sync 写过的 STRM 上几乎零开销，所以一般无需关闭。
+        // 关闭仅适用于「library 没有任何本地物理路径」的纯远端镜像场景，可省掉
+        // 一次完整的 `library_scan_paths_union_remote_strm` + `collect_video_files`
+        // + Phase A 收集 + Phase B 入口预查 的固定开销（典型 1-3 秒）。
+        if state.config.auto_local_scan_after_remote_sync {
+            match scanner::scan_single_library_with_db_semaphore(
+                &state.pool,
+                state.metadata_manager.clone(),
+                &state.config,
+                state.work_limiters.clone(),
+                library_id,
+                progress,
+                db_semaphore.clone(),
+            )
+            .await
+            {
+                Ok(scan_sum) => {
+                    summary.scanned_files += scan_sum.scanned_files;
+                    summary.imported_items += scan_sum.imported_items;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        library_id = %library_id,
+                        error = %err,
+                        "远端同步已成功，本地/STRM 目录增量扫描失败"
+                    );
+                    return Err(err);
+                }
             }
-            Err(err) => {
-                tracing::warn!(
-                    library_id = %library_id,
-                    error = %err,
-                    "远端同步已成功，本地/STRM 目录增量扫描失败"
-                );
-                return Err(err);
-            }
+        } else {
+            tracing::debug!(
+                library_id = %library_id,
+                "PB49 (S2)：auto_local_scan_after_remote_sync=false，跳过远端 sync 后的本地兜底扫描"
+            );
         }
         Ok(summary)
     } else {
@@ -410,6 +428,7 @@ async fn enqueue_library_scan(
                 total_files: 0,
                 scanned_files: 0,
                 imported_items: 0,
+                skipped_remote_strm: 0,
                 scan_rate_per_sec: 0.0,
                 created_at: Utc::now(),
                 started_at: None,
@@ -491,6 +510,7 @@ async fn enqueue_library_scan(
                     operation.total_files = 0;
                     operation.scanned_files = 0;
                     operation.imported_items = 0;
+                    operation.skipped_remote_strm = 0;
                 } else {
                     // 重试时让用户明确看到「这是第 N 次尝试」，而不是误以为
                     // 又回到「收集文件 0%」从零开始。
@@ -544,6 +564,10 @@ async fn enqueue_library_scan(
                     operation.total_files = operation.total_files.max(snap.total_files);
                     operation.scanned_files = operation.scanned_files.max(snap.scanned_files);
                     operation.imported_items = operation.imported_items.max(snap.imported_items);
+                    // PB49 (S1)：scanner 短路跳过计数（远端已同步）。和其它单调
+                    // 计数一样取 max，避免重试时回退。
+                    operation.skipped_remote_strm =
+                        operation.skipped_remote_strm.max(snap.skipped_remote_strm);
                     // progress 也只许涨，避免重试瞬间从 80% 砸回 0%
                     operation.progress = operation.progress.max(snap.percent);
                     operation.scan_rate_per_sec = scan_rate_per_sec;

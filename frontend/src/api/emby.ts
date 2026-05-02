@@ -517,6 +517,8 @@ export interface ScanOperation {
   TotalFiles?: number;
   ScannedFiles?: number;
   ImportedItems?: number;
+  /** PB49 (S1)：scanner 因「DB 已存在 + 远端 source 管理 + 文件未变更」而短路跳过的数量。 */
+  SkippedRemoteStrm?: number;
   ScanRatePerSec?: number;
   Status: string;
   Progress: number;

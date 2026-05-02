@@ -111,6 +111,15 @@ const scanImportedCounter = computed(() => {
   return imported ? `已入库 ${imported} 个` : '';
 });
 
+// PB49 (S1)：scanner 远端 STRM 短路计数。本地 scanner 在 Phase B 入口会用一次
+// 批量 SQL 查到所有「DB 已存在 + 由远端 source 管理」的 path，对其中文件 mtime
+// 不晚于 DB updated_at 的直接跳过整套 import 链路。这里把跳过数量露出来，让用户
+// 看到「为什么远端 sync 跑完后这么快就完事」。
+const scanSkippedRemoteText = computed(() => {
+  const skipped = scanOperation.value?.SkippedRemoteStrm || 0;
+  return skipped > 0 ? `跳过远端已同步 ${skipped} 个（fast path）` : '';
+});
+
 const scanRateText = computed(() => {
   const rate = scanOperation.value?.ScanRatePerSec;
   if (typeof rate !== 'number' || !Number.isFinite(rate) || rate <= 0) return '';
@@ -390,6 +399,9 @@ async function submitRename() {
             <p class="text-highlighted mt-1 text-2xl font-semibold">{{ scanProgressText }}</p>
             <p v-if="scanFileCounter" class="text-muted mt-1 text-xs">
               文件 {{ scanFileCounter }}<span v-if="scanImportedCounter"> · {{ scanImportedCounter }}</span><span v-if="scanRateText"> · {{ scanRateText }}</span>
+            </p>
+            <p v-if="scanSkippedRemoteText" class="text-muted mt-1 text-xs">
+              {{ scanSkippedRemoteText }}
             </p>
             <p v-if="scanOperation?.CurrentLibrary" class="text-muted text-xs">
               当前：{{ scanOperation.CurrentLibrary }}

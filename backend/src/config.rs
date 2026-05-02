@@ -31,6 +31,22 @@ pub struct Config {
     /// 是否启用独立的远端 Emby 库高频轮询循环（5 分钟）。
     /// 关闭后远端库的增量更新将完全交由计划任务"媒体库扫描"承担。
     pub enable_remote_library_monitor: bool,
+    /// PB49 (S2)：远端 sync 完成后是否再触发一次本地 scanner 兜底扫描。
+    ///
+    /// 默认 `true`：兼容旧行为——`incremental_update_library` 在 source sync 成功后
+    /// 总是再调一次 `scan_single_library_with_db_semaphore`，保证：
+    ///   1. 用户手动加进 library 的「物理路径」上的新增文件能被扫到；
+    ///   2. 用户手工删 / 改了某个 STRM 文件能被识别（PB49 S1 短路过滤会自动放行）；
+    ///   3. NFO / 海报等 sidecar 资产被新增 / 修改也能反映到 DB。
+    ///
+    /// 设为 `false`：纯远端镜像场景下的极致优化——跳过本地兜底扫，所有变更完全由
+    /// 远端 sync 路径决定。**仅在 library 没有任何本地物理路径、且不会被 file
+    /// watcher 触发再扫的「pure remote」场景启用**。混合库（既有远端源又有本地
+    /// 物理路径）仍然会执行本地扫描，因为 S2 关闭只跳过「远端 sync 之后那一次
+    /// 串联的本地扫描」，独立按钮和 file watcher 触发的扫描不受影响。
+    ///
+    /// 通过环境变量 `APP_AUTO_LOCAL_SCAN_AFTER_REMOTE_SYNC=false` 关闭。
+    pub auto_local_scan_after_remote_sync: bool,
 }
 
 impl Config {
@@ -112,6 +128,10 @@ impl Config {
                 })
                 .unwrap_or_default(),
             enable_remote_library_monitor: env::var("APP_ENABLE_REMOTE_LIBRARY_MONITOR")
+                .ok()
+                .map(|value| value.eq_ignore_ascii_case("true"))
+                .unwrap_or(true),
+            auto_local_scan_after_remote_sync: env::var("APP_AUTO_LOCAL_SCAN_AFTER_REMOTE_SYNC")
                 .ok()
                 .map(|value| value.eq_ignore_ascii_case("true"))
                 .unwrap_or(true),
