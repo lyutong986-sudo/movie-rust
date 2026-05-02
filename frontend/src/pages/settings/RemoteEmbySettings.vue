@@ -1016,7 +1016,7 @@ onBeforeUnmount(() => {
               placeholder="默认 200"
             />
             <p class="text-muted mt-1 text-xs">
-              范围 50–1000，默认 200。每次请求拉这么多条目；越大越省请求数但单页 IO 越大；远端机器较弱或带宽紧张可调小。
+              范围 50–1000，默认 200。影响 Series / Movie 列表的分页大小（Seasons 和 Episodes 由 Emby 一次返回，不受此值限制）。越大越省请求数但单次响应体越大；远端带宽紧张可调小。
             </p>
           </UFormField>
           <UFormField class="lg:col-span-2" label="拉取速率：请求最小间隔（毫秒）">
@@ -1029,7 +1029,7 @@ onBeforeUnmount(() => {
               placeholder="0 = 不限速"
             />
             <p class="text-muted mt-1 text-xs">
-              范围 0–60000。两次 HTTP 请求之间至少间隔多少毫秒；峰值 QPS ≈ 1000 / 该值，例：200 ms ≈ 5 req/s。远端有 QPS / WAF / 反爬保护被 429/502 频繁打回时调大降速。
+              范围 0–60000，默认 0（不限速）。所有远端 API 请求（Views / Series / Seasons / Episodes / Movies）均受此间隔约束；峰值 QPS ≈ 1000 / 该值（如 200 ms ≈ 5 req/s）。远端有 QPS 限制或频繁 429/502 时调大。
             </p>
           </UFormField>
           <div class="lg:col-span-2 flex flex-wrap items-center justify-between gap-2">
@@ -1474,7 +1474,7 @@ onBeforeUnmount(() => {
                 placeholder="默认 200"
               />
               <p class="text-muted mt-1 text-xs">
-                范围 50–1000，默认 200。越大越省请求数但单页 IO 越大；远端机器较弱或带宽紧张可调小。
+                范围 50–1000，默认 200。影响 Series / Movie 列表的分页大小（Seasons 和 Episodes 由 Emby 一次返回，不受此值限制）。越大越省请求数但单次响应体越大；远端带宽紧张可调小。
               </p>
             </UFormField>
             <UFormField class="lg:col-span-2" label="拉取速率：请求最小间隔（毫秒）">
@@ -1487,7 +1487,7 @@ onBeforeUnmount(() => {
                 placeholder="0 = 不限速"
               />
               <p class="text-muted mt-1 text-xs">
-                范围 0–60000。两次请求之间至少间隔多少毫秒；峰值 QPS ≈ 1000 / 该值。被远端 429/502 频繁打回时调大降速。
+                范围 0–60000，默认 0（不限速）。所有远端 API 请求均受此间隔约束；峰值 QPS ≈ 1000 / 该值（如 200 ms ≈ 5 req/s）。远端有 QPS 限制或频繁 429/502 时调大。
               </p>
             </UFormField>
             <div class="lg:col-span-2 mt-2 flex flex-wrap justify-end gap-2">
