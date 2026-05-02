@@ -3685,3 +3685,116 @@ for attempt in 0..UPSERT_MAX_ATTEMPTS {
 - `EmbyAPI_Compatibility_Report.md`
 
 ---
+
+## 远端 Emby 层级同步重构
+
+**日期**: 2026-05-02
+**批次**: RemoteSync-Hierarchy
+
+### 背景
+
+旧的远端 Emby 同步使用扁平化拉取策略（`IncludeItemTypes=Movie,Episode`），存在以下问题：
+
+1. **无法有效增量同步**：每次同步都要拉取全量 Episode ID 做 diff，大库（30万+条目）需要数十分钟
+2. **不符合 EmbySDK 标准**：Emby API 标准层级结构是 Views -> Series/Movies -> Seasons -> Episodes
+3. **删除检测效率低**：需要拉取所有远端 Movie+Episode 的 ID 列表做集合比较
+4. **无法跳过未变化的 Series/Season**：没有利用 `RecursiveItemCount` / `ChildCount` 进行增量判断
+
+### 改动方案
+
+#### 1. 层级 Fetch 函数
+
+新增以下层级 API 调用函数，符合 Emby 标准 API 层级结构：
+
+- `fetch_remote_series_page()`: GET `/Users/{userId}/Items?IncludeItemTypes=Series&ParentId={viewId}`
+- `fetch_remote_movies_page()`: GET `/Users/{userId}/Items?IncludeItemTypes=Movie&ParentId={viewId}`
+- `fetch_remote_seasons()`: GET `/Shows/{seriesId}/Seasons?UserId={userId}`
+- `fetch_remote_episodes_for_season()`: GET `/Shows/{seriesId}/Episodes?UserId={userId}&SeasonId={seasonId}`
+- `fetch_remote_all_episodes_for_series()`: GET `/Shows/{seriesId}/Episodes?UserId={userId}`
+
+#### 2. 核心同步逻辑重写 (`sync_source_inner`)
+
+从扁平模式重写为层级遍历模式：
+
+- **电视剧库 (tvshows)**: Views -> 分页拉取 Series 列表 -> 逐 Series 拉取 Seasons -> 逐 Season 拉取 Episodes
+- **电影库 (movies)**: Views -> 分页拉取 Movie 列表 -> 并发处理 Movie 条目
+- **未知库类型**: fallback 到旧方法（`IncludeItemTypes=Movie,Episode`）
+
+#### 3. 增量检测（基于 RecursiveItemCount / ChildCount）
+
+- Series 级别：比较远端 `RecursiveItemCount`（总集数）和本地存储的上次同步值
+  - 相同 → 跳过该 Series（包括其下所有 Season/Episode）
+  - 不同 → 进入 Season 级别逐季检查
+- Season 级别：比较远端 `ChildCount`（该季集数）和本地存储的上次同步值
+  - 相同 → 跳过该 Season
+  - 不同 → 拉取并处理该季所有 Episode
+- 存储位置：`provider_ids` JSON 中新增 `RemoteRecursiveItemCount` 和 `RemoteChildCount` 字段
+
+#### 4. 删除检测优化
+
+从全量 Episode ID diff 优化为 Series/Movie 级别 diff：
+
+- **电视剧库**：比较 Series 列表，远端不存在的 Series → 级联删除（`ON DELETE CASCADE` 自动清理 Season + Episode）
+- **电影库**：比较 Movie ID 列表，远端不存在的 Movie → 直接删除
+- 大幅减少 API 调用次数：30万集的库只需比较数百个 Series ID，而非 30万个 Episode ID
+
+#### 5. Series/Season 标识存储
+
+- `ensure_remote_series_folder` 中 `provider_ids` 新增 `RemoteEmbySeriesId` 字段
+- `ensure_remote_season_folder` 中 `provider_ids` 新增 `RemoteEmbySeasonId` 和 `RemoteEmbySeriesId` 字段
+- 支持增量 sync 时精确匹配远端 Series/Season
+
+#### 6. 进度模型增强
+
+`RemoteSyncProgressSnapshot` 新增层级同步字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `current_series` | String | 当前正在处理的 Series 名称 |
+| `skipped_unchanged_series` | u64 | 因 RecursiveItemCount 未变化而跳过的 Series 数量 |
+| `skipped_unchanged_seasons` | u64 | 因 ChildCount 未变化而跳过的 Season 数量 |
+| `processed_series` | u64 | 已处理的 Series 数量 |
+| `total_series` | u64 | Series 总数 |
+
+新增 phase: `SyncingMovies`（电影同步中）
+
+#### 7. 前端适配
+
+- `RemoteEmbySyncOperation` 接口新增层级同步字段
+- `RemoteEmbySettings.vue` 展示当前处理的 Series 名称、已跳过的未变化剧集/季数
+- `syncPhaseLabel.ts` 新增 `SyncingMovies` 阶段标签
+
+### 改动清单
+
+| # | 文件 | 改动 |
+|---|------|------|
+| H-1 | `backend/src/remote_emby.rs` | 新增 `RemoteSeriesItem`, `RemoteSeasonItem` 等层级结构体 |
+| H-2 | `backend/src/remote_emby.rs` | 新增 `fetch_remote_series_page`, `fetch_remote_movies_page`, `fetch_remote_seasons`, `fetch_remote_episodes_for_season` |
+| H-3 | `backend/src/remote_emby.rs` | 新增增量检测函数：`get_local_series_remote_counts`, `update_local_series_remote_counts`, `get_local_season_remote_child_count`, `update_local_season_remote_child_count` |
+| H-4 | `backend/src/remote_emby.rs` | 重写 `sync_source_inner` 为层级遍历模式 |
+| H-5 | `backend/src/remote_emby.rs` | `RemoteSyncProgressSnapshot` 新增层级进度字段 |
+| H-6 | `backend/src/remote_emby.rs` | `RemoteSyncProgress` 新增 `set_series_progress`, `set_movie_sync_progress` 方法 |
+| H-7 | `backend/src/remote_emby.rs` | `ensure_remote_series_folder` provider_ids 新增 `RemoteEmbySeriesId` |
+| H-8 | `backend/src/remote_emby.rs` | `ensure_remote_season_folder` provider_ids 新增 `RemoteEmbySeasonId`, `RemoteEmbySeriesId` |
+| H-9 | `backend/src/routes/remote_emby.rs` | `RemoteEmbySyncOperationDto` / `RemoteEmbySyncOperationState` 新增层级字段 |
+| H-10 | `frontend/src/api/emby.ts` | `RemoteEmbySyncOperation` 接口新增层级字段 |
+| H-11 | `frontend/src/pages/settings/RemoteEmbySettings.vue` | 进度面板展示层级同步详情 |
+| H-12 | `frontend/src/utils/syncPhaseLabel.ts` | 新增 `SyncingMovies` 阶段标签 |
+
+### 验证
+
+- `cargo check`：0 error
+- 层级同步逻辑保持向后兼容：
+  - 已有的 `process_one_remote_sync_item` 函数完全复用
+  - `ensure_remote_series_folder` / `ensure_remote_season_folder` 增强但不破坏原有逻辑
+  - 未知 CollectionType 的 View 自动 fallback 到旧方法
+
+### 影响文件
+- `backend/src/remote_emby.rs`
+- `backend/src/routes/remote_emby.rs`
+- `frontend/src/api/emby.ts`
+- `frontend/src/pages/settings/RemoteEmbySettings.vue`
+- `frontend/src/utils/syncPhaseLabel.ts`
+- `EmbyAPI_Compatibility_Report.md`
+
+---

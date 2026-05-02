@@ -282,15 +282,27 @@ pub struct RemoteSyncProgressSnapshot {
     pub phase: String,
     pub total_items: u64,
     pub fetched_items: u64,
-    pub written_files: u64, // 兼容前端字段名，语义为已入库条目数
+    pub written_files: u64,
     pub progress: f64,
-    /// PB49 (C3)：因 PB49 「skip-existing」加速跳过的条目数。
-    /// 前端展示成「跳过已入库 N」让用户直观看到「为什么 fetched/written 飙得这么快」。
     #[serde(default)]
     pub skipped_existing: u64,
-    /// PB49 (C3)：因 STRM 文件丢失而强制重写的条目数（B1 自愈触发计数）。
     #[serde(default)]
     pub strm_missing_reprocessed: u64,
+    /// 层级同步：当前正在处理的 Series 名称
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub current_series: String,
+    /// 层级同步：因 RecursiveItemCount 未变化而跳过的 Series 数量
+    #[serde(default)]
+    pub skipped_unchanged_series: u64,
+    /// 层级同步：因 ChildCount 未变化而跳过的 Season 数量
+    #[serde(default)]
+    pub skipped_unchanged_seasons: u64,
+    /// 层级同步：已处理的 Series 数量
+    #[serde(default)]
+    pub processed_series: u64,
+    /// 层级同步：Series 总数
+    #[serde(default)]
+    pub total_series: u64,
 }
 
 // PB49 (D1)：snapshot 用 std::sync::Mutex 而非 tokio::sync::RwLock。
@@ -397,6 +409,55 @@ impl RemoteSyncProgress {
         self.with_snapshot(|guard| {
             guard.skipped_existing = skipped_existing;
             guard.strm_missing_reprocessed = strm_missing_reprocessed;
+        });
+    }
+
+    /// 层级同步：设置当前正在处理的 Series 及其进度
+    pub fn set_series_progress(
+        &self,
+        current_series: &str,
+        processed_series: u64,
+        total_series: u64,
+        skipped_unchanged: u64,
+        fetched_items: u64,
+        written_files: u64,
+    ) {
+        self.with_snapshot(|guard| {
+            guard.phase = "SyncingRemoteItems".to_string();
+            guard.current_series = current_series.to_string();
+            guard.processed_series = processed_series;
+            guard.total_series = total_series;
+            guard.skipped_unchanged_series = skipped_unchanged;
+            guard.fetched_items = fetched_items;
+            guard.written_files = written_files;
+            guard.total_items = total_series;
+            let ratio = if total_series == 0 {
+                1.0
+            } else {
+                processed_series as f64 / total_series as f64
+            };
+            guard.progress = (10.0 + ratio * 85.0).clamp(10.0, 95.0);
+        });
+    }
+
+    /// 层级同步：设置电影库同步进度
+    pub fn set_movie_sync_progress(
+        &self,
+        fetched_items: u64,
+        written_files: u64,
+        total_items: u64,
+    ) {
+        self.with_snapshot(|guard| {
+            guard.phase = "SyncingMovies".to_string();
+            guard.fetched_items = fetched_items;
+            guard.written_files = written_files;
+            guard.total_items = total_items;
+            let ratio = if total_items == 0 {
+                1.0
+            } else {
+                fetched_items as f64 / total_items as f64
+            };
+            guard.progress = (10.0 + ratio * 85.0).clamp(10.0, 95.0);
         });
     }
 
@@ -1067,10 +1128,6 @@ async fn sync_source_inner(
     }
 
     // ── 灵活映射：为每个 View 解析目标本地库 ────────────────────
-    // view_library_map 统一适用于 merge 和 separate 模式：
-    //   - map 中有明确映射 → 使用该库（已验证存在）
-    //   - map 中无映射 + merge 模式 → fallback 到 target_library_id
-    //   - map 中无映射 + separate 模式 → 自动创建独立库
     let mut view_library_id_map: HashMap<String, Uuid> = HashMap::new();
     let map_obj = source.view_library_map
         .as_object()
@@ -1082,7 +1139,6 @@ async fn sync_source_inner(
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<Uuid>().ok());
 
-        // 验证显式映射的库是否存在
         let validated_lib_id = if let Some(lib_id) = explicit_lib_id {
             if repository::get_library(&state.pool, lib_id).await?.is_some() {
                 Some(lib_id)
@@ -1096,7 +1152,6 @@ async fn sync_source_inner(
         let lib_id = if let Some(id) = validated_lib_id {
             id
         } else if display_mode_str == REMOTE_DISPLAY_MODE_MERGE {
-            // merge 模式 fallback: 使用全局 target_library_id
             if target_library_opt.is_none() {
                 return Err(AppError::BadRequest(
                     format!("远端库「{}」未指定目标本地库且全局目标库不存在", view.name),
@@ -1104,7 +1159,6 @@ async fn sync_source_inner(
             }
             source.target_library_id
         } else {
-            // separate 模式: 自动创建独立库
             repository::ensure_view_library(
                 &state.pool,
                 source.id,
@@ -1118,7 +1172,6 @@ async fn sync_source_inner(
         };
         view_library_id_map.insert(view.id.clone(), lib_id);
     }
-    // 持久化更新后的映射
     let updated_map: serde_json::Map<String, Value> = view_library_id_map
         .iter()
         .map(|(k, v)| (k.clone(), Value::String(v.to_string())))
@@ -1128,7 +1181,6 @@ async fn sync_source_inner(
     repository::update_source_view_library_map(&state.pool, source.id, &updated_map_value)
         .await?;
 
-    // 将远程 View 虚拟路径注册到对应本地库的 PathInfos（合并时需要）
     for view in &views {
         if let Some(&lib_id) = view_library_id_map.get(&view.id) {
             repository::ensure_remote_view_path_in_library(
@@ -1141,34 +1193,8 @@ async fn sync_source_inner(
         }
     }
 
-    // 同步语义统一为「增 / 改 / 删」三段式：
-    //   - last_sync_at = Some  → 仅拉取远端在该水位线之后变更的条目（增量改），
-    //     并允许覆盖本地已存在的 sidecar（poster/backdrop/logo/.nfo/字幕）。
-    //   - last_sync_at = None  → 视作首次/恢复同步，拉取全部条目用于补齐 DB；
-    //     但仍然不删除 strm_workspace、不全表 cleanup，已存在的 sidecar 一律保留，
-    //     避免覆盖用户手动 POST /Items/{id}/Refresh 写入的 NFO/封面。
-    // 任何情况下都通过 delete_stale_items_for_source 同步「删」远端已不存在的条目。
-    let incremental_since = source.last_sync_at;
-    let force_refresh_sidecar = incremental_since.is_some();
-
-    let mut total_items = 0u64;
-    for view in &views {
-        let view_count = fetch_remote_items_total_count_for_view(
-            &state.pool,
-            source,
-            user_id.as_str(),
-            view.id.as_str(),
-            incremental_since,
-        )
-        .await?;
-        total_items = total_items.saturating_add(view_count);
-    }
-
-    // 仅用于日志/legacy 兼容（路径以 source_root 开头的旧 STRM 文件）
-    let _legacy_source_root = target_library_opt
-        .as_ref()
-        .map(|lib| source_root_path(lib, source))
-        .unwrap_or_else(|| PathBuf::from(format!("__nonexistent_{}", source.id.simple())));
+    let is_incremental = source.last_sync_at.is_some();
+    let force_refresh_sidecar = is_incremental;
 
     let playback_token = source
         .access_token
@@ -1178,14 +1204,11 @@ async fn sync_source_inner(
         .clone();
 
     let strm_workspace = strm_workspace_for_source(source)?;
-
-    // STRM 工作区保持现有内容，不整体清空，但确保根目录存在
     tokio::fs::create_dir_all(&strm_workspace)
         .await
         .map_err(|e| AppError::Internal(format!("创建 STRM 工作区失败: {e}")))?;
 
-    // PB49 (C4)：先把不在当前 view 列表的死 cursor 清掉，避免远端管理员重建库
-    // / 删 view 后表里堆积无人问津的孤儿 cursor 行。
+    // 清理不在当前 view 列表的死 cursor
     {
         let live_view_ids: Vec<String> = views.iter().map(|v| v.id.clone()).collect();
         match repository::prune_source_view_progress_not_in(
@@ -1196,157 +1219,77 @@ async fn sync_source_inner(
         .await
         {
             Ok(pruned) if pruned > 0 => {
-                tracing::info!(
-                    source_id = %source.id,
-                    pruned,
-                    "PB49 (C4)：清理已不存在 view 的续抓游标"
-                );
+                tracing::info!(source_id = %source.id, pruned, "清理已不存在 view 的续抓游标");
             }
             Ok(_) => {}
             Err(error) => {
-                tracing::warn!(
-                    source_id = %source.id,
-                    error = %error,
-                    "PB49 (C4)：清理孤儿续抓游标失败（不阻塞主链路）"
-                );
+                tracing::warn!(source_id = %source.id, error = %error, "清理孤儿续抓游标失败");
             }
         }
     }
 
-    if let Some(handle) = &progress {
-        handle.set_phase("FetchingRemoteIndex", 4.0);
-    }
-    // 1. 获取远端全量 ID 集合，检测「删」（远端已删除但本地仍在 DB 的条目）
-    // SF1：把 progress handle 传下去，让 fetch loop 能在每页之间检查 is_cancelled
-    // 与上报已扫 ID 数（避免 4% 长卡死时前端无任何反馈）。
-    let remote_id_set = fetch_all_remote_item_ids(
-        &state.pool,
-        source,
-        user_id.as_str(),
-        &views,
-        progress.as_ref(),
-    )
-    .await?;
+    // ═══════════════════════════════════════════════════════════════
+    // 层级同步核心：按 Emby 标准 API 分层拉取
+    //   tvshows 库: Series -> Seasons -> Episodes
+    //   movies  库: Movie（直接拉取）
+    //
+    // 增量检测：
+    //   - Series.RecursiveItemCount 变化 -> 该剧有增/删集
+    //   - Season.ChildCount 变化 -> 该季有增/删集
+    //   - Series 列表变化 -> 有新增/删除的剧
+    //   - Movie TotalRecordCount 变化 -> 有新增/删除的电影
+    // ═══════════════════════════════════════════════════════════════
 
-    if let Some(handle) = &progress {
-        handle.set_phase("PruningStaleItems", 5.0);
-    }
-    // 2. 从 DB（与对应 STRM 文件夹）删除远端已不存在的条目
-    let deleted = delete_stale_items_for_source(
-        &state.pool,
-        source.id,
-        source.target_library_id,
-        &remote_id_set,
-        Some(strm_workspace.as_path()),
-    )
-    .await?;
-    if deleted > 0 {
-        tracing::info!(
-            source_id = %source.id,
-            deleted,
-            "同步「删」：清理远端已下架条目"
-        );
-    }
-
-    // PB43：把所有"跨条目共享、需要并发安全"的集合换成 DashMap/DashSet，让 buffer_unordered
-    // 启动的多任务能直接访问 (per-key lock + lock-free read，无需手动 Mutex)。
     let tvshow_roots_written: Arc<DashSet<PathBuf>> = Arc::new(DashSet::new());
     let series_parent_map: Arc<DashMap<String, Uuid>> = Arc::new(DashMap::new());
     let season_parent_map: Arc<DashMap<String, Uuid>> = Arc::new(DashMap::new());
 
-    // PB49 (A2/C5)：在主循环开始前把数据库里已有的 Series/Season 预热进 DashMap，
-    // 让本次 sync 的「第一个 Episode」直接命中缓存，省掉一次 SELECT-then-UPSERT
-    // round-trip。增量同步同样受益（增量场景每个变更 Episode 都要 ensure parent）。
-    //
-    // 仅按 `view_id::sanitize(name)` 这把「name-based fallback key」写入；ensure_remote_series_folder
-    // 会在 sid-based 主 key miss 时再做一次 name-based 二次查询并 mirror 回来。
+    // 预热已有的 Series/Season 缓存
     match repository::preheat_series_for_source(&state.pool, source.id).await {
         Ok(rows) => {
-            let count = rows.len();
-            for (view_id, name, db_id) in rows {
-                let key = format!("{view_id}::{}", sanitize_segment(&name));
-                series_parent_map.insert(key, db_id);
+            for (view_id, name, db_id) in &rows {
+                let key = format!("{view_id}::{}", sanitize_segment(name));
+                series_parent_map.insert(key, *db_id);
             }
-            if count > 0 {
-                tracing::info!(
-                    source_id = %source.id,
-                    series_preheated = count,
-                    "PB49 (A2)：预热 series_parent_map（按 view_id+name fallback key）"
-                );
+            if !rows.is_empty() {
+                tracing::info!(source_id = %source.id, count = rows.len(), "预热 series_parent_map");
             }
         }
         Err(error) => {
-            tracing::warn!(
-                source_id = %source.id,
-                error = %error,
-                "PB49 (A2)：预热 series_parent_map 失败（不阻塞主链路，cache 由首次 ensure 自填）"
-            );
+            tracing::warn!(source_id = %source.id, error = %error, "预热 series_parent_map 失败");
         }
     }
     match repository::preheat_seasons_for_source(&state.pool, source.id).await {
         Ok(rows) => {
-            let count = rows.len();
-            for (series_db_id, season_number, db_id) in rows {
+            for (series_db_id, season_number, db_id) in &rows {
                 let key = format!("{series_db_id}::{season_number}");
-                season_parent_map.insert(key, db_id);
+                season_parent_map.insert(key, *db_id);
             }
-            if count > 0 {
-                tracing::info!(
-                    source_id = %source.id,
-                    seasons_preheated = count,
-                    "PB49 (A2)：预热 season_parent_map（按 series_db_id+season_number key）"
-                );
+            if !rows.is_empty() {
+                tracing::info!(source_id = %source.id, count = rows.len(), "预热 season_parent_map");
             }
         }
         Err(error) => {
-            tracing::warn!(
-                source_id = %source.id,
-                error = %error,
-                "PB49 (A2)：预热 season_parent_map 失败（不阻塞主链路，cache 由首次 ensure 自填）"
-            );
+            tracing::warn!(source_id = %source.id, error = %error, "预热 season_parent_map 失败");
         }
     }
 
-    // PB31-2：已成功拉过详情的 series_id 集合，避免每个 episode 都触发一次 Series 详情拉取。
-    // PB49 (B2)：预热已持久化的 detail-synced 集合，跨 sync 复用——避免每次 sync
-    // 都要为整库每部剧重新拉一遍详情，节省可能十几分钟的后台 detail 排队时间。
     let series_detail_synced: Arc<DashSet<String>> = Arc::new(DashSet::new());
     match repository::preheat_series_detail_synced(&state.pool, source.id).await {
         Ok(ids) => {
-            let count = ids.len();
-            for id in ids {
-                series_detail_synced.insert(id);
+            for id in &ids {
+                series_detail_synced.insert(id.clone());
             }
-            if count > 0 {
-                tracing::info!(
-                    source_id = %source.id,
-                    series_detail_preheated = count,
-                    "PB49 (B2)：预热 series_detail_synced（跨 sync 复用 detail 拉取标记）"
-                );
+            if !ids.is_empty() {
+                tracing::info!(source_id = %source.id, count = ids.len(), "预热 series_detail_synced");
             }
         }
         Err(error) => {
-            tracing::warn!(
-                source_id = %source.id,
-                error = %error,
-                "PB49 (B2)：预热 series_detail_synced 失败（不阻塞主链路，本次 sync 退化为重新拉所有 series 详情）"
-            );
+            tracing::warn!(source_id = %source.id, error = %error, "预热 series_detail_synced 失败");
         }
     }
 
-    // PB49：「已入库」远端 ID 集合——只在「全量/恢复」路径（incremental_since=None）启用，
-    // 用来在主循环里直接跳过那些已经成功落库的 Movie/Episode。
-    //
-    // 用户报告「重试同步从 0 重新开始」时，旧逻辑即使 cursor 续抓也会对前
-    // ~10 万行已存在的条目走完整 upsert + STRM 重写 + series detail 拉取，
-    // 浪费几分钟到几十分钟。这里在主循环开始前一次性把本源已有的
-    // RemoteEmbyItemId 拉到内存，主循环命中后只 bump 进度计数器、立即让位。
-    //
-    // 仅 full sync 启用：incremental sync (force_refresh_sidecar=true) 由远端
-    // `MinDateLastSaved` 过滤过的本来就是变更过的条目，必须重写。
-    // PB49 (B1)：把 DashSet<remote_id> 升级成 DashMap<remote_id, strm_path>，
-    // 让主循环跳过路径在 contains 命中后还能立即拿到 strm 路径做存在性校验。
-    // 这样用户手工删了 strm 文件想触发重生时，不会被「跳过已入库」无声吃掉。
+    // 全量时跳过已入库条目加速
     let local_synced_ids: Arc<DashMap<String, String>> = if force_refresh_sidecar {
         Arc::new(DashMap::new())
     } else {
@@ -1374,210 +1317,788 @@ async fn sync_source_inner(
             tracing::info!(
                 source_id = %source.id,
                 local_synced = map.len(),
-                "PB49：full sync 启用「跳过已入库」加速——主循环将直接跳过本地已有的远端条目（B1：跳过前会校验 STRM 文件存在性）"
+                "全量同步启用「跳过已入库」加速"
             );
         }
         Arc::new(map)
     };
-    // 跳过计数器，sync 结束统一打日志，方便用户验证「跳过」是否真的命中。
-    let skipped_existing = Arc::new(AtomicU64::new(0));
-    // B1：因 STRM 文件丢失而强制走完整 upsert 路径的计数，方便用户验证「自愈」是否被触发。
-    let strm_missing_reprocessed = Arc::new(AtomicU64::new(0));
 
-    // PB43：进度计数器换成原子，让并发任务无锁累加。
+    let skipped_existing = Arc::new(AtomicU64::new(0));
+    let strm_missing_reprocessed = Arc::new(AtomicU64::new(0));
     let fetched_count = Arc::new(AtomicU64::new(0));
     let written_files = Arc::new(AtomicU64::new(0));
-    if let Some(handle) = &progress {
-        handle.set_streaming_progress(0, 0, total_items);
-    }
-    // PB43：source 在并行段共享，仅做只读访问。`fetch_and_upsert_series_detail` 仍需要
-    // `&mut DbRemoteEmbySource`（为偶发 401 触发 ensure_authenticated），所以那里在每个
-    // task 内部 clone 一份本地可变副本——auth 状态写回 DB 是幂等的，不会出现冲突。
+    let skipped_unchanged_series = Arc::new(AtomicU64::new(0));
+    let skipped_unchanged_seasons = Arc::new(AtomicU64::new(0));
     let source_arc: Arc<DbRemoteEmbySource> = Arc::new(source.clone());
 
-    // PB46：series detail 下沉用的 spawn 池资源。
-    // - semaphore 限制后台 detail 同时在飞的远端 HTTP 数量
-    // - handles 收集所有 spawn 的 JoinHandle，sync_source_inner 末尾统一等齐
-    //   （让前端"Completed" 真的等于"全部 series 元数据已落库"）
     let series_detail_semaphore = Arc::new(tokio::sync::Semaphore::new(SERIES_DETAIL_CONCURRENCY));
     let series_detail_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
-
-    // PB49：把 series-detail spawn 池套上 RAII Guard。
-    // 任何 `?` 早退路径（FK 违例 / 取消 / DB 致命错误等）都会触发 Drop，
-    // 自动 cancel + abort 所有 in-flight detail task。正常完成路径在
-    // 末尾的 await 循环之后 `disarm()`。
     let mut detail_handles_guard =
         DetailHandlesGuard::new(Arc::clone(&series_detail_handles), progress.clone());
 
+    // 收集所有远端 Series/Movie ID 集合（用于删除检测——仅与 Series/Movie 层级比对，
+    // 不再全量拉 Episode ID）
+    let mut remote_series_ids_by_view: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut remote_movie_ids_by_view: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut total_deleted = 0u64;
+
+    if let Some(handle) = &progress {
+        handle.set_phase("SyncingRemoteItems", 5.0);
+    }
+
+    let page_size = effective_page_size(source);
+
     for view in &views {
+        if let Some(handle) = &progress {
+            if handle.is_cancelled() {
+                return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+            }
+        }
+
         let item_library_id = *view_library_id_map.get(&view.id).ok_or_else(|| {
             AppError::Internal(format!("View「{}」未找到对应本地库映射", view.name))
         })?;
 
-        // 每个 View 在源根目录下独占子目录：{strm_root}/{source_name}/{view_name}/
         let view_strm_workspace: PathBuf =
             strm_workspace.join(sanitize_segment(view.name.as_str()));
         if let Err(err) = tokio::fs::create_dir_all(&view_strm_workspace).await {
-            tracing::warn!(
-                view = %view.name,
-                error = %err,
-                "创建 View STRM 子目录失败，继续尝试同步"
-            );
+            tracing::warn!(view = %view.name, error = %err, "创建 View STRM 子目录失败");
         }
 
-        // PB49：尝试从持久化游标处续抓——只有当上次同步语义（incremental_since）
-        // 和本次完全一致时才会返回 Some(idx)；否则总是 0 起步，避免「上次全量
-        // 卡在第 N 页 / 这次想做增量」时错位。
-        let resume_index = repository::get_view_progress(
-            &state.pool,
-            source.id,
-            view.id.as_str(),
-            incremental_since,
-        )
-        .await
-        .unwrap_or(None);
-        let mut start_index = resume_index.unwrap_or(0);
-        if resume_index.is_some() && start_index > 0 {
+        let collection_type = view.collection_type.as_deref().unwrap_or("");
+        let is_tvshows = collection_type.eq_ignore_ascii_case("tvshows")
+            || collection_type.is_empty(); // 没有 CollectionType 的按电视剧处理（如"国漫"）
+        let is_movies = collection_type.eq_ignore_ascii_case("movies");
+
+        if is_movies {
+            // ── 电影库：直接拉 Movie 列表 ──────────────────────────
             tracing::info!(
                 source_id = %source.id,
                 view = %view.name,
-                resume_start_index = start_index,
-                "PB49：从上次中断处续抓远端 View"
+                "层级同步：开始处理电影库"
             );
-        }
-        // 拉取速率：单源可调 page_size（50–1000），影响每页带回的条目数（与 request_interval_ms
-        // 一起决定单源对远端的实际 QPS / 带宽消耗）。
-        let page_size = effective_page_size(source);
-        loop {
-            if let Some(handle) = &progress {
-                if handle.is_cancelled() {
-                    return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+
+            let mut movie_ids: HashSet<String> = HashSet::new();
+            let mut start_index: i64 = 0;
+
+            loop {
+                if let Some(handle) = &progress {
+                    if handle.is_cancelled() {
+                        return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+                    }
                 }
-            }
 
-            let page = fetch_remote_items_page_for_view(
-                &state.pool,
-                source,
-                user_id.as_str(),
-                view.id.as_str(),
-                start_index,
-                page_size,
-                incremental_since,
-            )
-            .await?;
-            if page.items.is_empty() {
-                break;
-            }
-
-            // PB43：内层循环改成 `buffer_unordered`，让同一页内 items 并发处理。
-            // 这是真正的提速大头——之前每条 await 5+ 次 IO（DB 写入 + 磁盘 + Series detail HTTP）
-            // 串行串成 ~700ms / 条，并发 8 之后在 IO bound 场景下能压到 ~80-100ms。
-            // page 内并发不会破坏分页推进（外层 loop 仍按 start_index 顺序拉），也不会和
-            // 删除检测 / Series detail 去重冲突（DashMap/DashSet 提供并发安全）。
-            use futures::stream::{self, StreamExt};
-            let view_strm_workspace_arc = Arc::new(view_strm_workspace.clone());
-            let view_id_arc = Arc::new(view.id.clone());
-            let view_name_arc = Arc::new(view.name.clone());
-            let user_id_arc = Arc::new(user_id.clone());
-            let playback_token_arc = Arc::new(playback_token.clone());
-
-            let item_results = stream::iter(page.items.into_iter().map(|base_item| {
-                let state_cloned = state.clone();
-                let source_for_task = Arc::clone(&source_arc);
-                let view_strm_workspace = Arc::clone(&view_strm_workspace_arc);
-                let view_id = Arc::clone(&view_id_arc);
-                let view_name = Arc::clone(&view_name_arc);
-                let user_id = Arc::clone(&user_id_arc);
-                let playback_token = Arc::clone(&playback_token_arc);
-                let series_parent_map = Arc::clone(&series_parent_map);
-                let season_parent_map = Arc::clone(&season_parent_map);
-                let series_detail_synced = Arc::clone(&series_detail_synced);
-                let tvshow_roots_written = Arc::clone(&tvshow_roots_written);
-                let fetched_count = Arc::clone(&fetched_count);
-                let written_files = Arc::clone(&written_files);
-                let series_detail_semaphore = Arc::clone(&series_detail_semaphore);
-                let series_detail_handles = Arc::clone(&series_detail_handles);
-                let local_synced_ids = Arc::clone(&local_synced_ids);
-                let skipped_existing = Arc::clone(&skipped_existing);
-                let strm_missing_reprocessed = Arc::clone(&strm_missing_reprocessed);
-                let progress = progress.clone();
-                async move {
-                    process_one_remote_sync_item(
-                        &state_cloned,
-                        source_for_task.as_ref(),
-                        base_item,
-                        view_id.as_str(),
-                        view_name.as_str(),
-                        view_strm_workspace.as_path(),
-                        item_library_id,
-                        user_id.as_str(),
-                        playback_token.as_str(),
-                        &series_parent_map,
-                        &season_parent_map,
-                        &series_detail_synced,
-                        &tvshow_roots_written,
-                        &fetched_count,
-                        &written_files,
-                        &series_detail_semaphore,
-                        &series_detail_handles,
-                        &local_synced_ids,
-                        &skipped_existing,
-                        &strm_missing_reprocessed,
-                        total_items,
-                        progress.as_ref(),
-                        force_refresh_sidecar,
-                    )
-                    .await
-                }
-            }))
-            .buffer_unordered(REMOTE_SYNC_INNER_CONCURRENCY)
-            .collect::<Vec<Result<(), AppError>>>()
-            .await;
-
-            // PB43：并发任务里任何 hard error（取消 / DB 致命错误等）都向上传播。
-            // 单条目软失败（write_remote_strm_bundle 写盘错、Series detail 拉取失败等）
-            // 在 process_one_remote_sync_item 内部已 warn 后吃掉，不会出现在 results 里。
-            for r in item_results {
-                r?;
-            }
-
-            start_index += page_size;
-            // PB49：每页处理完都把当前 start_index 持久化为下次续抓的游标。
-            // 写入失败仅 warn 不阻塞主链路——续抓只是性能优化，丢一次 cursor
-            // 大不了下次从 0 重头扫一遍（与不开续抓功能等价），不影响正确性。
-            if let Err(error) = repository::save_view_progress(
-                &state.pool,
-                source.id,
-                view.id.as_str(),
-                start_index,
-                page.total_record_count,
-                incremental_since,
-            )
-            .await
-            {
-                tracing::warn!(
-                    source_id = %source.id,
-                    view = %view.name,
+                let page = fetch_remote_movies_page(
+                    &state.pool,
+                    source,
+                    user_id.as_str(),
+                    view.id.as_str(),
                     start_index,
-                    error = %error,
-                    "保存远端同步续抓游标失败（不阻塞主链路）"
+                    page_size,
+                )
+                .await?;
+
+                if page.items.is_empty() {
+                    break;
+                }
+
+                if let Some(handle) = &progress {
+                    handle.set_movie_sync_progress(
+                        start_index as u64,
+                        written_files.load(Ordering::Relaxed),
+                        page.total_record_count.max(0) as u64,
+                    );
+                }
+
+                // 收集 Movie ID 用于删除检测
+                for item in &page.items {
+                    movie_ids.insert(item.id.clone());
+                }
+
+                // 并发处理 Movie 条目（复用已有的 process_one_remote_sync_item）
+                use futures::stream::{self, StreamExt};
+                let view_strm_workspace_arc = Arc::new(view_strm_workspace.clone());
+                let view_id_arc = Arc::new(view.id.clone());
+                let view_name_arc = Arc::new(view.name.clone());
+                let user_id_arc = Arc::new(user_id.clone());
+                let playback_token_arc = Arc::new(playback_token.clone());
+
+                let item_results = stream::iter(page.items.into_iter().map(|base_item| {
+                    let state_cloned = state.clone();
+                    let source_for_task = Arc::clone(&source_arc);
+                    let view_strm_workspace = Arc::clone(&view_strm_workspace_arc);
+                    let view_id = Arc::clone(&view_id_arc);
+                    let view_name = Arc::clone(&view_name_arc);
+                    let user_id = Arc::clone(&user_id_arc);
+                    let playback_token = Arc::clone(&playback_token_arc);
+                    let series_parent_map = Arc::clone(&series_parent_map);
+                    let season_parent_map = Arc::clone(&season_parent_map);
+                    let series_detail_synced = Arc::clone(&series_detail_synced);
+                    let tvshow_roots_written = Arc::clone(&tvshow_roots_written);
+                    let fetched_count = Arc::clone(&fetched_count);
+                    let written_files = Arc::clone(&written_files);
+                    let series_detail_semaphore = Arc::clone(&series_detail_semaphore);
+                    let series_detail_handles = Arc::clone(&series_detail_handles);
+                    let local_synced_ids = Arc::clone(&local_synced_ids);
+                    let skipped_existing = Arc::clone(&skipped_existing);
+                    let strm_missing_reprocessed = Arc::clone(&strm_missing_reprocessed);
+                    let progress = progress.clone();
+                    async move {
+                        process_one_remote_sync_item(
+                            &state_cloned,
+                            source_for_task.as_ref(),
+                            base_item,
+                            view_id.as_str(),
+                            view_name.as_str(),
+                            view_strm_workspace.as_path(),
+                            item_library_id,
+                            user_id.as_str(),
+                            playback_token.as_str(),
+                            &series_parent_map,
+                            &season_parent_map,
+                            &series_detail_synced,
+                            &tvshow_roots_written,
+                            &fetched_count,
+                            &written_files,
+                            &series_detail_semaphore,
+                            &series_detail_handles,
+                            &local_synced_ids,
+                            &skipped_existing,
+                            &strm_missing_reprocessed,
+                            page.total_record_count.max(0) as u64,
+                            progress.as_ref(),
+                            force_refresh_sidecar,
+                        )
+                        .await
+                    }
+                }))
+                .buffer_unordered(REMOTE_SYNC_INNER_CONCURRENCY)
+                .collect::<Vec<Result<(), AppError>>>()
+                .await;
+
+                for r in item_results {
+                    r?;
+                }
+
+                start_index += page_size;
+                if start_index >= page.total_record_count {
+                    break;
+                }
+            }
+
+            remote_movie_ids_by_view.insert(view.id.clone(), movie_ids);
+        } else if is_tvshows {
+            // ── 电视剧库：层级拉取 Series -> Seasons -> Episodes ──
+            tracing::info!(
+                source_id = %source.id,
+                view = %view.name,
+                "层级同步：开始处理电视剧库"
+            );
+
+            // 1. 分页拉取所有 Series
+            let mut all_series: Vec<RemoteSeriesItem> = Vec::new();
+            let mut start_index: i64 = 0;
+            let mut _total_series_count: i64 = 0;
+            loop {
+                let page = fetch_remote_series_page(
+                    &state.pool,
+                    source,
+                    user_id.as_str(),
+                    view.id.as_str(),
+                    start_index,
+                    page_size,
+                )
+                .await?;
+
+                _total_series_count = page.total_record_count;
+                if page.items.is_empty() {
+                    break;
+                }
+
+                all_series.extend(page.items);
+                start_index += page_size;
+                if start_index >= page.total_record_count {
+                    break;
+                }
+            }
+
+            tracing::info!(
+                source_id = %source.id,
+                view = %view.name,
+                series_count = all_series.len(),
+                total_record_count = _total_series_count,
+                "层级同步：获取到 Series 列表"
+            );
+
+            // 收集远端 Series ID 用于删除检测
+            let mut series_ids: HashSet<String> = HashSet::new();
+            for s in &all_series {
+                series_ids.insert(s.id.clone());
+            }
+            remote_series_ids_by_view.insert(view.id.clone(), series_ids);
+
+            // 2. 逐个 Series 处理
+            let total_series = all_series.len() as u64;
+            for (series_idx, remote_series) in all_series.iter().enumerate() {
+                if let Some(handle) = &progress {
+                    if handle.is_cancelled() {
+                        return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+                    }
+                    handle.set_series_progress(
+                        &remote_series.name,
+                        series_idx as u64,
+                        total_series,
+                        skipped_unchanged_series.load(Ordering::Relaxed),
+                        fetched_count.load(Ordering::Relaxed),
+                        written_files.load(Ordering::Relaxed),
+                    );
+                }
+
+                // ── 增量检测：比对 RecursiveItemCount ──
+                if is_incremental {
+                    if let Ok(Some((local_recursive, _local_child))) =
+                        get_local_series_remote_counts(
+                            &state.pool,
+                            source.id,
+                            &remote_series.id,
+                        )
+                        .await
+                    {
+                        let remote_recursive = remote_series.recursive_item_count;
+                        let remote_child = remote_series.child_count;
+
+                        if local_recursive == remote_recursive
+                            && _local_child.map(|c| c as i32) == remote_child
+                        {
+                            skipped_unchanged_series.fetch_add(1, Ordering::Relaxed);
+                            tracing::debug!(
+                                source_id = %source.id,
+                                series = %remote_series.name,
+                                recursive_item_count = ?remote_recursive,
+                                "增量跳过：Series 集数未变化"
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                // ── 确保 Series 父行存在（构造临时 RemoteSyncItem 适配已有函数签名）──
+                let synthetic_item = RemoteSyncItem {
+                    item: RemoteBaseItem {
+                        id: remote_series.id.clone(),
+                        name: remote_series.name.clone(),
+                        item_type: "Series".to_string(),
+                        overview: remote_series.overview.clone(),
+                        production_year: remote_series.production_year,
+                        official_rating: remote_series.official_rating.clone(),
+                        community_rating: remote_series.community_rating,
+                        critic_rating: remote_series.critic_rating,
+                        premiere_date: remote_series.premiere_date.clone(),
+                        run_time_ticks: remote_series.run_time_ticks,
+                        status: remote_series.status.clone(),
+                        end_date: remote_series.end_date.clone(),
+                        series_name: Some(remote_series.name.clone()),
+                        season_name: None,
+                        parent_index_number: None,
+                        index_number: None,
+                        provider_ids: remote_series.provider_ids.clone(),
+                        genres: remote_series.genres.clone(),
+                        studios: remote_series.studios.clone(),
+                        tags: remote_series.tags.clone(),
+                        media_sources: None,
+                        image_tags: remote_series.image_tags.clone(),
+                        backdrop_image_tags: remote_series.backdrop_image_tags.clone(),
+                        series_id: Some(remote_series.id.clone()),
+                        season_id: None,
+                        series_primary_image_tag: remote_series.image_tags.as_ref().and_then(|t| {
+                            t.get("Primary").and_then(Value::as_str).map(String::from)
+                        }),
+                        parent_backdrop_image_tags: remote_series.backdrop_image_tags.clone(),
+                        parent_backdrop_item_id: Some(remote_series.id.clone()),
+                        parent_logo_item_id: None,
+                        parent_logo_image_tag: None,
+                        people: remote_series.people.clone(),
+                        original_title: remote_series.original_title.clone(),
+                        sort_name: remote_series.sort_name.clone(),
+                        taglines: remote_series.taglines.clone(),
+                        production_locations: remote_series.production_locations.clone(),
+                        air_days: remote_series.air_days.clone(),
+                        air_time: remote_series.air_time.clone(),
+                        remote_trailers: remote_series.remote_trailers.clone(),
+                    },
+                    view_id: view.id.clone(),
+                    view_name: view.name.clone(),
+                };
+                let series_db_id = ensure_remote_series_folder(
+                    &state.pool,
+                    source_arc.as_ref(),
+                    &synthetic_item,
+                    None,
+                    &view.id,
+                    &view_strm_workspace,
+                    item_library_id,
+                    &series_parent_map,
+                )
+                .await?;
+
+                // 更新 Series 元数据（使用 Series 列表中带回的数据，不需要再发详情请求）
+                series_detail_synced.insert(remote_series.id.clone());
+
+                // ── 拉取 Seasons ──
+                let seasons_result = fetch_remote_seasons(
+                    &state.pool,
+                    source,
+                    user_id.as_str(),
+                    &remote_series.id,
+                )
+                .await?;
+
+                for remote_season in &seasons_result.items {
+                    if let Some(handle) = &progress {
+                        if handle.is_cancelled() {
+                            return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+                        }
+                    }
+
+                    let season_number = remote_season.index_number.unwrap_or(1);
+
+                    // ── 增量检测：比对 Season ChildCount ──
+                    if is_incremental {
+                        if let Ok(Some(local_child_count)) =
+                            get_local_season_remote_child_count(
+                                &state.pool,
+                                source.id,
+                                &remote_season.id,
+                            )
+                            .await
+                        {
+                            if let Some(remote_child_count) = remote_season.child_count {
+                                if local_child_count == remote_child_count {
+                                    skipped_unchanged_seasons.fetch_add(1, Ordering::Relaxed);
+                                    tracing::debug!(
+                                        source_id = %source.id,
+                                        series = %remote_series.name,
+                                        season = season_number,
+                                        child_count = remote_child_count,
+                                        "增量跳过：Season 集数未变化"
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    // ── 确保 Season 父行存在（构造临时 RemoteSyncItem 适配函数签名）──
+                    let season_synthetic_item = RemoteSyncItem {
+                        item: RemoteBaseItem {
+                            id: remote_season.id.clone(),
+                            name: remote_season.name.clone(),
+                            item_type: "Season".to_string(),
+                            overview: remote_season.overview.clone(),
+                            production_year: remote_season.production_year,
+                            official_rating: None,
+                            community_rating: None,
+                            critic_rating: None,
+                            premiere_date: None,
+                            run_time_ticks: None,
+                            status: None,
+                            end_date: None,
+                            series_name: remote_season.series_name.clone().or_else(|| Some(remote_series.name.clone())),
+                            season_name: Some(remote_season.name.clone()),
+                            parent_index_number: remote_season.index_number,
+                            index_number: remote_season.index_number,
+                            provider_ids: remote_season.provider_ids.clone(),
+                            genres: Vec::new(),
+                            studios: Vec::new(),
+                            tags: Vec::new(),
+                            media_sources: None,
+                            image_tags: remote_season.image_tags.clone(),
+                            backdrop_image_tags: remote_season.backdrop_image_tags.clone(),
+                            series_id: remote_season.series_id.clone().or_else(|| Some(remote_series.id.clone())),
+                            season_id: Some(remote_season.id.clone()),
+                            series_primary_image_tag: remote_season.series_primary_image_tag.clone(),
+                            parent_backdrop_image_tags: remote_season.parent_backdrop_image_tags.clone(),
+                            parent_backdrop_item_id: remote_season.parent_backdrop_item_id.clone(),
+                            parent_logo_item_id: remote_season.parent_logo_item_id.clone(),
+                            parent_logo_image_tag: remote_season.parent_logo_image_tag.clone(),
+                            people: Vec::new(),
+                            original_title: None,
+                            sort_name: None,
+                            taglines: Vec::new(),
+                            production_locations: Vec::new(),
+                            air_days: Vec::new(),
+                            air_time: None,
+                            remote_trailers: None,
+                        },
+                        view_id: view.id.clone(),
+                        view_name: view.name.clone(),
+                    };
+                    let _season_db_id = ensure_remote_season_folder(
+                        &state.pool,
+                        source_arc.as_ref(),
+                        &season_synthetic_item,
+                        series_db_id,
+                        &view_strm_workspace,
+                        item_library_id,
+                        &season_parent_map,
+                    )
+                    .await?;
+
+                    // ── 拉取该季的所有 Episode ──
+                    let episodes_result = fetch_remote_episodes_for_season(
+                        &state.pool,
+                        source,
+                        user_id.as_str(),
+                        &remote_series.id,
+                        &remote_season.id,
+                    )
+                    .await?;
+
+                    if episodes_result.items.is_empty() {
+                        continue;
+                    }
+
+                    // 并发处理 Episode（复用已有的 process_one_remote_sync_item）
+                    use futures::stream::{self, StreamExt};
+                    let view_strm_workspace_arc = Arc::new(view_strm_workspace.clone());
+                    let view_id_arc = Arc::new(view.id.clone());
+                    let view_name_arc = Arc::new(view.name.clone());
+                    let user_id_arc = Arc::new(user_id.clone());
+                    let playback_token_arc = Arc::new(playback_token.clone());
+
+                    let ep_count = episodes_result.items.len();
+                    let item_results = stream::iter(
+                        episodes_result.items.into_iter().map(|base_item| {
+                            let state_cloned = state.clone();
+                            let source_for_task = Arc::clone(&source_arc);
+                            let view_strm_workspace = Arc::clone(&view_strm_workspace_arc);
+                            let view_id = Arc::clone(&view_id_arc);
+                            let view_name = Arc::clone(&view_name_arc);
+                            let user_id = Arc::clone(&user_id_arc);
+                            let playback_token = Arc::clone(&playback_token_arc);
+                            let series_parent_map = Arc::clone(&series_parent_map);
+                            let season_parent_map = Arc::clone(&season_parent_map);
+                            let series_detail_synced = Arc::clone(&series_detail_synced);
+                            let tvshow_roots_written = Arc::clone(&tvshow_roots_written);
+                            let fetched_count = Arc::clone(&fetched_count);
+                            let written_files = Arc::clone(&written_files);
+                            let series_detail_semaphore = Arc::clone(&series_detail_semaphore);
+                            let series_detail_handles = Arc::clone(&series_detail_handles);
+                            let local_synced_ids = Arc::clone(&local_synced_ids);
+                            let skipped_existing = Arc::clone(&skipped_existing);
+                            let strm_missing_reprocessed =
+                                Arc::clone(&strm_missing_reprocessed);
+                            let progress = progress.clone();
+                            async move {
+                                process_one_remote_sync_item(
+                                    &state_cloned,
+                                    source_for_task.as_ref(),
+                                    base_item,
+                                    view_id.as_str(),
+                                    view_name.as_str(),
+                                    view_strm_workspace.as_path(),
+                                    item_library_id,
+                                    user_id.as_str(),
+                                    playback_token.as_str(),
+                                    &series_parent_map,
+                                    &season_parent_map,
+                                    &series_detail_synced,
+                                    &tvshow_roots_written,
+                                    &fetched_count,
+                                    &written_files,
+                                    &series_detail_semaphore,
+                                    &series_detail_handles,
+                                    &local_synced_ids,
+                                    &skipped_existing,
+                                    &strm_missing_reprocessed,
+                                    total_series,
+                                    progress.as_ref(),
+                                    force_refresh_sidecar,
+                                )
+                                .await
+                            }
+                        }),
+                    )
+                    .buffer_unordered(REMOTE_SYNC_INNER_CONCURRENCY)
+                    .collect::<Vec<Result<(), AppError>>>()
+                    .await;
+
+                    for r in item_results {
+                        r?;
+                    }
+
+                    // 更新本地 Season 的 remote child_count
+                    if let Some(child_count) = remote_season.child_count {
+                        if let Err(e) = update_local_season_remote_child_count(
+                            &state.pool,
+                            source.id,
+                            &remote_season.id,
+                            child_count,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                source_id = %source.id,
+                                season_id = %remote_season.id,
+                                error = %e,
+                                "更新 Season remote child_count 失败"
+                            );
+                        }
+                    }
+
+                    tracing::debug!(
+                        source_id = %source.id,
+                        series = %remote_series.name,
+                        season = season_number,
+                        episodes = ep_count,
+                        "层级同步：Season 处理完成"
+                    );
+                }
+
+                // 更新本地 Series 的 remote counts
+                if let Err(e) = update_local_series_remote_counts(
+                    &state.pool,
+                    source.id,
+                    &remote_series.id,
+                    remote_series.recursive_item_count,
+                    remote_series.child_count,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        source_id = %source.id,
+                        series = %remote_series.name,
+                        error = %e,
+                        "更新 Series remote counts 失败"
+                    );
+                }
+
+                tracing::debug!(
+                    source_id = %source.id,
+                    series = %remote_series.name,
+                    series_idx = series_idx + 1,
+                    total_series,
+                    "层级同步：Series 处理完成"
                 );
             }
-            if start_index >= page.total_record_count {
-                break;
+        } else {
+            // 未知类型库：使用旧方法 fallback（IncludeItemTypes=Movie,Episode）
+            tracing::warn!(
+                source_id = %source.id,
+                view = %view.name,
+                collection_type = collection_type,
+                "未识别的 CollectionType，使用旧方法同步"
+            );
+
+            let mut start_index: i64 = 0;
+            loop {
+                if let Some(handle) = &progress {
+                    if handle.is_cancelled() {
+                        return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+                    }
+                }
+
+                let incremental_since = source.last_sync_at;
+                let page = fetch_remote_items_page_for_view(
+                    &state.pool,
+                    source,
+                    user_id.as_str(),
+                    view.id.as_str(),
+                    start_index,
+                    page_size,
+                    incremental_since,
+                )
+                .await?;
+                if page.items.is_empty() {
+                    break;
+                }
+
+                use futures::stream::{self, StreamExt};
+                let view_strm_workspace_arc = Arc::new(view_strm_workspace.clone());
+                let view_id_arc = Arc::new(view.id.clone());
+                let view_name_arc = Arc::new(view.name.clone());
+                let user_id_arc = Arc::new(user_id.clone());
+                let playback_token_arc = Arc::new(playback_token.clone());
+
+                let item_results = stream::iter(page.items.into_iter().map(|base_item| {
+                    let state_cloned = state.clone();
+                    let source_for_task = Arc::clone(&source_arc);
+                    let view_strm_workspace = Arc::clone(&view_strm_workspace_arc);
+                    let view_id = Arc::clone(&view_id_arc);
+                    let view_name = Arc::clone(&view_name_arc);
+                    let user_id = Arc::clone(&user_id_arc);
+                    let playback_token = Arc::clone(&playback_token_arc);
+                    let series_parent_map = Arc::clone(&series_parent_map);
+                    let season_parent_map = Arc::clone(&season_parent_map);
+                    let series_detail_synced = Arc::clone(&series_detail_synced);
+                    let tvshow_roots_written = Arc::clone(&tvshow_roots_written);
+                    let fetched_count = Arc::clone(&fetched_count);
+                    let written_files = Arc::clone(&written_files);
+                    let series_detail_semaphore = Arc::clone(&series_detail_semaphore);
+                    let series_detail_handles = Arc::clone(&series_detail_handles);
+                    let local_synced_ids = Arc::clone(&local_synced_ids);
+                    let skipped_existing = Arc::clone(&skipped_existing);
+                    let strm_missing_reprocessed = Arc::clone(&strm_missing_reprocessed);
+                    let progress = progress.clone();
+                    async move {
+                        process_one_remote_sync_item(
+                            &state_cloned,
+                            source_for_task.as_ref(),
+                            base_item,
+                            view_id.as_str(),
+                            view_name.as_str(),
+                            view_strm_workspace.as_path(),
+                            item_library_id,
+                            user_id.as_str(),
+                            playback_token.as_str(),
+                            &series_parent_map,
+                            &season_parent_map,
+                            &series_detail_synced,
+                            &tvshow_roots_written,
+                            &fetched_count,
+                            &written_files,
+                            &series_detail_semaphore,
+                            &series_detail_handles,
+                            &local_synced_ids,
+                            &skipped_existing,
+                            &strm_missing_reprocessed,
+                            page.total_record_count.max(0) as u64,
+                            progress.as_ref(),
+                            force_refresh_sidecar,
+                        )
+                        .await
+                    }
+                }))
+                .buffer_unordered(REMOTE_SYNC_INNER_CONCURRENCY)
+                .collect::<Vec<Result<(), AppError>>>()
+                .await;
+
+                for r in item_results {
+                    r?;
+                }
+
+                start_index += page_size;
+                if start_index >= page.total_record_count {
+                    break;
+                }
             }
         }
     }
 
-    // PB46：等齐所有 series detail spawn task。
-    //
-    // 时间预算：detail spawn 的并发度是 SERIES_DETAIL_CONCURRENCY=4，单条 detail 一般
-    // 1-3 秒（HTTP + people upsert）。如果是大库（1 万 series），最坏要等 ~2-3 分钟。
-    // 但实际上 episode 主循环跑了几小时，detail spawn 一直在背景滚，到这里大多数都已完成。
-    //
-    // 取消语义：spawn task 内部已经 check 过 progress.is_cancelled，被取消的会立即 return；
-    // 这里 join 不需要再 abort。take 之后清空容器，handles 持有的 JoinHandle drop 即 detach。
+    // ── 删除检测（层级优化版）──────────────────────────────────
+    // 电视剧库：比对 Series 列表（数量远少于 Episode），缺失的 Series -> 级联删除
+    // 电影库：比对 Movie ID 列表
+    if let Some(handle) = &progress {
+        handle.set_phase("PruningStaleItems", 96.0);
+    }
+
+    for view in &views {
+        let collection_type = view.collection_type.as_deref().unwrap_or("");
+        let is_tvshows = collection_type.eq_ignore_ascii_case("tvshows")
+            || collection_type.is_empty();
+        let is_movies = collection_type.eq_ignore_ascii_case("movies");
+
+        if is_tvshows {
+            if let Some(remote_series_ids) = remote_series_ids_by_view.get(&view.id) {
+                // 查找本地有但远端没有的 Series -> 级联删除
+                let local_series: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+                    r#"
+                    SELECT id, provider_ids->>'RemoteEmbySeriesId' AS remote_sid
+                    FROM media_items
+                    WHERE provider_ids->>'RemoteEmbySourceId' = $1
+                      AND item_type = 'Series'
+                      AND provider_ids->>'RemoteEmbyViewId' = $2
+                    "#,
+                )
+                .bind(source.id.to_string())
+                .bind(&view.id)
+                .fetch_all(&state.pool)
+                .await?;
+
+                let mut stale_series_db_ids: Vec<Uuid> = Vec::new();
+                for (db_id, remote_sid) in &local_series {
+                    if let Some(sid) = remote_sid {
+                        if !remote_series_ids.contains(sid) {
+                            stale_series_db_ids.push(*db_id);
+                        }
+                    }
+                }
+
+                if !stale_series_db_ids.is_empty() {
+                    tracing::info!(
+                        source_id = %source.id,
+                        view = %view.name,
+                        stale_count = stale_series_db_ids.len(),
+                        "层级删除检测：发现远端已下架的 Series"
+                    );
+                    for batch in stale_series_db_ids.chunks(100) {
+                        let deleted = sqlx::query(
+                            "DELETE FROM media_items WHERE id = ANY($1)"
+                        )
+                        .bind(batch)
+                        .execute(&state.pool)
+                        .await?;
+                        total_deleted += deleted.rows_affected();
+                    }
+                }
+            }
+        } else if is_movies {
+            if let Some(remote_movie_ids) = remote_movie_ids_by_view.get(&view.id) {
+                // 查找本地有但远端没有的 Movie -> 删除
+                let local_movies: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+                    r#"
+                    SELECT id, provider_ids->>'RemoteEmbyItemId' AS remote_mid
+                    FROM media_items
+                    WHERE provider_ids->>'RemoteEmbySourceId' = $1
+                      AND item_type = 'Movie'
+                      AND provider_ids->>'RemoteEmbyItemId' IS NOT NULL
+                      AND provider_ids->>'RemoteEmbyItemId' <> ''
+                    "#,
+                )
+                .bind(source.id.to_string())
+                .fetch_all(&state.pool)
+                .await?;
+
+                let mut stale_movie_db_ids: Vec<Uuid> = Vec::new();
+                for (db_id, remote_mid) in &local_movies {
+                    if let Some(mid) = remote_mid {
+                        if !remote_movie_ids.contains(mid) {
+                            stale_movie_db_ids.push(*db_id);
+                        }
+                    }
+                }
+
+                if !stale_movie_db_ids.is_empty() {
+                    tracing::info!(
+                        source_id = %source.id,
+                        view = %view.name,
+                        stale_count = stale_movie_db_ids.len(),
+                        "层级删除检测：发现远端已下架的 Movie"
+                    );
+                    for batch in stale_movie_db_ids.chunks(100) {
+                        let deleted = sqlx::query(
+                            "DELETE FROM media_items WHERE id = ANY($1)"
+                        )
+                        .bind(batch)
+                        .execute(&state.pool)
+                        .await?;
+                        total_deleted += deleted.rows_affected();
+                    }
+                }
+            }
+        }
+    }
+
+    if total_deleted > 0 {
+        tracing::info!(
+            source_id = %source.id,
+            deleted = total_deleted,
+            "层级同步「删」：清理远端已下架条目"
+        );
+    }
+
+    // 等齐所有 series detail spawn task
     let pending_handles = std::mem::take(&mut *series_detail_handles.lock().await);
     if !pending_handles.is_empty() {
         let pending_count = pending_handles.len();
@@ -1585,41 +2106,31 @@ async fn sync_source_inner(
             handle.set_phase("FinalizingSeriesDetails", 99.0);
         }
         for h in pending_handles {
-            // detail spawn 任务自身永远不 panic（内部 await Result 都已 warn-and-swallow），
-            // JoinError 只可能来自任务被强制 abort——本次同步路径不会 abort，所以忽略。
             let _ = h.await;
         }
         tracing::info!(
             source_id = %source.id,
             count = pending_count,
-            "PB46：所有 Series 详情后台同步完成"
+            "所有 Series 详情后台同步完成"
         );
     }
-    // PB49：成功走到这里说明所有 detail handle 都已 await 完毕，解除 guard 的
-    // Drop 行为；否则 guard 会在函数末尾 drop 时再 spawn 一次空 abort，浪费但
-    // 无副作用。disarm 必须在所有 `?` 早退之后才发生。
     detail_handles_guard.disarm();
 
-    // PB49：整次 sync 走到这里说明所有 view 都已扫完且所有 detail handle 都已 await。
-    // 此时清空续抓游标——下次同步将从 start_index=0 重新开始（这是期望行为：
-    // 续抓游标是为「失败重试」准备的，成功完成后 stale 数据应清掉以免污染下次）。
     if let Err(error) = repository::clear_source_view_progress(&state.pool, source.id).await {
-        tracing::warn!(
-            source_id = %source.id,
-            error = %error,
-            "清空远端同步续抓游标失败（不阻塞主链路；下次同步会用旧游标再处理一次）"
-        );
+        tracing::warn!(source_id = %source.id, error = %error, "清空续抓游标失败");
     }
 
     let fetched_count = fetched_count.load(Ordering::Relaxed);
     let written_files = written_files.load(Ordering::Relaxed) as usize;
     let skipped_existing_count = skipped_existing.load(Ordering::Relaxed);
     let strm_missing_reprocessed_count = strm_missing_reprocessed.load(Ordering::Relaxed);
+    let skipped_series = skipped_unchanged_series.load(Ordering::Relaxed);
+    let skipped_seasons = skipped_unchanged_seasons.load(Ordering::Relaxed);
 
-    let mode_label = if incremental_since.is_some() {
-        "增量(增/改/删)"
+    let mode_label = if is_incremental {
+        "增量(层级)"
     } else {
-        "首次(增/删)"
+        "首次(层级)"
     };
     tracing::info!(
         source_id = %source.id,
@@ -1627,9 +2138,11 @@ async fn sync_source_inner(
         fetched = fetched_count,
         written = written_files,
         skipped_existing = skipped_existing_count,
+        skipped_unchanged_series = skipped_series,
+        skipped_unchanged_seasons = skipped_seasons,
         strm_missing_reprocessed = strm_missing_reprocessed_count,
-        deleted_stale = deleted,
-        "远端 Emby 同步完成"
+        deleted_stale = total_deleted,
+        "远端 Emby 层级同步完成"
     );
 
     let scan_summary = ScanSummary {
@@ -2534,7 +3047,15 @@ async fn ensure_remote_series_folder(
             end_date: parse_remote_premiere_date(item.item.end_date.as_deref()),
             air_days: &empty,
             air_time: None,
-            provider_ids: remote_marker_provider_ids(source.id, None, Some(&item.view_id), None),
+            provider_ids: {
+                let mut pids = remote_marker_provider_ids(source.id, None, Some(&item.view_id), None);
+                if let Some(sid) = item.item.series_id.as_deref().filter(|s| !s.trim().is_empty()) {
+                    if let Some(obj) = pids.as_object_mut() {
+                        obj.insert("RemoteEmbySeriesId".to_string(), Value::String(sid.to_string()));
+                    }
+                }
+                pids
+            },
             genres: &item.item.genres,
             studios: &item.item.studios,
             tags: &item.item.tags,
@@ -2631,7 +3152,18 @@ async fn ensure_remote_season_folder(
             end_date: parse_remote_premiere_date(item.item.end_date.as_deref()),
             air_days: &empty,
             air_time: None,
-            provider_ids: remote_marker_provider_ids(source.id, None, Some(&item.view_id), None),
+            provider_ids: {
+                let mut pids = remote_marker_provider_ids(source.id, None, Some(&item.view_id), None);
+                if let Some(obj) = pids.as_object_mut() {
+                    if let Some(sid) = item.item.season_id.as_deref().filter(|s| !s.trim().is_empty()) {
+                        obj.insert("RemoteEmbySeasonId".to_string(), Value::String(sid.to_string()));
+                    }
+                    if let Some(series_id) = item.item.series_id.as_deref().filter(|s| !s.trim().is_empty()) {
+                        obj.insert("RemoteEmbySeriesId".to_string(), Value::String(series_id.to_string()));
+                    }
+                }
+                pids
+            },
             genres: &item.item.genres,
             studios: &item.item.studios,
             tags: &item.item.tags,
@@ -3290,6 +3822,407 @@ async fn fetch_remote_items_page_for_view(
         query.push(("MinDateLastSaved".to_string(), since.to_rfc3339()));
     }
     get_json_with_retry(pool, source, &endpoint, &query).await
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 层级 Fetch 函数：按 Emby 标准 API 层级拉取
+//   Views -> Series(tvshows)/Movies(movies) -> Seasons -> Episodes
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 远端 Series 条目（来自 /Users/{userId}/Items?IncludeItemTypes=Series）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteSeriesItem {
+    id: String,
+    name: String,
+    #[serde(rename = "Type")]
+    item_type: String,
+    #[serde(default)]
+    overview: Option<String>,
+    production_year: Option<i32>,
+    #[serde(default)]
+    official_rating: Option<String>,
+    #[serde(default)]
+    community_rating: Option<f64>,
+    #[serde(default)]
+    critic_rating: Option<f64>,
+    #[serde(default)]
+    premiere_date: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    end_date: Option<String>,
+    #[serde(default)]
+    provider_ids: Value,
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
+    genres: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
+    studios: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
+    tags: Vec<String>,
+    #[serde(default)]
+    image_tags: Option<Value>,
+    #[serde(default)]
+    backdrop_image_tags: Option<Value>,
+    #[serde(default)]
+    people: Vec<RemotePersonEntry>,
+    #[serde(default)]
+    original_title: Option<String>,
+    #[serde(default)]
+    sort_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
+    taglines: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
+    production_locations: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_list_lossy")]
+    air_days: Vec<String>,
+    #[serde(default)]
+    air_time: Option<String>,
+    #[serde(default)]
+    remote_trailers: Option<Value>,
+    /// Emby: 该 Series 下所有集的总数（含所有季）
+    #[serde(default)]
+    recursive_item_count: Option<i64>,
+    /// Emby: 该 Series 下的季数
+    #[serde(default)]
+    child_count: Option<i32>,
+    #[serde(default)]
+    run_time_ticks: Option<i64>,
+    #[serde(default)]
+    date_created: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteSeriesResult {
+    #[serde(default)]
+    items: Vec<RemoteSeriesItem>,
+    total_record_count: i64,
+}
+
+/// 远端 Season 条目（来自 /Shows/{seriesId}/Seasons）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteSeasonItem {
+    id: String,
+    name: String,
+    #[serde(default)]
+    index_number: Option<i32>,
+    #[serde(default)]
+    child_count: Option<i32>,
+    #[serde(default)]
+    production_year: Option<i32>,
+    #[serde(default)]
+    date_created: Option<String>,
+    #[serde(default)]
+    image_tags: Option<Value>,
+    #[serde(default)]
+    backdrop_image_tags: Option<Value>,
+    #[serde(default)]
+    series_name: Option<String>,
+    #[serde(default)]
+    series_id: Option<String>,
+    #[serde(default)]
+    series_primary_image_tag: Option<String>,
+    #[serde(default)]
+    parent_logo_item_id: Option<String>,
+    #[serde(default)]
+    parent_logo_image_tag: Option<String>,
+    #[serde(default)]
+    parent_backdrop_item_id: Option<String>,
+    #[serde(default)]
+    parent_backdrop_image_tags: Option<Value>,
+    #[serde(default)]
+    primary_image_aspect_ratio: Option<f64>,
+    #[serde(rename = "Type", default)]
+    item_type: Option<String>,
+    #[serde(default)]
+    overview: Option<String>,
+    #[serde(default)]
+    provider_ids: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteSeasonsResult {
+    #[serde(default)]
+    items: Vec<RemoteSeasonItem>,
+    total_record_count: i64,
+}
+
+/// 远端 Episode 条目（来自 /Shows/{seriesId}/Episodes）
+/// 复用已有 RemoteBaseItem（Episode 字段完全兼容）
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RemoteEpisodesResult {
+    #[serde(default)]
+    items: Vec<RemoteBaseItem>,
+    total_record_count: i64,
+}
+
+/// 分页拉取某个 tvshows 库下的 Series 列表
+async fn fetch_remote_series_page(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    user_id: &str,
+    view_id: &str,
+    start_index: i64,
+    limit: i64,
+) -> Result<RemoteSeriesResult, AppError> {
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let query = vec![
+        ("Recursive".to_string(), "true".to_string()),
+        ("ParentId".to_string(), view_id.to_string()),
+        ("IncludeItemTypes".to_string(), "Series".to_string()),
+        (
+            "Fields".to_string(),
+            "BasicSyncInfo,PrimaryImageAspectRatio,ProductionYear,Status,EndDate,\
+             ChildCount,RecursiveItemCount,DateCreated,Overview,Genres,Studios,Tags,\
+             ProviderIds,ImageTags,BackdropImageTags,People,OriginalTitle,SortName,\
+             Taglines,ProductionLocations,AirDays,AirTime,RemoteTrailers,\
+             OfficialRating,CommunityRating,CriticRating,PremiereDate"
+                .to_string(),
+        ),
+        ("EnableTotalRecordCount".to_string(), "true".to_string()),
+        ("SortBy".to_string(), "SortName".to_string()),
+        ("SortOrder".to_string(), "Ascending".to_string()),
+        ("StartIndex".to_string(), start_index.to_string()),
+        ("Limit".to_string(), limit.to_string()),
+    ];
+    get_json_with_retry(pool, source, &endpoint, &query).await
+}
+
+/// 分页拉取某个 movies 库下的 Movie 列表（直接使用 RemoteItemsResult）
+async fn fetch_remote_movies_page(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    user_id: &str,
+    view_id: &str,
+    start_index: i64,
+    limit: i64,
+) -> Result<RemoteItemsResult, AppError> {
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let query = vec![
+        ("Recursive".to_string(), "true".to_string()),
+        ("ParentId".to_string(), view_id.to_string()),
+        ("IncludeItemTypes".to_string(), "Movie".to_string()),
+        (
+            "Fields".to_string(),
+            "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,\
+             OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,\
+             ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,\
+             ImageTags,BackdropImageTags,\
+             People,OriginalTitle,SortName,Taglines,ProductionLocations,\
+             AirDays,AirTime,RemoteTrailers"
+                .to_string(),
+        ),
+        ("EnableTotalRecordCount".to_string(), "true".to_string()),
+        ("SortBy".to_string(), "SortName".to_string()),
+        ("SortOrder".to_string(), "Ascending".to_string()),
+        ("StartIndex".to_string(), start_index.to_string()),
+        ("Limit".to_string(), limit.to_string()),
+    ];
+    get_json_with_retry(pool, source, &endpoint, &query).await
+}
+
+/// 拉取某个 Series 下的所有 Season（/Shows/{seriesId}/Seasons）
+async fn fetch_remote_seasons(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    user_id: &str,
+    series_id: &str,
+) -> Result<RemoteSeasonsResult, AppError> {
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!("{server_url}/Shows/{series_id}/Seasons");
+    let query = vec![
+        ("UserId".to_string(), user_id.to_string()),
+        (
+            "Fields".to_string(),
+            "PrimaryImageAspectRatio,ItemCounts,ChildCount,ProductionYear,\
+             DateCreated,Overview,ImageTags,BackdropImageTags,ProviderIds"
+                .to_string(),
+        ),
+    ];
+    get_json_with_retry(pool, source, &endpoint, &query).await
+}
+
+/// 拉取某个 Series 下某个 Season 的所有 Episode（/Shows/{seriesId}/Episodes）
+async fn fetch_remote_episodes_for_season(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    user_id: &str,
+    series_id: &str,
+    season_id: &str,
+) -> Result<RemoteEpisodesResult, AppError> {
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!("{server_url}/Shows/{series_id}/Episodes");
+    let query = vec![
+        ("UserId".to_string(), user_id.to_string()),
+        ("SeasonId".to_string(), season_id.to_string()),
+        (
+            "Fields".to_string(),
+            "BasicSyncInfo,PrimaryImageAspectRatio,Overview,RunTimeTicks,\
+             IndexNumber,ParentIndexNumber,DateCreated,PremiereDate,\
+             ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,\
+             ImageTags,BackdropImageTags,SeriesId,SeasonId,\
+             SeriesPrimaryImageTag,ParentBackdropImageTags,ParentBackdropItemId,\
+             ParentLogoItemId,ParentLogoImageTag,\
+             People,OriginalTitle,SortName,Taglines,ProductionLocations,\
+             OfficialRating,CommunityRating,CriticRating,\
+             SeriesName,SeasonName"
+                .to_string(),
+        ),
+    ];
+    get_json_with_retry(pool, source, &endpoint, &query).await
+}
+
+/// 拉取某个 Series 下所有 Episode（不限 Season，用于获取全量 Episode ID）
+async fn fetch_remote_all_episodes_for_series(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+    user_id: &str,
+    series_id: &str,
+) -> Result<RemoteEpisodesResult, AppError> {
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!("{server_url}/Shows/{series_id}/Episodes");
+    let query = vec![
+        ("UserId".to_string(), user_id.to_string()),
+        (
+            "Fields".to_string(),
+            "BasicSyncInfo,PrimaryImageAspectRatio,Overview,RunTimeTicks,\
+             IndexNumber,ParentIndexNumber,DateCreated,PremiereDate,\
+             ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,\
+             ImageTags,BackdropImageTags,SeriesId,SeasonId,\
+             SeriesPrimaryImageTag,ParentBackdropImageTags,ParentBackdropItemId,\
+             ParentLogoItemId,ParentLogoImageTag,\
+             People,OriginalTitle,SortName,Taglines,ProductionLocations,\
+             OfficialRating,CommunityRating,CriticRating,\
+             SeriesName,SeasonName"
+                .to_string(),
+        ),
+    ];
+    get_json_with_retry(pool, source, &endpoint, &query).await
+}
+
+/// 查询本地 DB 中某个 Series 的 remote_recursive_item_count（存储在 provider_ids 中）
+async fn get_local_series_remote_counts(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    remote_series_id: &str,
+) -> Result<Option<(Option<i64>, Option<i32>)>, AppError> {
+    let row: Option<(Value,)> = sqlx::query_as(
+        r#"
+        SELECT provider_ids
+        FROM media_items
+        WHERE provider_ids->>'RemoteEmbySourceId' = $1
+          AND provider_ids->>'RemoteEmbySeriesId' = $2
+          AND item_type = 'Series'
+        LIMIT 1
+        "#,
+    )
+    .bind(source_id.to_string())
+    .bind(remote_series_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|(pids,)| {
+        let recursive = pids
+            .get("RemoteRecursiveItemCount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i64>().ok());
+        let child = pids
+            .get("RemoteChildCount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i32>().ok());
+        (recursive, child)
+    }))
+}
+
+/// 更新本地 DB 中某个 Series 的 remote counts（存入 provider_ids）
+async fn update_local_series_remote_counts(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    remote_series_id: &str,
+    recursive_item_count: Option<i64>,
+    child_count: Option<i32>,
+) -> Result<(), AppError> {
+    let mut set_parts = Vec::new();
+    if let Some(v) = recursive_item_count {
+        set_parts.push(format!(
+            "provider_ids = jsonb_set(provider_ids, '{{RemoteRecursiveItemCount}}', '\"{}\"')",
+            v
+        ));
+    }
+    if let Some(v) = child_count {
+        set_parts.push(format!(
+            "provider_ids = jsonb_set(provider_ids, '{{RemoteChildCount}}', '\"{}\"')",
+            v
+        ));
+    }
+    if set_parts.is_empty() {
+        return Ok(());
+    }
+    let sql = format!(
+        "UPDATE media_items SET {} WHERE provider_ids->>'RemoteEmbySourceId' = $1 \
+         AND provider_ids->>'RemoteEmbySeriesId' = $2 AND item_type = 'Series'",
+        set_parts.join(", ")
+    );
+    sqlx::query(&sql)
+        .bind(source_id.to_string())
+        .bind(remote_series_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 获取本地 DB 中某个 Season 的 remote child_count
+async fn get_local_season_remote_child_count(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    remote_season_id: &str,
+) -> Result<Option<i32>, AppError> {
+    let row: Option<(Value,)> = sqlx::query_as(
+        r#"
+        SELECT provider_ids
+        FROM media_items
+        WHERE provider_ids->>'RemoteEmbySourceId' = $1
+          AND provider_ids->>'RemoteEmbySeasonId' = $2
+          AND item_type = 'Season'
+        LIMIT 1
+        "#,
+    )
+    .bind(source_id.to_string())
+    .bind(remote_season_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.and_then(|(pids,)| {
+        pids.get("RemoteChildCount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<i32>().ok())
+    }))
+}
+
+/// 更新本地 DB 中某个 Season 的 remote child_count
+async fn update_local_season_remote_child_count(
+    pool: &sqlx::PgPool,
+    source_id: Uuid,
+    remote_season_id: &str,
+    child_count: i32,
+) -> Result<(), AppError> {
+    let sql = "UPDATE media_items SET provider_ids = jsonb_set(provider_ids, '{RemoteChildCount}', $1) \
+               WHERE provider_ids->>'RemoteEmbySourceId' = $2 \
+               AND provider_ids->>'RemoteEmbySeasonId' = $3 AND item_type = 'Season'";
+    sqlx::query(sql)
+        .bind(json!(child_count.to_string()))
+        .bind(source_id.to_string())
+        .bind(remote_season_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// 仅拉取远端条目的 Id 列表（用于增量刷新中的删除检测）

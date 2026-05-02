@@ -645,10 +645,18 @@ export interface RemoteEmbySyncOperation {
   TotalItems: number;
   FetchedItems: number;
   WrittenFiles: number;
-  /** PB49 (C3)：因 PB49 fast path 跳过的已入库条目数。 */
   SkippedExisting?: number;
-  /** PB49 (C3 / B1)：本地 STRM 文件丢失被强制重写的条目数。 */
   StrmMissingReprocessed?: number;
+  /** 层级同步：当前正在处理的 Series 名称 */
+  CurrentSeries?: string;
+  /** 层级同步：因 RecursiveItemCount 未变化而跳过的 Series 数量 */
+  SkippedUnchangedSeries?: number;
+  /** 层级同步：因 ChildCount 未变化而跳过的 Season 数量 */
+  SkippedUnchangedSeasons?: number;
+  /** 层级同步：已处理的 Series 数量 */
+  ProcessedSeries?: number;
+  /** 层级同步：Series 总数 */
+  TotalSeries?: number;
   Queued: boolean;
   Running: boolean;
   Done: boolean;

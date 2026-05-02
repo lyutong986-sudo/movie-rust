@@ -214,7 +214,8 @@ const activeOperationDetail = computed(() => {
   if (!running) return '';
   const runtime = operationRuntimeSeconds(running);
   const phase = syncPhaseLabel(running.Phase, { remotePrefix: false }) || running.Status;
-  return `${running.SourceName} · ${phase} · ${Math.round(running.Progress || 0)}% · ${runtime} 秒`;
+  const seriesInfo = running.CurrentSeries ? ` · ${running.CurrentSeries}` : '';
+  return `${running.SourceName} · ${phase} · ${Math.round(running.Progress || 0)}%${seriesInfo} · ${runtime} 秒`;
 });
 
 function formatDate(value?: string) {
@@ -270,7 +271,13 @@ function sourceProgressText(source: RemoteEmbySource) {
   const runtime = operationRuntimeSeconds(operation);
   if (!operation.Done) {
     const phase = syncPhaseLabel(operation.Phase, { remotePrefix: false }) || operation.Status;
-    return `阶段 ${phase} · ${progress}% · 已运行 ${runtime} 秒`;
+    const seriesInfo = operation.CurrentSeries
+      ? ` · ${operation.CurrentSeries}`
+      : '';
+    const skippedInfo = (operation.SkippedUnchangedSeries || 0) > 0
+      ? ` · 跳过 ${operation.SkippedUnchangedSeries} 部未变化剧集`
+      : '';
+    return `阶段 ${phase} · ${progress}%${seriesInfo}${skippedInfo} · 已运行 ${runtime} 秒`;
   }
   if (operation.Status === 'Succeeded') {
     const writtenFiles = operation.Result?.WrittenFiles ?? operation.WrittenFiles ?? 0;
@@ -1185,7 +1192,7 @@ onBeforeUnmount(() => {
               </p>
             </div>
             <div>
-              <p class="text-muted">远端抓取</p>
+              <p class="text-muted">已处理 / 总数</p>
               <p class="text-highlighted mt-1 font-medium">
                 {{ sourceOperation(source)?.FetchedItems || 0 }} / {{ sourceOperation(source)?.TotalItems || 0 }}
               </p>
@@ -1194,8 +1201,40 @@ onBeforeUnmount(() => {
               <p class="text-muted">入库条目</p>
               <p class="text-highlighted mt-1 font-medium">{{ sourceOperation(source)?.WrittenFiles || 0 }}</p>
             </div>
-            <!-- PB49 (C3)：跳过 / 自愈计数。当存在跳过命中时占满整行展示，让用户直观看到
-                 「绝大多数条目走了 fast path，并不是真的在重写库」。 -->
+            <!-- 层级同步：当前正在处理的 Series -->
+            <div
+              v-if="sourceOperation(source)?.CurrentSeries"
+              class="md:col-span-3"
+            >
+              <p class="text-muted">正在处理</p>
+              <p class="text-highlighted mt-1 font-medium truncate">
+                {{ sourceOperation(source)?.CurrentSeries }}
+              </p>
+            </div>
+            <!-- 层级同步增量统计 -->
+            <div
+              v-if="(sourceOperation(source)?.SkippedUnchangedSeries || 0) > 0
+                || (sourceOperation(source)?.SkippedUnchangedSeasons || 0) > 0
+                || (sourceOperation(source)?.ProcessedSeries || 0) > 0"
+              class="md:col-span-3 flex flex-wrap gap-x-4 gap-y-1 text-muted"
+            >
+              <span v-if="(sourceOperation(source)?.ProcessedSeries || 0) > 0">
+                已处理剧集：<span class="text-highlighted font-medium">
+                  {{ sourceOperation(source)?.ProcessedSeries || 0 }} / {{ sourceOperation(source)?.TotalSeries || 0 }}
+                </span>
+              </span>
+              <span v-if="(sourceOperation(source)?.SkippedUnchangedSeries || 0) > 0">
+                跳过未变化剧集：<span class="text-highlighted font-medium">
+                  {{ sourceOperation(source)?.SkippedUnchangedSeries || 0 }}
+                </span>
+              </span>
+              <span v-if="(sourceOperation(source)?.SkippedUnchangedSeasons || 0) > 0">
+                跳过未变化季：<span class="text-highlighted font-medium">
+                  {{ sourceOperation(source)?.SkippedUnchangedSeasons || 0 }}
+                </span>
+              </span>
+            </div>
+            <!-- 跳过 / 自愈计数 -->
             <div
               v-if="(sourceOperation(source)?.SkippedExisting || 0) > 0
                 || (sourceOperation(source)?.StrmMissingReprocessed || 0) > 0"

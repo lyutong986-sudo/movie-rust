@@ -45,6 +45,8 @@ export function syncPhaseLabel(
     case 'SyncingRemoteItems':
     case 'UpsertingVirtualItems':
       return needPrefix ? '远端条目入库中' : '条目入库中';
+    case 'SyncingMovies':
+      return needPrefix ? '远端电影同步中' : '电影同步中';
     case 'PruningStaleItems':
       return needPrefix ? '清理远端已删条目' : '清理已删条目';
     case 'FinalizingSeriesDetails':

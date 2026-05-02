@@ -361,9 +361,14 @@ struct RemoteEmbySyncOperationDto {
     total_items: u64,
     fetched_items: u64,
     written_files: u64,
-    /// PB49 (C3)：fast-path 跳过 / strm 自愈计数。
     skipped_existing: u64,
     strm_missing_reprocessed: u64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    current_series: String,
+    skipped_unchanged_series: u64,
+    skipped_unchanged_seasons: u64,
+    processed_series: u64,
+    total_series: u64,
     queued: bool,
     running: bool,
     done: bool,
@@ -387,9 +392,13 @@ struct RemoteEmbySyncOperationState {
     total_items: u64,
     fetched_items: u64,
     written_files: u64,
-    /// PB49 (C3)：fast-path 跳过 / strm 自愈计数（poller 从 snapshot 同步）。
     skipped_existing: u64,
     strm_missing_reprocessed: u64,
+    current_series: String,
+    skipped_unchanged_series: u64,
+    skipped_unchanged_seasons: u64,
+    processed_series: u64,
+    total_series: u64,
     cancel_requested: bool,
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
@@ -421,6 +430,11 @@ impl RemoteEmbySyncOperationState {
             written_files: self.written_files,
             skipped_existing: self.skipped_existing,
             strm_missing_reprocessed: self.strm_missing_reprocessed,
+            current_series: self.current_series.clone(),
+            skipped_unchanged_series: self.skipped_unchanged_series,
+            skipped_unchanged_seasons: self.skipped_unchanged_seasons,
+            processed_series: self.processed_series,
+            total_series: self.total_series,
             queued: self.status == "Queued",
             running: matches!(self.status, "Running" | "Cancelling"),
             done: self.is_done(),
@@ -923,6 +937,11 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
                 written_files: 0,
                 skipped_existing: 0,
                 strm_missing_reprocessed: 0,
+                current_series: String::new(),
+                skipped_unchanged_series: 0,
+                skipped_unchanged_seasons: 0,
+                processed_series: 0,
+                total_series: 0,
                 cancel_requested: false,
                 created_at: Utc::now(),
                 started_at: None,
@@ -998,9 +1017,13 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
                 operation.total_items = snap.total_items;
                 operation.fetched_items = snap.fetched_items;
                 operation.written_files = snap.written_files;
-                // PB49 (C3)：fast-path 跳过 / 自愈计数同步到 DTO，给前端展示。
                 operation.skipped_existing = snap.skipped_existing;
                 operation.strm_missing_reprocessed = snap.strm_missing_reprocessed;
+                operation.current_series = snap.current_series;
+                operation.skipped_unchanged_series = snap.skipped_unchanged_series;
+                operation.skipped_unchanged_seasons = snap.skipped_unchanged_seasons;
+                operation.processed_series = snap.processed_series;
+                operation.total_series = snap.total_series;
             }
         });
 
