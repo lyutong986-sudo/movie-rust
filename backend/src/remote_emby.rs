@@ -943,6 +943,44 @@ pub async fn sync_source_with_progress(
         ))
     })?;
 
+    // PB49 (Cap)：全局远端 sync 并发上限。
+    //
+    // per-source mutex 已经保证「同源不并发」，本 semaphore 进一步限制「跨源
+    // 并发不超过 N」。多源用户（>= 5 个 source）配「自动增量同步间隔」时，
+    // cron 容易在同一分钟触发所有源——每源主循环 8 + detail 4 = 12 个 PG 连接，
+    // 5 源同时跑就要 60 个连接，加上日常 API 流量直接打爆默认 100 的 PG 池。
+    //
+    // 在这里 await 等待 permit 就好——per-source mutex 已经握在手里，重复
+    // 触发会被前面的 try_lock 立即拒掉，不会堆积排队任务；前端 UI 通过
+    // `WaitingForGlobalSlot` phase 看到「队列中」状态。
+    //
+    // 等待期间也响应 cancel：每秒醒一次检查 progress.is_cancelled。
+    if let Some(handle) = &progress {
+        handle.set_phase("WaitingForGlobalSlot", 0.5);
+    }
+    let global_sem = state.remote_sync_global_semaphore.clone();
+    let _global_permit = {
+        let mut acquire_fut = Box::pin(global_sem.acquire_owned());
+        loop {
+            tokio::select! {
+                permit = &mut acquire_fut => {
+                    break permit.map_err(|_| AppError::Internal(
+                        "全局远端 sync semaphore 已关闭".to_string()
+                    ))?;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    if let Some(handle) = &progress {
+                        if handle.is_cancelled() {
+                            return Err(AppError::BadRequest(
+                                "同步任务在等待全局并发槽时被取消".to_string()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    };
+
     let mut source = repository::get_remote_emby_source(&state.pool, source_id)
         .await?
         .ok_or_else(|| AppError::NotFound("远端 Emby 源不存在".to_string()))?;

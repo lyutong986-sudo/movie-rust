@@ -41,6 +41,16 @@ pub struct AppState {
     /// Limits how many DB connections the scanner/sync background tasks can hold
     /// simultaneously, reserving the rest for API requests.
     pub scan_db_semaphore: Arc<Semaphore>,
+    /// PB49 (Cap)：远端 Emby sync 全局并发上限。
+    ///
+    /// 与 `SOURCE_SYNC_LOCKS`（per-source mutex）正交：
+    ///   - per-source mutex 保证「同一 source 不能并发」，重复触发立即返回 BUSY
+    ///   - 本 semaphore 保证「不同 source 加起来不超过 N 个并发」，N 个之外的
+    ///     源会在 acquire().await 上排队，UI 上看到的 phase = `WaitingForGlobalSlot`
+    ///
+    /// 由 `Config.remote_sync_global_concurrency` 决定容量；`None` 表示不限制
+    /// （等价于 `Semaphore::new(usize::MAX)`，仍提供句柄一致性，避免分支复杂化）。
+    pub remote_sync_global_semaphore: Arc<Semaphore>,
     /// Broadcast channel for server events (WebSocket push to clients)
     pub event_tx: tokio::sync::broadcast::Sender<ServerEvent>,
 }

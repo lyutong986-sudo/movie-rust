@@ -4,6 +4,7 @@ import SettingsLayout from '../../layouts/SettingsLayout.vue';
 import type { ScheduledTaskInfo, ScheduledTaskTrigger } from '../../api/emby';
 import { api, isAdmin } from '../../store/app';
 import { useAppToast } from '../../composables/toast';
+import { syncPhaseLabel } from '../../utils/syncPhaseLabel';
 
 const toast = useAppToast();
 const tasks = ref<ScheduledTaskInfo[]>([]);
@@ -116,51 +117,9 @@ function statusColor(status?: string) {
   return 'neutral';
 }
 
-// PB49 (UX)：把后端 task:library-scan:progress_detail 写入的 Phase 字段
-// 翻译成中文。同 LibrarySettings 的映射保持一致——这里复制一份避免引入跨页耦合，
-// 因为这两个页面的字段来源不同（一个是 ScanOperation，一个是 ScheduledTaskInfo）。
+// PB49 (UX)：scheduled task 的 Phase 中文化复用统一 helper（含 WaitingForGlobalSlot 等）。
 function taskPhaseLabel(phase?: string | null): string {
-  if (!phase) return '';
-  const retry = /^Retrying\((\d+)\/(\d+)\)$/.exec(phase);
-  if (retry) return `重试中 ${retry[1]}/${retry[2]}`;
-  if (phase.startsWith('RemoteSync/')) {
-    const remote = phase.slice('RemoteSync/'.length);
-    switch (remote) {
-      case 'FetchingRemoteIndex':
-        return '远端 ID 索引中';
-      case 'FetchingRemoteItems':
-        return '远端条目获取中';
-      case 'SyncingRemoteItems':
-      case 'UpsertingVirtualItems':
-        return '远端条目入库中';
-      case 'PruningStaleItems':
-        return '清理远端已删条目';
-      case 'FinalizingSeriesDetails':
-        return '剧集元数据收尾';
-      case 'Completed':
-        return '远端同步已完成';
-      default:
-        return remote ? `远端 · ${remote}` : '远端同步中';
-    }
-  }
-  switch (phase) {
-    case 'CollectingFiles':
-      return '收集文件中';
-    case 'Importing':
-      return '入库中';
-    case 'PostProcessing':
-      return '后处理';
-    case 'Completed':
-      return '已完成';
-    case 'Cancelled':
-      return '已取消';
-    case 'Failed':
-      return '已失败';
-    case 'Queued':
-      return '排队中';
-    default:
-      return phase;
-  }
+  return syncPhaseLabel(phase, { remotePrefix: true });
 }
 
 function taskCounterText(task: ScheduledTaskInfo): string {

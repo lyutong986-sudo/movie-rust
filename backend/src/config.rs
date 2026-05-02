@@ -47,6 +47,25 @@ pub struct Config {
     ///
     /// 通过环境变量 `APP_AUTO_LOCAL_SCAN_AFTER_REMOTE_SYNC=false` 关闭。
     pub auto_local_scan_after_remote_sync: bool,
+    /// PB49 (Cap)：同时允许跑的远端 Emby sync 任务数上限。
+    ///
+    /// 用户配置了多个远端 source 时，定时调度器或自动增量轮询可能在同一分钟
+    /// 触发 N 个源同时同步——每个源会瞬间占用 ~12 个 PG 连接（主循环 8 +
+    /// detail spawn 4），加上日常 API 流量，N≥5 时容易把 PG 池打满
+    /// （默认 100 个连接，主循环占用其中 ~70+，剩余 ~30 留给 API）。
+    ///
+    /// 全局 semaphore 在 per-source mutex 之后获取（acquire `await`），
+    /// 等待期间会推一个 `WaitingForGlobalSlot` phase 让前端 UI 看到「队列中」
+    /// 而非「卡死」。per-source mutex 仍保证「同源不能并发」，所以本配置
+    /// 只影响**不同 source 之间**的并发度。
+    ///
+    /// - 默认 `2`：同时只跑 2 个源，对常见 50~100 PG 连接配置安全
+    /// - 增大：PG 池要相应调大（建议 `database_max_connections >=
+    ///   remote_sync_global_concurrency * 15 + 30`）
+    /// - 设为 `0`：表示不限制（不推荐）
+    ///
+    /// 通过环境变量 `APP_REMOTE_SYNC_GLOBAL_CONCURRENCY` 调整。
+    pub remote_sync_global_concurrency: usize,
 }
 
 impl Config {
@@ -60,10 +79,18 @@ impl Config {
         Ok(Self {
             database_url: env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://movie:movie@localhost:5432/movie_rust".to_string()),
+            // PB49 (Cap)：默认从 50 提升到 100。
+            //
+            // 单个远端 source sync 高峰占用 ~12 连接（主循环 8 + detail spawn 4）。
+            // 默认 `remote_sync_global_concurrency=2` 意味着两个源并发时占用 ~24，
+            // 加上日常 API / WebSocket 流量后剩余给 scanner / playback ~70+，安全。
+            //
+            // PG 服务器侧的 `max_connections` 必须 ≥ 此值；PG 默认 100，单实例
+            // 跑这一个项目刚好够用，多实例 / 共享 DB 场景需要 PG 那边先扩容。
             database_max_connections: env::var("DATABASE_MAX_CONNECTIONS")
                 .ok()
                 .and_then(|value| value.parse().ok())
-                .unwrap_or(50),
+                .unwrap_or(100),
             host: env::var("APP_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
             port: env::var("APP_PORT")
                 .ok()
@@ -135,6 +162,10 @@ impl Config {
                 .ok()
                 .map(|value| value.eq_ignore_ascii_case("true"))
                 .unwrap_or(true),
+            remote_sync_global_concurrency: env::var("APP_REMOTE_SYNC_GLOBAL_CONCURRENCY")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(2),
         })
     }
 

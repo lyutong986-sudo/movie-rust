@@ -124,6 +124,28 @@ async fn main() -> Result<()> {
     let max_conns = state_config_max_conns;
     let scan_db_permits = (max_conns as usize).saturating_sub(8).max(2);
     let (event_tx, _) = tokio::sync::broadcast::channel::<crate::state::ServerEvent>(256);
+
+    // PB49 (Cap)：远端 sync 全局并发 semaphore。
+    // `0` 视作「不限制」——给一个足够大的容量保留 Arc 句柄，让上层 acquire 流程
+    // 不必在 `Option<Semaphore>` 上分两条分支。
+    let remote_sync_concurrency = config.remote_sync_global_concurrency;
+    let remote_sync_capacity = if remote_sync_concurrency == 0 {
+        usize::MAX >> 3 // 留点上界余量，避免某些 sem 实现 cap = usize::MAX 触发溢出
+    } else {
+        remote_sync_concurrency
+    };
+    tracing::info!(
+        database_max_connections = max_conns,
+        scan_db_permits,
+        remote_sync_global_concurrency = remote_sync_concurrency,
+        "PB49 (Cap)：连接池与远端 sync 并发已就绪"
+    );
+    if remote_sync_concurrency == 0 {
+        tracing::warn!(
+            "APP_REMOTE_SYNC_GLOBAL_CONCURRENCY=0：未限制远端 sync 并发数，多 source 同时触发可能耗尽 PG 池"
+        );
+    }
+
     let state = AppState {
         pool,
         config,
@@ -134,6 +156,7 @@ async fn main() -> Result<()> {
         task_tokens: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         http_client,
         scan_db_semaphore: Arc::new(tokio::sync::Semaphore::new(scan_db_permits)),
+        remote_sync_global_semaphore: Arc::new(tokio::sync::Semaphore::new(remote_sync_capacity)),
         event_tx,
     };
 

@@ -9,6 +9,7 @@ import type {
   VirtualFolderInfo
 } from '../../api/emby';
 import { api, isAdmin } from '../../store/app';
+import { syncPhaseLabel } from '../../utils/syncPhaseLabel';
 
 const DEFAULT_SPOOFED_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) EmbyTheater/3.0.20 Chrome/124.0.0.0 Safari/537.36';
@@ -212,7 +213,8 @@ const activeOperationDetail = computed(() => {
   const running = Object.values(operationBySourceId.value).find((operation) => !operation.Done);
   if (!running) return '';
   const runtime = operationRuntimeSeconds(running);
-  return `${running.SourceName} · ${running.Phase || running.Status} · ${Math.round(running.Progress || 0)}% · ${runtime} 秒`;
+  const phase = syncPhaseLabel(running.Phase, { remotePrefix: false }) || running.Status;
+  return `${running.SourceName} · ${phase} · ${Math.round(running.Progress || 0)}% · ${runtime} 秒`;
 });
 
 function formatDate(value?: string) {
@@ -230,7 +232,8 @@ function sourceStatus(source: RemoteEmbySource) {
   const operation = sourceOperation(source);
   if (operation && !operation.Done) {
     const progress = Number.isFinite(operation.Progress) ? Math.round(operation.Progress) : 0;
-    return `${operation.Phase || operation.Status} (${progress}%)`;
+    const phase = syncPhaseLabel(operation.Phase, { remotePrefix: false }) || operation.Status;
+    return `${phase} (${progress}%)`;
   }
   if (operation?.Done && operation.Status === 'Failed') return '任务失败';
   if (operation?.Done && operation.Status === 'Cancelled') return '已中断';
@@ -266,7 +269,8 @@ function sourceProgressText(source: RemoteEmbySource) {
   const progress = Number.isFinite(operation.Progress) ? Math.round(operation.Progress) : 0;
   const runtime = operationRuntimeSeconds(operation);
   if (!operation.Done) {
-    return `阶段 ${operation.Phase || operation.Status} · ${progress}% · 已运行 ${runtime} 秒`;
+    const phase = syncPhaseLabel(operation.Phase, { remotePrefix: false }) || operation.Status;
+    return `阶段 ${phase} · ${progress}% · 已运行 ${runtime} 秒`;
   }
   if (operation.Status === 'Succeeded') {
     const writtenFiles = operation.Result?.WrittenFiles ?? operation.WrittenFiles ?? 0;
@@ -1177,7 +1181,7 @@ onBeforeUnmount(() => {
             <div>
               <p class="text-muted">阶段</p>
               <p class="text-highlighted mt-1 font-medium">
-                {{ sourceOperation(source)?.Phase || sourceOperation(source)?.Status }}
+                {{ syncPhaseLabel(sourceOperation(source)?.Phase, { remotePrefix: false }) || sourceOperation(source)?.Status }}
               </p>
             </div>
             <div>
