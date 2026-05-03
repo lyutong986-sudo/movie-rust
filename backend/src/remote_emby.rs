@@ -901,13 +901,14 @@ pub async fn preview_remote_views(
         parse_remote_json_response(login_response, auth_endpoint.as_str()).await?;
 
     let views_endpoint = format!("{server_url}/Users/{}/Views", login.user.id);
-    let views_auth = emby_auth_header_for_device(device_id.as_str(), Some(login.access_token.as_str()));
+    let views_auth = emby_auth_header_for_identity(
+        "Infuse-Direct", "Apple TV", device_id.as_str(), "8.2.4", login.user.id.as_str(),
+    );
     let views_response = client
         .get(&views_endpoint)
         .query(&[
             ("Fields", "CollectionType,ChildCount,RecursiveItemCount"),
             ("EnableTotalRecordCount", "true"),
-            ("reqformat", "json"),
             ("api_key", login.access_token.as_str()),
         ])
         .header(header::USER_AGENT.as_str(), preview_ua)
@@ -5250,13 +5251,7 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
             .access_token
             .clone()
             .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
-        let mut normalized_query = query.to_vec();
-        if !normalized_query
-            .iter()
-            .any(|(key, _)| key.eq_ignore_ascii_case("reqformat"))
-        {
-            normalized_query.push(("reqformat".to_string(), "json".to_string()));
-        }
+        let normalized_query = query.to_vec();
         // 拉取速率节流：实际发出请求前先按 `source.request_interval_ms` 等候足够时间，
         // 这样无论调用点是 fetch_remote_items_page_for_view（顺序循环）还是后续可能
         // 引入的并发路径，都会在网关层（per-source mutex）形成「全局最低间隔」屏障。
@@ -5495,7 +5490,6 @@ async fn fetch_remote_playback_info(
         ),
         ("AutoOpenLiveStream".to_string(), "false".to_string()),
         ("MaxStreamingBitrate".to_string(), "200000000".to_string()),
-        ("reqformat".to_string(), "json".to_string()),
     ];
     if let Some(value) = media_source_id {
         if !value.trim().is_empty() {
@@ -6949,44 +6943,50 @@ fn first_media_source_id(item: &RemoteSyncItem) -> Option<&str> {
 }
 
 /// PB39：从 source 取出"已伪装的"四元组（Client / Device / DeviceId / Version），
-/// 让远端 Devices 表里这一行不再带 `MovieRustTransit / MovieRustProxy / movie-rust-{uuid}`
-/// 等自爆字符串。所有调用点（Static URL、PlaybackInfo、items 列表拉取、登录预览）
-/// 统一走这里，确保**同一个 source 永远展示同一台"设备"**，符合真人客户端长期使用的画像。
-fn emby_auth_header(source: &DbRemoteEmbySource, token: Option<&str>) -> String {
+/// 构造认证后 GET/POST 请求的 Authorization 头值（官方规范）：
+/// `Emby UserId="...", Client="...", Device="...", DeviceId="...", Version="..."`
+/// Token 不放在 Authorization 值中，通过独立 `X-Emby-Token` header 传递。
+fn emby_auth_header(source: &DbRemoteEmbySource, _token: Option<&str>) -> String {
+    let user_id = source.remote_user_id.as_deref().unwrap_or("");
     emby_auth_header_for_identity(
         source.effective_spoofed_client(),
         source.effective_spoofed_device_name(),
         source.effective_spoofed_device_id().as_str(),
         source.effective_spoofed_app_version(),
-        token,
+        user_id,
     )
 }
 
 /// 不带 source 上下文（preview / 一次性预登录场景）时的伪装头构造。
-/// 调用方负责传入随机 device_id 并选好 client / device 名。
-fn emby_auth_header_for_device(device_id: &str, token: Option<&str>) -> String {
-    emby_auth_header_for_identity("Infuse-Direct", "Apple TV", device_id, "8.2.4", token)
+/// 登录时无 UserId，传空即可。
+fn emby_auth_header_for_device(device_id: &str, _token: Option<&str>) -> String {
+    emby_auth_header_for_identity("Infuse-Direct", "Apple TV", device_id, "8.2.4", "")
 }
 
+/// 按 EmbySDK 官方文档格式构造 Authorization 头值：
+/// - 有 UserId 时：`Emby UserId="...", Client="...", Device="...", DeviceId="...", Version="..."`
+/// - 无 UserId 时：`Emby Client="...", Device="...", DeviceId="...", Version="..."`
+/// Token 通过独立 `X-Emby-Token` header + `api_key` query param 传递，不嵌入此值。
 fn emby_auth_header_for_identity(
     client: &str,
     device: &str,
     device_id: &str,
     version: &str,
-    token: Option<&str>,
+    user_id: &str,
 ) -> String {
-    if let Some(token) = token.filter(|value| !value.trim().is_empty()) {
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
         format!(
-            "Emby Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\", Token=\"{}\"",
+            "Emby Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\"",
             client.trim(),
             device.trim(),
             device_id.trim(),
-            version.trim(),
-            token.trim()
+            version.trim()
         )
     } else {
         format!(
-            "Emby Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\"",
+            "Emby UserId=\"{}\", Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\"",
+            user_id,
             client.trim(),
             device.trim(),
             device_id.trim(),
