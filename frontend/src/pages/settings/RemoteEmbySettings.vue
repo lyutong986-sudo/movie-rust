@@ -369,25 +369,77 @@ async function pollOperations() {
 
   pollingBusy = true;
   try {
-    const results = await Promise.all(
-      pending.map((operation) => api.remoteEmbySyncOperation(operation.Id))
+    // PB49 (FX4)：用 allSettled 替代 all——容器重启后旧 operationId 会 404，
+    // 旧实现里一个 404 会让整批 polling 失败、UI 永远停在「正在同步」。
+    // 现在按单条结果处理：fulfilled 走原逻辑；rejected 且是 404/410 直接把
+    // 那个 SourceId 从 operations 表里拿走（让按钮回到"立即同步/重试同步"），
+    // 其它错误（5xx / 网络断）只在 console 提示一次，不打 toast。
+    const settled = await Promise.allSettled(
+      pending.map((operation) =>
+        api
+          .remoteEmbySyncOperation(operation.Id)
+          .then((result) => ({ ok: true as const, sourceId: operation.SourceId, result }))
+          .catch((err) => ({
+            ok: false as const,
+            sourceId: operation.SourceId,
+            operationId: operation.Id,
+            err: err as Error & { status?: number }
+          }))
+      )
     );
+
     const next = { ...operationBySourceId.value };
     let shouldRefreshSources = false;
-    for (const operation of results) {
-      next[operation.SourceId] = operation;
-      if (operation.Done) {
-        shouldRefreshSources = true;
+    let allDoneOrGone = true;
+    let nonRecoverableMessage = '';
+
+    for (const settledResult of settled) {
+      if (settledResult.status !== 'fulfilled') {
+        // Promise.allSettled 包了一层；外层的 .catch 已经把 reject 转成 ok:false 对象了，
+        // 这里几乎不会走到。保险起见忽略。
+        allDoneOrGone = false;
+        continue;
+      }
+      const value = settledResult.value;
+      if (value.ok) {
+        next[value.sourceId] = value.result;
+        if (value.result.Done) {
+          shouldRefreshSources = true;
+        } else {
+          allDoneOrGone = false;
+        }
+      } else {
+        const status = value.err.status ?? 0;
+        if (status === 404 || status === 410) {
+          // 后端找不到这个 op：进程重启 / TTL 过期 / 被清理。从内存里拿走，
+          // 让该源回到 sources 列表里以 last_sync_error / last_sync_at 决定按钮。
+          delete next[value.sourceId];
+          shouldRefreshSources = true;
+          // eslint-disable-next-line no-console
+          console.info(
+            `[RemoteEmbySync] operation ${value.operationId} 404，已从前端状态移除（容器可能重启过）`
+          );
+        } else {
+          // 5xx / 网络问题——保留旧记录，下一轮重试，仅记录最近一条非致命错误用于诊断
+          allDoneOrGone = false;
+          nonRecoverableMessage = value.err.message || `HTTP ${status}`;
+        }
       }
     }
+
     operationBySourceId.value = next;
     if (shouldRefreshSources) {
       await refreshSourcesOnly();
     }
-    if (results.every((operation) => operation.Done)) {
+    if (allDoneOrGone || Object.values(next).every((op) => op.Done)) {
       stopPolling();
     }
+    if (nonRecoverableMessage) {
+      // eslint-disable-next-line no-console
+      console.warn('[RemoteEmbySync] 轮询出现非 404 错误：', nonRecoverableMessage);
+    }
   } catch (err) {
+    // 兜底：极少数 throw 不在 inner catch 里时（如 JSON parse），仍然显示给用户
     error.value = err instanceof Error ? err.message : String(err);
   } finally {
     pollingBusy = false;

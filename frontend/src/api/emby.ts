@@ -2328,7 +2328,12 @@ export class EmbyApi {
         this.logout();
         this.onUnauthorized?.();
       }
-      throw new Error(text || `HTTP ${response.status}`);
+      // PB49 (FX4)：让调用方能精准识别 404/410 等状态——而不是硬解析 message 字符串。
+      // 用例：远端同步操作的 polling 在容器重启后会拿到 404，前端要把对应 op 从内存里拿走，
+      // 而不是把通用错误冒泡到 toast。
+      const err = new Error(text || `HTTP ${response.status}`) as Error & { status?: number };
+      err.status = response.status;
+      throw err;
     }
 
     if (response.status === 204) {

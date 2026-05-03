@@ -215,6 +215,49 @@ async fn main() -> Result<()> {
         }
     }
 
+    // PB49 (FX3)：启动期识别"上次首次同步未完成"的 source 并写入 last_sync_error，
+    // 让前端按钮在容器重启后正确显示「重试同步」而不是「立即同步」。
+    //
+    // 触发条件：last_sync_at IS NULL（从未成功完成过整次同步）
+    //         AND 该 source 在 media_items 里已经写入过条目（说明跑过一半）
+    //         AND last_sync_error IS NULL（避免覆盖更具体的错误信息）
+    //
+    // 不依赖内存里的"is currently syncing"——容器进程已经被 kill 了，那份内存早没了。
+    // 必须在 scheduler / auto-sync / monitor 等 spawn **之前**做完，否则会和它们触发的
+    // 新 sync 抢同一个 source（新 sync 把 last_sync_error 清成 NULL，我们又把它写回，相互覆盖）。
+    {
+        let pool = state.pool.clone();
+        let marker = "上次同步在进程退出前被中断（容器重启 / 手动 kill），点击「重试同步」从断点续抓";
+        match sqlx::query(
+            r#"
+            UPDATE remote_emby_sources s
+            SET last_sync_error = $1
+            WHERE s.last_sync_at IS NULL
+              AND s.last_sync_error IS NULL
+              AND EXISTS (
+                  SELECT 1 FROM media_items mi
+                  WHERE mi.provider_ids->>'RemoteEmbySourceId' = s.id::text
+                  LIMIT 1
+              )
+            "#,
+        )
+        .bind(marker)
+        .execute(&pool)
+        .await
+        {
+            Ok(r) if r.rows_affected() > 0 => {
+                tracing::info!(
+                    marked = r.rows_affected(),
+                    "PB49 (FX3)：识别到首次同步被进程中断的远端源，已标记 last_sync_error 让前端显示「重试同步」"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "PB49 (FX3)：标记中断同步源失败（前端按钮可能仍显示「立即同步」）");
+            }
+        }
+    }
+
     tokio::spawn(routes::scheduled_tasks::run_scheduler(state.clone()));
 
     let remote_emby_refresh_pool = state.pool.clone();

@@ -1348,38 +1348,51 @@ async fn sync_source_inner(
     let skipped_unchanged_movie_views = Arc::new(AtomicU64::new(0));
     let source_arc: Arc<DbRemoteEmbySource> = Arc::new(source.clone());
 
-    // 增量模式：批量预加载 Series/Season 的 remote counts（消除 N+1 查询）
-    let series_counts_cache: HashMap<String, (Option<i64>, Option<i32>)> = if is_incremental {
-        match batch_load_series_remote_counts(&state.pool, source.id).await {
-            Ok(map) => {
-                if !map.is_empty() {
-                    tracing::info!(source_id = %source.id, count = map.len(), "批量预加载 Series remote counts");
-                }
-                map
+    // PB49 (FX1)：批量预加载 Series/Season 的 remote counts，**不再被 is_incremental 闸门限制**。
+    //
+    // 旧实现只有增量同步（last_sync_at IS NOT NULL）才加载这两份缓存，结果是：
+    // 用户的「首次同步跑了一半 → 容器/网络中断 → 重试」场景里，DB 已经有 N 条
+    // Series/Season 的 RemoteRecursiveItemCount + RemoteChildCount，但 is_incremental
+    // 仍然是 false（last_sync_at 还没写过），缓存被跳过，每条 Series 都要重新拉
+    // Seasons + Episodes 详情 HTTP，UI 里就出现「卡在某个剧很久」的体感。
+    //
+    // 现在无条件加载：缓存为空时（真正的首次同步、或本地确实没数据）map.len()=0，
+    // for-loop 里的 `series_counts_cache.get(...)` 自然 miss，行为退化到原全量逻辑，
+    // 不引入正确性问题。缓存非空时（重试 / 增量），命中即跳过整个 Series/Season 的
+    // 远端拉取链，速度从「分钟级」降到「毫秒级」。
+    let series_counts_cache: HashMap<String, (Option<i64>, Option<i32>)> = match batch_load_series_remote_counts(&state.pool, source.id).await {
+        Ok(map) => {
+            if !map.is_empty() {
+                tracing::info!(
+                    source_id = %source.id,
+                    count = map.len(),
+                    is_incremental,
+                    "批量预加载 Series remote counts（用于层级 fast-skip）"
+                );
             }
-            Err(e) => {
-                tracing::warn!(source_id = %source.id, error = %e, "批量预加载 Series counts 失败，降级为逐条查询");
-                HashMap::new()
-            }
+            map
         }
-    } else {
-        HashMap::new()
+        Err(e) => {
+            tracing::warn!(source_id = %source.id, error = %e, "批量预加载 Series counts 失败，降级为逐条查询");
+            HashMap::new()
+        }
     };
-    let season_counts_cache: HashMap<String, i32> = if is_incremental {
-        match batch_load_season_remote_child_counts(&state.pool, source.id).await {
-            Ok(map) => {
-                if !map.is_empty() {
-                    tracing::info!(source_id = %source.id, count = map.len(), "批量预加载 Season remote child counts");
-                }
-                map
+    let season_counts_cache: HashMap<String, i32> = match batch_load_season_remote_child_counts(&state.pool, source.id).await {
+        Ok(map) => {
+            if !map.is_empty() {
+                tracing::info!(
+                    source_id = %source.id,
+                    count = map.len(),
+                    is_incremental,
+                    "批量预加载 Season remote child counts（用于层级 fast-skip）"
+                );
             }
-            Err(e) => {
-                tracing::warn!(source_id = %source.id, error = %e, "批量预加载 Season counts 失败，降级为逐条查询");
-                HashMap::new()
-            }
+            map
         }
-    } else {
-        HashMap::new()
+        Err(e) => {
+            tracing::warn!(source_id = %source.id, error = %e, "批量预加载 Season counts 失败，降级为逐条查询");
+            HashMap::new()
+        }
     };
 
     let series_detail_semaphore = Arc::new(tokio::sync::Semaphore::new(SERIES_DETAIL_CONCURRENCY));
@@ -1455,7 +1468,38 @@ async fn sync_source_inner(
             );
 
             let mut movie_ids: HashSet<String> = HashSet::new();
-            let mut start_index: i64 = 0;
+            // PB49 (FX2)：续抓游标——若上次同步未完成（容器/网络中断），从断点继续。
+            // incremental_since 必须匹配（增量↔增量、全量↔全量），否则旧游标被忽略。
+            // 命中游标时跳过的页里 Movie 已经在 DB（local_synced_ids fast-path），
+            // 重新拉一遍只是浪费 HTTP；游标让我们直接从下一页继续。
+            let cursor_since = if is_incremental {
+                source.last_sync_at
+            } else {
+                None
+            };
+            let mut start_index: i64 = match crate::repository::get_view_progress(
+                &state.pool,
+                source.id,
+                view.id.as_str(),
+                cursor_since,
+            )
+            .await
+            {
+                Ok(Some(saved)) if saved > 0 => {
+                    tracing::info!(
+                        source_id = %source.id,
+                        view = %view.name,
+                        resumed_start_index = saved,
+                        "PB49 (FX2)：电影库从断点续抓"
+                    );
+                    saved
+                }
+                Ok(_) => 0,
+                Err(e) => {
+                    tracing::warn!(source_id = %source.id, error = %e, "读取续抓游标失败，从 0 开始");
+                    0
+                }
+            };
             let mut view_movie_total: i64 = -1;
 
             loop {
@@ -1560,6 +1604,26 @@ async fn sync_source_inner(
                 }
 
                 start_index += page_size;
+                // PB49 (FX2)：本页所有 Movie 入库成功后再持久化游标——
+                // 任何失败会通过 `?` 直接 return，避免把"半页失败"持久化成续抓起点。
+                if let Err(e) = crate::repository::save_view_progress(
+                    &state.pool,
+                    source.id,
+                    view.id.as_str(),
+                    start_index,
+                    page.total_record_count,
+                    cursor_since,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        source_id = %source.id,
+                        view = %view.name,
+                        start_index,
+                        error = %e,
+                        "PB49 (FX2)：保存续抓游标失败，下次重试将多拉一页"
+                    );
+                }
                 if start_index >= page.total_record_count {
                     break;
                 }
@@ -1694,6 +1758,33 @@ async fn sync_source_inner(
                 }
             } else {
                 // ── 全量模式：使用完整 Fields 拉取 ──
+                // PB49 (FX2)：电视剧库的 Series-list 阶段也支持续抓——避免每次重试都
+                // 重抓全部 Series 元数据。注意：cursor 只对"列表分页"起作用，
+                // per-Series 处理走 series_counts_cache fast-skip（FX1 已无 is_incremental 闸门）。
+                let cursor_since_full: Option<chrono::DateTime<chrono::Utc>> = None;
+                start_index = match crate::repository::get_view_progress(
+                    &state.pool,
+                    source.id,
+                    view.id.as_str(),
+                    cursor_since_full,
+                )
+                .await
+                {
+                    Ok(Some(saved)) if saved > 0 => {
+                        tracing::info!(
+                            source_id = %source.id,
+                            view = %view.name,
+                            resumed_start_index = saved,
+                            "PB49 (FX2)：电视剧库 Series-list 从断点续抓"
+                        );
+                        saved
+                    }
+                    Ok(_) => 0,
+                    Err(e) => {
+                        tracing::warn!(source_id = %source.id, error = %e, "读取续抓游标失败，从 0 开始");
+                        0
+                    }
+                };
                 loop {
                     let page = fetch_remote_series_page(
                         &state.pool,
@@ -1710,6 +1801,25 @@ async fn sync_source_inner(
                     }
                     all_series.extend(page.items);
                     start_index += page_size;
+                    // 每抓一页 Series-list 就更新游标，让中断后能续抓
+                    if let Err(e) = crate::repository::save_view_progress(
+                        &state.pool,
+                        source.id,
+                        view.id.as_str(),
+                        start_index,
+                        page.total_record_count,
+                        cursor_since_full,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            source_id = %source.id,
+                            view = %view.name,
+                            start_index,
+                            error = %e,
+                            "PB49 (FX2)：保存 Series-list 游标失败"
+                        );
+                    }
                     if start_index >= page.total_record_count {
                         break;
                     }
@@ -1748,26 +1858,34 @@ async fn sync_source_inner(
                     );
                 }
 
-                // ── 增量检测：比对 RecursiveItemCount + ChildCount ──
-                if is_incremental {
-                    if let Some((local_recursive, local_child)) =
-                        series_counts_cache.get(&remote_series.id)
-                    {
-                        let remote_recursive = remote_series.recursive_item_count;
-                        let remote_child = remote_series.child_count;
+                // PB49 (FX1)：层级数量比对快路径——比对 RecursiveItemCount + ChildCount。
+                // 不再要求 is_incremental，让「首次同步崩溃后重试」也能在 Series 级
+                // 直接跳过未变化条目，而不是退化到 per-Episode 的 local_synced_ids。
+                if let Some((local_recursive, local_child)) =
+                    series_counts_cache.get(&remote_series.id)
+                {
+                    let remote_recursive = remote_series.recursive_item_count;
+                    let remote_child = remote_series.child_count;
 
-                        if *local_recursive == remote_recursive
-                            && local_child.map(|c| c as i32) == remote_child
-                        {
-                            skipped_unchanged_series.fetch_add(1, Ordering::Relaxed);
-                            tracing::debug!(
-                                source_id = %source.id,
-                                series = %remote_series.name,
-                                recursive_item_count = ?remote_recursive,
-                                "增量跳过：Series 集数未变化"
+                    if *local_recursive == remote_recursive
+                        && local_child.map(|c| c as i32) == remote_child
+                    {
+                        skipped_unchanged_series.fetch_add(1, Ordering::Relaxed);
+                        tracing::debug!(
+                            source_id = %source.id,
+                            series = %remote_series.name,
+                            recursive_item_count = ?remote_recursive,
+                            is_incremental,
+                            "层级 fast-skip：Series 集数未变化（避免重新拉 Seasons/Episodes）"
+                        );
+                        // 同步推送 skipped 计数让前端 UI 看到"按层级跳过"在生效
+                        if let Some(handle) = &progress {
+                            handle.set_skipped_counters(
+                                skipped_existing.load(Ordering::Relaxed),
+                                strm_missing_reprocessed.load(Ordering::Relaxed),
                             );
-                            continue;
                         }
+                        continue;
                     }
                 }
 
@@ -1842,6 +1960,24 @@ async fn sync_source_inner(
                 )
                 .await?;
 
+                // PB49 (FX1-Heartbeat)：进入 Series 内部循环前先记一笔——
+                // 否则用户在 UI 看到"正在处理 变形金刚"几分钟没动静，日志里又没任何
+                // 该 Series 的事件，会以为后台死了。这条 INFO 让用户知道：
+                // (a) Series 已经 ensure 完成；(b) 即将处理 N 个 Season；
+                // (c) 之后每个 Season 完成会单独 DEBUG log。
+                let season_count = seasons_result.items.len();
+                if season_count >= 3 {
+                    tracing::info!(
+                        source_id = %source.id,
+                        series = %remote_series.name,
+                        series_idx = series_idx + 1,
+                        total_series,
+                        season_count,
+                        recursive_item_count = ?remote_series.recursive_item_count,
+                        "层级同步：Series 进入处理（Season 数量较多，可能耗时较长）"
+                    );
+                }
+
                 for remote_season in &seasons_result.items {
                     if let Some(handle) = &progress {
                         if handle.is_cancelled() {
@@ -1851,23 +1987,23 @@ async fn sync_source_inner(
 
                     let season_number = remote_season.index_number.unwrap_or(1);
 
-                    // ── 增量检测：比对 Season ChildCount（从批量缓存读取）──
-                    if is_incremental {
-                        if let Some(&local_child_count) =
-                            season_counts_cache.get(&remote_season.id)
-                        {
-                            if let Some(remote_child_count) = remote_season.child_count {
-                                if local_child_count == remote_child_count {
-                                    skipped_unchanged_seasons.fetch_add(1, Ordering::Relaxed);
-                                    tracing::debug!(
-                                        source_id = %source.id,
-                                        series = %remote_series.name,
-                                        season = season_number,
-                                        child_count = remote_child_count,
-                                        "增量跳过：Season 集数未变化"
-                                    );
-                                    continue;
-                                }
+                    // PB49 (FX1)：层级数量比对快路径——比对 Season ChildCount。
+                    // 同样去掉 is_incremental 闸门，让重试场景也能 Season 级跳过。
+                    if let Some(&local_child_count) =
+                        season_counts_cache.get(&remote_season.id)
+                    {
+                        if let Some(remote_child_count) = remote_season.child_count {
+                            if local_child_count == remote_child_count {
+                                skipped_unchanged_seasons.fetch_add(1, Ordering::Relaxed);
+                                tracing::debug!(
+                                    source_id = %source.id,
+                                    series = %remote_series.name,
+                                    season = season_number,
+                                    child_count = remote_child_count,
+                                    is_incremental,
+                                    "层级 fast-skip：Season 集数未变化（避免重新拉 Episodes）"
+                                );
+                                continue;
                             }
                         }
                     }
@@ -2423,6 +2559,16 @@ async fn sync_source_inner(
         scanned_files: fetched_count as i64,
         imported_items: written_files as i64,
     };
+
+    // PB49 (FX2)：整次同步成功完成 → 清空所有 view 续抓游标，
+    // 让下次同步从 start_index=0 开始（避免 stale 游标错跳页）。
+    if let Err(e) = crate::repository::clear_source_view_progress(&state.pool, source.id).await {
+        tracing::warn!(
+            source_id = %source.id,
+            error = %e,
+            "PB49 (FX2)：清空 view 续抓游标失败（不影响本次同步成功结果）"
+        );
+    }
 
     Ok(RemoteEmbySyncResult {
         source_id: source.id,
