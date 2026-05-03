@@ -517,7 +517,7 @@ async function saveEditor() {
       SyncMetadata: boolean;
       SyncSubtitles: boolean;
       TokenRefreshIntervalSecs: number;
-      ProxyMode: 'proxy' | 'redirect';
+      ProxyMode: 'proxy' | 'redirect' | 'redirect_direct';
       AutoSyncIntervalMinutes: number;
       PageSize: number;
       RequestIntervalMs: number;

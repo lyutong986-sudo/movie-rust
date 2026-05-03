@@ -1597,7 +1597,7 @@ export class EmbyApi {
     SyncMetadata?: boolean;
     SyncSubtitles?: boolean;
     TokenRefreshIntervalSecs?: number;
-    ProxyMode?: 'proxy' | 'redirect';
+    ProxyMode?: 'proxy' | 'redirect' | 'redirect_direct';
     AutoSyncIntervalMinutes?: number;
     EnableAutoDelete?: boolean;
     /** 拉取速率：每页条目数（50–1000，默认 200） */
@@ -1634,7 +1634,7 @@ export class EmbyApi {
       SyncMetadata?: boolean;
       SyncSubtitles?: boolean;
       TokenRefreshIntervalSecs?: number;
-      ProxyMode?: 'proxy' | 'redirect';
+      ProxyMode?: 'proxy' | 'redirect' | 'redirect_direct';
       AutoSyncIntervalMinutes?: number;
       EnableAutoDelete?: boolean;
       /** 拉取速率：每页条目数（50–1000，默认 200） */
