@@ -431,7 +431,9 @@ impl RemoteSyncProgress {
             guard.skipped_unchanged_series = skipped_unchanged;
             guard.fetched_items = fetched_items;
             guard.written_files = written_files;
-            guard.total_items = total_series;
+            // "已处理/总数" 在层级模式下使用 written_files/fetched_items（实际入库/实际拉取的剧集数），
+            // 而不是 total_series（那只是剧集数），避免前端出现 fetched_items > total_items 的错乱。
+            guard.total_items = fetched_items;
             let ratio = if total_series == 0 {
                 1.0
             } else {

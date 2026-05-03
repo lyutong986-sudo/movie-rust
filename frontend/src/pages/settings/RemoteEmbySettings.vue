@@ -1210,7 +1210,7 @@ onBeforeUnmount(() => {
               </p>
             </div>
             <div>
-              <p class="text-muted">已处理 / 总数</p>
+              <p class="text-muted">已拉取 / 总数</p>
               <p class="text-highlighted mt-1 font-medium">
                 {{ sourceOperation(source)?.FetchedItems || 0 }} / {{ sourceOperation(source)?.TotalItems || 0 }}
               </p>
