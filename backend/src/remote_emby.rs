@@ -2463,7 +2463,19 @@ async fn process_one_remote_sync_item(
             let should_skip = if local_path.is_empty() || !local_path.ends_with(".strm") {
                 true
             } else {
-                tokio::fs::try_exists(&local_path).await.unwrap_or(false)
+                match tokio::fs::try_exists(&local_path).await {
+                    Ok(exists) => exists,
+                    Err(io_err) => {
+                        tracing::warn!(
+                            source_id = %source.id,
+                            remote_id = %base_item.id,
+                            path = %local_path,
+                            error = %io_err,
+                            "PB49 (B1)：STRM 存在性检查 I/O 错误，视为缺失触发自愈"
+                        );
+                        false
+                    }
+                }
             };
             if should_skip {
                 let s = skipped_existing.fetch_add(1, Ordering::Relaxed) + 1;
@@ -2484,7 +2496,7 @@ async fn process_one_remote_sync_item(
             if let Some(handle) = progress {
                 handle.set_skipped_counters(skipped_existing.load(Ordering::Relaxed), r);
             }
-            tracing::debug!(
+            tracing::warn!(
                 source_id = %source.id,
                 remote_id = %base_item.id,
                 missing_path = %local_path,
