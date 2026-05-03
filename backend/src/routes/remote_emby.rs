@@ -698,8 +698,7 @@ async fn delete_remote_emby_source(
 ///
 /// `max_wait` 内仍未退出 → 记 WARN 后 fall-through，调用方继续后续清理；
 /// 这是为了避免「sync 卡死时永远删不掉源」的死锁路径，靠 sync 本身的取消检查点
-/// （`fetch_all_remote_item_ids` 每页 / `process_one_remote_sync_item` 入口 / 主循环
-/// 每页边界）来兜住绝大多数情况。
+/// （`process_one_remote_sync_item` 入口 / 主循环每页边界）来兜住绝大多数情况。
 async fn cancel_active_sync_and_wait(source_id: Uuid, max_wait: Duration) {
     let started = std::time::Instant::now();
 
@@ -920,9 +919,8 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
             if let Some(active) = registry.operations.get(&active_id) {
                 if !active.is_done() {
                     // SF2：之前这里只看 `is_done()`，结果用户「中断同步」后旧 task 还在
-                    // 跑（特别是卡在 fetch_all_remote_item_ids 那种长循环），用户再点
-                    // 「立即同步」会立即被复用回**同一个**正在退出的旧 task id，前端就
-                    // 永远看到那个停滞的 4% phase，看上去像「再点同步一直拉不到」。
+                    // 跑，用户再点「立即同步」会立即被复用回**同一个**正在退出的旧 task id，
+                    // 前端就永远看到那个停滞的 4% phase，看上去像「再点同步一直拉不到」。
                     // 现在区分三种情况：
                     //  1) cancel_requested + 还没退完：返回明确错误「上次取消尚未完成」，
                     //     前端可以提示用户稍候，旧 task 会在最长一页 HTTP 周期内（搭配

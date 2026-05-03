@@ -2364,9 +2364,14 @@ pub struct ScanSummary {
 #[serde(rename_all = "PascalCase")]
 pub struct ImageInfoDto {
     pub image_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_index: Option<i32>,
     pub image_tag: String,
     pub path: String,
+    pub filename: String,
+    pub width: u32,
+    pub height: u32,
+    pub size: u64,
 }
 
 #[derive(Debug, Deserialize)]

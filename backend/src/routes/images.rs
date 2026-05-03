@@ -141,6 +141,32 @@ pub fn router() -> Router<AppState> {
         )
 }
 
+fn build_image_info(image_type: &str, image_index: Option<i32>, tag: &str, path: String) -> ImageInfoDto {
+    let filename = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let (width, height, size) = if !path.starts_with("http://") && !path.starts_with("https://") {
+        let p = std::path::Path::new(&path);
+        let dims = image::image_dimensions(p).unwrap_or((0, 0));
+        let file_size = p.metadata().map(|m| m.len()).unwrap_or(0);
+        (dims.0, dims.1, file_size)
+    } else {
+        (0, 0, 0)
+    };
+    ImageInfoDto {
+        image_type: image_type.to_string(),
+        image_index,
+        image_tag: tag.to_string(),
+        path,
+        filename,
+        width,
+        height,
+        size,
+    }
+}
+
 async fn list_item_images(
     _session: OptionalAuthSession,
     State(state): State<AppState>,
@@ -150,69 +176,30 @@ async fn list_item_images(
         .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
     let mut images = Vec::new();
     if let Some(item) = repository::get_media_item(&state.pool, item_id).await? {
+        let tag = item.date_modified.timestamp().to_string();
         if let Some(path) = item.image_primary_path {
-            images.push(ImageInfoDto {
-                image_type: "Primary".to_string(),
-                image_index: None,
-                image_tag: item.date_modified.timestamp().to_string(),
-                path,
-            });
+            images.push(build_image_info("Primary", None, &tag, path));
         }
         if let Some(path) = item.logo_path {
-            images.push(ImageInfoDto {
-                image_type: "Logo".to_string(),
-                image_index: None,
-                image_tag: item.date_modified.timestamp().to_string(),
-                path,
-            });
+            images.push(build_image_info("Logo", None, &tag, path));
         }
         if let Some(path) = item.thumb_path {
-            images.push(ImageInfoDto {
-                image_type: "Thumb".to_string(),
-                image_index: None,
-                image_tag: item.date_modified.timestamp().to_string(),
-                path,
-            });
+            images.push(build_image_info("Thumb", None, &tag, path));
         }
         if let Some(path) = item.banner_path {
-            images.push(ImageInfoDto {
-                image_type: "Banner".to_string(),
-                image_index: None,
-                image_tag: item.date_modified.timestamp().to_string(),
-                path,
-            });
+            images.push(build_image_info("Banner", None, &tag, path));
         }
         if let Some(path) = item.disc_path {
-            images.push(ImageInfoDto {
-                image_type: "Disc".to_string(),
-                image_index: None,
-                image_tag: item.date_modified.timestamp().to_string(),
-                path,
-            });
+            images.push(build_image_info("Disc", None, &tag, path));
         }
         if let Some(path) = item.art_path {
-            images.push(ImageInfoDto {
-                image_type: "Art".to_string(),
-                image_index: None,
-                image_tag: item.date_modified.timestamp().to_string(),
-                path,
-            });
+            images.push(build_image_info("Art", None, &tag, path));
         }
         if let Some(path) = item.backdrop_path {
-            images.push(ImageInfoDto {
-                image_type: "Backdrop".to_string(),
-                image_index: Some(0),
-                image_tag: item.date_modified.timestamp().to_string(),
-                path,
-            });
+            images.push(build_image_info("Backdrop", Some(0), &tag, path));
         }
         for (i, path) in item.backdrop_paths.iter().enumerate() {
-            images.push(ImageInfoDto {
-                image_type: "Backdrop".to_string(),
-                image_index: Some((i + 1) as i32),
-                image_tag: item.date_modified.timestamp().to_string(),
-                path: path.clone(),
-            });
+            images.push(build_image_info("Backdrop", Some((i + 1) as i32), &tag, path.clone()));
         }
     } else if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
         let image_tag = person
@@ -223,12 +210,8 @@ async fn list_item_images(
             if let Some(path) =
                 repository::get_person_image_path(&state.pool, &person.id, image_type).await?
             {
-                images.push(ImageInfoDto {
-                    image_type: image_type.to_string(),
-                    image_index: (image_type == "Backdrop").then_some(0),
-                    image_tag: image_tag.clone(),
-                    path,
-                });
+                let idx = (image_type == "Backdrop").then_some(0);
+                images.push(build_image_info(image_type, idx, &image_tag, path));
             }
         }
     } else if let Some(library) = repository::get_library(&state.pool, item_id).await? {
@@ -238,12 +221,7 @@ async fn list_item_images(
                     .primary_image_tag
                     .clone()
                     .unwrap_or_else(|| library.created_at.timestamp().to_string());
-                images.push(ImageInfoDto {
-                    image_type: "Primary".to_string(),
-                    image_index: None,
-                    image_tag: tag,
-                    path: path.clone(),
-                });
+                images.push(build_image_info("Primary", None, &tag, path.clone()));
             }
         }
     } else {

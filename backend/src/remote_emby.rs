@@ -70,7 +70,7 @@ static REMOTE_REQUEST_THROTTLE: std::sync::LazyLock<
 ///
 /// 当用户手动点「立即同步」恰好和定时任务撞到同一秒，两个 `sync_source_inner`
 /// 同时跑——一个 task 缓存了某个 Series/Season 父行的 UUID，另一个 task
-/// 在 `delete_stale_items_for_source` 里把这条父行 cascade-delete 掉，
+/// 在层级删除检测里把这条父行 cascade-delete 掉，
 /// 第一个 task 接着 INSERT Episode 用了那个已被删的 parent_id，触发
 /// `media_items_parent_id_fkey` 违例。这是用户报告的 FK 报错的主路径。
 ///
@@ -386,6 +386,7 @@ impl RemoteSyncProgress {
     /// 用户报告"已运行 684 秒还在 4%"就是这个症状。
     /// 这里把已扫 ID 数写进 `fetched_items` 字段，progress 在 `[4.0, 5.0]` 区间随
     /// view 总数 + 当前 view 进度线性爬动，前端「远端抓取」卡片就能看到 ID 数实时增长。
+    #[allow(dead_code)]
     pub fn set_fetching_index_progress(
         &self,
         scanned_ids: u64,
@@ -1614,7 +1615,7 @@ async fn sync_source_inner(
                     for item in page.items {
                         if let (Some(dm_str), Some(sync_at)) = (&item.date_modified, last_sync) {
                             if let Ok(dm) = chrono::DateTime::parse_from_rfc3339(dm_str) {
-                                if dm.with_timezone(&Utc) <= sync_at {
+                                if dm.with_timezone(&Utc) < sync_at {
                                     early_stopped = true;
                                     break;
                                 }
@@ -1622,7 +1623,7 @@ async fn sync_source_inner(
                                 dm_str.trim_end_matches('Z'),
                                 "%Y-%m-%dT%H:%M:%S%.f",
                             ) {
-                                if dm.and_utc() <= sync_at {
+                                if dm.and_utc() < sync_at {
                                     early_stopped = true;
                                     break;
                                 }
@@ -1903,7 +1904,7 @@ async fn sync_source_inner(
                         view_id: view.id.clone(),
                         view_name: view.name.clone(),
                     };
-                    let _season_db_id = ensure_remote_season_folder(
+                    let season_db_id = ensure_remote_season_folder(
                         &state.pool,
                         source_arc.as_ref(),
                         &season_synthetic_item,
@@ -1927,6 +1928,13 @@ async fn sync_source_inner(
                     if episodes_result.items.is_empty() {
                         continue;
                     }
+
+                    // P8: 收集远端 Episode ID 集合，用于后续 episode-level 下架检测
+                    let remote_episode_ids: HashSet<String> = episodes_result
+                        .items
+                        .iter()
+                        .map(|ep| ep.id.clone())
+                        .collect();
 
                     // 并发处理 Episode（复用已有的 process_one_remote_sync_item）
                     use futures::stream::{self, StreamExt};
@@ -1995,6 +2003,29 @@ async fn sync_source_inner(
 
                     for r in item_results {
                         r?;
+                    }
+
+                    // P8: Episode 级别下架检测——仅当启用自动删除时执行。
+                    // 此时 remote_episode_ids 包含远端该季的全部 Episode，查本地 DB
+                    // 该 Season 下的 Episode 取差集，删除已下架的条目及其 STRM 文件。
+                    if enable_auto_delete {
+                        if let Err(e) = delete_stale_episodes_for_season(
+                            &state.pool,
+                            season_db_id,
+                            source.id,
+                            &remote_episode_ids,
+                            &view_strm_workspace,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                source_id = %source.id,
+                                series = %remote_series.name,
+                                season = season_number,
+                                error = %e,
+                                "P8：Season 级 Episode 下架清理失败"
+                            );
+                        }
                     }
 
                     // 更新本地 Season 的 remote child_count
@@ -2434,6 +2465,8 @@ async fn process_one_remote_sync_item(
         }
     }
 
+    let mut is_strm_self_heal = false;
+
     // PB49：full sync 路径上，主循环命中本地已入库的条目就直接跳过。
     //
     // 之前即使配合 B-7 续抓游标，每个已落库的 Movie/Episode 仍要走完
@@ -2444,7 +2477,7 @@ async fn process_one_remote_sync_item(
     // 这里的早退**不影响正确性**：
     //   - local_synced_ids 仅在 force_refresh_sidecar=false（last_sync_at IS NULL）时
     //     被填充；增量路径 (last_sync_at=Some) 下集合为空，不会命中。
-    //   - delete_stale_items_for_source 仍照常基于完整的 remote_id_set 跑，
+    //   - 层级删除检测（Series/Movie 级）仍照常跑，
     //     所以「远端已下架的本地条目」仍会被正常清理（不依赖主循环遍历）。
     //   - 命中跳过时仍 bump fetched_count + written_files，让 UI 看到的
     //     「入库条目」反映本地真实存量，避免又出现「明明 11 万在库却显示 400」的
@@ -2502,6 +2535,7 @@ async fn process_one_remote_sync_item(
                 missing_path = %local_path,
                 "PB49 (B1)：本地 STRM 文件丢失，触发条目重写自愈"
             );
+            is_strm_self_heal = true;
         }
     }
 
@@ -2660,6 +2694,12 @@ async fn process_one_remote_sync_item(
         }
     };
     let (strm_path, poster_path, backdrop_path, logo_path) = strm_bundle;
+    // 自愈场景：STRM 丢失通常意味着 sidecar 图片也丢了（同目录），
+    // 此时 local_poster 等为 None，upsert 会传入远端 URL。
+    // force_overwrite_images=true 确保 DB 从失效的本地路径切回远端 URL，
+    // 让 sidecar_image_download_loop 重新下载。如果图片文件恰好还在，
+    // local_poster 就是 Some(本地路径)，写回去也完全正确。
+    let overwrite_images = force_refresh_sidecar || is_strm_self_heal;
     let upserted = upsert_remote_media_item(
         &state.pool,
         source,
@@ -2673,23 +2713,26 @@ async fn process_one_remote_sync_item(
         backdrop_path.as_deref(),
         logo_path.as_deref(),
         series_db_id,
-        force_refresh_sidecar,
+        overwrite_images,
     )
     .await?;
-    if let Some(analysis) = analysis {
-        repository::save_media_streams(&state.pool, upserted, &analysis).await?;
-        repository::update_media_item_metadata(&state.pool, upserted, &analysis).await?;
-    }
-    if !item.item.people.is_empty() {
-        if let Err(error) =
-            upsert_remote_people_for_item(&state.pool, source, upserted, &item.item.people).await
-        {
-            tracing::warn!(
-                source_id = %source.id,
-                remote_item_id = %item.item.id,
-                error = %error,
-                "PB31-1：写入远端 item 的 People 失败"
-            );
+    if !is_strm_self_heal {
+        if let Some(analysis) = analysis {
+            repository::save_media_streams(&state.pool, upserted, &analysis).await?;
+            repository::update_media_item_metadata(&state.pool, upserted, &analysis).await?;
+        }
+        if !item.item.people.is_empty() {
+            if let Err(error) =
+                upsert_remote_people_for_item(&state.pool, source, upserted, &item.item.people)
+                    .await
+            {
+                tracing::warn!(
+                    source_id = %source.id,
+                    remote_item_id = %item.item.id,
+                    error = %error,
+                    "PB31-1：写入远端 item 的 People 失败"
+                );
+            }
         }
     }
 
@@ -4716,173 +4759,42 @@ async fn batch_load_season_remote_child_counts(
     Ok(map)
 }
 
-/// 仅拉取远端条目的 Id 列表（用于增量刷新中的删除检测，已被层级删除检测替代）
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct RemoteItemIdEntry {
-    #[allow(dead_code)]
-    id: String,
-}
-
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct RemoteItemIdsResult {
-    #[serde(default)]
-    items: Vec<RemoteItemIdEntry>,
-    total_record_count: i64,
-}
-
-#[allow(dead_code)]
-const REMOTE_ID_PAGE_SIZE: i64 = 1000;
-
-#[allow(dead_code)]
-async fn fetch_remote_item_ids_page(
-    pool: &sqlx::PgPool,
-    source: &mut DbRemoteEmbySource,
-    user_id: &str,
-    view_id: &str,
-    start_index: i64,
-    limit: i64,
-) -> Result<RemoteItemIdsResult, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Users/{user_id}/Items");
-    let query = vec![
-        ("Recursive".to_string(), "true".to_string()),
-        ("ParentId".to_string(), view_id.to_string()),
-        ("IncludeItemTypes".to_string(), "Movie,Episode".to_string()),
-        ("Fields".to_string(), "Id".to_string()),
-        ("EnableTotalRecordCount".to_string(), "true".to_string()),
-        // 稳定分页排序键：Id 是 Emby 内部主键，全局唯一不重复；
-        // 不指定 SortBy 时 Emby 默认按 SortName 升序，而大库里 SortName 重复 / 空串
-        // 极常见，跨页时会跳过或重复条目（30 万条规模能稳定漏拉百~千条）。
-        // 漏拉的 ID 会让 `delete_stale_items_for_source` 把对应本地行误判成 stale
-        // 并 DELETE，是「重启后再同步媒体数量减少」灾难路径的根因之一。
-        ("SortBy".to_string(), "Id".to_string()),
-        ("SortOrder".to_string(), "Ascending".to_string()),
-        ("StartIndex".to_string(), start_index.to_string()),
-        ("Limit".to_string(), limit.to_string()),
-    ];
-    get_json_with_retry(pool, source, &endpoint, &query).await
-}
-
-/// 拉取所有视图下的远端条目 ID 集合（已被层级删除检测替代）
-#[allow(dead_code)]
-async fn fetch_all_remote_item_ids(
-    pool: &sqlx::PgPool,
-    source: &mut DbRemoteEmbySource,
-    user_id: &str,
-    views: &[RemoteLibraryView],
-    progress: Option<&RemoteSyncProgress>,
-) -> Result<HashSet<String>, AppError> {
-    let mut all_ids = HashSet::new();
-    let view_count = views.len();
-    for (view_index, view) in views.iter().enumerate() {
-        // SF1：进入新 view 之前先抢一次进度上报，让前端 phase=FetchingRemoteIndex 的
-        // 进度条按 view 个数线性推进（4.0 → 5.0），不再一直停在 4%。
-        if let Some(handle) = progress {
-            handle.set_fetching_index_progress(all_ids.len() as u64, view_index, view_count);
-        }
-        let mut start_index = 0i64;
-        loop {
-            // SF1：每页之间检查 cancel —— 之前这里完全没检查，用户点中断后旧 task
-            // 只能等所有 view + 所有 page 拉完才看到取消信号，对 ~40 万远端条目的
-            // 大库要等 10+ 分钟。检查放在 HTTP 请求之前，最大一次「单页延迟」就退出。
-            if let Some(handle) = progress {
-                if handle.is_cancelled() {
-                    return Err(AppError::BadRequest("同步任务已被取消".to_string()));
-                }
-            }
-            let page = fetch_remote_item_ids_page(
-                pool,
-                source,
-                user_id,
-                &view.id,
-                start_index,
-                REMOTE_ID_PAGE_SIZE,
-            )
-            .await?;
-            for entry in &page.items {
-                all_ids.insert(entry.id.clone());
-            }
-            start_index += REMOTE_ID_PAGE_SIZE;
-            // SF1：每拉完一页，把累计已扫 ID 数上报一次，前端「远端抓取」卡片
-            // 就能看到 ID 数随 page 数实时增长，明确判断「在拉」还是「卡死」。
-            if let Some(handle) = progress {
-                handle.set_fetching_index_progress(all_ids.len() as u64, view_index, view_count);
-            }
-            if page.items.is_empty() || start_index >= page.total_record_count {
-                break;
-            }
-        }
-    }
-    // 完成全部 view 后把进度推到 5%，下一阶段（PruningStaleItems）会接力。
-    if let Some(handle) = progress {
-        handle.set_fetching_index_progress(all_ids.len() as u64, view_count, view_count);
-    }
-    Ok(all_ids)
-}
-
-/// 删除本地 DB 中不再存在于远端的条目（旧版全量 ID 比对方式，已被层级删除检测替代）
+/// P8: 删除某 Season 下本地存在但远端已不存在的 Episode 条目及其 STRM 文件。
 ///
-/// 内置「prune 比例安全阀」：当 `候选行数 ≥ PRUNE_GUARD_MIN_CANDIDATES` 且
-/// 「待删 / 候选」超过 `PRUNE_GUARD_RATIO`（10%）时，判定 `remote_id_set`
-/// 大概率不完整（典型场景：远端分页抖动 / 中途被 kill 重启再跑），整次
-/// prune 直接跳过并 WARN，等下一次同步用更完整的 ID 集合重新判定，
-/// 避免「重启 → 误删上千条 → 用户必须靠扫描所有媒体库恢复」灾难路径。
-#[allow(dead_code)]
-async fn delete_stale_items_for_source(
+/// 仅比对 `RemoteEmbyItemId` 在 `remote_episode_ids` 中不存在的行，
+/// 每个 Season 内 Episode 量通常 10~30 条，开销可忽略。
+async fn delete_stale_episodes_for_season(
     pool: &sqlx::PgPool,
+    season_db_id: Uuid,
     source_id: Uuid,
-    _library_id: Uuid,
-    remote_id_set: &HashSet<String>,
-    strm_workspace: Option<&Path>,
-) -> Result<u64, AppError> {
-    /// 安全阀触发的最小候选量；小于此值的库视为新建/小库，prune 波动天然较大，
-    /// 强行卡阈值会导致频繁误阻断，反而让小库永远没法清理真正的孤儿。
-    const PRUNE_GUARD_MIN_CANDIDATES: usize = 100;
-    /// 安全阀阈值：单次 prune 比例上限。10% 是经验值——
-    /// 真实场景下用户在远端 Emby 一次性下架 10% 以上条目极罕见；
-    /// 反过来分页抖动 / 部分视图拉空导致 ID 集合缺失 10% 以上很常见。
-    const PRUNE_GUARD_RATIO_NUM: usize = 10;
-    const PRUNE_GUARD_RATIO_DEN: usize = 100;
-    /// PB49：单次 prune **绝对量** 上限。
-    ///
-    /// 比例阀只在小库上稳——10 万规模的库 9.9% = 9900 条「正好低于阈值」
-    /// 但仍是不可接受的批量误删（用户报告就是「原先 10 万、现在 3938」）。
-    /// 加一道绝对量保险：单次 stale 超过 5000 条就直接跳过，留给下次同步
-    /// 用更完整的 ID 集合来判定。如果远端真有 >5000 条要下架，多次同步
-    /// 也能渐进收敛。
-    const PRUNE_GUARD_MAX_ABSOLUTE: usize = 5000;
-
+    remote_episode_ids: &HashSet<String>,
+    strm_workspace: &Path,
+) -> Result<(), AppError> {
     let source_id_str = source_id.to_string();
-    struct StaleRow {
+    struct EpRow {
         id: Uuid,
         path: Option<String>,
         remote_id: Option<String>,
     }
-    // 不再限制 library_id，支持 separate 模式下条目分散在多个库。
-    // 仅检测有真实 RemoteEmbyItemId 的 Movie/Episode 节点：
-    //   - Series/Season 节点的 RemoteEmbyItemId 写为空串（远端没有对应的 Movie/Episode ID），
-    //     `IS NOT NULL` 不能过滤空串，必须额外用 <> '' 防御，避免把它们当作 stale 误删。
-    //   - fetch_all_remote_item_ids 仅拉 Movie/Episode 类型，Series/Season 本就不在集合内。
-    let rows: Vec<StaleRow> = sqlx::query(
+    let rows: Vec<EpRow> = sqlx::query(
         r#"
         SELECT id, path, provider_ids->>'RemoteEmbyItemId' AS remote_id
         FROM media_items
-        WHERE provider_ids->>'RemoteEmbySourceId' = $1
+        WHERE parent_id = $1
+          AND item_type = 'Episode'
+          AND provider_ids->>'RemoteEmbySourceId' = $2
           AND provider_ids->>'RemoteEmbyItemId' IS NOT NULL
           AND provider_ids->>'RemoteEmbyItemId' <> ''
         "#,
     )
+    .bind(season_db_id)
     .bind(&source_id_str)
     .fetch_all(pool)
     .await?
     .into_iter()
     .map(|row| {
         use sqlx::Row;
-        StaleRow {
+        EpRow {
             id: row.get("id"),
             path: row.get("path"),
             remote_id: row.get("remote_id"),
@@ -4890,124 +4802,58 @@ async fn delete_stale_items_for_source(
     })
     .collect();
 
-    // 先两遍扫一下 stale 候选行：第一遍只算「真正会被判定 stale 的行数」用于安全阀决策，
-    // 第二遍才执行物理 + DB 删除。两遍 hash 查询都是 O(N)，相比单条 DELETE 的 IO 几乎可忽略，
-    // 但能确保「跨阈值就一条都不删」语义干净。
-    let candidate_count = rows.len();
-    let stale_count = rows
-        .iter()
-        .filter(|row| {
-            row.remote_id
-                .as_deref()
-                .map(|id| !id.trim().is_empty() && !remote_id_set.contains(id))
-                .unwrap_or(false)
-        })
-        .count();
-
-    if candidate_count >= PRUNE_GUARD_MIN_CANDIDATES
-        && stale_count * PRUNE_GUARD_RATIO_DEN > candidate_count * PRUNE_GUARD_RATIO_NUM
-    {
-        tracing::warn!(
-            source_id = %source_id,
-            candidate_count,
-            stale_count,
-            remote_id_set_size = remote_id_set.len(),
-            ratio_threshold_pct = PRUNE_GUARD_RATIO_NUM,
-            "prune 安全阀触发（比例）：本次 stale 比例超过阈值，疑似远端 ID 集合不完整（分页抖动 / 中途取消 / 进程重启等），\
-             跳过本次 stale 删除，等下一次同步用更完整的 ID 集合再行判定"
-        );
-        return Ok(0);
-    }
-    // PB49：绝对量保险——比例阀对中大型库（>1 万）保护不够（9.9% 仍可能误删上千条），
-    // 这里再卡一道「单次最多删 N 条」，超过就直接跳过，下次再判。
-    if stale_count > PRUNE_GUARD_MAX_ABSOLUTE {
-        tracing::warn!(
-            source_id = %source_id,
-            candidate_count,
-            stale_count,
-            remote_id_set_size = remote_id_set.len(),
-            absolute_threshold = PRUNE_GUARD_MAX_ABSOLUTE,
-            "PB49：prune 安全阀触发（绝对量）：单次 stale 数超过 {} 条上限，\
-             跳过本次 stale 删除以避免大量误删；如果远端真的下架了 >{} 条，多轮同步会渐进收敛",
-            PRUNE_GUARD_MAX_ABSOLUTE,
-            PRUNE_GUARD_MAX_ABSOLUTE
-        );
-        return Ok(0);
-    }
-
-    // PB49 (A1)：先把待删行集中到 Vec，再一次性批量 DELETE，sidecar 文件清理并发跑。
-    //
-    // 旧逻辑里每条都打一发 `DELETE WHERE id = $1`，对 5000 上限的 prune 就是 5000 次
-    // PG round-trip（远端 DB 单次 ~5ms），最坏 25 秒卡在网络上；同时 sidecar 也是单条
-    // 串行 read_dir + remove_file，磁盘 IO 完全没并发利用。
-    //
-    // 新逻辑：
-    //   1. 一遍扫 rows 收集 (id, path) 待删项；
-    //   2. sidecar 清理用 buffer_unordered(8) 并发跑（C1 顺手修：只删 stem-prefixed，
-    //      公共图片 poster/backdrop/logo/movie.nfo 不再按 Episode 粒度删，留给 Series
-    //      整体下架时由父目录 remove_dir 一并清掉）；
-    //   3. DB 行用 `DELETE WHERE id = ANY($1)` 一发批量删（PG 内部 hash join，N 行也是
-    //      一次 round-trip）。
-    use futures::stream::{self, StreamExt};
     let mut to_delete_ids: Vec<Uuid> = Vec::new();
-    let mut sidecar_jobs: Vec<(PathBuf, String)> = Vec::new(); // (parent_dir, stem)
+    let mut strm_files_to_remove: Vec<PathBuf> = Vec::new();
     for row in rows {
-        let Some(remote_id) = row.remote_id else {
-            continue;
-        };
-        if remote_id.trim().is_empty() || remote_id_set.contains(remote_id.as_str()) {
+        let Some(remote_id) = row.remote_id else { continue };
+        if remote_id.trim().is_empty() || remote_episode_ids.contains(&remote_id) {
             continue;
         }
         to_delete_ids.push(row.id);
-        if let Some(workspace) = strm_workspace {
-            if let Some(path_str) = row.path {
-                let item_path = Path::new(path_str.as_str());
-                if path_str.ends_with(".strm") && item_path.starts_with(workspace) {
-                    if let (Some(parent), Some(stem)) = (
-                        item_path.parent(),
-                        item_path.file_stem().and_then(|s| s.to_str()),
-                    ) {
-                        sidecar_jobs.push((parent.to_path_buf(), stem.to_string()));
-                    }
-                }
+        if let Some(path_str) = row.path {
+            let p = PathBuf::from(&path_str);
+            if path_str.ends_with(".strm") && p.starts_with(strm_workspace) {
+                strm_files_to_remove.push(p);
             }
         }
     }
 
     if to_delete_ids.is_empty() {
-        return Ok(0);
+        return Ok(());
     }
 
-    // sidecar 清理（C1 修正：只删 stem-prefixed，公共图片不动）
-    let _: Vec<()> = stream::iter(sidecar_jobs.into_iter())
-        .map(|(parent, stem)| async move {
-            if let Ok(mut entries) = tokio::fs::read_dir(&parent).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let fname = entry.file_name();
-                    let fname_str = fname.to_string_lossy();
-                    // C1：只清 strm 同名前缀的旁路（如 S01E05.nfo / S01E05-zh.srt 等）；
-                    // poster / backdrop / logo / movie.nfo 是 Series 或 Season 级公共资源，
-                    // 同目录可能还有其它仍存在的 Episode 在用，这里不能误删——它们应当在
-                    // Series 整体被 prune 时由父目录 remove_dir 一并消失（或者用户手动清）。
-                    if fname_str.starts_with(stem.as_str()) {
-                        let _ = tokio::fs::remove_file(entry.path()).await;
+    let deleted_count = to_delete_ids.len();
+
+    // 先清 STRM 文件及同名旁路
+    for strm_path in &strm_files_to_remove {
+        if let Some(stem) = strm_path.file_stem().and_then(|s| s.to_str()) {
+            if let Some(parent) = strm_path.parent() {
+                if let Ok(mut entries) = tokio::fs::read_dir(parent).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let fname = entry.file_name();
+                        if fname.to_string_lossy().starts_with(stem) {
+                            let _ = tokio::fs::remove_file(entry.path()).await;
+                        }
                     }
                 }
+                let _ = tokio::fs::remove_dir(parent).await;
             }
-            // 尝试 remove_dir：仅当目录已空时成功，否则静默失败（说明同目录还有其它
-            // Episode 没被删，应当保留）。
-            let _ = tokio::fs::remove_dir(&parent).await;
-        })
-        .buffer_unordered(8)
-        .collect()
-        .await;
+        }
+    }
 
-    let deleted = sqlx::query("DELETE FROM media_items WHERE id = ANY($1)")
+    // 批量删 DB
+    sqlx::query("DELETE FROM media_items WHERE id = ANY($1)")
         .bind(&to_delete_ids)
         .execute(pool)
-        .await?
-        .rows_affected();
-    Ok(deleted)
+        .await?;
+
+    tracing::info!(
+        source_id = %source_id,
+        season_db_id = %season_db_id,
+        deleted = deleted_count,
+        "P8：Season 内 Episode 下架清理完成"
+    );
+    Ok(())
 }
 
 /// 构造远端 Emby 的 Static 直链 URL，跳过 PlaybackInfo 往返
@@ -6769,7 +6615,14 @@ async fn run_remote_emby_auto_sync_pass(
         if interval_min <= 0 {
             continue;
         }
-        // 没有 last_sync_at 时使用 created_at 作为基准，确保新源也会按周期触发首次同步。
+        if source.last_sync_at.is_none() {
+            tracing::debug!(
+                source_id = %source.id,
+                source_name = %source.name,
+                "自动增量同步：跳过未完成首次同步的源（请先手动触发首次同步）"
+            );
+            continue;
+        }
         let baseline = source.last_sync_at.unwrap_or(source.created_at);
         let elapsed_min = now
             .signed_duration_since(baseline)
