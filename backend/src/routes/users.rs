@@ -144,6 +144,8 @@ struct UserQuery {
     limit: Option<i64>,
     #[serde(default, alias = "searchTerm")]
     search_term: Option<String>,
+    #[serde(default, alias = "nameStartsWithOrGreater")]
+    name_starts_with_or_greater: Option<String>,
 }
 
 async fn query_users(
@@ -152,12 +154,13 @@ async fn query_users(
     Query(query): Query<UserQuery>,
 ) -> Result<Json<Value>, AppError> {
     auth::require_admin(&session)?;
-    let search_term = query
+    let raw_term = query
         .search_term
         .as_deref()
+        .or(query.name_starts_with_or_greater.as_deref())
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("%{}%", value.to_ascii_lowercase()));
+        .filter(|value| !value.is_empty());
+    let search_term = raw_term.map(|value| format!("%{}%", value.to_ascii_lowercase()));
     let start_index = query.start_index.unwrap_or(0).max(0);
     let limit = query.limit.unwrap_or(100).clamp(1, 1000);
 
@@ -501,11 +504,12 @@ async fn authenticate(
             .unwrap_or_default()
     };
 
-    let primary_ok = security::verify_password(&user.password_hash, password);
+    // 空哈希 = 无密码（ResetPassword 后的状态）：仅当用户也没提供密码时放行。
+    let passwordless = user.password_hash.trim().is_empty() && password.is_empty();
+
+    let primary_ok = passwordless || security::verify_password(&user.password_hash, password);
     let mut legacy_upgraded = false;
     if !primary_ok {
-        // 主哈希（Argon2）失败时，再尝试外部用户库的旧哈希格式（如 Emby SQLite SHA1）。
-        // 命中后一次性把密码升级为 Argon2，下次登录仍走标准路径。
         let legacy_ok = match (
             user.legacy_password_format.as_deref(),
             user.legacy_password_hash.as_deref(),
@@ -621,10 +625,9 @@ async fn update_password(
         if !session.is_admin {
             return Err(AppError::Forbidden);
         }
-        // 写一个 32 字节随机 Argon2 占位 hash（永远不可登录），同时清掉 legacy 字段。
-        let placeholder = Uuid::new_v4().to_string();
-        let placeholder_hash = security::hash_password(&placeholder)?;
-        repository::set_user_password_hash(&state.pool, user_id, &placeholder_hash).await?;
+        // 清空密码哈希 → 用户可以无密码登录（与 Emby 行为一致）。
+        // Sakura_embyboss `emby_reset(id, None)` 依赖此行为。
+        repository::set_user_password_hash(&state.pool, user_id, "").await?;
         repository::delete_sessions_for_user(&state.pool, user_id).await?;
         return Ok(StatusCode::NO_CONTENT);
     }

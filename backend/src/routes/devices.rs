@@ -53,8 +53,8 @@ async fn list_devices(
     State(state): State<AppState>,
     Query(query): Query<DeviceQuery>,
 ) -> Result<Json<Value>, AppError> {
-    // 按 device_id 聚合 sessions 表，按 EmbySDK DeviceInfo 结构返回。
-    let sessions = repository::list_sessions(&state.pool).await?;
+    // 按 device_id 聚合所有会话（含已过期），模拟 Emby 持久化 Devices 表。
+    let sessions = repository::list_all_sessions_for_devices(&state.pool).await?;
 
     // 非管理员仅能看到自己设备
     let visible_user = if session.is_admin {
@@ -162,7 +162,7 @@ async fn device_info(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| AppError::BadRequest("缺少 Id 参数".to_string()))?;
 
-    let sessions = repository::list_sessions(&state.pool).await?;
+    let sessions = repository::list_all_sessions_for_devices(&state.pool).await?;
     let mut latest: Option<crate::models::AuthSessionRow> = None;
     for s in sessions {
         if s.device_id.as_deref() != Some(id) {
@@ -241,7 +241,7 @@ async fn delete_device(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| AppError::BadRequest("缺少 Id 参数".to_string()))?;
 
-    let sessions = repository::list_sessions(&state.pool).await?;
+    let sessions = repository::list_all_sessions_for_devices(&state.pool).await?;
     for s in sessions {
         if s.device_id.as_deref() != Some(id.as_str()) {
             continue;

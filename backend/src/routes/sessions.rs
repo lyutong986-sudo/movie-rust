@@ -720,12 +720,14 @@ async fn build_playback_payload(
         "DeviceName": device_name,
         "DeviceId": device_id,
         "RemoteAddress": remote_address,
+        "NowPlayingItem": item_obj.clone(),
     });
 
     serde_json::json!({
         "User":    user_obj,
         "Item":    item_obj,
         "Session": session_obj,
+        "PlaybackPositionTicks": position_ticks.unwrap_or(0),
         "PlaybackInfo": {
             "PositionTicks":      position_ticks,
             "IsPaused":           is_paused,

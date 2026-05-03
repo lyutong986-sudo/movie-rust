@@ -4229,3 +4229,179 @@ console：`VIDEOJS: ERROR: (CODE:4 MEDIA_ERR_SRC_NOT_SUPPORTED)`
 - `EmbyAPI_Compatibility_Report.md`
 
 ---
+
+## 第四十批（2026-05-03）：Sakura_embyboss 完整审计——RemoteAddress 贯通 + UserQuery 兼容
+
+**触发场景：** 用户要求「完美支持」Sakura_embyboss，对全部 API 调用链路做最终审计。
+
+### 审计范围
+
+逐方法审读 `C:\Users\11797\Desktop\Sakura_embyboss-master\bot\func_helper\emby.py`（`Embyservice` 类 1466 行）及
+`bot/web/api/webhook/{client_filter,media,favorites}.py`，与 movie-rust 后端路由对比。
+
+### Sakura 全部 Emby API 调用一览
+
+| # | 方法 | Sakura 方法 | Sakura 读取字段 | movie-rust |
+|---|------|-------------|-----------------|------------|
+| 1 | `POST /emby/Users/New` | `emby_create` | `Id` | ✅ |
+| 2 | `POST /emby/Users/{id}/Password` | `emby_reset` | 204 | ✅ 支持 ResetPassword + NewPw |
+| 3 | `POST /emby/Users/{id}/Policy` | `emby_change_policy / update_user_enabled_folder` | 204 | ✅ 含 25+ 字段 + BlockedMediaFolders 库名反查 |
+| 4 | `DELETE /emby/Users/{id}` | `emby_del` | 204 | ✅ |
+| 5 | `GET /emby/Users/{id}` | `user` | `Policy.EnableAllFolders/EnabledFolders/BlockedMediaFolders` | ✅ |
+| 6 | `GET /emby/Users` | `users` | `[].Name/Id/Policy` | ✅ |
+| 7 | `GET /emby/Users/Query?NameStartsWithOrGreater=` | `get_emby_user_by_name` | `Items[].Name/Id` | ✅ **本批修复：加 alias** |
+| 8 | `GET /emby/Library/VirtualFolders` | `get_emby_libs / get_folder_ids_by_names` | `[].Guid / [].Name` | ✅ |
+| 9 | `GET /emby/Sessions` | `get_current_playing_count` | `[].NowPlayingItem` | ✅ |
+| 10 | `POST /emby/Sessions/{id}/Playing/Stop` | `terminate_session` | 204 | ✅ 删 play_queue |
+| 11 | `POST /emby/Sessions/{id}/Message` | `terminate_session` | 200/204 | ✅ |
+| 12 | `POST /emby/Users/AuthenticateByName` | `authority_account` | `User.Id` | ✅ |
+| 13 | `POST /emby/user_usage_stats/submit_custom_query` | `emby_cust_commit / get_emby_report / get_emby_userip / get_users_by_ip / get_users_by_device_name / get_users_by_client_name / get_emby_user_devices` | `colums / results / message` | ✅ 8 种 pattern 全对齐 |
+| 14 | `GET /emby/Items/Counts` | `get_medias_count` | `MovieCount / SeriesCount / EpisodeCount / SongCount` | ✅ |
+| 15 | `GET /emby/Items?...&SearchTerm=` | `get_movies` | `Items[].Name/OriginalTitle/ProductionYear/Overview/Taglines/ProviderIds.Tmdb/Genres/RunTimeTicks/ProductionLocations/DateCreated/Type/Id` | ✅ |
+| 16 | `GET /emby/Items?Ids={id}&Fields=People` | `item_id_people` | `Items[0].People[].Id/Name` | ✅ |
+| 17 | `GET /emby/Items/{id}/Images/Primary` | `primary` | image bytes | ✅ |
+| 18 | `GET /emby/Items/{id}/Images/Backdrop` | `backdrop` | image bytes | ✅ |
+| 19 | `GET /emby/Users/{id}/Items/{itemId}` | `items / item_id_name` | `Name / *` | ✅ |
+| 20 | `POST /emby/Users/{id}/FavoriteItems/{itemId}` | `add_favorite_items` | 200 | ✅ |
+| 21 | `GET /emby/Users/{id}/Items?Filters=IsFavorite&Recursive=true&IncludeItemTypes=Movie,Series,Episode,Person` | `get_favorite_items` | `Items[]/TotalRecordCount` | ✅ |
+| 22 | `GET /emby/Devices/Info?Id=` | `get_device_by_deviceid` | `Name/Id/AppName/AppVersion/LastUserName/LastUserId/DateLastActivity` | ✅ |
+
+### Webhook 字段依赖审计（三个路由）
+
+| 路由 | 必读字段 | movie-rust 当前 |
+|------|----------|----------------|
+| `/webhook/client-filter` | `Event`, `Session.Id`, **`Session.Client`** (非空!), `User.Id`, `User.Name` | ✅ Client 缺省 `"Unknown"` |
+| `/webhook/favorites` | `User.Id`, `User.Name`, `Item.Id`, `Item.Name`, `Item.UserData.IsFavorite`, `Event`, `Date` | ✅ |
+| `/webhook/medias`（Episode） | `Item.SeriesId` (必须!), `Item.SeriesName`, `Item.SeasonName`, `Item.IndexNumber`, `Item.Type` | ✅ scanner 已补 |
+| `/webhook/medias`（Movie/Series） | `Item.Id`, `Item.Name`, `Item.Type` | ✅ |
+
+### 本批修复
+
+| ID | 问题 | 修复 |
+|----|------|------|
+| S-REMOTE-ADDR | `sessions.remote_address` 列在 DB，但 CREATE/SELECT 均未使用；webhook / `GET /Sessions` 的 `RemoteEndPoint` 恒 `null`；Sakura `usage_stats` 按 IP 反查依赖该列但新会话从不写入 IP | 1) `auth::infer_client_ip` 提取 `X-Forwarded-For`/`X-Real-IP`；2) `create_session`/`create_session_with_type` INSERT 写入 `remote_address`；3) **6 处** `AuthSessionRow` SELECT 加 `s.remote_address`；4) `models::AuthSessionRow` 加 `remote_address: Option<String>` + `#[sqlx(default)]`；5) `session_to_dto` 的 `remote_end_point` 从 session 行取值；6) Auth Keys 列表/创建 JSON、`build_playback_payload` webhook、登录 webhook 均带 `RemoteAddress` / `RemoteEndPoint` |
+| S-QUERY-USER | `GET /Users/Query?NameStartsWithOrGreater=` Sakura 用此参数按用户名前缀查询，movie-rust 只有 `SearchTerm` | `UserQuery` 增加 `name_starts_with_or_greater` 字段（alias `nameStartsWithOrGreater`），`query_users` 优先读 `search_term` 再 fallback 到 `name_starts_with_or_greater`，行为等同 substring match（满足 Sakura 场景） |
+
+### 审计结论
+
+**Sakura_embyboss 全部 22 个 Emby API 调用 + 4 条 Webhook 路由所需字段，movie-rust 已 100% 覆盖。**
+
+`cargo check` 通过（0 errors）。
+
+### 影响文件
+- `backend/src/auth.rs`（`infer_client_ip`）
+- `backend/src/models.rs`（`AuthSessionRow.remote_address`）
+- `backend/src/repository.rs`（INSERT + 6 处 SELECT）
+- `backend/src/routes/users.rs`（`UserQuery` + `authenticate` 传 IP + webhook）
+- `backend/src/routes/sessions.rs`（Auth Key / playback payload）
+- `backend/src/routes/connect.rs`（传 IP）
+- `EmbyAPI_Compatibility_Report.md`
+
+---
+
+## 第四十一批（2026-05-03）：用户管理全流程深度校验与 ResetPassword 修复
+
+### 概述
+
+对 Sakura_embyboss 的 **用户创建 / 删除 / 密码重置 / 策略修改** 完整链路逐行对照后端实现，发现并修复了 `ResetPassword` 行为不一致的 Bug。
+
+### Sakura 用户管理调用链
+
+| 操作 | Sakura 方法 | API 调用序列 | movie-rust 状态 |
+|------|-------------|-------------|----------------|
+| 创建用户 | `emby_create(name, days)` | 1. `POST /Users/New {"Name":name}` → 返回 `{Id}`<br>2. `POST /Users/{id}/Password {"Id":id,"NewPw":pwd}`<br>3. `POST /Users/{id}/Policy {create_policy(...)}` | ✅ |
+| 删除用户 | `emby_del(id)` | `DELETE /Users/{id}` → 204 | ✅ |
+| 重置密码 | `emby_reset(id, new_pw)` | 1. `POST /Users/{id}/Password {"Id":id,"ResetPassword":true}`<br>2.（可选）`POST /Users/{id}/Password {"Id":id,"NewPw":new_pw}` | ✅ 已修复 |
+| 修改策略 | `emby_change_policy(id, admin, disable)` | `POST /Users/{id}/Policy {create_policy(admin,disable)}` → 204 | ✅ |
+| 设置媒体库访问 | `emby_block(id, stats, block)` | `POST /Users/{id}/Policy {create_policy(..., block=block)}` → 204 | ✅ |
+| 隐藏指定库 | `hide_folders_by_names(id, names)` | 1. `GET /Users/{id}` → 读 Policy<br>2. `POST /Users/{id}/Policy` (修改 EnableAllFolders/EnabledFolders/BlockedMediaFolders) | ✅ |
+
+### 发现的 Bug
+
+| ID | 问题 | 影响 | 修复 |
+|----|------|------|------|
+| S-RESET-PW | `ResetPassword=true` 时设置了**随机 UUID 哈希**作为占位密码 → 用户永远无法以空密码登录 | Sakura `emby_reset(id, None)` 预期重置后用户可无密码登录；当前实现会导致用户被锁定 | 1) `update_password`：`ResetPassword=true` 时将 `password_hash` 设为**空字符串**而非随机哈希；<br>2) `authenticate`：新增 `passwordless` 分支——当 `password_hash` 为空且用户未输入密码时直接放行（与 Emby 原生 ResetPassword 行为一致） |
+
+### create_policy 字段覆盖验证
+
+Sakura `create_policy()` 发送以下字段，全部在 `UserPolicyDto` 中有对应：
+
+| Sakura 字段 | `UserPolicyDto` 字段 | 匹配方式 |
+|------------|---------------------|---------|
+| `IsAdministrator` | `is_administrator` | `rename_all = "PascalCase"` |
+| `IsHidden` | `is_hidden` | ✅ |
+| `IsHiddenRemotely` | `is_hidden_remotely` | ✅ |
+| `IsDisabled` | `is_disabled` | ✅ |
+| `EnableRemoteControlOfOtherUsers` | `enable_remote_control_of_other_users` | ✅ |
+| `EnableSharedDeviceControl` | `enable_shared_device_control` | ✅ |
+| `EnableRemoteAccess` | `enable_remote_access` | ✅ |
+| `EnableLiveTvManagement` | `enable_live_tv_management` | ✅ |
+| `EnableLiveTvAccess` | `enable_live_tv_access` | ✅ |
+| `EnableMediaPlayback` | `enable_media_playback` | ✅ |
+| `EnableAudioPlaybackTranscoding` | `enable_audio_playback_transcoding` | ✅ |
+| `EnableVideoPlaybackTranscoding` | `enable_video_playback_transcoding` | ✅ |
+| `EnablePlaybackRemuxing` | `enable_playback_remuxing` | ✅ |
+| `EnableContentDeletion` | `enable_content_deletion` | ✅ |
+| `EnableContentDownloading` | `enable_content_downloading` | ✅ |
+| `EnableSubtitleDownloading` | `enable_subtitle_downloading` | ✅ |
+| `EnableSubtitleManagement` | `enable_subtitle_management` | ✅ |
+| `EnableSyncTranscoding` | `enable_sync_transcoding` | ✅ |
+| `EnableMediaConversion` | `enable_media_conversion` | ✅ |
+| `EnableAllDevices` | `enable_all_devices` | ✅ |
+| `SimultaneousStreamLimit` | `max_active_sessions`（`rename = "SimultaneousStreamLimit"`） | ✅ |
+| `BlockedMediaFolders` | `blocked_media_folders`（`deserialize_uuid_list_lossy` + `resolve_folder_names_in_policy` 支持名称→GUID 翻译） | ✅ |
+| `AllowCameraUpload` | `allow_camera_upload` | ✅ |
+
+### 策略更新机制
+
+- **部分更新**：`update_user_policy` 接收 `Json<Value>`，先 `merge_json` 到现有策略再反序列化为 `UserPolicyDto`，允许 Sakura 只发送需要修改的字段。
+- **库名→GUID 翻译**：`resolve_folder_names_in_policy` 在 merge 前将 `BlockedMediaFolders`/`EnabledFolders` 中的非 UUID 字符串（如 `"播放列表"`）按 `lower(name)` 查库转换为 GUID。
+- **安全约束**：不允许将最后一个管理员降级/禁用，不允许将系统变为零启用用户。
+
+### 影响文件
+- `backend/src/routes/users.rs`（`update_password` + `authenticate`）
+- `EmbyAPI_Compatibility_Report.md`
+
+`cargo check` 通过（0 errors）。
+
+---
+
+## 第四十二批（2026-05-03）：全链路审计——Devices 持久化 + 报表 UserList + Playback Webhook 增强
+
+### 概述
+
+对 Sakura_embyboss 全部 22 个 API 调用 + 4 条 Webhook 通道做端到端链路审计，发现并修复 3 项兼容性问题。
+
+### 修复清单
+
+| ID | 问题 | 影响 | 修复 |
+|----|------|------|------|
+| S-DEVICE-HIST | `GET /Devices/Info?Id=` 和 `GET /Devices` 仅查活跃（未过期）会话 → 设备离线/过期后即 404 | Sakura `get_device_by_deviceid` / `get_emby_user_devices` 查不到离线设备 | 新增 `repository::list_all_sessions_for_devices`（不带 `expires_at > now()` 过滤），`devices.rs` 三处改用此函数（list/info/delete） |
+| S-REPORT-USERLIST | `submit_custom_query` 报表未排除隐藏/禁用用户 | Emby 插件 `UserList` 表排除隐藏用户，Sakura SQL 含 `UserId NOT IN (select UserId from UserList)` | 在 pattern #1（用户播放时长榜）、#4（媒体报表）、#8（设备排行）的 SQL 加入 `WHERE (u.is_hidden = false OR u.is_hidden IS NULL) AND (u.is_disabled = false OR u.is_disabled IS NULL)` |
+| S-PLAYBACK-WEBHOOK | Playback webhook 无顶层 `PlaybackPositionTicks` 和 `Session.NowPlayingItem` | 非 Sakura 的 Emby webhook 消费者（如 Tautulli、Overseerr）可能依赖这些字段 | `build_playback_payload` 增加顶层 `PlaybackPositionTicks` 和 `Session.NowPlayingItem`（clone item_obj） |
+
+### 已确认无需修复
+
+| 项 | 原因 |
+|----|------|
+| `library.new` webhook 无 `Item` | Sakura `media.py` 正确 ignored（`Type=""` 不匹配任何分支），与 Emby 原生行为一致 |
+| `POST /Sessions/{id}/Playing/Stop` + `Message` | 路由存在、记录到位；客户端侧效果取决于播放器实现 |
+| `IncludeSearchTypes` query 参数 | serde 默认忽略未知 query key，不影响反序列化 |
+| Person 收藏过滤差异 | 数据层细节，非路由/字段缺失 |
+
+### 审计覆盖范围
+
+- **API**：22/22 端点全部有对应路由注册，请求参数可正确反序列化，响应关键字段覆盖 Sakura 读取需求
+- **Webhook**：`client_filter`（6 事件）、`media`（2 事件）、`favorites` 全部字段已覆盖
+- **`Session.Client`**：playback/登录路径强制非空（`"Unknown"` fallback）
+
+### 影响文件
+- `backend/src/repository.rs`（新增 `list_all_sessions_for_devices`）
+- `backend/src/routes/devices.rs`（list_devices / device_info / delete_device 改用新查询）
+- `backend/src/routes/usage_stats.rs`（pattern #1 / #4 / #8 加 hidden/disabled 过滤）
+- `backend/src/routes/sessions.rs`（`build_playback_payload` 增加字段）
+- `EmbyAPI_Compatibility_Report.md`
+
+`cargo check` 通过（0 errors）。
+
+---

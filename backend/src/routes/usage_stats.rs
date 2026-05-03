@@ -183,6 +183,8 @@ async fn user_watchtime_ranking(
                COALESCE(SUM(sd.dur), 0)::bigint     AS watch_time
           FROM session_durations sd
           LEFT JOIN users u ON u.id = sd.user_id
+         WHERE (u.is_hidden = false OR u.is_hidden IS NULL)
+           AND (u.is_disabled = false OR u.is_disabled IS NULL)
          GROUP BY sd.user_id, u.name
          ORDER BY watch_time DESC
         "#,
@@ -342,7 +344,10 @@ async fn media_report(
                COALESCE(SUM(sd.dur), 0)::bigint AS total_duarion
           FROM session_durations sd
           JOIN media_items mi ON mi.id = sd.item_id
+          LEFT JOIN users u ON u.id = sd.user_id
          WHERE mi.item_type = $4
+           AND (u.is_hidden = false OR u.is_hidden IS NULL)
+           AND (u.is_disabled = false OR u.is_disabled IS NULL)
          GROUP BY sd.user_id, sd.item_id, mi.item_type, mi.name
          ORDER BY total_duarion DESC
          LIMIT $5
@@ -500,6 +505,8 @@ async fn user_devices_ranking(
           FROM playback_events pe
           LEFT JOIN sessions s ON s.access_token = pe.session_id
           LEFT JOIN users u    ON u.id = pe.user_id
+         WHERE (u.is_hidden = false OR u.is_hidden IS NULL)
+           AND (u.is_disabled = false OR u.is_disabled IS NULL)
          GROUP BY pe.user_id, u.name
          ORDER BY device_count DESC
          LIMIT $1 OFFSET $2

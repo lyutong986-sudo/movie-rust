@@ -2944,6 +2944,34 @@ pub async fn list_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, A
     .await?)
 }
 
+/// 列出所有会话（含已过期），用于 Devices 端点聚合设备信息。
+/// Emby 持久化设备表，我们用全量会话历史模拟。
+pub async fn list_all_sessions_for_devices(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, AppError> {
+    Ok(sqlx::query_as::<_, AuthSessionRow>(
+        r#"
+        SELECT
+            s.access_token,
+            s.user_id,
+            u.name AS user_name,
+            u.is_admin,
+            s.session_type,
+            s.device_id,
+            s.device_name,
+            s.client,
+            s.application_version,
+            s.last_activity_at,
+            s.expires_at,
+            s.remote_address
+        FROM sessions s
+        INNER JOIN users u ON u.id = s.user_id
+        WHERE s.device_id IS NOT NULL AND s.device_id != ''
+        ORDER BY s.last_activity_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
 pub async fn list_sessions_for_user(
     pool: &sqlx::PgPool,
     user_id: Uuid,
