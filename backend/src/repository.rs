@@ -4638,6 +4638,26 @@ pub async fn clear_remote_emby_source_auth_state(
     Ok(())
 }
 
+/// 轮换远端源的设备标识并清除认证状态，用于触发限流后自动更换身份重试。
+pub async fn rotate_remote_emby_source_device_id(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    new_device_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE remote_emby_sources
+        SET spoofed_device_id = $2, remote_user_id = NULL, access_token = NULL, updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(new_device_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// PB49：取出指定 (source, view) 的续抓游标。
 ///
 /// 仅当存储的 `incremental_since` 与本次同步语义匹配时才返回 `Some(start_index)`，

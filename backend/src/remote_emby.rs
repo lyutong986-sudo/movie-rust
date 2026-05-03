@@ -5194,6 +5194,15 @@ fn is_retryable_network_error(err: &reqwest::Error) -> bool {
     err.is_timeout() || err.is_connect() || err.is_request() || err.is_body()
 }
 
+/// 判断是否为「Connection reset by peer」类型错误。
+/// 远端 WAF/限流主动 RST 连接时 hyper 报的就是这类 I/O 错误（errno 104）。
+fn is_connection_reset(err: &reqwest::Error) -> bool {
+    let debug_repr = format!("{err:?}");
+    debug_repr.contains("ConnectionReset")
+        || debug_repr.contains("connection reset")
+        || debug_repr.contains("reset by peer")
+}
+
 async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
@@ -5202,14 +5211,15 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
 ) -> Result<T, AppError> {
     let client = &*crate::http_client::SHARED;
     let mut auth_retry_used = false;
+    let mut identity_rotated = false;
     let mut last_error: Option<String> = None;
 
-    // 重试循环：max_retries 次「网络/5xx 错误」退避重试 + 最多 1 次 401/403 续登重试。
-    // 这两类重试相互独立计数：
-    //   - auth_retry_used：401/403 触发的「清 token 重登」是否已用掉；
-    //   - retry_count：5xx / 网络错误 触发的退避重试次数。
+    // 重试循环：max_retries 次「网络/5xx 错误」退避重试 + 最多 1 次 401/403 续登重试
+    // + 最多 1 次身份轮换后全量重试（连接 RST 场景）。
     let request_interval_ms = source.request_interval_ms;
     let source_id = source.id;
+    // 身份轮换后 `continue 'identity` 重置 retry_count 重新跑一整轮
+    'identity: loop {
     for retry_count in 0..=REMOTE_HTTP_MAX_RETRIES {
         let _user_id = ensure_authenticated(pool, source, false).await?;
         let token = source
@@ -5272,6 +5282,30 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
                     last_error = Some(format!("{err:#}"));
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
+                }
+                // 连接被 RST 且尚未轮换过身份 → 自动更换 DeviceId 并重新认证再试一轮
+                if !identity_rotated && is_connection_reset(&err) {
+                    identity_rotated = true;
+                    let new_device_id = Uuid::new_v4().simple().to_string();
+                    tracing::warn!(
+                        endpoint,
+                        old_device_id = %source.effective_spoofed_device_id(),
+                        new_device_id = %new_device_id,
+                        "远端连接被重置，轮换设备标识后重试"
+                    );
+                    if let Err(e) = repository::rotate_remote_emby_source_device_id(
+                        pool, source.id, &new_device_id,
+                    ).await {
+                        tracing::warn!(error = %e, "轮换设备标识写 DB 失败");
+                    } else {
+                        source.spoofed_device_id = new_device_id;
+                        source.access_token = None;
+                        source.remote_user_id = None;
+                        auth_retry_used = false;
+                        invalidate_playback_info_cache_for_source(source.id).await;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue 'identity;
+                    }
                 }
                 tracing::error!(
                     endpoint,
@@ -5385,7 +5419,9 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
                 status.as_u16()
             ))
         });
-    }
+    } // for retry_count
+    break; // 正常退出 'identity 循环
+    } // 'identity: loop
 
     Err(AppError::Internal(format!(
         "远端 Emby 请求多次重试仍失败 endpoint={} 最近错误: {}",
