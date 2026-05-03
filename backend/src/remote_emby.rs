@@ -4953,9 +4953,29 @@ async fn send_remote_stream_request(
 ) -> Result<reqwest::Response, AppError> {
     let client = &*crate::http_client::SHARED;
     let empty_headers = HashMap::new();
+    // attempt 0: 正常请求
+    // attempt 1: 清 token 重登后重试
+    // attempt 2: 轮换 DeviceId 后最终重试（仅在 attempt 1 仍 401/403 时触发）
+    let max_attempts: u32 = 3;
 
-    for attempt in 0..2 {
-        let _user_id = ensure_authenticated(pool, source, attempt > 0).await?;
+    for attempt in 0..max_attempts {
+        if attempt == 2 {
+            // 最终兜底：轮换设备标识
+            if !try_rotate_device_identity(pool, source).await {
+                break;
+            }
+        }
+        let force_refresh = attempt > 0;
+        match ensure_authenticated(pool, source, force_refresh).await {
+            Ok(_) => {}
+            Err(auth_err) => {
+                if attempt < max_attempts - 1 {
+                    // 登录失败 → 下一轮尝试轮换设备标识
+                    continue;
+                }
+                return Err(auth_err);
+            }
+        }
         let token = source
             .access_token
             .clone()
@@ -4992,7 +5012,7 @@ async fn send_remote_stream_request(
                 if matches!(
                     status,
                     reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-                ) && attempt == 0
+                ) && attempt < max_attempts - 1
                 {
                     repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
                     source.access_token = None;
@@ -5060,7 +5080,7 @@ async fn send_remote_stream_request(
         if matches!(
             status,
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-        ) && attempt == 0
+        ) && attempt < max_attempts - 1
         {
             {
                 let mut cache = PLAYBACK_INFO_CACHE.write().await;
@@ -5071,7 +5091,7 @@ async fn send_remote_stream_request(
             source.remote_user_id = None;
             continue;
         }
-        if status == reqwest::StatusCode::NOT_FOUND && used_cache && attempt == 0 {
+        if status == reqwest::StatusCode::NOT_FOUND && used_cache && attempt < max_attempts - 1 {
             // 远端 DirectStreamUrl/TranscodingUrl 已失效（如 token rotate、媒体源 ID 变更）；
             // 清掉过期 PlaybackInfo 缓存，下一轮 attempt 会拉取 fresh PlaybackInfo 重试一次
             // （token 仍有效，无需 clear_remote_emby_source_auth_state）。
@@ -5164,6 +5184,42 @@ fn is_retryable_network_error(err: &reqwest::Error) -> bool {
     err.is_timeout() || err.is_connect() || err.is_request() || err.is_body()
 }
 
+/// 远端设备疑似被封禁时的最终恢复手段：轮换 spoofed_device_id，清空 auth 状态，
+/// 清除 PlaybackInfo 缓存。下一轮 `ensure_authenticated` 会用新 DeviceId 重新登录，
+/// 在远端 Devices 表创建一台"全新设备"，绕过旧设备的封禁/限制。
+///
+/// 仅在 auth_retry（清 token 重登）也无法恢复时触发，每次请求链路最多执行一次。
+async fn try_rotate_device_identity(
+    pool: &sqlx::PgPool,
+    source: &mut DbRemoteEmbySource,
+) -> bool {
+    let old_device_id = source.effective_spoofed_device_id();
+    match repository::rotate_remote_emby_source_device_id(pool, source.id).await {
+        Ok(new_device_id) => {
+            tracing::warn!(
+                source_id = %source.id,
+                source_name = %source.name,
+                old_device_id = %old_device_id,
+                new_device_id = %new_device_id,
+                "远端设备标识疑似被封禁，已自动轮换 DeviceId 并清空 auth 状态"
+            );
+            source.spoofed_device_id = new_device_id;
+            source.access_token = None;
+            source.remote_user_id = None;
+            invalidate_playback_info_cache_for_source(source.id).await;
+            true
+        }
+        Err(err) => {
+            tracing::error!(
+                source_id = %source.id,
+                error = %err,
+                "设备标识轮换失败（数据库写入异常）"
+            );
+            false
+        }
+    }
+}
+
 async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
@@ -5172,16 +5228,35 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
 ) -> Result<T, AppError> {
     let client = &*crate::http_client::SHARED;
     let mut auth_retry_used = false;
+    let mut device_rotation_used = false;
     let mut last_error: Option<String> = None;
 
-    // 重试循环：max_retries 次「网络/5xx 错误」退避重试 + 最多 1 次 401/403 续登重试。
-    // 这两类重试相互独立计数：
+    // 重试循环：max_retries 次「网络/5xx 错误」退避重试 + 最多 1 次 401/403 续登重试
+    // + 最多 1 次设备标识轮换重试（末尾 fallback）。
+    // 这三类重试相互独立计数：
     //   - auth_retry_used：401/403 触发的「清 token 重登」是否已用掉；
+    //   - device_rotation_used：设备标识轮换是否已用掉（最终兜底）；
     //   - retry_count：5xx / 网络错误 触发的退避重试次数。
     let request_interval_ms = source.request_interval_ms;
     let source_id = source.id;
     for retry_count in 0..=REMOTE_HTTP_MAX_RETRIES {
-        let _user_id = ensure_authenticated(pool, source, false).await?;
+        match ensure_authenticated(pool, source, false).await {
+            Ok(_) => {}
+            Err(auth_err) => {
+                // 登录本身失败（可能设备被封禁），尝试轮换 DeviceId 后重新登录
+                if !device_rotation_used {
+                    let rotated = try_rotate_device_identity(pool, source).await;
+                    if rotated {
+                        device_rotation_used = true;
+                        auth_retry_used = false;
+                        last_error = Some(format!("登录失败触发设备标识轮换: {auth_err}"));
+                        tokio::time::sleep(Duration::from_millis(REMOTE_HTTP_BACKOFF_BASE_MS)).await;
+                        continue;
+                    }
+                }
+                return Err(auth_err);
+            }
+        }
         let token = source
             .access_token
             .clone()
@@ -5241,6 +5316,17 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
+                // 网络重试耗尽 → 尝试设备标识轮换作为最终兜底
+                if !device_rotation_used {
+                    let rotated = try_rotate_device_identity(pool, source).await;
+                    if rotated {
+                        device_rotation_used = true;
+                        auth_retry_used = false;
+                        last_error = Some(format!("网络错误触发设备标识轮换: {err:#}"));
+                        tokio::time::sleep(Duration::from_millis(REMOTE_HTTP_BACKOFF_BASE_MS)).await;
+                        continue;
+                    }
+                }
                 tracing::error!(
                     endpoint,
                     error_debug = ?err,
@@ -5256,15 +5342,27 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
         if matches!(
             status,
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-        ) && !auth_retry_used
-        {
-            auth_retry_used = true;
-            repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
-            source.access_token = None;
-            source.remote_user_id = None;
-            // PB22：重登 + 清 PlaybackInfo 缓存（与 PB15 一致），下一轮 ensure_authenticated 会重新拿 token。
-            invalidate_playback_info_cache_for_source(source.id).await;
-            continue;
+        ) {
+            if !auth_retry_used {
+                auth_retry_used = true;
+                repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
+                source.access_token = None;
+                source.remote_user_id = None;
+                // PB22：重登 + 清 PlaybackInfo 缓存（与 PB15 一致），下一轮 ensure_authenticated 会重新拿 token。
+                invalidate_playback_info_cache_for_source(source.id).await;
+                continue;
+            }
+            // auth 重试已用但仍 401/403 → 设备可能被远端封禁，尝试轮换 DeviceId
+            if !device_rotation_used {
+                let rotated = try_rotate_device_identity(pool, source).await;
+                if rotated {
+                    device_rotation_used = true;
+                    auth_retry_used = false;
+                    last_error = Some(format!("持续 {} 触发设备标识轮换", status.as_u16()));
+                    tokio::time::sleep(Duration::from_millis(REMOTE_HTTP_BACKOFF_BASE_MS)).await;
+                    continue;
+                }
+            }
         }
 
         // 5xx / 429 / 408：退避后重试。
@@ -6295,7 +6393,23 @@ async fn refresh_single_remote_token(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
 ) -> Result<(), AppError> {
-    ensure_authenticated(pool, source, true).await?;
+    match ensure_authenticated(pool, source, true).await {
+        Ok(_) => {}
+        Err(err) => {
+            // 令牌刷新失败 → 尝试轮换设备标识后重新登录
+            tracing::warn!(
+                source_id = %source.id,
+                source_name = %source.name,
+                error = %err,
+                "远端令牌刷新失败，尝试轮换设备标识"
+            );
+            if try_rotate_device_identity(pool, source).await {
+                ensure_authenticated(pool, source, true).await?;
+            } else {
+                return Err(err);
+            }
+        }
+    }
     repository::update_remote_emby_source_last_token_refresh(pool, source.id).await?;
     // PB15：token 刷新成功后清掉这个源的 PlaybackInfo 缓存，避免下游继续命中带旧
     // api_key 的直链导致 401/403 浪费一次重试。

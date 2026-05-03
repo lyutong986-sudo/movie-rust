@@ -4638,6 +4638,30 @@ pub async fn clear_remote_emby_source_auth_state(
     Ok(())
 }
 
+/// 轮换远端源的 spoofed_device_id，同时清空 auth 状态迫使下次请求重新登录。
+/// 用于远端设备被封禁导致持续 401/403/连接失败时的自动恢复。
+pub async fn rotate_remote_emby_source_device_id(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<String, AppError> {
+    let new_device_id = Uuid::new_v4().simple().to_string();
+    sqlx::query(
+        r#"
+        UPDATE remote_emby_sources
+        SET spoofed_device_id = $2,
+            remote_user_id = NULL,
+            access_token = NULL,
+            updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(&new_device_id)
+    .execute(pool)
+    .await?;
+    Ok(new_device_id)
+}
+
 /// PB49：取出指定 (source, view) 的续抓游标。
 ///
 /// 仅当存储的 `incremental_since` 与本次同步语义匹配时才返回 `Some(start_index)`，
