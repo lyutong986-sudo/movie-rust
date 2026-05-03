@@ -9130,6 +9130,11 @@ pub struct UpsertMediaItem<'a> {
     pub video_codec: Option<&'a str>,
     pub audio_codec: Option<&'a str>,
     pub series_id: Option<Uuid>,
+    /// 当为 `true` 时，ON CONFLICT UPDATE 无条件用 EXCLUDED 的图片路径覆盖已有值，
+    /// 跳过"已有本地路径 → 不被 HTTP URL 覆盖"的保护逻辑。
+    /// 适用于增量同步 `force_refresh_sidecar = true` 场景：本地 jpg 已被物理删除，
+    /// 需要把远端 HTTP URL 写回 DB 以便 sidecar worker 按新 ImageTag 重新下载。
+    pub force_overwrite_images: bool,
 }
 
 /// 返回 `(item_id, was_inserted)`：
@@ -9276,6 +9281,7 @@ pub async fn upsert_media_item(
                 tags = EXCLUDED.tags,
                 production_locations = EXCLUDED.production_locations,
                 image_primary_path = CASE
+                    WHEN $46 THEN EXCLUDED.image_primary_path
                     WHEN EXCLUDED.image_primary_path IS NULL THEN media_items.image_primary_path
                     WHEN media_items.image_primary_path IS NOT NULL
                          AND media_items.image_primary_path NOT LIKE 'http://%'
@@ -9285,6 +9291,7 @@ pub async fn upsert_media_item(
                     ELSE EXCLUDED.image_primary_path
                 END,
                 backdrop_path = CASE
+                    WHEN $46 THEN EXCLUDED.backdrop_path
                     WHEN EXCLUDED.backdrop_path IS NULL THEN media_items.backdrop_path
                     WHEN media_items.backdrop_path IS NOT NULL
                          AND media_items.backdrop_path NOT LIKE 'http://%'
@@ -9294,6 +9301,7 @@ pub async fn upsert_media_item(
                     ELSE EXCLUDED.backdrop_path
                 END,
                 logo_path = CASE
+                    WHEN $46 THEN EXCLUDED.logo_path
                     WHEN EXCLUDED.logo_path IS NULL THEN media_items.logo_path
                     WHEN media_items.logo_path IS NOT NULL
                          AND media_items.logo_path NOT LIKE 'http://%'
@@ -9366,6 +9374,7 @@ pub async fn upsert_media_item(
         .bind(input.video_codec)
         .bind(input.audio_codec)
         .bind(input.series_id)
+        .bind(input.force_overwrite_images)
         .execute(pool)
         .await;
 

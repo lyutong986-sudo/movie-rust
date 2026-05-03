@@ -826,6 +826,7 @@ async fn import_movie_file(
             video_codec: parsed.video_codec.as_deref(),
             audio_codec: parsed.audio_codec.as_deref(),
             series_id: None,
+            force_overwrite_images: false,
         },
     )
     .await?;
@@ -1128,6 +1129,7 @@ async fn import_tv_file(
             video_codec: None,
             audio_codec: None,
             series_id: None,
+            force_overwrite_images: false,
         },
     )
     .await?;
@@ -1268,6 +1270,7 @@ async fn import_tv_file(
             video_codec: None,
             audio_codec: None,
             series_id: Some(series_id),
+            force_overwrite_images: false,
         },
     )
     .await?;
@@ -1445,6 +1448,7 @@ async fn import_tv_file(
             video_codec: parsed.video_codec.as_deref(),
             audio_codec: parsed.audio_codec.as_deref(),
             series_id: Some(series_id),
+            force_overwrite_images: false,
         },
     )
     .await?;

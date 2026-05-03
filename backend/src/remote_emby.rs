@@ -2661,6 +2661,7 @@ async fn process_one_remote_sync_item(
         backdrop_path.as_deref(),
         logo_path.as_deref(),
         series_db_id,
+        force_refresh_sidecar,
     )
     .await?;
     if let Some(analysis) = analysis {
@@ -3308,6 +3309,7 @@ async fn ensure_remote_series_folder(
             video_codec: None,
             audio_codec: None,
             series_id: None,
+            force_overwrite_images: false,
         },
     )
     .await?;
@@ -3416,6 +3418,7 @@ async fn ensure_remote_season_folder(
             video_codec: None,
             audio_codec: None,
             series_id: Some(series_parent_id),
+            force_overwrite_images: false,
         },
     )
     .await?;
@@ -3440,6 +3443,7 @@ async fn upsert_remote_media_item(
     local_backdrop: Option<&Path>,
     local_logo: Option<&Path>,
     series_db_id: Option<Uuid>,
+    force_overwrite_images: bool,
 ) -> Result<Uuid, AppError> {
     let container = analysis.and_then(|value| value.format.format_name.as_deref());
     let video_codec = analysis.and_then(|value| {
@@ -3615,6 +3619,7 @@ async fn upsert_remote_media_item(
             video_codec,
             audio_codec,
             series_id: series_db_id,
+            force_overwrite_images,
         },
     )
     .await
@@ -3858,6 +3863,7 @@ async fn fetch_and_upsert_series_detail(
             video_codec: None,
             audio_codec: None,
             series_id: None,
+            force_overwrite_images: false,
         },
     )
     .await
