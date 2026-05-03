@@ -8485,10 +8485,10 @@ pub async fn cleanup_stale_play_queue(pool: &sqlx::PgPool, timeout_minutes: i64)
     let result = sqlx::query(
         r#"
         DELETE FROM session_play_queue
-        WHERE updated_at < now() - make_interval(mins => $1)
+        WHERE updated_at < now() - ($1::bigint || ' minutes')::interval
         "#,
     )
-    .bind(timeout_minutes as f64)
+    .bind(timeout_minutes)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
