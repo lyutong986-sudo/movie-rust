@@ -75,7 +75,14 @@ impl From<anyhow::Error> for AppError {
 
 impl From<reqwest::Error> for AppError {
     fn from(value: reqwest::Error) -> Self {
-        AppError::Internal(format!("HTTP请求错误: {}", value))
+        let mut detail = format!("HTTP请求错误: {value}");
+        // 展开完整错误链，暴露真正的内层原因（TLS/DNS/connection reset等）
+        let mut source = std::error::Error::source(&value);
+        while let Some(inner) = source {
+            detail.push_str(&format!(" -> {inner}"));
+            source = std::error::Error::source(inner);
+        }
+        AppError::Internal(detail)
     }
 }
 
