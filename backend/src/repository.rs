@@ -4243,6 +4243,7 @@ pub async fn create_remote_emby_source(
     };
     let proxy_mode = match proxy_mode.trim().to_ascii_lowercase().as_str() {
         "redirect" => "redirect",
+        "redirect_direct" => "redirect_direct",
         _ => "proxy",
     };
     // 拉取速率：page_size <= 0 退默认 200，clamp [50, 1000]；request_interval_ms 负数归零，clamp [0, 60_000ms]。
@@ -4468,6 +4469,7 @@ pub async fn update_remote_emby_source(
     };
     let proxy_mode = match proxy_mode.trim().to_ascii_lowercase().as_str() {
         "redirect" => "redirect",
+        "redirect_direct" => "redirect_direct",
         _ => "proxy",
     };
     let page_size = if page_size <= 0 { 200 } else { page_size.clamp(50, 1000) };
