@@ -3619,11 +3619,12 @@ async fn upsert_remote_media_item(
     let banner_path = remote_urls.banner.as_ref().map(|s| Path::new(s.as_str()));
     let art_path = remote_urls.art.as_ref().map(|s| Path::new(s.as_str()));
     let disc_path = remote_urls.disc.as_ref().map(|s| Path::new(s.as_str()));
-    // 全部 backdrops（自身全部 + episode 缺则用 series 回退全部）；media_items.backdrop_paths 是 text[]。
+    // 额外 backdrops（跳过第一张，因为第一张已存入 backdrop_path 单值字段）；
+    // media_items.backdrop_paths 存的是 index 1+ 的壁纸。
     let all_backdrops: Vec<String> = if !remote_urls.backdrops.is_empty() {
-        remote_urls.backdrops.clone()
+        remote_urls.backdrops.iter().skip(1).cloned().collect()
     } else {
-        series_fallback_backdrops.clone()
+        series_fallback_backdrops.iter().skip(1).cloned().collect()
     };
 
     // PB34-1：把远端 BaseItemDto 的扩展字段透传到本地 DB（之前一律置 None / 空数组）。

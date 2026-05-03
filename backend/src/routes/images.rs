@@ -195,11 +195,15 @@ async fn list_item_images(
         if let Some(path) = item.art_path {
             images.push(build_image_info("Art", None, &tag, path));
         }
-        if let Some(path) = item.backdrop_path {
-            images.push(build_image_info("Backdrop", Some(0), &tag, path));
+        if let Some(ref bd_path) = item.backdrop_path {
+            images.push(build_image_info("Backdrop", Some(0), &tag, bd_path.clone()));
         }
         for (i, path) in item.backdrop_paths.iter().enumerate() {
-            images.push(build_image_info("Backdrop", Some((i + 1) as i32), &tag, path.clone()));
+            if item.backdrop_path.as_deref() == Some(path.as_str()) {
+                continue;
+            }
+            let idx = images.iter().filter(|img| img.image_type == "Backdrop").count() as i32;
+            images.push(build_image_info("Backdrop", Some(idx), &tag, path.clone()));
         }
     } else if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
         let image_tag = person
