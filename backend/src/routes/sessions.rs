@@ -572,11 +572,12 @@ async fn record_report(
             return Err(AppError::NotFound("媒体条目不存在".to_string()));
         }
     }
-    let session_id_for_event = report
-        .session_id
-        .as_deref()
-        .or(Some(session.access_token.as_str()))
-        .map(ToOwned::to_owned);
+    let session_id_for_event = repository::resolve_session_id_for_play_queue(
+        &state.pool,
+        session.access_token.as_str(),
+        report.session_id.as_deref(),
+    )
+    .await?;
     let extras = repository::PlaybackEventExtras {
         audio_stream_index: report.audio_stream_index,
         subtitle_stream_index: report.subtitle_stream_index,
@@ -596,7 +597,7 @@ async fn record_report(
         &state.pool,
         user_id,
         report.item_id,
-        session_id_for_event.as_deref(),
+        Some(session_id_for_event.as_str()),
         event_type,
         report.position_ticks,
         report.is_paused,
@@ -641,7 +642,7 @@ async fn record_report(
             state,
             user_id,
             report.item_id,
-            session_id_for_event.as_deref(),
+            Some(session_id_for_event.as_str()),
             report.position_ticks,
             report.is_paused.unwrap_or(false),
             report.played_to_completion.unwrap_or(false),
@@ -768,17 +769,11 @@ async fn record_legacy_for_user(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
     };
-    // PB25：legacy 路径之前对 query.play_session_id 做了 `filter(== access_token)` 这种
-    // 没有意义的等价判断（Emby 客户端发的 PlaySessionId 是 PlaybackInfo handler 生成的
-    // 独立 ID，几乎从不等于 access_token），实际效果是「取 access_token 当 session_id」。
-    // 这里改为：如果客户端带了 PlaySessionId 就尊重它（写进 playback_events.session_id 兜底
-    // 维度，等 PB29 持久化跨表后再分离），否则回落 access_token。
-    let session_id_for_event = query
-        .play_session_id
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| session.access_token.clone());
+    // PlaySessionId 已写入 `playback_events.play_session_id`（extras）；`session_id` 列与
+    // `session_play_queue` **必须**使用登录会话的 access_token，否则会触发 PB25 回归：
+    // EXISTS(sessions.access_token) 对 PlaySessionId 恒为假 → 无播放队列 → Sakura/控制台
+    // 「在线播放」统计恒 0。
+    let session_id_for_event = session.access_token.clone();
     repository::record_playback_event(
         &state.pool,
         user_id,

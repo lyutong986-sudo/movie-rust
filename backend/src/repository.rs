@@ -2998,6 +2998,41 @@ pub async fn find_active_session(
     .await?)
 }
 
+/// `session_play_queue` 与 `session_runtime_state` 以 `sessions.access_token` 为维度。
+/// Emby 客户端里的 **PlaySessionId**（PlaybackInfo 生成）与登录拿到的 **AccessToken** 不是同一个值；
+/// 若把前者误写入 `playback_events.session_id`，则 `record_playback_event` 里
+/// `WHERE EXISTS (SELECT 1 FROM sessions WHERE access_token = $1)` 永远不成立，
+/// **NowPlayingItem** 无法填充，下游（Sakura / 控制台「在线播放」统计）恒为 0。
+///
+/// 规则：仅当 `client_session_id` 非空且确实是当前库里的有效 `access_token` 时才采纳；
+/// 否则回落到本次请求的 `auth_access_token`。
+pub async fn resolve_session_id_for_play_queue(
+    pool: &sqlx::PgPool,
+    auth_access_token: &str,
+    client_session_id: Option<&str>,
+) -> Result<String, AppError> {
+    if let Some(sid) = client_session_id.map(str::trim).filter(|s| !s.is_empty()) {
+        let exists: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM sessions s
+                INNER JOIN users u ON u.id = s.user_id
+                WHERE s.access_token = $1
+                  AND u.is_disabled = false
+                  AND (s.expires_at IS NULL OR s.expires_at > now())
+            )
+            "#,
+        )
+        .bind(sid)
+        .fetch_one(pool)
+        .await?;
+        if exists {
+            return Ok(sid.to_string());
+        }
+    }
+    Ok(auth_access_token.to_string())
+}
+
 pub async fn list_api_key_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, AppError> {
     Ok(sqlx::query_as::<_, AuthSessionRow>(
         r#"

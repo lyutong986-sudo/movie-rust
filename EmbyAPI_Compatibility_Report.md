@@ -2841,6 +2841,16 @@ do_refresh_item_metadata_with
 
 ---
 
+## 补丁（2026-05-03）：在线播放 / Sakura 统计依赖 `session_play_queue`
+
+| ID | 现象 | 修复 |
+|----|------|------|
+| PR-SAKURA-PLAYQUEUE | Sakura_embyboss「服务器」里在线播放人数、`GET /Sessions` 的 **NowPlayingItem** 长期为空（看起来像在线 0）。根因：`session_play_queue` 写入前有 `WHERE EXISTS (sessions.access_token = session_id)`；PB25 起 legacy `/PlayingItems*` 把 **PlaySessionId** 误写入 `playback_events.session_id`，该值几乎从不等于登录 **AccessToken**，导致 INSERT 条件永不成立，队列无行，`session_runtime_state` 恒空。另：部分客户端会把无关字符串塞进 `PlaybackReport.SessionId`，同样破坏队列。 | 1) `repository::resolve_session_id_for_play_queue`：仅当客户端传来的 `SessionId` 确实是当前有效会话的 `access_token` 时才采纳，否则回落请求者 token。2) `sessions.rs::record_report` 使用该解析结果写入事件与队列。3) `record_legacy_for_user`：**始终**用 `session.access_token` 作为 `session_id` 维度；**PlaySessionId** 仅通过已有 `PlaybackEventExtras.play_session_id` 进 `playback_events.play_session_id` 列（PB29），不再污染队列外键。 |
+
+**验证：** 用 Infuse / 老 Emby 上报路径播一段 → `GET /Sessions` 对应会话应出现 **NowPlayingItem**；Sakura 在线播放计数应 >0（若 Sakura 按「有 NowPlayingItem」统计）。
+
+---
+
 ## 第三十八批（2026-05-01）：元数据链路审计 PB31–PB35（远端 People / Series 详情 / 锁定字段 / 编辑回写 NFO / TMDB 打分匹配 / 7 类图 / 软删盘 / provider 删除 / PlaybackInfo 重试 / DTO 兜底 / TMDB retry / ETag / TMDB tagline+keywords+person_roles.is_featured）
 
 **触发场景：** 用户要求在 PB30 详情页 fire-and-forget 异步补全的基础上做一次「元数据链路全链路审计」，列出所有"看起来已实现但其实没真写进 DB / 没回写 NFO / 与 Emby SDK 行为不一致"的问题，分批修复。
