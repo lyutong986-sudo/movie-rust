@@ -2821,14 +2821,74 @@ async fn proxy_item_stream_internal_with_source(
     method: Method,
     headers: &HeaderMap,
 ) -> Result<Response, AppError> {
-    // --- redirect 模式：302 直链重定向，客户端直连远端，节省本地带宽 ---
+    // --- redirect 模式：解析远端 302 链，将最终直链返回给客户端 ---
+    // 远端 Emby 可能返回 302 指向 CDN/云盘直链（如 123pan.cn），
+    // 我们跟踪整条重定向链，把最后一跳的 Location 直接返回给客户端，
+    // 客户端一步到位连接存储后端，无需经过远端 Emby 或本地中转。
     if source.is_redirect_mode() {
         let token = ensure_authenticated(&state.pool, source, false).await?;
         let redirect_url =
             build_remote_stream_redirect_url(source, remote_item_id, media_source_id, &token);
+
+        // 用不跟随重定向的一次性 Client 探测远端是否返回 302
+        let no_redirect_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(15))
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        let auth_value = emby_auth_header(source, Some(&token));
+        let probe = no_redirect_client
+            .get(&redirect_url)
+            .header(header::USER_AGENT.as_str(), source.effective_user_agent())
+            .header("X-Emby-Token", token.as_str())
+            .header("Authorization", &auth_value)
+            .header("X-Emby-Authorization", &auth_value)
+            .send()
+            .await;
+
+        let mut final_location = redirect_url.clone();
+        if let Ok(resp) = probe {
+            if resp.status().is_redirection() {
+                if let Some(loc) = resp.headers().get(header::LOCATION).and_then(|v| v.to_str().ok()) {
+                    let mut current = loc.to_string();
+                    // 跟踪最多 8 跳重定向链，找到最终直链
+                    for _ in 0..8 {
+                        match no_redirect_client
+                            .get(&current)
+                            .header(header::USER_AGENT.as_str(), source.effective_user_agent())
+                            .send()
+                            .await
+                        {
+                            Ok(r) if r.status().is_redirection() => {
+                                if let Some(next) = r.headers().get(header::LOCATION).and_then(|v| v.to_str().ok()) {
+                                    current = next.to_string();
+                                } else {
+                                    break;
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+                    final_location = current;
+                }
+            }
+            // 远端返回 200（无重定向）：保持原始 URL，客户端直连远端
+        }
+
+        tracing::debug!(
+            source_id = %source.id,
+            remote_item_id,
+            original = %redirect_url,
+            resolved = %final_location,
+            "redirect 模式：解析远端重定向链"
+        );
+
         return Response::builder()
             .status(StatusCode::FOUND)
-            .header(header::LOCATION, redirect_url.as_str())
+            .header(header::LOCATION, final_location.as_str())
             .header(header::CACHE_CONTROL, "no-store")
             .body(Body::empty())
             .map_err(|e| AppError::Internal(format!("构建重定向响应失败: {e}")));
