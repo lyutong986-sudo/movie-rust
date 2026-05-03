@@ -165,22 +165,33 @@ async fn get_seasons(
     }
 
     let row_ids: Vec<Uuid> = filtered_seasons.iter().map(|s| s.id).collect();
+    let child_counts =
+        repository::count_item_children_batch(&state.pool, &row_ids).await?;
     let user_data_map =
         repository::get_user_item_data_batch(&state.pool, user_id, &row_ids).await?;
     let season_dtos: Vec<BaseItemDto> = filtered_seasons
         .iter()
         .map(|season| {
             let prefetched = Some(user_data_map.get(&season.id).cloned());
+            let n = child_counts.get(&season.id).copied().unwrap_or(0);
             repository::media_item_to_dto_for_list(
                 season,
                 state.config.server_id,
                 prefetched,
-                repository::DtoCountPrefetch::default(),
+                repository::DtoCountPrefetch {
+                    child_count: Some(n),
+                    recursive_item_count: Some(n),
+                    ..Default::default()
+                },
             )
         })
         .collect();
 
     let season_dtos = apply_adjacent_items(season_dtos, query.adjacent_to.as_deref());
+    let season_dtos: Vec<BaseItemDto> = season_dtos
+        .into_iter()
+        .map(|item| apply_season_response_shape(item, &query))
+        .collect();
     let total_record_count = season_dtos.len() as i64;
 
     Ok(Json(QueryResult {
@@ -631,6 +642,32 @@ fn apply_show_response_shape(mut item: BaseItemDto, query: &ItemsQuery) -> BaseI
         item.user_data = repository::empty_user_data_for_item(
             emby_id_to_uuid(&item.id).unwrap_or_else(|_| Uuid::nil()),
         );
+    }
+
+    item
+}
+
+fn apply_season_response_shape(mut item: BaseItemDto, query: &SeasonsQuery) -> BaseItemDto {
+    let enable_image_types = parse_list(query.enable_image_types.as_deref());
+    let images_disabled = query.enable_images == Some(false)
+        || query.image_type_limit == Some(0)
+        || (query.image_type_limit.is_some_and(|limit| limit <= 0));
+
+    if images_disabled {
+        clear_item_images(&mut item);
+    } else if !enable_image_types.is_empty() {
+        retain_item_images(&mut item, &enable_image_types);
+    }
+
+    if query.enable_user_data == Some(false) {
+        item.user_data = repository::empty_user_data_for_item(
+            emby_id_to_uuid(&item.id).unwrap_or_else(|_| Uuid::nil()),
+        );
+    }
+
+    let requested_fields = parse_list(query.fields.as_deref());
+    if !requested_fields.is_empty() {
+        trim_episode_heavy_fields(&mut item, &requested_fields);
     }
 
     item
