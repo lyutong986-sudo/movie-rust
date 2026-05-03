@@ -6126,8 +6126,14 @@ fn build_direct_stream_url(
     // 与 Emby 原生客户端的 "Direct Play / Direct Download" 端点对齐：
     // 路由 routes/videos.rs 已同时挂 `/Videos/{id}/stream.{container}` 与 `/Videos/{id}/original.{container}`，
     // 后者是 Emby SDK Direct Play 习惯路径，本地/移动端播放器（如 iOS Emby）首选解析。
+    //
+    // PB50：URL 必须带 `/emby/` 前缀（与官方 Emby 服务一致）。原始实现写 `/Videos/...`，
+    // 客户端做 `Uri.parse(baseUrl).resolve("/Videos/...")` 时绝对路径会**覆盖** base 的
+    // 整个 path——若 baseUrl 是 `https://host/sub/emby` 这种带子路径或反代前缀的
+    // 部署，结果就丢失了 `/sub/emby` 段，请求打到 `https://host/Videos/...` 直接 404。
+    // Filmly 一类客户端因此报 "获取播放地址失败"。
     format!(
-        "/Videos/{item_emby_id}/original.{container}?Static=true&{}",
+        "/emby/Videos/{item_emby_id}/original.{container}?Static=true&{}",
         serializer.finish()
     )
 }
@@ -6876,7 +6882,7 @@ mod tests {
             Some("DEVICEID"),
         );
 
-        assert!(url.starts_with("/Videos/ITEMID/original.mkv?"));
+        assert!(url.starts_with("/emby/Videos/ITEMID/original.mkv?"));
         assert!(url.contains("MediaSourceId=mediasource_ITEMID"));
         assert!(url.contains("PlaySessionId=PLAYSESSION"));
         assert!(url.contains("api_key=TOKEN"));

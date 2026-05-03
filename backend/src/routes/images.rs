@@ -294,7 +294,9 @@ async fn item_image_url_response(
     if !has_image {
         return Err(AppError::NotFound("图片不存在".to_string()));
     }
-    let mut url = format!("/Items/{item_id_str}/Images/{normalized}");
+    // PB50：与 Emby 标准一致，URL 必须带 `/emby/` 前缀，避免反代部署下被
+    // 客户端 `Uri.resolve` 吞掉子路径段。
+    let mut url = format!("/emby/Items/{item_id_str}/Images/{normalized}");
     if let Some(index) = image_index {
         url.push('/');
         url.push_str(&index.to_string());

@@ -444,7 +444,7 @@ async fn subtitles_playlist(
     let passthrough = auth_passthrough_query(request.uri().query());
     let subtitle_url = append_query_pairs(
         &format!(
-            "/Videos/{}/Subtitles/{}/Stream.{}",
+            "/emby/Videos/{}/Subtitles/{}/Stream.{}",
             crate::models::uuid_to_emby_guid(&item.id),
             subtitle_index,
             codec
@@ -783,7 +783,7 @@ async fn subtitle_descriptor(
     let item_emby_id = crate::models::uuid_to_emby_guid(&item_id);
     let media_source_id = format!("mediasource_{item_emby_id}");
     let stream_url = format!(
-        "/Videos/{item_emby_id}/{media_source_id}/Subtitles/{}/Stream.{ext}",
+        "/emby/Videos/{item_emby_id}/{media_source_id}/Subtitles/{}/Stream.{ext}",
         path.index
     );
     Ok(axum::Json(serde_json::json!({
@@ -923,7 +923,7 @@ async fn hls_playlist_response(
             .map(|(w, h)| format!("{w}x{h}"))
             .unwrap_or_else(|| "1920x1080".to_string());
         let main_url = append_query_pairs(
-            &format!("/Videos/{item_emby_id}/main.m3u8"),
+            &format!("/emby/Videos/{item_emby_id}/main.m3u8"),
             &extend_query_pairs(
                 passthrough.clone(),
                 vec![
@@ -938,7 +938,7 @@ async fn hls_playlist_response(
         )
     } else {
         let segment_url = append_query_pairs(
-            &format!("/Videos/{item_emby_id}/hls1/main/0.ts"),
+            &format!("/emby/Videos/{item_emby_id}/hls1/main/0.ts"),
             &extend_query_pairs(passthrough, video_query_pairs(&query, &media_source_id)),
         );
         format!("#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:0,\n{segment_url}\n#EXT-X-ENDLIST\n")
@@ -986,7 +986,7 @@ async fn hls_audio_playlist_response(
         .clone()
         .unwrap_or_else(|| media_source.id.clone());
     let segment_url = append_query_pairs(
-        &format!("/Audio/{item_emby_id}/hls1/main/0.ts"),
+        &format!("/emby/Audio/{item_emby_id}/hls1/main/0.ts"),
         &extend_query_pairs(passthrough, video_query_pairs(&query, &media_source_id)),
     );
 
@@ -1154,8 +1154,11 @@ fn rewrite_hls_playlist(
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or(trimmed);
+            // PB50：HLS 转码 playlist 内的 segment URL 也必须带 `/emby/` 前缀，
+            // 否则反代部署下客户端 `Uri.resolve` 会把 baseUrl 的子路径段
+            // (如 `/sub/emby/`) 抹掉，导致 hls1/{sid}/{seg}.ts 全部 404。
             let rewritten = append_query_pairs(
-                &format!("/{media_prefix}/{item_emby_id}/hls1/{session_id}/{file_name}"),
+                &format!("/emby/{media_prefix}/{item_emby_id}/hls1/{session_id}/{file_name}"),
                 passthrough,
             );
             result.push_str(&rewritten);

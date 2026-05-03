@@ -11270,7 +11270,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
 
     let sanitized_path = if is_remote {
         format!(
-            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}",
+            "/emby/Videos/{}/stream.{}?Static=true&MediaSourceId={}",
             item_emby_id, container, media_source_id
         )
     } else {
@@ -11296,7 +11296,7 @@ pub fn media_source_for_item(item: &DbMediaItem) -> MediaSourceDto {
         supports_direct_stream: true,
         supports_transcoding: true,
         direct_stream_url: Some(format!(
-            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
+            "/emby/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
             item_emby_id, container, media_source_id, media_source_id
         )),
         formats: vec![container.clone()],
@@ -12945,7 +12945,7 @@ pub async fn get_media_source_with_streams(
                 let item_emby_id = uuid_to_emby_guid(&item.id);
                 let media_source_id = format!("mediasource_{item_emby_id}");
                 let delivery_url = Some(format!(
-                    "/Videos/{}/{}/Subtitles/{}/Stream.{}",
+                    "/emby/Videos/{}/{}/Subtitles/{}/Stream.{}",
                     item_emby_id,
                     media_source_id,
                     stream.index,
@@ -13066,7 +13066,7 @@ pub async fn get_media_source_with_streams(
             is_external: true,
             delivery_method: Some("External".to_string()),
             delivery_url: Some(format!(
-                "/Videos/{}/{}/Subtitles/{}/Stream.{}",
+                "/emby/Videos/{}/{}/Subtitles/{}/Stream.{}",
                 item_emby_id_for_subs, media_source_id_for_subs, idx, subtitle.format
             )),
             is_chunked_response: Some(false),
@@ -13116,9 +13116,12 @@ pub async fn get_media_source_with_streams(
     let item_emby_id = uuid_to_emby_guid(&item.id);
     let media_source_id = format!("mediasource_{item_emby_id}");
 
+    // PB50：远端源 Path 字段统一加 `/emby/` 前缀，与官方 Emby 一致；
+    // 客户端 Uri.resolve(Path) 才能在反代场景（baseUrl=https://host/sub/emby/）
+    // 下保留正确路径，否则绝对路径会覆盖 base.path 段，请求落到 404。
     let sanitized_path = if is_remote {
         format!(
-            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}",
+            "/emby/Videos/{}/stream.{}?Static=true&MediaSourceId={}",
             item_emby_id, container, media_source_id
         )
     } else {
@@ -13144,7 +13147,7 @@ pub async fn get_media_source_with_streams(
         supports_direct_stream: true,
         supports_transcoding: true,
         direct_stream_url: Some(format!(
-            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
+            "/emby/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
             item_emby_id, container, media_source_id, media_source_id
         )),
         formats: vec![container.clone()],
