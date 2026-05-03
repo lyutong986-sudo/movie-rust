@@ -5229,13 +5229,23 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
                         attempt = retry_count + 1,
                         max_retries = REMOTE_HTTP_MAX_RETRIES,
                         delay_ms,
+                        is_timeout = err.is_timeout(),
+                        is_connect = err.is_connect(),
+                        is_request = err.is_request(),
+                        is_body = err.is_body(),
                         error = %err,
+                        error_debug = ?err,
                         "远端 Emby 网络错误，退避后重试"
                     );
-                    last_error = Some(err.to_string());
+                    last_error = Some(format!("{err:#}"));
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
+                tracing::error!(
+                    endpoint,
+                    error_debug = ?err,
+                    "远端 Emby 请求失败（不可重试或重试耗尽）"
+                );
                 return Err(err.into());
             }
         };
@@ -5319,10 +5329,11 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
                         delay_ms,
                         content_type = %content_type,
                         error = %err,
+                        error_debug = ?err,
                         "远端 Emby 响应 body 读取失败，退避后重试"
                     );
                     last_error =
-                        Some(format!("body read err (status={}): {err}", status.as_u16()));
+                        Some(format!("body read err (status={}): {err:#}", status.as_u16()));
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
@@ -6058,7 +6069,7 @@ async fn emby_download_bytes(
         .header("X-Emby-Authorization", emby_auth_header(source, Some(token)))
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("下载远端资源失败: {e}: {url}")))?;
+        .map_err(|e| AppError::Internal(format!("下载远端资源失败: {e:#} url={url}")))?;
     if !resp.status().is_success() {
         return Err(AppError::Internal(format!(
             "下载远端 HTTP {} {}",
