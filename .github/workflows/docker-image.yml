@@ -18,9 +18,9 @@ name: Docker Image CI
 
 on:
   push:
-    branches: [mmp]
+    branches: [mmk1]
   pull_request:
-    branches: [mmp]
+    branches: [mmk1]
   workflow_dispatch:
 
 env:
@@ -47,7 +47,7 @@ jobs:
       - name: Log in to Docker Hub
         if: >
           github.event_name == 'push' &&
-          github.ref == 'refs/heads/mmp'
+          github.ref == 'refs/heads/mmk1'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -68,7 +68,7 @@ jobs:
       - name: Build and push image
         if: >
           github.event_name == 'push' &&
-          github.ref == 'refs/heads/mmp'
+          github.ref == 'refs/heads/mmk1'
         uses: docker/build-push-action@v6
         with:
           context: .
