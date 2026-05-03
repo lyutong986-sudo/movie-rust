@@ -1858,6 +1858,23 @@ async fn sync_source_inner(
                     );
                 }
 
+                // PB49 (FX5-A)：每条 Series 进入处理前先记一笔 trace log。
+                //
+                // 旧实现里 Series 处理是个完全静默的阶段——只有「Season 处理完成」和
+                // 「Series 处理完成」两条 DEBUG。如果某个 Series 的 ensure_series_folder /
+                // fetch_remote_seasons / 第一个 fetch_episodes 静默挂起，日志里看不到
+                // 任何关于这部剧的事件，根本无从定位是哪条 HTTP / DB 操作死的。
+                //
+                // 这条 trace log 让"已经走到迭代器第 N 条"这个事实落到日志，配合下面
+                // FX5-B 的硬超时，hang 时能直接锁定到具体 series_idx + name。
+                tracing::trace!(
+                    source_id = %source.id,
+                    series = %remote_series.name,
+                    series_idx = series_idx + 1,
+                    total_series,
+                    "PB49 (FX5-A)：Series 迭代开始"
+                );
+
                 // PB49 (FX1)：层级数量比对快路径——比对 RecursiveItemCount + ChildCount。
                 // 不再要求 is_incremental，让「首次同步崩溃后重试」也能在 Series 级
                 // 直接跳过未变化条目，而不是退化到 per-Episode 的 local_synced_ids。
@@ -1952,13 +1969,43 @@ async fn sync_source_inner(
                 series_detail_synced.insert(remote_series.id.clone());
 
                 // ── 拉取 Seasons ──
-                let seasons_result = fetch_remote_seasons(
-                    &state.pool,
-                    source,
-                    user_id.as_str(),
-                    &remote_series.id,
+                // PB49 (FX5-B v2)：reqwest 的 120s timeout 在某些边界场景下不触发——
+                // 我们在 movie-rust-20260503223926.log 中观察到「fetch_remote_seasons 进入
+                // 后整个 sync 任务静默挂起 21+ 分钟，无 HTTP / 无 SQL / 无 ERROR」。
+                // 这里加 tokio::time::timeout 作为 runtime 级硬上限——独立于 reqwest 内部
+                // 状态机，到点必然返回 Elapsed。
+                //
+                // 实测（movie-rust-20260503231217.log，77k 行）：
+                //  - per-Series 完成耗时 P50 ≈ 6-8s，P90 ≈ 19-36s，max=36s
+                //  - fetch_remote_seasons 单调用 ≈ 200ms-3s（响应通常 <50KB）
+                //  - 最大已知 Series（蓝猫淘气三千问 7 季 2168 集）整剧 ≈ 16s
+                // 所以 60s（5x P90 单调用值）已足够覆盖任何正常情况，超时即真挂死。
+                let seasons_result = match tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    fetch_remote_seasons(
+                        &state.pool,
+                        source,
+                        user_id.as_str(),
+                        &remote_series.id,
+                    ),
                 )
-                .await?;
+                .await
+                {
+                    Ok(Ok(v)) => v,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => {
+                        tracing::error!(
+                            source_id = %source.id,
+                            series = %remote_series.name,
+                            series_idx = series_idx + 1,
+                            total_series,
+                            timeout_secs = 60,
+                            "PB49 (FX5-B)：fetch_remote_seasons runtime 级超时，本部 Series 跳过（下次 sync 会重试）"
+                        );
+                        let _ = series_db_id; // silence unused warning on early continue path
+                        continue;
+                    }
+                };
 
                 // PB49 (FX1-Heartbeat)：进入 Series 内部循环前先记一笔——
                 // 否则用户在 UI 看到"正在处理 变形金刚"几分钟没动静，日志里又没任何
@@ -2065,14 +2112,35 @@ async fn sync_source_inner(
                     .await?;
 
                     // ── 拉取该季的所有 Episode ──
-                    let episodes_result = fetch_remote_episodes_for_season(
-                        &state.pool,
-                        source,
-                        user_id.as_str(),
-                        &remote_series.id,
-                        &remote_season.id,
+                    // PB49 (FX5-B v2)：runtime 级硬上限。
+                    // 实测最大 Season（蓝猫淘气三千问 season 1 - 424 集）单调用 ≈ 5s，
+                    // 60s 留 12 倍裕度，覆盖网络抖动 + retry。超时跳过本 Season。
+                    let episodes_result = match tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        fetch_remote_episodes_for_season(
+                            &state.pool,
+                            source,
+                            user_id.as_str(),
+                            &remote_series.id,
+                            &remote_season.id,
+                        ),
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(Ok(v)) => v,
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => {
+                            tracing::error!(
+                                source_id = %source.id,
+                                series = %remote_series.name,
+                                season = season_number,
+                                timeout_secs = 60,
+                                "PB49 (FX5-B)：fetch_remote_episodes_for_season runtime 级超时，本 Season 跳过"
+                            );
+                            let _ = season_db_id;
+                            continue;
+                        }
+                    };
 
                     if episodes_result.items.is_empty() {
                         continue;
@@ -2094,7 +2162,12 @@ async fn sync_source_inner(
                     let playback_token_arc = Arc::new(playback_token.clone());
 
                     let ep_count = episodes_result.items.len();
-                    let item_results = stream::iter(
+                    // PB49 (FX5-B v2)：Episode 批量入库的 runtime 级硬上限。
+                    // 8 路并发 buffer_unordered，每集入库 ~30-100ms。
+                    // 实测 200 集 Season ~3-5s，500 集 Season ~12s，2168 集（蓝猫淘气
+                    // 三千问，分 7 季处理）整剧 ~16s。120s = 2 分钟，给 24x P50 裕度，
+                    // 既覆盖 1000+ 集大 Season 的最坏情况，又不让真挂死等太久。
+                    let collect_fut = stream::iter(
                         episodes_result.items.into_iter().map(|base_item| {
                             let state_cloned = state.clone();
                             let source_for_task = Arc::clone(&source_arc);
@@ -2147,8 +2220,26 @@ async fn sync_source_inner(
                         }),
                     )
                     .buffer_unordered(REMOTE_SYNC_INNER_CONCURRENCY)
-                    .collect::<Vec<Result<(), AppError>>>()
-                    .await;
+                    .collect::<Vec<Result<(), AppError>>>();
+                    let item_results = match tokio::time::timeout(
+                        std::time::Duration::from_secs(120),
+                        collect_fut,
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(_) => {
+                            tracing::error!(
+                                source_id = %source.id,
+                                series = %remote_series.name,
+                                season = season_number,
+                                episodes = ep_count,
+                                timeout_secs = 120,
+                                "PB49 (FX5-B)：Episode 批量入库 runtime 级超时，本 Season 跳过"
+                            );
+                            continue;
+                        }
+                    };
 
                     for r in item_results {
                         r?;
@@ -4715,6 +4806,11 @@ async fn fetch_remote_seasons(
 ) -> Result<RemoteSeasonsResult, AppError> {
     let server_url = normalize_server_url(&source.server_url);
     let endpoint = format!("{server_url}/Shows/{series_id}/Seasons");
+    // PB49 (FX5-Speed)：对齐上游 Emby web 客户端的减负载参数。
+    //  - EnableUserData=false：不带 UserData，节省每条 ~150 字节
+    //  - EnableTotalRecordCount=false：跳过 server 端 COUNT(*) 开销
+    //  - IsSpecialSeason=false：跳过特别篇 Season（一般也不需要 sync）
+    // Fields 仍保留 ChildCount + ProviderIds（FX1 Season 级 fast-skip 必需）。
     let query = vec![
         ("UserId".to_string(), user_id.to_string()),
         (
@@ -4723,6 +4819,9 @@ async fn fetch_remote_seasons(
              DateCreated,Overview,ImageTags,BackdropImageTags,ProviderIds"
                 .to_string(),
         ),
+        ("EnableUserData".to_string(), "false".to_string()),
+        ("EnableTotalRecordCount".to_string(), "false".to_string()),
+        ("IsSpecialSeason".to_string(), "false".to_string()),
     ];
     get_json_with_retry(pool, source, &endpoint, &query).await
 }
@@ -4737,6 +4836,11 @@ async fn fetch_remote_episodes_for_season(
 ) -> Result<RemoteEpisodesResult, AppError> {
     let server_url = normalize_server_url(&source.server_url);
     let endpoint = format!("{server_url}/Shows/{series_id}/Episodes");
+    // PB49 (FX5-Speed)：对齐上游 Emby web 客户端的减负载参数。
+    //  - EnableUserData=false：不带 UserData，节省每集 ~150 字节
+    //  - EnableTotalRecordCount=false：跳过 server 端 COUNT(*) 开销
+    // Fields 保留全集（MediaSources/MediaStreams/People 是 STRM 生成 + person 入库
+    // 真实需要的，不能砍）。
     let query = vec![
         ("UserId".to_string(), user_id.to_string()),
         ("SeasonId".to_string(), season_id.to_string()),
@@ -4753,6 +4857,8 @@ async fn fetch_remote_episodes_for_season(
              SeriesName,SeasonName"
                 .to_string(),
         ),
+        ("EnableUserData".to_string(), "false".to_string()),
+        ("EnableTotalRecordCount".to_string(), "false".to_string()),
     ];
     get_json_with_retry(pool, source, &endpoint, &query).await
 }
