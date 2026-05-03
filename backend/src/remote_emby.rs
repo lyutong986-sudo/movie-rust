@@ -4526,26 +4526,34 @@ async fn update_local_series_remote_counts(
     recursive_item_count: Option<i64>,
     child_count: Option<i32>,
 ) -> Result<(), AppError> {
-    let mut set_parts = Vec::new();
-    if let Some(v) = recursive_item_count {
-        set_parts.push(format!(
-            "provider_ids = jsonb_set(provider_ids, '{{RemoteRecursiveItemCount}}', '\"{}\"')",
-            v
-        ));
-    }
-    if let Some(v) = child_count {
-        set_parts.push(format!(
-            "provider_ids = jsonb_set(provider_ids, '{{RemoteChildCount}}', '\"{}\"')",
-            v
-        ));
-    }
-    if set_parts.is_empty() {
+    let has_recursive = recursive_item_count.is_some();
+    let has_child = child_count.is_some();
+    if !has_recursive && !has_child {
         return Ok(());
     }
+
+    let expr = match (recursive_item_count, child_count) {
+        (Some(r), Some(c)) => format!(
+            "provider_ids = jsonb_set(\
+                jsonb_set(provider_ids, '{{RemoteRecursiveItemCount}}', '\"{}\"'), \
+                '{{RemoteChildCount}}', '\"{}\"')",
+            r, c
+        ),
+        (Some(r), None) => format!(
+            "provider_ids = jsonb_set(provider_ids, '{{RemoteRecursiveItemCount}}', '\"{}\"')",
+            r
+        ),
+        (None, Some(c)) => format!(
+            "provider_ids = jsonb_set(provider_ids, '{{RemoteChildCount}}', '\"{}\"')",
+            c
+        ),
+        (None, None) => unreachable!(),
+    };
+
     let sql = format!(
         "UPDATE media_items SET {} WHERE provider_ids->>'RemoteEmbySourceId' = $1 \
          AND provider_ids->>'RemoteEmbySeriesId' = $2 AND item_type = 'Series'",
-        set_parts.join(", ")
+        expr
     );
     sqlx::query(&sql)
         .bind(source_id.to_string())
