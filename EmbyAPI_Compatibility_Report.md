@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-05-01（第四十批：远端 BaseItemDto **图片字段全采集** PB40 — 远端同步一次性写入 7 类图（Primary / Logo / Thumb / Banner / Art / Disc + 多张 Backdrop），不再只取 Primary + 第一张 Backdrop；去 TMDB 兜底依赖；新增 `/api/admin/remote-emby/sources/{id}/diagnostic/sample-items` 诊断接口）
+> 对比时间：2026-05-03（远端 Emby 流量模式 redirect / redirect_direct 严重 bug 修复 — `proxy_item_stream_internal_with_source` 历史误把 `ensure_authenticated()` 返回的 `remote_user_id` 当成 token 拼进 `api_key=`，导致 redirect 模式 302 链客户端 401、redirect_direct 模式解析失败回退到带错 api_key 的远端 URL；改为从 `source.access_token` 取真实 token，并补强 redirect_direct 失败重试 + 降级回 redirect 的双重兜底；端到端实环境验证最终能 302 → 123pan CDN 直链 200）
 
 ---
 
