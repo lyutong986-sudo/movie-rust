@@ -6130,9 +6130,9 @@ async fn emby_download_bytes(
     token: &str,
     url: &str,
 ) -> Result<Vec<u8>, AppError> {
-    // per-source 并发限制：sidecar 图片下载也必须遵守，避免瞬间打爆远端
-    let _http_permit = acquire_http_permit(source.id).await;
+    // 先节流（不占 permit），再获取并发许可（占 permit 后立即发请求）
     throttle_remote_request(source.id, source.request_interval_ms).await;
+    let _http_permit = acquire_http_permit(source.id).await;
     let resp = crate::http_client::SHARED
         .get(url)
         .header(header::USER_AGENT.as_str(), source.spoofed_user_agent.as_str())
