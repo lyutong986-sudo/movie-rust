@@ -8,7 +8,7 @@ anyhow = "1.0"
 argon2 = { version = "0.5", features = ["std"] }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros", "ws"] }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
 dotenvy = "0.15"
 mime_guess = "2.0"
 regex = "1.12"

@@ -28,15 +28,17 @@
 //! 不识别的 SQL 一律返回空结果集 + `"message": "unsupported pattern"` 的 200，
 //! 模仿 emby plugin "查询无结果" 的行为，避免 Sakura 因 4xx/5xx 直接 crash。
 //!
-//! **对用户可见的时间字符串**：`LastLogin`、`LastActivity` 等以东八区（UTC+8，等同上海民用时）墙钟格式
-//! `YYYY-MM-DD HH:MM:SS` 输出（内部仍存 UTC），避免 `/myinfo` 等与 Sakura SQL 拼接用的本地时间体感差 8 小时。
+//! **对用户可见的时间字符串**：`LastLogin`、`LastActivity` 等转换为 **服务端系统本地时区**墙钟
+//! （`chrono::Local`，随进程可用的 IANA/OS 配置；常见于 `TZ` 环境变量或服务器的「地区与语言」）。
+//! **注意**：查询窗口字符串仍按下方 `extract_date_range` 以东八区解析，因 Sakura `emby_cust_commit`
+//! 在 Python 里写死 `timezone(timedelta(hours=8))` 拼 SQL，与下游展示用什么时区无关。
 
 use axum::{
     extract::State,
     routing::post,
     Json, Router,
 };
-use chrono::{DateTime, FixedOffset, LocalResult, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, Local, LocalResult, NaiveDateTime, TimeZone, Utc};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -583,11 +585,10 @@ async fn user_devices_ranking(
 
 // ---------------------- helpers ---------------------- //
 
-/// 与 Sakura `emby_cust_commit` 使用东八区 `datetime.now(tz)` 拼 SQL 的口径对齐：把 UTC 存盘时间转成中国内地墙钟再给下游展示。
+/// 将 UTC 存盘时刻格式化为 **`TZ`/OS 配置的本地墙钟**，供 Sakura Telegram 等与管理员预期一致。
+/// 未设置 `TZ` 的典型 Linux 镜像可能退化为 UTC；中国部署建议：`TZ=Asia/Shanghai`.
 fn format_usage_stats_wall_time_from_utc(dt: DateTime<Utc>) -> String {
-    // 中国内地当前无 DST，UTC+8 与 IANA `Asia/Shanghai` 等价。
-    let cn = FixedOffset::east_opt(8 * 3600).expect("+08:00");
-    dt.with_timezone(&cn)
+    dt.with_timezone(&Local)
         .format("%Y-%m-%d %H:%M:%S")
         .to_string()
 }

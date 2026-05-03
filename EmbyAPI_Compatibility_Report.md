@@ -3,7 +3,7 @@
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
 > 对比时间：2026-05-03（① 远端 Emby 流量模式 redirect / redirect_direct 严重 bug 修复 — `proxy_item_stream_internal_with_source` 历史误把 `ensure_authenticated()` 返回的 `remote_user_id` 当成 token 拼进 `api_key=`，改为从 `source.access_token` 取真实 token，并补强 redirect_direct 失败重试 + 降级回 redirect 的双重兜底；② 前端集成 mpegts.js — 浏览器播放 FLV / MPEG-TS 完全走客户端 demux + MSE，不再依赖服务端转码，按容器/编码智能选播放引擎）
 > ③ **Webhooks 设置页中文化**：`/settings/webhooks` 事件分组展示为「身份验证 / 媒体库 / 播放」，各事件附中文说明且保留英文 `Type` 协议名；勾选「订阅全部事件」仍对应后端 `Events` 空数组；侧栏与路由标题改为「Webhook 回调」。
-> ④ **Sakura `/myinfo` 与播放榜统计**：`POST /emby/user_usage_stats/submit_custom_query` 中单用户/排行模式按「播放实例」（`play_session_id` 退化到 `session_id`）+ `item_id` 聚合；**有 `position_ticks` 时用 tick 差折算分钟/秒**，否则回退到首尾时间差；Sakura SQL 内日期按 **UTC+8** 解析以匹配 `emby_cust_commit`；**响应中 `LastLogin`、`LastActivity` 墙钟字符串亦为东八区（上海民用时）**，不再误用 UTC。**说明**：面板「在线人数」在 Sakura 侧 `get_current_playing_count` 带 **120s** 缓存（`@cache.memoize(ttl=120)`），非实时。
+> ④ **Sakura `/myinfo` 与播放榜统计**：`POST /emby/user_usage_stats/submit_custom_query` 中单用户/排行模式按「播放实例」（`play_session_id` 退化到 `session_id`）+ `item_id` 聚合；**有 `position_ticks` 时用 tick 差折算分钟/秒**，否则回退到首尾时间差；Sakura SQL 内日期按 **UTC+8** 解析以匹配 `emby_cust_commit`；**响应中 `LastLogin`、`LastActivity` 为服务端系统本地时区墙钟**（`TZ` / OS 区域，例如 `TZ=Asia/Shanghai`），不再写死 UTC 或 +8。**说明**：面板「在线人数」在 Sakura 侧 `get_current_playing_count` 带 **120s** 缓存（`@cache.memoize(ttl=120)`），非实时。
 
 ---
 
