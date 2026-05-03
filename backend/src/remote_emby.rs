@@ -5959,6 +5959,31 @@ fn remote_item_key_from_path(path: &str) -> Option<String> {
     Some(sanitize_segment(raw))
 }
 
+/// 确保 `source` 处于已登录状态：若 `remote_user_id` + `access_token` 均非空则直接复用；
+/// 否则调用 `login_remote` 重新登录，并把新 user_id / token 写回 DB 与内存中的 `source`。
+///
+/// # ⚠️ 返回值是 `remote_user_id`，**不是 access_token**
+///
+/// 用于直接拼到 `/Users/{user_id}/Items` 等需要用户 ID 的远端端点。
+/// **如果你需要鉴权用的 token（`api_key=` query 或 `X-Emby-Token` header），
+/// 必须显式从 `source.access_token` 取**：
+///
+/// ```ignore
+/// // 正确：拿 user_id 拼 URL
+/// let user_id = ensure_authenticated(pool, source, false).await?;
+/// let endpoint = format!("{base}/Users/{user_id}/Items");
+///
+/// // 正确：刷新后从字段取真 token
+/// ensure_authenticated(pool, source, false).await?;
+/// let token = source.access_token.clone()
+///     .ok_or_else(|| AppError::Internal("远端登录令牌为空".into()))?;
+///
+/// // ❌ 错误：把 user_id 当 token（历史 bug，曾导致 redirect_direct 模式 302 链客户端 401）
+/// let token = ensure_authenticated(pool, source, false).await?;  // 这是 user_id！
+/// let url = format!("{base}/Videos/{id}/stream?api_key={token}");
+/// ```
+///
+/// `force_refresh = true` 强制重登（本地 token/user_id 未必失效，但调用方有理由怀疑）。
 async fn ensure_authenticated(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,

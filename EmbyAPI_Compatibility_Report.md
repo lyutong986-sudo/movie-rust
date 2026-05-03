@@ -4038,4 +4038,69 @@ let redirect_url =
 - `scripts/verify_redirect_direct_fix.py`（新增 — 端到端验证脚本）
 - `EmbyAPI_Compatibility_Report.md`
 
+### RD-05 全链路审计 — 没有同类问题（2026-05-03）
+
+修复后对整个 `backend/src` 做了一次"是否还有别处把 `remote_user_id` 当成 token 用"的全量扫查，结论：**仅 `proxy_item_stream_internal_with_source` 一处错误**，已修复。
+
+**1) `ensure_authenticated()` 所有 9 个调用点（`backend/src/remote_emby.rs`）**
+
+| 行号 | 上下文 | 取值方式 | 判定 |
+|------|------|------|------|
+| 1130 | `sync_source_inner` 同步入口 | `let user_id = ensure_authenticated(...)` 用作 fetch_remote_views 的 user_id | ✅ |
+| 2849 | `proxy_item_stream_internal_with_source` 主流 | **本次修复** ：丢弃返回值，再 `source.access_token.clone()` 取真 token | ✅ |
+| 2876 | 同上的 force_refresh 重试分支 | 同上 | ✅ |
+| 4138 | `count_remote_items_for_progress` | `let user_id = ...` | ✅ |
+| 5125 | `send_remote_stream_request` 内层重试 | `match ... { Ok(_) => {} }`，再 `source.access_token.clone()` | ✅ |
+| 5403 | `get_json_with_retry` 通用 GET | 同上 | ✅ |
+| 5738 | `analyze_remote_media` | `let user_id = ...` | ✅ |
+| 6520 / 6531 | `refresh_remote_emby_source_token`（后台 token 刷新 loop） | `match ... { Ok(_) => {} }`，不读返回值 | ✅ |
+| 7217 | `search_remote_items_admin` | `let user_id = ...` 拼 `/Users/{user_id}/Items` | ✅ |
+
+**2) 所有 `token: &str` 形参的函数（共 8 处）调用点**
+
+| 函数 | 调用点 token 来源 | 判定 |
+|------|------|------|
+| `build_remote_stream_redirect_url` (2952) | `proxy_item_stream_internal_with_source` 修复后从 `source.access_token` 取 | ✅ |
+| `resolve_remote_redirect_chain` (2971) | 同上 | ✅ |
+| `build_remote_static_stream_url` (5026) | `send_remote_stream_request` 5135 处 `source.access_token.clone()` | ✅ |
+| `build_remote_stream_builder` (5046) | 同上 | ✅ |
+| `resolve_playback_info_stream_endpoint` (5274) | 同上 | ✅ |
+| `append_remote_api_key_param` (6195) | `sidecar_image_download_loop` 6733 处 `source.access_token.as_deref()` | ✅ |
+| `emby_download_bytes` (6321) | 同上 | ✅ |
+| `remote_subtitle_stream_url` (6229) | `#[allow(dead_code)]` 死代码，无运行时调用 | ✅ |
+
+**3) 其它路由层处理远端 Emby 身份的位置**
+
+| 文件:行 | 上下文 | 来源 | 判定 |
+|------|------|------|------|
+| `routes/images.rs:1356` | 远端图片代理追加 api_key | `source.access_token` | ✅ |
+| `routes/videos.rs:1346` | 远端字幕代理追加 api_key | `source.access_token` | ✅ |
+| `routes/remote_emby.rs:1146-1148` | DTO 暴露 `RemoteUserId` / `HasAccessToken` | 直读 `source.remote_user_id` / `source.access_token` 字段，无混用 | ✅ |
+| `routes/admin.rs` | 仅调用 `sync_source_with_progress`，不直接处理身份 | — | ✅ |
+
+**4) `emby_auth_header(source, _token)` 的 `_token` 形参带下划线表示不使用**
+
+按 EmbySDK 规范，`Authorization` 头只放 `UserId` + Client/Device 四元组，token 通过独立 `X-Emby-Token` header + `api_key` query 传递。所有调用方传入 `Some(token)` 仅为可读语义，函数体内确实不读它。
+
+### 结论
+
+`proxy_item_stream_internal_with_source` 的 user_id↔token 混用是**孤例**，全仓只此一处。修复（RD-01 ~ RD-04）落地后，所有「远端 Emby 身份」的取值路径都已与字段语义严格对齐：
+- 需要 `api_key` / `X-Emby-Token` → 一律取 `source.access_token`
+- 需要 `/Users/{id}/...` 路径 → 一律取 `source.remote_user_id`
+
+### RD-06 防御性文档：给 `ensure_authenticated` 加 IDE 悬停警告（2026-05-03）
+
+`backend/src/remote_emby.rs` 给 `ensure_authenticated` 加了带 `# ⚠️` 标题的 rustdoc 注释，明确标注：
+
+> 返回值是 `remote_user_id`，**不是 access_token**。如果需要鉴权用的 token，必须显式从 `source.access_token` 取。
+
+注释里附了"正确用法 × 2"和"错误用法 × 1"的 ignore 代码示例，把这次修复掉的 historic bug 直接 inline 在文档里。后续在 IDE 里悬停函数名即能看到这条警告，避免重蹈覆辙。
+
+`cargo check` 6.60s 通过，0 errors，0 新增 warning。
+
+### 影响文件
+- `backend/src/remote_emby.rs`
+- `scripts/verify_redirect_direct_fix.py`
+- `EmbyAPI_Compatibility_Report.md`
+
 ---
