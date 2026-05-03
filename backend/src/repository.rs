@@ -2812,6 +2812,7 @@ pub async fn create_session(
     device_name: Option<String>,
     client: Option<String>,
     application_version: Option<String>,
+    remote_address: Option<String>,
     expires_at: Option<DateTime<Utc>>,
 ) -> Result<AuthSessionRow, AppError> {
     create_session_with_type(
@@ -2821,6 +2822,7 @@ pub async fn create_session(
         device_name,
         client,
         application_version,
+        remote_address,
         expires_at,
         "Interactive",
     )
@@ -2834,6 +2836,7 @@ pub async fn create_session_with_type(
     device_name: Option<String>,
     client: Option<String>,
     application_version: Option<String>,
+    remote_address: Option<String>,
     expires_at: Option<DateTime<Utc>>,
     session_type: &str,
 ) -> Result<AuthSessionRow, AppError> {
@@ -2848,10 +2851,11 @@ pub async fn create_session_with_type(
             device_name,
             client,
             application_version,
+            remote_address,
             expires_at,
             session_type
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(&token)
@@ -2860,6 +2864,7 @@ pub async fn create_session_with_type(
     .bind(device_name)
     .bind(client)
     .bind(application_version)
+    .bind(remote_address)
     .bind(expires_at)
     .bind(session_type)
     .execute(pool)
@@ -2887,7 +2892,8 @@ pub async fn get_session(
             s.client,
             s.application_version,
             s.last_activity_at,
-            s.expires_at
+            s.expires_at,
+            s.remote_address
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
         WHERE s.access_token = $1
@@ -2925,7 +2931,8 @@ pub async fn list_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, A
             s.client,
             s.application_version,
             s.last_activity_at,
-            s.expires_at
+            s.expires_at,
+            s.remote_address
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
         WHERE s.session_type = 'Interactive'
@@ -2954,7 +2961,8 @@ pub async fn list_sessions_for_user(
             s.client,
             s.application_version,
             s.last_activity_at,
-            s.expires_at
+            s.expires_at,
+            s.remote_address
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
         WHERE s.user_id = $1
@@ -2985,7 +2993,8 @@ pub async fn find_active_session(
             s.client,
             s.application_version,
             s.last_activity_at,
-            s.expires_at
+            s.expires_at,
+            s.remote_address
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
         WHERE s.access_token = $1
@@ -3047,7 +3056,8 @@ pub async fn list_api_key_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessio
             s.client,
             s.application_version,
             s.last_activity_at,
-            s.expires_at
+            s.expires_at,
+            s.remote_address
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
         WHERE s.session_type = 'ApiKey'
@@ -3075,7 +3085,8 @@ pub async fn get_api_key_session(
             s.client,
             s.application_version,
             s.last_activity_at,
-            s.expires_at
+            s.expires_at,
+            s.remote_address
         FROM sessions s
         INNER JOIN users u ON u.id = s.user_id
         WHERE s.access_token = $1
@@ -9601,7 +9612,7 @@ pub fn session_to_dto(session: &AuthSessionRow, server_id: Uuid) -> SessionInfoD
             .unwrap_or_else(|| "0.1.0".to_string()),
         is_active: session.expires_at.is_none_or(|value| value > Utc::now()),
         last_activity_date: session.last_activity_at,
-        remote_end_point: None,
+        remote_end_point: session.remote_address.clone(),
         supports_remote_control: true,
         playable_media_types: vec!["Audio".to_string(), "Video".to_string()],
         supported_commands: vec![

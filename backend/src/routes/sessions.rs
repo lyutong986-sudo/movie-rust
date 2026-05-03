@@ -8,7 +8,7 @@ use crate::{
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -193,7 +193,8 @@ async fn list_auth_keys(
                 "DeviceName": session.device_name,
                 "DateLastActivity": session.last_activity_at,
                 "ExpirationDate": session.expires_at,
-                "IsActive": session.expires_at.is_none_or(|expires_at| expires_at > Utc::now())
+                "IsActive": session.expires_at.is_none_or(|expires_at| expires_at > Utc::now()),
+                "RemoteEndPoint": session.remote_address.clone().unwrap_or_default(),
             })
         })
         .collect();
@@ -208,6 +209,7 @@ async fn list_auth_keys(
 async fn create_auth_key(
     session: AuthSession,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<CreateAuthKeyQuery>,
 ) -> Result<Json<Value>, AppError> {
     if !session.is_admin {
@@ -226,6 +228,7 @@ async fn create_auth_key(
         Some(app.clone()),
         Some(app),
         Some(app_version),
+        auth::infer_client_ip(&headers),
         expires_at,
         "ApiKey",
     )
@@ -241,7 +244,8 @@ async fn create_auth_key(
         "DeviceName": created.device_name,
         "DateLastActivity": created.last_activity_at,
         "ExpirationDate": created.expires_at,
-        "IsActive": created.expires_at.is_none_or(|value| value > Utc::now())
+        "IsActive": created.expires_at.is_none_or(|value| value > Utc::now()),
+        "RemoteEndPoint": created.remote_address.clone().unwrap_or_default(),
     })))
 }
 
@@ -640,6 +644,7 @@ async fn record_report(
     if let Some(event) = event_name {
         let payload = build_playback_payload(
             state,
+            session,
             user_id,
             report.item_id,
             Some(session_id_for_event.as_str()),
@@ -656,9 +661,10 @@ async fn record_report(
 
 async fn build_playback_payload(
     state: &AppState,
+    auth_session: &AuthSession,
     user_id: Uuid,
     item_id: Option<Uuid>,
-    session_id: Option<&str>,
+    session_id_for_hook: Option<&str>,
     position_ticks: Option<i64>,
     is_paused: bool,
     played_to_completion: bool,
@@ -679,11 +685,43 @@ async fn build_playback_payload(
     } else {
         serde_json::Value::Null
     };
-    let session_obj = if let Some(sid) = session_id {
-        serde_json::json!({ "Id": sid })
-    } else {
-        serde_json::Value::Null
-    };
+
+    // Sakura_embyboss `client_filter.py`：无 `Session.Client` 会直接 ignored（无法做 UA 过滤/踢线）。
+    // 从当前登录会话行补齐 Client / Device*，与登录 webhook 口径一致。
+    let session_row = repository::find_active_session(&state.pool, &auth_session.access_token)
+        .await
+        .ok()
+        .flatten();
+    let client = session_row
+        .as_ref()
+        .and_then(|r| r.client.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Unknown")
+        .to_string();
+    let device_name = session_row
+        .as_ref()
+        .and_then(|r| r.device_name.as_deref())
+        .unwrap_or("")
+        .to_string();
+    let device_id = session_row
+        .as_ref()
+        .and_then(|r| r.device_id.as_deref())
+        .unwrap_or("")
+        .to_string();
+    let sid = session_id_for_hook.unwrap_or(auth_session.access_token.as_str());
+    let remote_address = session_row
+        .as_ref()
+        .and_then(|r| r.remote_address.clone())
+        .unwrap_or_default();
+    let session_obj = serde_json::json!({
+        "Id": sid,
+        "Client": client,
+        "DeviceName": device_name,
+        "DeviceId": device_id,
+        "RemoteAddress": remote_address,
+    });
+
     serde_json::json!({
         "User":    user_obj,
         "Item":    item_obj,
@@ -816,6 +854,7 @@ async fn record_legacy_for_user(
         if let Some(event) = event_name {
             let payload = build_playback_payload(
                 state,
+                session,
                 user_id,
                 Some(item_id),
                 Some(session_id_for_event.as_str()),

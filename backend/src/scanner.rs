@@ -31,6 +31,14 @@ use walkdir::WalkDir;
 
 const TICKS_PER_SECOND: i64 = 10_000_000;
 
+/// `item.added` 对齐 Sakura `media.py`：Episode 需要 **SeriesId** 才能给「收藏该剧」的用户发更新通知。
+#[derive(Clone, Copy, Default)]
+struct ItemAddedWebhookExtras<'a> {
+    episode_series_id: Option<uuid::Uuid>,
+    season_name: Option<&'a str>,
+    index_number: Option<i32>,
+}
+
 /// scanner 入库后通知 `item.added` webhook。
 ///
 /// scanner 流程从 `Movie / Series / Season / Episode` 任意一种新建条目时调用。
@@ -44,23 +52,44 @@ fn notify_item_added(
     item_type: &str,
     name: &str,
     series_name: Option<&str>,
+    extras: ItemAddedWebhookExtras<'_>,
 ) {
     if !was_new {
         return;
+    }
+    let mut item = json!({
+        "Item": {
+            "Id":         crate::models::uuid_to_emby_guid(&item_id),
+            "Name":       name,
+            "Type":       item_type,
+            "SeriesName": series_name.unwrap_or(""),
+        }
+    });
+    if item_type == "Episode" {
+        if let Some(obj) = item
+            .get_mut("Item")
+            .and_then(|v| v.as_object_mut())
+        {
+            if let Some(sid) = extras.episode_series_id {
+                obj.insert(
+                    "SeriesId".to_string(),
+                    json!(crate::models::uuid_to_emby_guid(&sid)),
+                );
+            }
+            if let Some(sn) = extras.season_name {
+                obj.insert("SeasonName".to_string(), json!(sn));
+            }
+            if let Some(ix) = extras.index_number {
+                obj.insert("IndexNumber".to_string(), json!(ix));
+            }
+        }
     }
     crate::webhooks::dispatch_raw(
         pool.clone(),
         config.server_id,
         config.server_name.clone(),
         crate::webhooks::events::ITEM_ADDED.to_owned(),
-        json!({
-            "Item": {
-                "Id":         crate::models::uuid_to_emby_guid(&item_id),
-                "Name":       name,
-                "Type":       item_type,
-                "SeriesName": series_name.unwrap_or_default(),
-            }
-        }),
+        item,
     );
 }
 
@@ -830,7 +859,16 @@ async fn import_movie_file(
         },
     )
     .await?;
-    notify_item_added(pool, config, movie_id, movie_was_new, "Movie", name, None);
+    notify_item_added(
+        pool,
+        config,
+        movie_id,
+        movie_was_new,
+        "Movie",
+        name,
+        None,
+        ItemAddedWebhookExtras::default(),
+    );
     sync_nfo_people(pool, movie_id, &nfo.people).await?;
     if library_options.enable_internet_providers {
         refresh_remote_people(
@@ -1141,6 +1179,7 @@ async fn import_tv_file(
         "Series",
         &series_name,
         Some(&series_name),
+        ItemAddedWebhookExtras::default(),
     );
     sync_nfo_people(pool, series_id, &series_nfo.people).await?;
     if library_options.enable_internet_providers {
@@ -1282,6 +1321,7 @@ async fn import_tv_file(
         "Season",
         &season_name,
         Some(&series_name),
+        ItemAddedWebhookExtras::default(),
     );
     if library_options.enable_internet_providers && library_options.download_images_in_advance {
         cache_remote_images_for_item(
@@ -1460,6 +1500,11 @@ async fn import_tv_file(
         "Episode",
         episode_name,
         Some(&series_name),
+        ItemAddedWebhookExtras {
+            episode_series_id: Some(series_id),
+            season_name: Some(season_name.as_str()),
+            index_number: episode_number,
+        },
     );
     if library_options.enable_internet_providers && library_options.download_images_in_advance {
         cache_remote_images_for_item(

@@ -472,6 +472,8 @@ pub struct AuthSessionRow {
     pub application_version: Option<String>,
     pub last_activity_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub remote_address: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

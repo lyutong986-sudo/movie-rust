@@ -562,6 +562,7 @@ async fn authenticate(
         device_name,
         client,
         application_version,
+        auth::infer_client_ip(&headers),
         None,
     )
     .await?;
@@ -579,9 +580,10 @@ async fn authenticate(
         },
         "Session": {
             "Id":         session.access_token.clone(),
-            "Client":     session.client.clone(),
-            "DeviceName": session.device_name.clone(),
-            "DeviceId":   session.device_id.clone(),
+            "Client":     session.client.clone().unwrap_or_else(|| "Unknown".to_string()),
+            "DeviceName": session.device_name.clone().unwrap_or_default(),
+            "DeviceId":   session.device_id.clone().unwrap_or_default(),
+            "RemoteAddress": session.remote_address.clone().unwrap_or_default(),
         }
     });
     crate::webhooks::dispatch(

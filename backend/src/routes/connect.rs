@@ -68,6 +68,7 @@ async fn connect_exchange(
         device_name,
         client,
         application_version,
+        auth::infer_client_ip(&headers),
         None,
     )
     .await?;

@@ -2859,6 +2859,24 @@ do_refresh_item_metadata_with
 
 ---
 
+## 审计（2026-05-03）：与 Sakura_embyboss Webhook 对齐（WH-SAKURA）
+
+对照仓库 `bot/web/api/webhook/{client_filter,media,favorites}.py` 与 Movie Rust `webhooks.rs` / 派发点：
+
+| 链路 | Sakura 期望 | Movie Rust（审计前） | Movie Rust（当前） |
+|------|-------------|----------------------|-------------------|
+| `POST …/webhook/client-filter` | JSON：`Event`、`User`、`Session`，且 **`Session.Client` 非空**（否则直接 ignored） | `playback.*` 仅 `Session.Id` → **全部被 Sakura 忽略** | `build_playback_payload` 用 `find_active_session(access_token)` 补齐 **`Client` / `DeviceName` / `DeviceId` / `RemoteAddress`**；缺省 Client=`Unknown` |
+| `user.authenticated` / `session.start` | 同上，依赖 `Session.Client` | `Users/AuthenticateByName` 已带 Session，但 **Client 可为 JSON null** → Python 可能拿到 None | Session 字段 **`Client` 默认 `"Unknown"`**，字符串永不缺失；**`RemoteAddress`** 来自登录时写入的 `sessions.remote_address`（`X-Forwarded-For` / `X-Real-IP` 经 `auth::infer_client_ip`，与 `forwarded_client_ip` 同源） |
+| `POST …/webhook/medias`（Episode） | `Item.SeriesId` 用于查收藏用户；缺则无法通知 | `item.added` 仅有 Id/Name/Type/SeriesName → **剧集更新通知不触发** | 扫描新建 Episode 时 **`SeriesId` + `SeasonName` + `IndexNumber`** 写入 Item |
+| `POST …/webhook/medias`（Movie/Series） | `Item.Id` 调 Emby API `People` | ✅ Id/Name/Type 已有 | 不变（Sakura 侧仍须把 Emby 基址指向本服务器） |
+| `POST …/webhook/favorites` | `Item.UserData.IsFavorite` | ✅ 已实现 | 不变 |
+| Form 投递 `data=<json>` | 支持 | ✅ `content_type` 可选 `application/x-www-form-urlencoded` | 不变 |
+| **`GET /Sessions`** / **`usage_stats` SQL** | `RemoteEndPoint` / `sessions.remote_address` | DB 列已有但建会话未写入、`session_to_dto` 恒 `null` → Sakura 按 IP 反查弱 | **`auth::infer_client_ip`**（与登录策略 `forwarded_client_ip` 同源）写入 **`sessions.remote_address`**；`session_to_dto`、Auth Keys 列表 JSON、playback/login webhook 均带出 IP |
+
+**仍为外部条件 / 非 Webhook 范围：** Sakura「观影榜」等主要依赖定时调用 Emby API（如 `emby_cust_commit`），与 Webhook 并行；Bot 的 `item_id_people` 等亦指向所配置的 Emby 服务 URL。**item.deleted / library.scan.*** 不在上述三个路由内，Sakura 默认不消费。
+
+---
+
 ## 第三十八批（2026-05-01）：元数据链路审计 PB31–PB35（远端 People / Series 详情 / 锁定字段 / 编辑回写 NFO / TMDB 打分匹配 / 7 类图 / 软删盘 / provider 删除 / PlaybackInfo 重试 / DTO 兜底 / TMDB retry / ETag / TMDB tagline+keywords+person_roles.is_featured）
 
 **触发场景：** 用户要求在 PB30 详情页 fire-and-forget 异步补全的基础上做一次「元数据链路全链路审计」，列出所有"看起来已实现但其实没真写进 DB / 没回写 NFO / 与 Emby SDK 行为不一致"的问题，分批修复。

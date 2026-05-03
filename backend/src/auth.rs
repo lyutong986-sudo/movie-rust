@@ -255,6 +255,11 @@ fn forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
     None
 }
 
+/// 写入 `sessions.remote_address`、Webhook `Session.RemoteAddress`、Emby 形态 **RemoteEndPoint**。
+pub fn infer_client_ip(headers: &HeaderMap) -> Option<String> {
+    forwarded_client_ip(headers).map(|ip| ip.to_string())
+}
+
 fn request_host(headers: &HeaderMap) -> Option<String> {
     for header_name in ["X-Forwarded-Host", "Host"] {
         let value = headers.get(header_name)?.to_str().ok()?.trim();
