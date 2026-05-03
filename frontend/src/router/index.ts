@@ -157,7 +157,7 @@ export const router = createRouter({
       path: '/settings/webhooks',
       name: 'settings-webhooks',
       component: () => import('../pages/settings/WebhooksSettings.vue'),
-      meta: { title: 'Webhook', section: 'admin', admin: true }
+      meta: { title: 'Webhook 回调', section: 'admin', admin: true }
     },
     {
       path: '/settings/logs-and-activity',

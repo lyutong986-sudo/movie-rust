@@ -23,6 +23,37 @@ const draft = reactive({
   Secret: ''
 });
 
+/** 与后端 `/Notifications/Types` 的 `Category` 字段对应，仅用于展示顺序与中文标题 */
+const WEBHOOK_CATEGORY_ORDER = ['Authentication', 'Library', 'Playback', 'General'] as const;
+
+const WEBHOOK_CATEGORY_ZH: Record<string, string> = {
+  Authentication: '身份验证',
+  Library: '媒体库',
+  Playback: '播放',
+  General: '其它'
+};
+
+/** 事件 `Type` 仍为英文协议名；此处为设置页中文说明 */
+const WEBHOOK_EVENT_ZH: Record<string, string> = {
+  'user.authenticated': '用户已通过身份验证',
+  'user.authenticationfailed': '用户身份验证失败',
+  'item.added': '条目已添加',
+  'item.deleted': '条目已删除',
+  'library.new': '新建媒体库',
+  'library.scan.start': '媒体库扫描开始',
+  'library.scan.complete': '媒体库扫描完成',
+  'item.favorited': '条目已收藏',
+  'item.unfavorited': '条目已取消收藏',
+  'playback.start': '开始播放',
+  'playback.progress': '播放进度',
+  'playback.stop': '停止播放',
+  'session.start': '会话已开始'
+};
+
+function webhookEventLabelZh(type: string) {
+  return WEBHOOK_EVENT_ZH[type] ?? type;
+}
+
 const groupedEvents = computed(() => {
   const map = new Map<string, WebhookNotificationType[]>();
   for (const t of eventTypes.value) {
@@ -30,7 +61,28 @@ const groupedEvents = computed(() => {
     if (!map.has(cat)) map.set(cat, []);
     map.get(cat)!.push(t);
   }
-  return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
+  const out: { categoryKey: string; categoryZh: string; items: WebhookNotificationType[] }[] = [];
+  for (const key of WEBHOOK_CATEGORY_ORDER) {
+    const items = map.get(key);
+    if (items?.length) {
+      out.push({
+        categoryKey: key,
+        categoryZh: WEBHOOK_CATEGORY_ZH[key] ?? key,
+        items
+      });
+      map.delete(key);
+    }
+  }
+  for (const [key, items] of map) {
+    if (items.length) {
+      out.push({
+        categoryKey: key,
+        categoryZh: WEBHOOK_CATEGORY_ZH[key] ?? key,
+        items
+      });
+    }
+  }
+  return out;
 });
 
 function formatDate(value?: string | null) {
@@ -177,18 +229,17 @@ watch(
     <div v-else class="space-y-4">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p class="text-muted text-xs uppercase tracking-wider">Webhooks</p>
-          <h2 class="text-highlighted text-xl font-semibold">出向 Webhook</h2>
+          <p class="text-muted text-xs tracking-wide">服务端 HTTP 回调</p>
+          <h2 class="text-highlighted text-xl font-semibold">出站 Webhook</h2>
           <p class="text-muted mt-1 max-w-3xl text-sm leading-relaxed">
             配置保存在服务端 PostgreSQL 表 <code class="text-xs">webhooks</code>。播放器上报进度后，Movie Rust 会按订阅向目标 URL POST JSON（含
             <code class="text-xs">Event</code>、<code class="text-xs">Date</code>、<code class="text-xs">Server</code>、<code class="text-xs">User</code>、<code class="text-xs">Item</code>、<code class="text-xs">PlaybackInfo</code>
             等字段），与 Emby Webhooks 插件格式一致。对接 Sakura_embyboss 时，播放相关可指向其
-            <code class="text-xs">POST …/webhook/client-filter</code>（需订阅 <code class="text-xs">playback.start</code> /
-            <code class="text-xs">playback.progress</code> / <code class="text-xs">playback.stop</code> /
-            <code class="text-xs">session.start</code>）。媒体库/收藏另有 <code class="text-xs">/webhook/medias</code>、<code class="text-xs">/webhook/favorites</code>。
+            <code class="text-xs">POST …/webhook/client-filter</code>（需订阅开始播放 / 播放进度 / 停止播放 / 会话开始等事件）。媒体库与收藏另有
+            <code class="text-xs">/webhook/medias</code>、<code class="text-xs">/webhook/favorites</code>。
           </p>
           <p class="text-muted mt-2 text-xs">
-            「订阅全部」= 事件列表留空（后端 <code class="text-xs">events</code> 为空数组表示匹配所有事件）。
+            勾选「订阅全部事件」等同于 Emby 中 <code class="text-xs">Events</code> 留空：后端以空数组表示接收<strong>全部</strong>事件类型。
           </p>
         </div>
         <div class="flex gap-2">
@@ -219,7 +270,7 @@ watch(
             <UInput v-model="draft.Url" placeholder="https://your-sakura-bot/webhook/client-filter" class="w-full font-mono text-sm" />
           </UFormField>
           <div class="grid gap-3 sm:grid-cols-2">
-            <UFormField label="Content-Type">
+            <UFormField label="内容类型（Content-Type）">
               <USelect
                 v-model="draft.ContentType"
                 :items="[
@@ -231,25 +282,36 @@ watch(
                 class="w-full"
               />
             </UFormField>
-            <UFormField label="密钥（可选，HMAC SHA256）" hint="编辑时留空表示保留原密钥">
+            <UFormField
+              label="请求认证：密钥（可选）"
+              hint="HMAC SHA256，请求头 X-Webhook-Signature；编辑时留空表示保留原密钥"
+            >
               <UInput v-model="draft.Secret" type="password" autocomplete="new-password" placeholder="与下游约定的签名密钥" class="w-full" />
             </UFormField>
           </div>
 
           <div class="border-default rounded-lg border p-3">
             <UCheckbox v-model="draft.subscribeAll" label="订阅全部事件（等同于 Events 留空）" />
-            <p v-if="draft.subscribeAll" class="text-muted mt-2 text-xs">关闭后可按类别勾选下方事件。</p>
-            <div v-else class="mt-3 space-y-3">
-              <div v-for="[cat, items] of groupedEvents" :key="cat">
-                <p class="text-highlighted mb-2 text-xs font-semibold uppercase tracking-wide">{{ cat }}</p>
-                <div class="flex flex-wrap gap-x-4 gap-y-2">
-                  <UCheckbox
-                    v-for="t in items"
+            <p v-if="draft.subscribeAll" class="text-muted mt-2 text-xs">取消勾选后，可按「身份验证 / 媒体库 / 播放」分组选择具体事件；事件类型值仍为英文协议名。</p>
+            <div v-else class="mt-3 space-y-4">
+              <div v-for="g of groupedEvents" :key="g.categoryKey">
+                <p class="text-highlighted mb-2 text-sm font-semibold">{{ g.categoryZh }}</p>
+                <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-x-6 sm:gap-y-2">
+                  <label
+                    v-for="t in g.items"
                     :key="t.Type"
-                    :model-value="isEventChecked(t.Type)"
-                    :label="t.Type"
-                    @update:model-value="toggleEventFromCheckbox(t.Type, $event)"
-                  />
+                    class="flex max-w-md cursor-pointer items-start gap-2 rounded-md py-0.5"
+                  >
+                    <UCheckbox
+                      class="mt-0.5 shrink-0"
+                      :model-value="isEventChecked(t.Type)"
+                      @update:model-value="toggleEventFromCheckbox(t.Type, $event)"
+                    />
+                    <span class="min-w-0">
+                      <span class="text-default text-sm leading-snug">{{ webhookEventLabelZh(t.Type) }}</span>
+                      <code class="text-dimmed mt-0.5 block font-mono text-[11px]">{{ t.Type }}</code>
+                    </span>
+                  </label>
                 </div>
               </div>
             </div>
@@ -276,7 +338,7 @@ watch(
               <p class="text-highlighted font-semibold">{{ h.Name }}</p>
               <p class="text-muted truncate font-mono text-xs">{{ h.Url }}</p>
               <p class="text-dimmed mt-1 text-[11px]">
-                事件: {{ !h.Events?.length ? '全部' : h.Events.join(', ') }} · Content-Type: {{ h.ContentType || 'application/json' }} · 密钥:
+                事件: {{ !h.Events?.length ? '全部' : h.Events.join(', ') }} · 内容类型: {{ h.ContentType || 'application/json' }} · 认证密钥:
                 {{ h.HasSecret ? '已设置' : '无' }}
               </p>
               <p class="text-dimmed text-[11px]">

@@ -107,8 +107,8 @@ const adminEntries = computed<SettingsEntry[]>(() => [
   },
   {
     icon: 'i-lucide-webhook',
-    title: 'Webhook',
-    description: '配置出向 HTTP 回调（Sakura / 自建 BOT）：播放进度与登录等事件。',
+    title: 'Webhook 回调',
+    description: '出站 HTTP 回调：身份验证、媒体库、播放等事件；可订阅全部或按类型勾选。',
     to: '/settings/webhooks'
   },
   {
