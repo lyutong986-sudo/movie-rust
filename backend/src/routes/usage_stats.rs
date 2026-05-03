@@ -33,7 +33,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, LocalResult, NaiveDateTime, TimeZone, Utc};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -169,23 +169,43 @@ async fn user_watchtime_ranking(
 ) -> Result<Value, AppError> {
     let rows = sqlx::query(
         r#"
-        WITH session_durations AS (
+        WITH grp AS (
             SELECT pe.user_id,
-                   pe.session_id,
-                   EXTRACT(EPOCH FROM (MAX(pe.created_at) - MIN(pe.created_at)))::bigint AS dur
+                   pe.item_id,
+                   MAX(pe.created_at) AS last_at,
+                   MIN(pe.created_at) AS first_at,
+                   MAX(pe.position_ticks) FILTER (WHERE pe.position_ticks IS NOT NULL)
+                       AS max_p,
+                   MIN(pe.position_ticks) FILTER (WHERE pe.position_ticks IS NOT NULL)
+                       AS min_p,
+                   EXTRACT(EPOCH FROM (MAX(pe.created_at) - MIN(pe.created_at)))::bigint
+                       AS wall_secs
               FROM playback_events pe
              WHERE ($1::timestamptz IS NULL OR pe.created_at >= $1)
                AND ($2::timestamptz IS NULL OR pe.created_at <  $2)
-             GROUP BY pe.user_id, pe.session_id
+             GROUP BY pe.user_id,
+                      COALESCE(NULLIF(trim(pe.play_session_id), ''),
+                               NULLIF(trim(pe.session_id), ''),
+                               ''),
+                      pe.item_id
+        ),
+        contrib AS (
+            SELECT user_id,
+                   CASE WHEN COALESCE(max_p, 0) > COALESCE(min_p, 0)
+                        THEN GREATEST(0,
+                             (COALESCE(max_p, 0) - COALESCE(min_p, 0)))::bigint
+                             / 10000000::bigint
+                        ELSE wall_secs END::bigint AS watch_secs
+              FROM grp
         )
-        SELECT sd.user_id::text                     AS user_id,
-               COALESCE(u.name, '')                 AS user_name,
-               COALESCE(SUM(sd.dur), 0)::bigint     AS watch_time
-          FROM session_durations sd
-          LEFT JOIN users u ON u.id = sd.user_id
+        SELECT c.user_id::text                  AS user_id,
+               COALESCE(u.name, '')             AS user_name,
+               COALESCE(SUM(c.watch_secs), 0)::bigint AS watch_time
+          FROM contrib c
+          LEFT JOIN users u ON u.id = c.user_id
          WHERE (u.is_hidden = false OR u.is_hidden IS NULL)
            AND (u.is_disabled = false OR u.is_disabled IS NULL)
-         GROUP BY sd.user_id, u.name
+         GROUP BY c.user_id, u.name
          ORDER BY watch_time DESC
         "#,
     )
@@ -228,20 +248,37 @@ async fn single_user_watchtime(
     };
     let row = sqlx::query(
         r#"
-        WITH session_durations AS (
-            SELECT pe.session_id,
-                   MIN(pe.created_at) AS first_at,
+        WITH grp AS (
+            SELECT pe.item_id,
                    MAX(pe.created_at) AS last_at,
-                   EXTRACT(EPOCH FROM (MAX(pe.created_at) - MIN(pe.created_at)))::bigint AS dur
+                   MIN(pe.created_at) AS first_at,
+                   MAX(pe.position_ticks) FILTER (WHERE pe.position_ticks IS NOT NULL)
+                       AS max_p,
+                   MIN(pe.position_ticks) FILTER (WHERE pe.position_ticks IS NOT NULL)
+                       AS min_p,
+                   EXTRACT(EPOCH FROM (MAX(pe.created_at) - MIN(pe.created_at)))::bigint
+                       AS wall_secs
               FROM playback_events pe
              WHERE pe.user_id = $1
                AND ($2::timestamptz IS NULL OR pe.created_at >= $2)
                AND ($3::timestamptz IS NULL OR pe.created_at <  $3)
-             GROUP BY pe.session_id
+             GROUP BY COALESCE(NULLIF(trim(pe.play_session_id), ''),
+                                  NULLIF(trim(pe.session_id), ''),
+                                  ''),
+                      pe.item_id
+        ),
+        agg AS (
+            SELECT MAX(last_at)                                                    AS last_login,
+                   SUM(CASE WHEN COALESCE(max_p, 0) > COALESCE(min_p, 0)
+                            THEN ((COALESCE(max_p, 0) - COALESCE(min_p, 0))::bigint)
+                                 / 600000000::bigint
+                            ELSE GREATEST(wall_secs, 0)::bigint / 60::bigint END
+                       )::bigint AS watch_time_minutes
+              FROM grp
         )
-        SELECT MAX(last_at) AS last_login,
-               COALESCE(SUM(dur), 0) / 60 AS watch_time_minutes
-          FROM session_durations
+        SELECT last_login,
+               COALESCE(watch_time_minutes, 0)::bigint AS watch_time_minutes
+          FROM agg
         "#,
     )
     .bind(uuid)
@@ -556,10 +593,15 @@ fn extract_date_range(sql: &str) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>
     static R_LT: OnceLock<Regex> = OnceLock::new();
     let r_ge = R_GE.get_or_init(|| Regex::new(r"datecreated >= '([^']+)'").unwrap());
     let r_lt = R_LT.get_or_init(|| Regex::new(r"datecreated (?:<|<=) '([^']+)'").unwrap());
+    // Sakura_embyboss `emby_cust_commit` 以东八区 `datetime.now(tz)` 拼 SQL；
+    // 若不按 UTC+8 解析会整体偏 8h，裁剪掉窗口内回放记录。
     let parse = |s: &str| -> Option<DateTime<Utc>> {
-        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-            .ok()
-            .map(|n| Utc.from_utc_datetime(&n))
+        let naive = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?;
+        let offset = FixedOffset::east_opt(8 * 3600)?;
+        match offset.from_local_datetime(&naive) {
+            LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => Some(dt.with_timezone(&Utc)),
+            LocalResult::None => None,
+        }
     };
     let start = r_ge.captures(sql).and_then(|c| parse(c.get(1)?.as_str()));
     let end = r_lt.captures(sql).and_then(|c| parse(c.get(1)?.as_str()));
