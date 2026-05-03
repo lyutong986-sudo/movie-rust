@@ -53,7 +53,7 @@ const form = ref({
   syncMetadata: true,
   syncSubtitles: true,
   tokenRefreshIntervalSecs: 3600,
-  proxyMode: 'proxy' as 'proxy' | 'redirect',
+  proxyMode: 'proxy' as 'proxy' | 'redirect' | 'redirect_direct',
   autoSyncIntervalMinutes: 0,
   pageSize: 200,
   requestIntervalMs: 0,
@@ -81,7 +81,7 @@ const editForm = ref({
   syncMetadata: true,
   syncSubtitles: true,
   tokenRefreshIntervalSecs: 3600,
-  proxyMode: 'proxy' as 'proxy' | 'redirect',
+  proxyMode: 'proxy' as 'proxy' | 'redirect' | 'redirect_direct',
   autoSyncIntervalMinutes: 0,
   pageSize: 200,
   requestIntervalMs: 0,
@@ -449,7 +449,7 @@ function openEditor(source: RemoteEmbySource) {
     syncMetadata: source.SyncMetadata !== false,
     syncSubtitles: source.SyncSubtitles !== false,
     tokenRefreshIntervalSecs: source.TokenRefreshIntervalSecs ?? 3600,
-    proxyMode: (source.ProxyMode === 'redirect' ? 'redirect' : 'proxy') as 'proxy' | 'redirect',
+    proxyMode: (['redirect', 'redirect_direct'].includes(source.ProxyMode) ? source.ProxyMode : 'proxy') as 'proxy' | 'redirect' | 'redirect_direct',
     autoSyncIntervalMinutes: Math.max(0, Number(source.AutoSyncIntervalMinutes ?? 0) || 0),
     pageSize: Math.max(50, Math.min(1000, Number(source.PageSize ?? 200) || 200)),
     requestIntervalMs: Math.max(0, Math.min(60000, Number(source.RequestIntervalMs ?? 0) || 0)),
@@ -985,8 +985,17 @@ onBeforeUnmount(() => {
                 <label class="flex cursor-pointer items-center gap-2">
                   <input type="radio" v-model="form.proxyMode" value="redirect" class="accent-primary" />
                   <div>
-                    <span class="font-medium text-sm">302 直链重定向</span>
-                    <p class="text-muted text-xs">返回 302 重定向到远端直链，节省本地带宽；客户端需能直接访问远端 Emby 服务器</p>
+                    <span class="font-medium text-sm">302 重定向</span>
+                    <p class="text-muted text-xs">302 重定向到远端 Emby，客户端自行跟随 302 链获取最终直链。适合有 IP 绑定的 CDN（如115网盘）</p>
+                  </div>
+                </label>
+              </div>
+              <div class="flex items-start gap-3">
+                <label class="flex cursor-pointer items-center gap-2">
+                  <input type="radio" v-model="form.proxyMode" value="redirect_direct" class="accent-primary" />
+                  <div>
+                    <span class="font-medium text-sm">302 解析直链</span>
+                    <p class="text-muted text-xs">服务端解析远端 302 链后返回最终 CDN 直链，减少一跳更快。不适合有 IP 绑定的 CDN</p>
                   </div>
                 </label>
               </div>
@@ -1154,8 +1163,8 @@ onBeforeUnmount(() => {
               </p>
               <p class="text-muted mt-1 text-xs">
                 流量模式：
-                <span :class="source.ProxyMode === 'redirect' ? 'text-warning font-medium' : 'text-success font-medium'">
-                  {{ source.ProxyMode === 'redirect' ? '302 直链重定向（节省带宽）' : '本地中转（默认）' }}
+                <span :class="source.ProxyMode !== 'proxy' ? 'text-warning font-medium' : 'text-success font-medium'">
+                  {{ source.ProxyMode === 'redirect_direct' ? '302 解析直链' : source.ProxyMode === 'redirect' ? '302 重定向' : '本地中转（默认）' }}
                 </span>
               </p>
               <p class="text-muted mt-1 text-xs">
@@ -1444,8 +1453,17 @@ onBeforeUnmount(() => {
                   <label class="flex cursor-pointer items-center gap-2">
                     <input type="radio" v-model="editForm.proxyMode" value="redirect" class="accent-primary" />
                     <div>
-                      <span class="font-medium text-sm">302 直链重定向</span>
-                      <p class="text-muted text-xs">返回 302 重定向到远端直链，节省本地带宽；客户端需能直接访问远端 Emby 服务器</p>
+                      <span class="font-medium text-sm">302 重定向</span>
+                      <p class="text-muted text-xs">302 重定向到远端 Emby，客户端自行跟随 302 链获取最终直链。适合有 IP 绑定的 CDN（如115网盘）</p>
+                    </div>
+                  </label>
+                </div>
+                <div class="flex items-start gap-3">
+                  <label class="flex cursor-pointer items-center gap-2">
+                    <input type="radio" v-model="editForm.proxyMode" value="redirect_direct" class="accent-primary" />
+                    <div>
+                      <span class="font-medium text-sm">302 解析直链</span>
+                      <p class="text-muted text-xs">服务端解析远端 302 链后返回最终 CDN 直链，减少一跳更快。不适合有 IP 绑定的 CDN</p>
                     </div>
                   </label>
                 </div>

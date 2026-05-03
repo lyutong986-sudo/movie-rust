@@ -2821,70 +2821,24 @@ async fn proxy_item_stream_internal_with_source(
     method: Method,
     headers: &HeaderMap,
 ) -> Result<Response, AppError> {
-    // --- redirect 模式：解析远端 302 链，将最终直链返回给客户端 ---
-    // 远端 Emby 可能返回 302 指向 CDN/云盘直链（如 123pan.cn），
-    // 我们跟踪整条重定向链，把最后一跳的 Location 直接返回给客户端，
-    // 客户端一步到位连接存储后端，无需经过远端 Emby 或本地中转。
+    // --- redirect 模式：302 重定向 ---
     if source.is_redirect_mode() {
         let token = ensure_authenticated(&state.pool, source, false).await?;
         let redirect_url =
             build_remote_stream_redirect_url(source, remote_item_id, media_source_id, &token);
 
-        // 用不跟随重定向的一次性 Client 探测远端是否返回 302
-        let no_redirect_client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(15))
-            .pool_max_idle_per_host(0)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
-        let auth_value = emby_auth_header(source, Some(&token));
-        let probe = no_redirect_client
-            .get(&redirect_url)
-            .header(header::USER_AGENT.as_str(), source.effective_user_agent())
-            .header("X-Emby-Token", token.as_str())
-            .header("Authorization", &auth_value)
-            .header("X-Emby-Authorization", &auth_value)
-            .send()
-            .await;
-
-        let mut final_location = redirect_url.clone();
-        if let Ok(resp) = probe {
-            if resp.status().is_redirection() {
-                if let Some(loc) = resp.headers().get(header::LOCATION).and_then(|v| v.to_str().ok()) {
-                    let mut current = loc.to_string();
-                    // 跟踪最多 8 跳重定向链，找到最终直链
-                    for _ in 0..8 {
-                        match no_redirect_client
-                            .get(&current)
-                            .header(header::USER_AGENT.as_str(), source.effective_user_agent())
-                            .send()
-                            .await
-                        {
-                            Ok(r) if r.status().is_redirection() => {
-                                if let Some(next) = r.headers().get(header::LOCATION).and_then(|v| v.to_str().ok()) {
-                                    current = next.to_string();
-                                } else {
-                                    break;
-                                }
-                            }
-                            _ => break,
-                        }
-                    }
-                    final_location = current;
-                }
-            }
-            // 远端返回 200（无重定向）：保持原始 URL，客户端直连远端
-        }
-
-        tracing::debug!(
-            source_id = %source.id,
-            remote_item_id,
-            original = %redirect_url,
-            resolved = %final_location,
-            "redirect 模式：解析远端重定向链"
-        );
+        let final_location = if source.is_redirect_direct_mode() {
+            // redirect_direct：服务端解析远端 302 链，返回最终 CDN 直链给客户端。
+            // 适合无 IP 绑定的 CDN（123云盘等），减少一跳更快。
+            // 有 IP 绑定的 CDN（115网盘等）不要用此模式，会导致客户端 403。
+            resolve_remote_redirect_chain(source, &redirect_url, &token)
+                .await
+                .unwrap_or(redirect_url)
+        } else {
+            // redirect（默认）：直接 302 到远端 Emby 流 URL，客户端自己跟随 302 链。
+            // CDN 直链绑定的是客户端 IP，适用于所有 CDN（包括 115网盘等有 IP 绑定的）。
+            redirect_url
+        };
 
         return Response::builder()
             .status(StatusCode::FOUND)
@@ -2944,6 +2898,72 @@ fn build_remote_stream_redirect_url(
         url.push_str(msid);
     }
     url
+}
+
+/// redirect_direct 模式专用：向远端发起请求（不跟随重定向），
+/// 逐跳解析 302 链，返回最终目标 URL。
+async fn resolve_remote_redirect_chain(
+    source: &DbRemoteEmbySource,
+    initial_url: &str,
+    token: &str,
+) -> Result<String, AppError> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let auth_value = emby_auth_header(source, Some(token));
+    let ua = source.effective_user_agent();
+
+    // 第一跳：带认证头请求远端 Emby
+    let resp = client
+        .get(initial_url)
+        .header(header::USER_AGENT.as_str(), &ua)
+        .header("X-Emby-Token", token)
+        .header("Authorization", &auth_value)
+        .header("X-Emby-Authorization", &auth_value)
+        .send()
+        .await?;
+
+    if !resp.status().is_redirection() {
+        return Err(AppError::Internal("远端未返回重定向".to_string()));
+    }
+    let mut current = resp
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| AppError::Internal("远端 302 无 Location 头".to_string()))?
+        .to_string();
+
+    // 后续跳：不带认证头，只跟随 CDN 自身的 302 链（最多 8 跳）
+    for _ in 0..8 {
+        match client
+            .get(&current)
+            .header(header::USER_AGENT.as_str(), &ua)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_redirection() => {
+                if let Some(next) = r.headers().get(header::LOCATION).and_then(|v| v.to_str().ok()) {
+                    current = next.to_string();
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    tracing::debug!(
+        source_id = %source.id,
+        original = %initial_url,
+        resolved = %current,
+        "redirect_direct: 解析远端重定向链完成"
+    );
+    Ok(current)
 }
 
 fn source_root_path(library: &DbLibrary, source: &DbRemoteEmbySource) -> PathBuf {

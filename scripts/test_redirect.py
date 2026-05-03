@@ -1,13 +1,12 @@
 """
-测试远端 Emby 媒体资源是否存在 302 重定向链。
-登录 → 获取媒体库 → 获取第一个电影 → 请求播放信息 → 测试流媒体 URL 的重定向。
+测试 emby.340773.xyz 媒体存储直链的完整重定向链和有效性。
 """
 import requests
 import uuid
 import json
 import sys
 
-SERVER_URL = "http://aaa.204cloud.com"
+SERVER_URL = "https://emby.340773.xyz"
 USERNAME = "bbll"
 PASSWORD = "bbll"
 
@@ -22,207 +21,153 @@ def auth_header(user_id=""):
     if user_id:
         parts.append(f'UserId="{user_id}"')
     parts.extend([
-        f'Client="{CLIENT}"',
-        f'Device="{DEVICE}"',
-        f'DeviceId="{DEVICE_ID}"',
-        f'Version="{VERSION}"',
+        f'Client="{CLIENT}"', f'Device="{DEVICE}"',
+        f'DeviceId="{DEVICE_ID}"', f'Version="{VERSION}"',
     ])
     return f'Emby {", ".join(parts)}'
 
 def api_headers(token, user_id=""):
-    auth = auth_header(user_id)
-    return {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-        "X-Emby-Token": token,
-        "Authorization": auth,
-        "X-Emby-Authorization": auth,
-    }
+    a = auth_header(user_id)
+    return {"User-Agent": USER_AGENT, "Accept": "application/json",
+            "X-Emby-Token": token, "Authorization": a, "X-Emby-Authorization": a}
 
 # Step 1: 登录
 print("=" * 70)
 print("Step 1: 登录")
-print("=" * 70)
 login_auth = auth_header()
-resp = requests.post(
-    f"{SERVER_URL}/Users/AuthenticateByName",
-    headers={
-        "User-Agent": USER_AGENT,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": login_auth,
-        "X-Emby-Authorization": login_auth,
-    },
-    json={"Username": USERNAME, "Pw": PASSWORD, "Password": PASSWORD},
-    timeout=15,
-)
-if resp.status_code != 200:
-    print(f"登录失败: {resp.status_code}")
-    sys.exit(1)
+resp = requests.post(f"{SERVER_URL}/Users/AuthenticateByName",
+    headers={"User-Agent": USER_AGENT, "Content-Type": "application/json",
+             "Accept": "application/json", "Authorization": login_auth,
+             "X-Emby-Authorization": login_auth},
+    json={"Username": USERNAME, "Pw": PASSWORD, "Password": PASSWORD}, timeout=15)
+assert resp.status_code == 200, f"登录失败: {resp.status_code}"
 data = resp.json()
 TOKEN = data["AccessToken"]
 USER_ID = data["User"]["Id"]
-print(f"Token: {TOKEN[:16]}...  UserId: {USER_ID}")
+print(f"  Token: {TOKEN[:16]}...  UserId: {USER_ID}")
 
-# Step 2: 获取媒体库，找到电影库
+# Step 2: 获取电影库
 print("\n" + "=" * 70)
 print("Step 2: 获取媒体库")
-print("=" * 70)
-resp2 = requests.get(
-    f"{SERVER_URL}/Users/{USER_ID}/Views",
+resp2 = requests.get(f"{SERVER_URL}/Users/{USER_ID}/Views",
     headers=api_headers(TOKEN, USER_ID),
-    params={"Fields": "CollectionType", "api_key": TOKEN},
-    timeout=15,
-)
+    params={"Fields": "CollectionType", "api_key": TOKEN}, timeout=15)
 views = resp2.json().get("Items", [])
 movie_view = None
 for v in views:
     ct = v.get("CollectionType", "")
-    print(f"  {v['Name']} (Id={v['Id']}, Type={ct})")
+    name = v.get("Name", "?")
+    print(f"  {name} (Id={v['Id']}, Type={ct})")
     if ct == "movies" and movie_view is None:
         movie_view = v
 
-if not movie_view:
-    print("没找到电影库!")
-    sys.exit(1)
-print(f"\n选中电影库: {movie_view['Name']} (Id={movie_view['Id']})")
+assert movie_view, "没找到电影库!"
+print(f"\n  选中: {movie_view['Name']} (Id={movie_view['Id']})")
 
-# Step 3: 获取第一部电影
+# Step 3: 获取前3部电影
 print("\n" + "=" * 70)
-print("Step 3: 获取第一部电影")
-print("=" * 70)
-resp3 = requests.get(
-    f"{SERVER_URL}/Users/{USER_ID}/Items",
+print("Step 3: 获取电影列表")
+resp3 = requests.get(f"{SERVER_URL}/Users/{USER_ID}/Items",
     headers=api_headers(TOKEN, USER_ID),
-    params={
-        "ParentId": movie_view["Id"],
-        "IncludeItemTypes": "Movie",
-        "Recursive": "true",
-        "Limit": "1",
-        "Fields": "Path,MediaSources",
-        "api_key": TOKEN,
-    },
-    timeout=15,
-)
+    params={"ParentId": movie_view["Id"], "IncludeItemTypes": "Movie",
+            "Recursive": "true", "Limit": "3", "Fields": "Path,MediaSources",
+            "api_key": TOKEN}, timeout=15)
 items = resp3.json().get("Items", [])
-if not items:
-    print("电影库为空!")
-    sys.exit(1)
-movie = items[0]
-movie_id = movie["Id"]
-movie_name = movie.get("Name", "?")
-print(f"电影: {movie_name} (Id={movie_id})")
-print(f"Path: {movie.get('Path', 'N/A')}")
+assert items, "电影库为空!"
+for i, m in enumerate(items):
+    print(f"  [{i}] {m.get('Name','?')} (Id={m['Id']})")
 
-# Step 4: 获取 PlaybackInfo
-print("\n" + "=" * 70)
-print("Step 4: 获取 PlaybackInfo")
-print("=" * 70)
-resp4 = requests.post(
-    f"{SERVER_URL}/Items/{movie_id}/PlaybackInfo",
-    headers={
-        **api_headers(TOKEN, USER_ID),
-        "Content-Type": "application/json",
-    },
-    params={
-        "UserId": USER_ID,
-        "StartTimeTicks": "0",
-        "IsPlayback": "false",
-        "AutoOpenLiveStream": "false",
-        "api_key": TOKEN,
-    },
-    json={},
-    timeout=15,
-)
-pb = resp4.json()
-media_sources = pb.get("MediaSources", [])
-print(f"MediaSources 数量: {len(media_sources)}")
+# 测试每部电影的流媒体直链
+for movie in items:
+    movie_id = movie["Id"]
+    movie_name = movie.get("Name", "?")
+    print("\n" + "=" * 70)
+    print(f"测试: {movie_name} (Id={movie_id})")
+    print("=" * 70)
 
-for i, ms in enumerate(media_sources):
-    print(f"\n  [{i}] Id={ms.get('Id', '?')}")
-    print(f"      Name: {ms.get('Name', '?')}")
-    print(f"      Path: {ms.get('Path', 'N/A')}")
-    print(f"      Protocol: {ms.get('Protocol', '?')}")
-    print(f"      Container: {ms.get('Container', '?')}")
-    direct_url = ms.get("DirectStreamUrl") or ms.get("Path", "")
-    print(f"      DirectStreamUrl: {direct_url[:120] if direct_url else 'N/A'}")
+    # Step 4: PlaybackInfo
+    resp4 = requests.post(f"{SERVER_URL}/Items/{movie_id}/PlaybackInfo",
+        headers={**api_headers(TOKEN, USER_ID), "Content-Type": "application/json"},
+        params={"UserId": USER_ID, "StartTimeTicks": "0", "IsPlayback": "false",
+                "AutoOpenLiveStream": "false", "api_key": TOKEN},
+        json={}, timeout=15)
+    pb = resp4.json()
+    media_sources = pb.get("MediaSources", [])
+    print(f"  MediaSources: {len(media_sources)}")
 
-# Step 5: 测试流媒体 URL 的 302 重定向
-print("\n" + "=" * 70)
-print("Step 5: 测试流媒体 URL 重定向链")
-print("=" * 70)
+    if not media_sources:
+        print("  (无 MediaSource)")
+        continue
 
-if media_sources:
     ms = media_sources[0]
     ms_id = ms.get("Id", movie_id)
-
-    # 构造 Emby 标准的直接串流 URL
-    stream_urls = []
     container = ms.get("Container", "mp4")
-    
-    # 尝试多种 URL 格式
-    stream_urls.append(f"{SERVER_URL}/Videos/{movie_id}/stream.{container}?Static=true&MediaSourceId={ms_id}&api_key={TOKEN}")
-    stream_urls.append(f"{SERVER_URL}/Videos/{movie_id}/stream?Static=true&MediaSourceId={ms_id}&api_key={TOKEN}")
-    
-    direct = ms.get("DirectStreamUrl")
-    if direct:
-        if direct.startswith("/"):
-            stream_urls.insert(0, f"{SERVER_URL}{direct}")
-        elif direct.startswith("http"):
-            stream_urls.insert(0, direct)
+    print(f"  [{0}] {ms.get('Name','?')} ({container}) Protocol={ms.get('Protocol','?')}")
 
-    for url in stream_urls:
-        print(f"\n测试 URL: {url[:120]}...")
-        try:
-            # allow_redirects=False: 不自动跟随重定向，手动查看每一跳
-            r = requests.get(
-                url,
-                headers={
-                    "User-Agent": USER_AGENT,
-                    "X-Emby-Token": TOKEN,
-                },
-                allow_redirects=False,
-                timeout=15,
-                stream=True,
-            )
-            print(f"  Status: {r.status_code}")
-            if r.status_code in (301, 302, 303, 307, 308):
-                location = r.headers.get("Location", "")
-                print(f"  >>> 重定向到: {location}")
-                
-                # 跟踪完整重定向链
-                hop = 1
-                current_url = location
-                while hop < 10:
-                    r2 = requests.get(
-                        current_url,
-                        headers={"User-Agent": USER_AGENT},
-                        allow_redirects=False,
-                        timeout=15,
-                        stream=True,
-                    )
-                    print(f"  [Hop {hop}] {r2.status_code} -> {current_url[:100]}")
-                    if r2.status_code in (301, 302, 303, 307, 308):
-                        current_url = r2.headers.get("Location", "")
-                        print(f"           >>> 重定向到: {current_url[:120]}")
-                        hop += 1
-                    else:
-                        ct = r2.headers.get("Content-Type", "")
-                        cl = r2.headers.get("Content-Length", "?")
-                        print(f"           最终响应: Content-Type={ct}, Content-Length={cl}")
-                        break
-                r.close()
-            else:
-                ct = r.headers.get("Content-Type", "")
-                cl = r.headers.get("Content-Length", "?")
-                print(f"  Content-Type: {ct}")
-                print(f"  Content-Length: {cl}")
-                print(f"  (无重定向，直接返回内容)")
-                r.close()
-            break  # 测试第一个有效 URL 即可
-        except Exception as e:
-            print(f"  失败: {e}")
+    # Step 5: 请求流 URL，不跟随重定向
+    stream_url = f"{SERVER_URL}/Videos/{movie_id}/stream.{container}?Static=true&MediaSourceId={ms_id}&api_key={TOKEN}"
+    print(f"\n  Stream URL: {stream_url[:100]}...")
+
+    try:
+        r = requests.get(stream_url,
+            headers={"User-Agent": USER_AGENT, "X-Emby-Token": TOKEN},
+            allow_redirects=False, timeout=15, stream=True)
+        print(f"  响应: {r.status_code}")
+
+        if r.status_code in (301, 302, 303, 307, 308):
+            loc = r.headers.get("Location", "")
+            print(f"  302 -> {loc[:120]}...")
+            r.close()
+
+            # 跟踪重定向链
+            current = loc
+            hop = 1
+            while hop <= 8:
+                r2 = requests.get(current, headers={"User-Agent": USER_AGENT},
+                    allow_redirects=False, timeout=15, stream=True)
+                if r2.status_code in (301, 302, 303, 307, 308):
+                    current = r2.headers.get("Location", "")
+                    print(f"  [Hop {hop}] {r2.status_code} -> {current[:120]}...")
+                    r2.close()
+                    hop += 1
+                else:
+                    ct = r2.headers.get("Content-Type", "?")
+                    cl = r2.headers.get("Content-Length", "?")
+                    accept_ranges = r2.headers.get("Accept-Ranges", "?")
+                    print(f"  [最终] {r2.status_code}")
+                    print(f"    Content-Type: {ct}")
+                    print(f"    Content-Length: {cl}")
+                    print(f"    Accept-Ranges: {accept_ranges}")
+                    print(f"    URL: {current[:150]}")
+
+                    # 验证直链：用 Range 请求前 1 字节
+                    try:
+                        r3 = requests.get(current,
+                            headers={"User-Agent": USER_AGENT, "Range": "bytes=0-0"},
+                            timeout=15, stream=True)
+                        print(f"    Range 验证: {r3.status_code} (Content-Range: {r3.headers.get('Content-Range','N/A')})")
+                        r3.close()
+                        if r3.status_code in (200, 206):
+                            print(f"    >>> 直链有效!")
+                        else:
+                            print(f"    >>> 直链可能无效")
+                    except Exception as e:
+                        print(f"    Range 验证失败: {e}")
+                    r2.close()
+                    break
+        elif r.status_code == 200:
+            ct = r.headers.get("Content-Type", "?")
+            cl = r.headers.get("Content-Length", "?")
+            print(f"  (无重定向，直接返回)")
+            print(f"    Content-Type: {ct}")
+            print(f"    Content-Length: {cl}")
+            r.close()
+        else:
+            print(f"  异常响应: {r.status_code} {r.text[:200]}")
+            r.close()
+    except Exception as e:
+        print(f"  请求失败: {e}")
 
 print("\n" + "=" * 70)
-print("完成!")
+print("全部完成!")
 print("=" * 70)

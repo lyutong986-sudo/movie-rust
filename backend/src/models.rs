@@ -113,7 +113,14 @@ pub struct DbRemoteEmbySource {
 impl DbRemoteEmbySource {
     /// 是否为直链重定向模式（302 redirect，客户端直连远端）
     pub fn is_redirect_mode(&self) -> bool {
-        self.proxy_mode.trim().eq_ignore_ascii_case("redirect")
+        let mode = self.proxy_mode.trim();
+        mode.eq_ignore_ascii_case("redirect") || mode.eq_ignore_ascii_case("redirect_direct")
+    }
+
+    /// 是否为解析直链模式：服务端解析远端 302 链，将最终 CDN 直链返回给客户端。
+    /// 适合无 IP 绑定的 CDN，减少一跳；有 IP 绑定的 CDN（115网盘等）应使用普通 redirect。
+    pub fn is_redirect_direct_mode(&self) -> bool {
+        self.proxy_mode.trim().eq_ignore_ascii_case("redirect_direct")
     }
 
     /// PB39：身份伪装兜底。`spoofed_client` 空 → `Infuse-Direct`。
