@@ -1,7 +1,7 @@
 ﻿# Jellyfin 模板 vs 当前项目 — 功能差异报告
 
 > 排除范围：直播(LiveTV)、插件(Plugins)、DLNA、音乐(Music)、家庭视频/混合内容
-> 对比时间：2026-05-03（远端 Emby 流量模式 redirect / redirect_direct 严重 bug 修复 — `proxy_item_stream_internal_with_source` 历史误把 `ensure_authenticated()` 返回的 `remote_user_id` 当成 token 拼进 `api_key=`，导致 redirect 模式 302 链客户端 401、redirect_direct 模式解析失败回退到带错 api_key 的远端 URL；改为从 `source.access_token` 取真实 token，并补强 redirect_direct 失败重试 + 降级回 redirect 的双重兜底；端到端实环境验证最终能 302 → 123pan CDN 直链 200）
+> 对比时间：2026-05-03（① 远端 Emby 流量模式 redirect / redirect_direct 严重 bug 修复 — `proxy_item_stream_internal_with_source` 历史误把 `ensure_authenticated()` 返回的 `remote_user_id` 当成 token 拼进 `api_key=`，改为从 `source.access_token` 取真实 token，并补强 redirect_direct 失败重试 + 降级回 redirect 的双重兜底；② 前端集成 mpegts.js — 浏览器播放 FLV / MPEG-TS 完全走客户端 demux + MSE，不再依赖服务端转码，按容器/编码智能选播放引擎）
 
 ---
 
@@ -4087,6 +4087,65 @@ let redirect_url =
 `proxy_item_stream_internal_with_source` 的 user_id↔token 混用是**孤例**，全仓只此一处。修复（RD-01 ~ RD-04）落地后，所有「远端 Emby 身份」的取值路径都已与字段语义严格对齐：
 - 需要 `api_key` / `X-Emby-Token` → 一律取 `source.access_token`
 - 需要 `/Users/{id}/...` 路径 → 一律取 `source.remote_user_id`
+
+### FE-PB1 浏览器侧解码 — 前端集成 mpegts.js 处理 FLV / MPEG-TS（2026-05-03）
+
+#### 问题现场（MCP DevTools 实测）
+
+用户报告 `https://test.emby.yun:4443/item/337202EC-...` (容器 = `flv`，编码 H.264 + AAC，远端 CDN 直链) 无法播放。MCP 浏览器抓到的故障链：
+
+| 步骤 | 请求 | 结果 |
+|------|------|------|
+| ① PlaybackInfo | `POST /Items/.../PlaybackInfo` | 200，但 `SupportsDirectPlay=false`、`SupportsDirectStream=false`、`SupportsTranscoding=true` |
+| ② HLS 主清单 | `GET /Videos/.../master.m3u8` | **400** `{"ErrorCode":"BadRequest","ErrorMessage":"HLS 播放需要启用真实转码输出"}` |
+| ③ 直链 (旁路) | `GET /Videos/.../original.flv?Static=true` | 302 ✓ |
+| ④ CDN 直链 | `GET https://1814975823.v.123pan.cn/.../三个邻居.flv` | 206 ✓ (流通到底) |
+
+console：`VIDEOJS: ERROR: (CODE:4 MEDIA_ERR_SRC_NOT_SUPPORTED)`
+
+#### 根因 = 前端把转码当主路径
+
+旧版 `VideoPlaybackPage.vue::sourceCandidates` 不分容器一律 `[hls m3u8, direct mp4]`，FLV 文件浏览器又不能原生播放。后端 `EnableTranscoding=false` 直接 400，前端无路可走。
+
+#### 设计原则更正
+
+> 浏览器播放**不应**依赖服务端转码 — 服务端只负责把远端 CDN 直链 302 给客户端，浏览器自己 demux / decode。
+
+#### 改造（`frontend/src/pages/playback/VideoPlaybackPage.vue` + `package.json`）
+
+| 编号 | 变更 |
+|------|------|
+| FE-PB1-1 | `package.json` 新增 `mpegts.js@^1.8.0`（B 站维护的 flv.js fork，FLV + MPEG-TS 双解，浏览器 MSE 喂 fMP4） |
+| FE-PB1-2 | `containerToMime(container, codec)` — 容器名→标准 MIME 映射（mp4/m4v/mov→video/mp4，mkv→video/x-matroska，flv→video/x-flv，ts/m2ts→video/mp2t，webm→video/webm 等） |
+| FE-PB1-3 | `browserCanPlayDirectly(mime)` — 用 `<video>.canPlayType()` 探测原生支持 |
+| FE-PB1-4 | `sourceCandidates` 重写为四级优先级： ① 浏览器原生可播 → 直链 + native；② FLV / MPEG-TS → mpegts.js demux；③ HLS 兜底（仅在服务端开转码时才能走通）；④ 直链最终兜底 |
+| FE-PB1-5 | `applyPlaybackSource` 增加 `engine === 'mpegts'` 分支：`createPlayer({ type: 'flv'\|'mpegts', isLive:false, url, cors:true })` + `attachMediaElement` + Range seek，错误自动 `tryNextSource` |
+| FE-PB1-6 | `ensurePlaybackEngines` 把 `import('mpegts.js')` 加进首批并行；`destroyMpegts()` 在 source 切换 / 页面卸载时调用 |
+
+#### 浏览器播放矩阵（修复后）
+
+| 容器 + 编码 | 引擎 | 走服务端转码？ |
+|------|------|------|
+| mp4 + h264/h265/aac | native `<video>` | 否 |
+| webm + vp9/av1 | native `<video>` | 否 |
+| mkv + h264/aac (Chromium 系) | native `<video>` | 否 |
+| **flv + h264/aac** | **mpegts.js (本机 demux + MSE)** | **否** ← 本次修复目标 |
+| ts / m2ts + h264/aac | mpegts.js | 否 |
+| avi / wmv | HLS 兜底 (需后端 EnableTranscoding=true) | 是（仅此场景） |
+
+#### 验证
+
+- `npm run build` ✓ 25.4s，0 errors
+- mpegts.js 单独打成 chunk：273.94 kB / gzip 63.75 kB，**按需加载**，不影响首屏
+- VideoPlaybackPage chunk 23.94 kB / gzip 9.07 kB（旧版基础上 +1 kB）
+
+#### 影响文件
+
+- `frontend/package.json`
+- `frontend/src/pages/playback/VideoPlaybackPage.vue`
+- `EmbyAPI_Compatibility_Report.md`
+
+---
 
 ### RD-06 防御性文档：给 `ensure_authenticated` 加 IDE 悬停警告（2026-05-03）
 

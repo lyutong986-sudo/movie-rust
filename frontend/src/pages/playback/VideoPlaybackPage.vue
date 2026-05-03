@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router';
 import type Player from 'video.js/dist/types/player';
 import type Hls from 'hls.js';
+import type Mpegts from 'mpegts.js';
 import type { BaseItemDto, MediaStreamDto } from '../../api/emby';
 import {
   api,
@@ -32,10 +33,13 @@ const router = useRouter();
 const videoRef = ref<HTMLVideoElement | null>(null);
 const playerRef = ref<Player | null>(null);
 const hlsRef = ref<Hls | null>(null);
+const mpegtsRef = ref<Mpegts.Player | null>(null);
 type VideoJsFactory = typeof import('video.js')['default'];
 type HlsConstructor = typeof import('hls.js')['default'];
+type MpegtsModule = typeof import('mpegts.js')['default'];
 const videoJsFactoryRef = ref<VideoJsFactory | null>(null);
 const hlsConstructorRef = ref<HlsConstructor | null>(null);
+const mpegtsModuleRef = ref<MpegtsModule | null>(null);
 const playbackEngineReady = ref(false);
 const loading = ref(false);
 const error = ref('');
@@ -137,14 +141,90 @@ const hlsSourceUrl = computed(() => {
   if (!item.value) return '';
   return api.hlsUrlForSource(item.value.Id, currentSource.value, playSessionId.value);
 });
-const sourceCandidates = computed(() => {
-  const candidates: Array<{ src: string; type: string }> = [];
+
+type PlaybackEngine = 'native' | 'mpegts' | 'hls';
+interface SourceCandidate {
+  src: string;
+  type: string;
+  engine: PlaybackEngine;
+}
+
+// 容器名 → HTML <video> 标准 MIME。前端按容器选播放引擎，避免依赖服务端转码。
+function containerToMime(container: string | null | undefined, videoCodec?: string | null): string {
+  const c = (container || '').toLowerCase().split(',')[0]?.trim() ?? '';
+  switch (c) {
+    case 'mp4':
+    case 'm4v':
+    case 'mov':
+      return 'video/mp4';
+    case 'webm':
+      return 'video/webm';
+    case 'mkv':
+    case 'matroska':
+      // Chromium / Edge / 大多数移动浏览器都支持 video/x-matroska + h264/aac/h265
+      return 'video/x-matroska';
+    case 'flv':
+      return 'video/x-flv';
+    case 'ts':
+    case 'mts':
+    case 'm2ts':
+    case 'mpegts':
+      return 'video/mp2t';
+    case 'avi':
+      return 'video/x-msvideo';
+    case 'wmv':
+      return 'video/x-ms-wmv';
+    case 'ogg':
+    case 'ogv':
+      return 'video/ogg';
+    default:
+      // 未知容器：编码是 H.264 时按 mp4 试一把（不少站点把 .ts 误标为 unknown）
+      return videoCodec === 'h264' ? 'video/mp4' : '';
+  }
+}
+
+// 浏览器原生能否解码（probably/maybe 都视为可播）。
+function browserCanPlayDirectly(mime: string): boolean {
+  if (!mime) return false;
+  if (typeof document === 'undefined') return false;
+  const probe = document.createElement('video');
+  const r = probe.canPlayType(mime);
+  return r === 'probably' || r === 'maybe';
+}
+
+const sourceCandidates = computed<SourceCandidate[]>(() => {
+  const candidates: SourceCandidate[] = [];
+  const source = currentSource.value;
+  const direct = directSourceUrl.value;
+  const container = (source?.Container || '').toLowerCase().split(',')[0]?.trim() ?? '';
+  const videoCodec = (source?.MediaStreams || []).find((s) => s.Type === 'Video')?.Codec ?? null;
+  const mime = containerToMime(container, videoCodec);
+
+  // ① 浏览器原生可播 → 直链 + <video>，零服务端转码、零额外 demux 开销
+  if (direct && mime && browserCanPlayDirectly(mime)) {
+    candidates.push({ src: direct, type: mime, engine: 'native' });
+  }
+
+  // ② FLV / MPEG-TS → mpegts.js 在浏览器侧 demux 到 fMP4，再 MSE 喂给 <video>
+  //    这条路径完全不需要服务端转码：拿到 CDN 直链后客户端自己解。
+  if (direct && (container === 'flv' || ['ts', 'mts', 'm2ts', 'mpegts'].includes(container))) {
+    candidates.push({
+      src: direct,
+      type: container === 'flv' ? 'video/x-flv' : 'video/mp2t',
+      engine: 'mpegts',
+    });
+  }
+
+  // ③ HLS 兜底（仅在服务端 EnableTranscoding=true 时才会成功）
   if (hlsSourceUrl.value) {
-    candidates.push({ src: hlsSourceUrl.value, type: 'application/x-mpegURL' });
+    candidates.push({ src: hlsSourceUrl.value, type: 'application/x-mpegURL', engine: 'hls' });
   }
-  if (directSourceUrl.value) {
-    candidates.push({ src: directSourceUrl.value, type: 'video/mp4' });
+
+  // ④ 最终兜底：直链 + 推断 MIME / mp4，留给浏览器自己再试一次
+  if (direct && !candidates.some((c) => c.engine === 'native')) {
+    candidates.push({ src: direct, type: mime || 'video/mp4', engine: 'native' });
   }
+
   return candidates;
 });
 const posterImage = computed(() =>
@@ -263,6 +343,7 @@ onBeforeUnmount(async () => {
   document.removeEventListener('fullscreenchange', onFullscreenChange);
   window.removeEventListener('keydown', onKeyDown);
   destroyHls();
+  destroyMpegts();
   playerRef.value?.dispose();
   playerRef.value = null;
   await stopPlayback();
@@ -270,13 +351,16 @@ onBeforeUnmount(async () => {
 
 async function ensurePlaybackEngines() {
   if (playbackEngineReady.value) return;
-  const [{ default: videojs }, { default: HlsCtor }] = await Promise.all([
+  // mpegts.js 默认 4xx KB（gzip ~120 KB），与 hls.js / video.js 一并按需加载，不阻塞首屏。
+  const [{ default: videojs }, { default: HlsCtor }, { default: MpegtsMod }] = await Promise.all([
     import('video.js'),
     import('hls.js'),
+    import('mpegts.js'),
     import('video.js/dist/video-js.css')
   ]);
   videoJsFactoryRef.value = videojs;
   hlsConstructorRef.value = HlsCtor;
+  mpegtsModuleRef.value = MpegtsMod;
   playbackEngineReady.value = true;
 }
 
@@ -305,19 +389,35 @@ function destroyHls() {
   }
 }
 
+function destroyMpegts() {
+  if (mpegtsRef.value) {
+    try {
+      mpegtsRef.value.unload();
+      mpegtsRef.value.detachMediaElement();
+      mpegtsRef.value.destroy();
+    } catch {
+      // 重复 destroy 静默
+    }
+    mpegtsRef.value = null;
+  }
+}
+
 async function applyPlaybackSource(keepTime = 0) {
   await ensurePlaybackEngines();
   const player = playerRef.value;
   const media = videoRef.value;
   const candidate = sourceCandidates.value[activeSourceCandidate.value];
   const HlsCtor = hlsConstructorRef.value;
+  const MpegtsMod = mpegtsModuleRef.value;
   if (!player || !media || !candidate) return;
 
   destroyHls();
+  destroyMpegts();
   media.pause();
   media.currentTime = Math.max(0, keepTime);
 
-  if (candidate.type === 'application/x-mpegURL' && HlsCtor?.isSupported()) {
+  // ── HLS (服务端转码) ──
+  if (candidate.engine === 'hls' && HlsCtor?.isSupported()) {
     const hls = new HlsCtor({
       enableWorker: true
     });
@@ -343,6 +443,45 @@ async function applyPlaybackSource(keepTime = 0) {
     return;
   }
 
+  // ── FLV / MPEG-TS (mpegts.js 浏览器侧 demux + MSE) ──
+  // CDN 直链拉到的 FLV 由客户端自行解封，服务器不参与转码。
+  if (candidate.engine === 'mpegts' && MpegtsMod) {
+    if (!MpegtsMod.getFeatureList().mseLivePlayback) {
+      console.warn('[playback] mpegts.js MSE not supported, falling through');
+      void tryNextSource('mpegts.js MSE not supported');
+      return;
+    }
+    const mp = MpegtsMod.createPlayer(
+      {
+        type: candidate.type === 'video/x-flv' ? 'flv' : 'mpegts',
+        isLive: false,
+        url: candidate.src,
+        cors: true
+      },
+      {
+        enableWorker: true,
+        enableStashBuffer: false,
+        seekType: 'range',
+        lazyLoad: false,
+        autoCleanupSourceBuffer: true
+      }
+    );
+    mpegtsRef.value = mp;
+    mp.attachMediaElement(media);
+    mp.on(MpegtsMod.Events.ERROR, (errType: string, errDetail: string) => {
+      console.warn('[playback] mpegts.js error', errType, errDetail);
+      void tryNextSource(`mpegts ${errType}: ${errDetail}`);
+    });
+    try {
+      mp.load();
+      await media.play();
+    } catch {
+      // autoplay 拦截：等用户交互
+    }
+    return;
+  }
+
+  // ── 浏览器原生 <video>（mp4 / mkv / webm 等） ──
   player.src({
     src: candidate.src,
     type: candidate.type
