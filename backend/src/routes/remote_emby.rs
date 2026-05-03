@@ -481,6 +481,13 @@ fn remote_emby_sync_registry() -> &'static RwLock<RemoteEmbySyncRegistry> {
     REGISTRY.get_or_init(|| RwLock::new(RemoteEmbySyncRegistry::default()))
 }
 
+/// sidecar worker 调用：判断是否有同步任务正在运行。
+/// 如果有则 worker 应暂停下载避免竞争远端 HTTP 带宽 / 触发 QPS 限制。
+pub async fn is_any_remote_sync_active() -> bool {
+    let registry = remote_emby_sync_registry().read().await;
+    !registry.active_operation_ids.is_empty()
+}
+
 #[derive(Debug, Deserialize)]
 struct ProxyQuery {
     #[serde(default, alias = "Sig")]

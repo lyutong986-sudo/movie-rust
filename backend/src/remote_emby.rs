@@ -6157,6 +6157,7 @@ fn xml_escape(s: &str) -> String {
         .replace('\"', "&quot;")
 }
 
+#[allow(dead_code)]
 fn subtitle_file_extension(codec: Option<&str>) -> &'static str {
     let raw = codec.unwrap_or("").to_ascii_lowercase();
     if raw.contains("subrip") || raw == "srt" {
@@ -6174,6 +6175,7 @@ fn subtitle_file_extension(codec: Option<&str>) -> &'static str {
     "srt"
 }
 
+#[allow(dead_code)]
 fn remote_subtitle_stream_url(
     server_url: &str,
     remote_item_id: &str,
@@ -6244,6 +6246,7 @@ fn build_tvshow_nfo_xml_from_episode(item: &RemoteSyncItem) -> String {
     )
 }
 
+#[allow(dead_code)]
 fn media_source_row<'a>(
     item: &'a RemoteBaseItem,
     preferred_msid: Option<&str>,
@@ -6297,7 +6300,7 @@ async fn write_remote_strm_bundle(
     state: &AppState,
     source: &DbRemoteEmbySource,
     workspace_root: &Path,
-    playback_token: &str,
+    _playback_token: &str,
     item: &RemoteSyncItem,
     media_source_id: Option<&str>,
     // PB43：tvshow.nfo 每个 Series 目录只写一次的去重集合。DashSet 让并发任务能 lock-free
@@ -6419,50 +6422,9 @@ async fn write_remote_strm_bundle(
         }
     }
 
-    if source.sync_subtitles {
-        if let Some((ms_id, streams)) = media_source_row(&item.item, media_source_id) {
-            // PB42：外挂字幕仍在前台下载（典型大小 KB 级，且只对带外挂字幕的条目触发，
-            // 总体成本远小于图片）。如果未来确认仍是瓶颈，可以同样下沉到 worker。
-            let base = normalize_server_url(&source.server_url);
-            let stem = strm_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("media");
-            for stream in streams {
-                if !stream.stream_type.eq_ignore_ascii_case("Subtitle") {
-                    continue;
-                }
-                if !stream.is_external.unwrap_or(false) {
-                    continue;
-                }
-                let ext = subtitle_file_extension(stream.codec.as_deref());
-                let lang = stream
-                    .language
-                    .as_deref()
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or("und");
-                let safe_lang = sanitize_segment(lang);
-                let fname = format!("{stem}.{safe_lang}.{ext}");
-                let sub_path = sidecar_dir.join(fname);
-                // 已存在的字幕在非强刷场景下保留（兼容用户手动维护的字幕）；
-                // 增量「改」时覆盖以反映远端最新外挂字幕。
-                if sidecar_exists_nonempty(&sub_path).await && !force_refresh {
-                    continue;
-                }
-                let url = remote_subtitle_stream_url(
-                    base.as_str(),
-                    item.item.id.as_str(),
-                    ms_id,
-                    stream.index,
-                    ext,
-                    playback_token.trim(),
-                );
-                if let Ok(bytes) = emby_download_bytes(source, playback_token, url.as_str()).await {
-                    let _ = tokio::fs::write(&sub_path, bytes).await;
-                }
-            }
-        }
-    }
+    // 字幕下载已下沉到 sidecar_image_download_loop 后台 worker，
+    // 主同步线程不再做任何远端 HTTP 下载（STRM + NFO 纯本地 IO）。
+    // 这让取消操作可以在毫秒级响应，不会被远端超时阻塞。
 
     Ok((strm_path, local_poster, local_backdrop, local_logo))
 }
@@ -6603,6 +6565,13 @@ const SIDECAR_DOWNLOAD_IDLE_INTERVAL: Duration = Duration::from_secs(15);
 ///    让远端 Emby 不会被瞬间打爆；如果同步主循环也在跑，主循环优先（共享 throttle slot）。
 pub async fn remote_emby_sidecar_download_loop(pool: sqlx::PgPool) {
     loop {
+        // 如果有同步任务正在运行，worker 主动让出远端 HTTP 带宽，
+        // 避免图片下载与主同步竞争 QPS / 触发远端限流。
+        if crate::routes::remote_emby::is_any_remote_sync_active().await {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
         let processed = match run_remote_emby_sidecar_download_pass(&pool).await {
             Ok(n) => n,
             Err(error) => {
@@ -6613,7 +6582,6 @@ pub async fn remote_emby_sidecar_download_loop(pool: sqlx::PgPool) {
         if processed == 0 {
             tokio::time::sleep(SIDECAR_DOWNLOAD_IDLE_INTERVAL).await;
         } else {
-            // 还有任务时只 sleep 短暂时间避免空转 / 让 DB CPU 喘口气。
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
