@@ -27,6 +27,9 @@
 //!
 //! 不识别的 SQL 一律返回空结果集 + `"message": "unsupported pattern"` 的 200，
 //! 模仿 emby plugin "查询无结果" 的行为，避免 Sakura 因 4xx/5xx 直接 crash。
+//!
+//! **对用户可见的时间字符串**：`LastLogin`、`LastActivity` 等以东八区（UTC+8，等同上海民用时）墙钟格式
+//! `YYYY-MM-DD HH:MM:SS` 输出（内部仍存 UTC），避免 `/myinfo` 等与 Sakura SQL 拼接用的本地时间体感差 8 小时。
 
 use axum::{
     extract::State,
@@ -293,7 +296,7 @@ async fn single_user_watchtime(
         return Ok(empty_result("no data"));
     }
     let lastlogin_str = last_login
-        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(format_usage_stats_wall_time_from_utc)
         .unwrap_or_default();
     Ok(json!({
         "colums":  ["LastLogin", "WatchTime"],
@@ -511,7 +514,9 @@ fn build_users_by_xxx(rows: Vec<sqlx::postgres::PgRow>, replace_user_id: bool) -
             let ra: String = r.get("remote_address");
             let la: Option<DateTime<Utc>> = r.get("last_activity");
             let cnt: i64 = r.get("activity_count");
-            let la_str = la.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default();
+            let la_str = la
+                .map(format_usage_stats_wall_time_from_utc)
+                .unwrap_or_default();
             let id_field = if replace_user_id && !user_name.is_empty() {
                 user_name
             } else {
@@ -577,6 +582,15 @@ async fn user_devices_ranking(
 }
 
 // ---------------------- helpers ---------------------- //
+
+/// 与 Sakura `emby_cust_commit` 使用东八区 `datetime.now(tz)` 拼 SQL 的口径对齐：把 UTC 存盘时间转成中国内地墙钟再给下游展示。
+fn format_usage_stats_wall_time_from_utc(dt: DateTime<Utc>) -> String {
+    // 中国内地当前无 DST，UTC+8 与 IANA `Asia/Shanghai` 等价。
+    let cn = FixedOffset::east_opt(8 * 3600).expect("+08:00");
+    dt.with_timezone(&cn)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
 
 fn empty_result(message: &str) -> Value {
     json!({ "colums": [], "results": [], "message": message })
