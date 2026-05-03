@@ -2839,17 +2839,67 @@ async fn proxy_item_stream_internal_with_source(
 ) -> Result<Response, AppError> {
     // --- redirect 模式：302 重定向 ---
     if source.is_redirect_mode() {
-        let token = ensure_authenticated(&state.pool, source, false).await?;
-        let redirect_url =
+        // ⚠️ ensure_authenticated 返回的是 `remote_user_id`（用于后续 /Users/{user_id}/Items 等接口），
+        // 而 Emby Stream URL 的 `api_key=` 必须用 `source.access_token`。
+        // 历史 bug：旧代码把这里的返回值命名为 `token` 直接塞进 build_remote_stream_redirect_url，
+        // 客户端拿到的 302 Location 是 `…/stream?api_key=<user_id>`，远端鉴权失败 401；
+        // 同时 redirect_direct 第一跳也带着无效 api_key 被 401，解析链路直接 break，
+        // unwrap_or 把这个带错 api_key 的远端 URL 又透传回客户端 → 用户看到的是
+        // "远程媒体库直链" 而不是最终 CDN 直链。
+        ensure_authenticated(&state.pool, source, false).await?;
+        let token = source
+            .access_token
+            .clone()
+            .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
+
+        let mut redirect_url =
             build_remote_stream_redirect_url(source, remote_item_id, media_source_id, &token);
 
         let final_location = if source.is_redirect_direct_mode() {
             // redirect_direct：服务端解析远端 302 链，返回最终 CDN 直链给客户端。
             // 适合无 IP 绑定的 CDN（123云盘等），减少一跳更快。
             // 有 IP 绑定的 CDN（115网盘等）不要用此模式，会导致客户端 403。
-            resolve_remote_redirect_chain(source, &redirect_url, &token)
-                .await
-                .unwrap_or(redirect_url)
+            //
+            // 解析失败时分两步退路：
+            //   1) 强制刷新 token 重试一次（旧 token 过期或 401 时挽救）；
+            //   2) 仍失败则回落为普通 redirect，至少返回带新 token 的远端 URL，让客户端
+            //      自己跟随后续 302 链，不会再回到「错 api_key 直接 401」的坏分支。
+            match resolve_remote_redirect_chain(source, &redirect_url, &token).await {
+                Ok(resolved) => resolved,
+                Err(first_err) => {
+                    tracing::warn!(
+                        source_id = %source.id,
+                        remote_item_id = %remote_item_id,
+                        error = %first_err,
+                        "redirect_direct 第一次解析失败，强制刷新令牌后重试"
+                    );
+                    ensure_authenticated(&state.pool, source, true).await?;
+                    let refreshed_token = source
+                        .access_token
+                        .clone()
+                        .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
+                    redirect_url = build_remote_stream_redirect_url(
+                        source,
+                        remote_item_id,
+                        media_source_id,
+                        &refreshed_token,
+                    );
+                    match resolve_remote_redirect_chain(source, &redirect_url, &refreshed_token)
+                        .await
+                    {
+                        Ok(resolved) => resolved,
+                        Err(second_err) => {
+                            tracing::warn!(
+                                source_id = %source.id,
+                                remote_item_id = %remote_item_id,
+                                error = %second_err,
+                                "redirect_direct 重试仍失败，回落到 redirect 模式（带新 token）"
+                            );
+                            redirect_url
+                        }
+                    }
+                }
+            }
         } else {
             // redirect（默认）：直接 302 到远端 Emby 流 URL，客户端自己跟随 302 链。
             // CDN 直链绑定的是客户端 IP，适用于所有 CDN（包括 115网盘等有 IP 绑定的）。

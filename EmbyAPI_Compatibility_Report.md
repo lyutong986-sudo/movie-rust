@@ -3976,3 +3976,66 @@ enable_auto_delete = true:
 - `EmbyAPI_Compatibility_Report.md`
 
 ---
+
+## 远端 Emby 流量模式 redirect / redirect_direct 严重 bug 修复（2026-05-03）
+
+### 问题现象
+
+用户报告：在「远程媒体库」流量模式里选择「302 解析直链 (`redirect_direct`)」，但 backend 返回的 302 `Location` 仍是**远端 Emby 媒体库直链**（`http://aaa.204cloud.com:80/emby/Videos/.../stream?api_key=...`），而不是预期的最终 CDN 直链（`https://1828459303.v.123pan.cn/...`）。客户端跟随 302 后被远端 401，整个播放链路报废。
+
+### 根因（活体定位）
+
+`backend/src/remote_emby.rs::proxy_item_stream_internal_with_source`（line 2842 旧版）：
+
+```rust
+let token = ensure_authenticated(&state.pool, source, false).await?;
+let redirect_url =
+    build_remote_stream_redirect_url(source, remote_item_id, media_source_id, &token);
+```
+
+`ensure_authenticated()` 的返回值实际上是 `remote_user_id`（用于后续 `/Users/{user_id}/Items` 等接口），**不是** `access_token`。其它所有调用方都正确把它命名为 `user_id`，**只有这一处错把它当作 token 拼进了 `api_key=` 和 `X-Emby-Token`**。
+
+后果链：
+
+1. `redirect` 模式：客户端跟随 302 → 远端用 `user_id` 做 api_key → **远端 401**。
+2. `redirect_direct` 模式：`resolve_remote_redirect_chain` 第 1 跳同样带着错的 api_key → 远端返回 401（不是 302） → 函数返回 `Err("远端未返回重定向")` → 上层 `.unwrap_or(redirect_url)` **把这条带错 api_key 的远端 URL 又透传给客户端** → 用户看到的就是「远程媒体库直链」。
+
+### 实测证据（`scripts/verify_redirect_direct_fix.py`）
+
+| 步骤 | 现象 |
+|------|------|
+| STEP 3 — 调线上 backend `/Videos/{id}/stream` | `302 Location: http://aaa.204cloud.com:80/emby/Videos/628213/stream?api_key=349e57535be44487b4acd38aebafd507` |
+| STEP 4 — 用 buggy api_key 直访远端 | **HTTP 401** |
+| STEP 5 — 单独登录远端 Emby 拿真实 user_id | `349e57535be44487b4acd38aebafd507` —— **与 buggy api_key 完全相同** ✓ bug 锁定 |
+| STEP 6 — 用真实 token 重走 `resolve_remote_redirect_chain` | hop1 `aaa.204cloud.com 302` → hop2 `1828459303.v.123pan.cn 200`（`Content-Length=2,116,225,105`）✓ |
+| STEP 7 — HEAD 验证最终直链 | `200`，`application/octet-stream` ✓ |
+
+### 修复
+
+`backend/src/remote_emby.rs::proxy_item_stream_internal_with_source`：
+
+| 编号 | 变更 |
+|------|------|
+| RD-01 | `ensure_authenticated()` 后**显式从 `source.access_token` 取真实 token**（与 `send_remote_stream_request` 取法一致），不再把 `user_id` 当 token 用 |
+| RD-02 | `redirect_direct` 模式：`resolve_remote_redirect_chain` 第一次失败时**强制刷新 token 重试一次**（应对真实的 token 过期 401） |
+| RD-03 | `redirect_direct` 模式：两次重试都失败时**回落到带新 token 的 `redirect` 模式**（不再返回带错 api_key 的坏链），让客户端自己跟随 302。失败语义从「沉默回退到坏链」升级为「降级到可用模式」 |
+| RD-04 | 加了 5 行 `tracing::warn!` 把每一步失败原因落盘，方便排障 |
+
+### 改动前后对比
+
+```
+改前 (buggy):     302 → http://aaa.204cloud.com/emby/Videos/.../stream?api_key=<user_id>  ← 远端 401
+改后 (verified):  302 → https://1828459303.v.123pan.cn/.../1080p.WEB-DL.mp4               ← 200, 直链
+```
+
+### 影响范围
+
+- 所有 `proxy_mode = redirect` 或 `redirect_direct` 的远端源：之前都是坏的（除非远端 Emby 不校验 api_key）
+- `proxy_mode = proxy` 不受影响（用的是 `send_remote_stream_request`，从一开始就正确取 `source.access_token`）
+
+### 影响文件
+- `backend/src/remote_emby.rs`
+- `scripts/verify_redirect_direct_fix.py`（新增 — 端到端验证脚本）
+- `EmbyAPI_Compatibility_Report.md`
+
+---
