@@ -2679,6 +2679,13 @@ async fn process_one_remote_sync_item(
         parent_id = Some(season_parent_id);
     }
 
+    // 再次检查取消——在 series folder / season folder 等 DB 操作之后、STRM 写盘之前
+    if let Some(handle) = progress {
+        if handle.is_cancelled() {
+            return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+        }
+    }
+
     let media_source_id = first_media_source_id(&item);
     // PB42：分页带回的 MediaStreams 已够用，无需 PlaybackInfo 多发一次 HTTP。
     let analysis = synthesize_analysis_from_base_item(&item.item, media_source_id);
@@ -2712,6 +2719,13 @@ async fn process_one_remote_sync_item(
     // force_overwrite_images=true 确保 DB 从失效的本地路径切回远端 URL，
     // 让 sidecar_image_download_loop 重新下载。如果图片文件恰好还在，
     // local_poster 就是 Some(本地路径)，写回去也完全正确。
+    // 取消检查——DB upsert 之前
+    if let Some(handle) = progress {
+        if handle.is_cancelled() {
+            return Err(AppError::BadRequest("同步任务已被取消".to_string()));
+        }
+    }
+
     let overwrite_images = force_refresh_sidecar || is_strm_self_heal;
     let upserted = upsert_remote_media_item(
         &state.pool,
