@@ -11,8 +11,6 @@ import type {
 import { api, isAdmin } from '../../store/app';
 import { syncPhaseLabel } from '../../utils/syncPhaseLabel';
 
-const DEFAULT_SPOOFED_USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) EmbyTheater/3.0.20 Chrome/124.0.0.0 Safari/537.36';
 
 /** PB39：常见 Emby 真客户端预设。下拉一键填入「客户端 / 设备名 / 应用版本」三件套，
  * DeviceId 由后端自动派生 32 位 hex（不带项目名前缀），首次创建后**永不变**。
@@ -49,7 +47,7 @@ const form = ref({
   targetLibraryId: '',
   displayMode: 'merge' as 'merge' | 'separate',
   viewLibraryMap: {} as Record<string, string>,
-  spoofedUserAgent: DEFAULT_SPOOFED_USER_AGENT,
+  spoofedUserAgent: '',
   enabled: true,
   strmOutputPath: '',
   syncMetadata: true,
@@ -77,7 +75,7 @@ const editForm = ref({
   targetLibraryId: '',
   displayMode: 'merge' as 'merge' | 'separate',
   viewLibraryMap: {} as Record<string, string>,
-  spoofedUserAgent: DEFAULT_SPOOFED_USER_AGENT,
+  spoofedUserAgent: '',
   enabled: true,
   strmOutputPath: '',
   syncMetadata: true,
@@ -445,7 +443,7 @@ function openEditor(source: RemoteEmbySource) {
     targetLibraryId: source.TargetLibraryId,
     displayMode: source.DisplayMode === 'merge' ? 'merge' : 'separate',
     viewLibraryMap: { ...(source.ViewLibraryMap || {}) },
-    spoofedUserAgent: source.SpoofedUserAgent || DEFAULT_SPOOFED_USER_AGENT,
+    spoofedUserAgent: source.SpoofedUserAgent || '',
     enabled: source.Enabled,
     strmOutputPath: source.StrmOutputPath || '',
     syncMetadata: source.SyncMetadata !== false,
@@ -597,10 +595,6 @@ async function createSource() {
       error.value = '灵活映射模式下，请为至少一个远端库指定目标本地库，或设置默认目标库';
       return;
     }
-  }
-  if (!payload.spoofedUserAgent.trim()) {
-    error.value = '请输入伪装 User-Agent';
-    return;
   }
   if (!payload.strmOutputPath.trim()) {
     error.value = '请填写 STRM 输出根目录（必填，远端 strm/元数据/字幕都将写入此目录）';
@@ -920,14 +914,6 @@ onBeforeUnmount(() => {
           <UFormField label="启用状态">
             <USwitch v-model="form.enabled" />
           </UFormField>
-          <UFormField class="lg:col-span-2" label="伪装 User-Agent">
-            <UTextarea
-              v-model="form.spoofedUserAgent"
-              :rows="2"
-              class="w-full"
-              placeholder="填写你要用于远端请求的 UA"
-            />
-          </UFormField>
           <UFormField class="lg:col-span-2" label="身份伪装预设（远端 Devices 表显示的客户端）">
             <USelect
               :model-value="form.spoofedClient + ' | ' + form.spoofedDeviceName + ' | ' + form.spoofedAppVersion"
@@ -1055,15 +1041,7 @@ onBeforeUnmount(() => {
               范围 0–60000，默认 0（不限速）。所有远端 API 请求（Views / Series / Seasons / Episodes / Movies）均受此间隔约束；峰值 QPS ≈ 1000 / 该值（如 200 ms ≈ 5 req/s）。远端有 QPS 限制或频繁 429/502 时调大。
             </p>
           </UFormField>
-          <div class="lg:col-span-2 flex flex-wrap items-center justify-between gap-2">
-            <UButton
-              color="neutral"
-              variant="subtle"
-              icon="i-lucide-rotate-ccw"
-              @click="form.spoofedUserAgent = DEFAULT_SPOOFED_USER_AGENT"
-            >
-              恢复默认 UA
-            </UButton>
+          <div class="lg:col-span-2 flex flex-wrap items-center justify-end gap-2">
             <UButton icon="i-lucide-plus" :loading="saving" @click="createSource">新增远端源</UButton>
           </div>
         </div>
@@ -1308,7 +1286,7 @@ onBeforeUnmount(() => {
               </template>
               <p v-else class="text-muted">默认目标库: {{ targetLibraryName(source.TargetLibraryId) }}</p>
               <p class="text-muted break-all font-mono">远端库: {{ source.RemoteViewIds?.join(', ') || 'ALL' }}</p>
-              <p class="text-muted break-all font-mono">UA: {{ source.SpoofedUserAgent }}</p>
+              <p class="text-muted break-all font-mono">UA: {{ source.SpoofedClient || 'Infuse-Direct' }}/{{ source.SpoofedAppVersion || '8.2.4' }}</p>
             </div>
           </template>
         </UCard>
@@ -1400,9 +1378,6 @@ onBeforeUnmount(() => {
             </UFormField>
             <UFormField label="启用">
               <USwitch v-model="editForm.enabled" />
-            </UFormField>
-            <UFormField class="lg:col-span-2" label="伪装 User-Agent">
-              <UTextarea v-model="editForm.spoofedUserAgent" :rows="2" class="w-full" />
             </UFormField>
             <UFormField class="lg:col-span-2" label="身份伪装预设（远端 Devices 表显示的客户端）">
               <USelect

@@ -246,7 +246,7 @@ pub async fn invalidate_playback_info_cache_for_source(source_id: Uuid) {
     let mut cache = PLAYBACK_INFO_CACHE.write().await;
     cache.retain(|k, _| !k.starts_with(&prefix));
 }
-const DEFAULT_SPOOFED_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) EmbyTheater/3.0.20 Chrome/124.0.0.0 Safari/537.36";
+const DEFAULT_SPOOFED_USER_AGENT: &str = "Infuse-Direct/8.2.4";
 const REMOTE_DISPLAY_MODE_SEPARATE: &str = "separate";
 const REMOTE_DISPLAY_MODE_MERGE: &str = "merge";
 
@@ -853,7 +853,7 @@ pub async fn preview_remote_views(
     server_url: &str,
     username: &str,
     password: &str,
-    spoofed_user_agent: &str,
+    _spoofed_user_agent: &str,
 ) -> Result<RemotePreviewResult, AppError> {
     let server_url = normalize_server_url(server_url);
     if server_url.trim().is_empty() {
@@ -866,27 +866,20 @@ pub async fn preview_remote_views(
     if password.trim().is_empty() {
         return Err(AppError::BadRequest("远端 Emby 密码不能为空".to_string()));
     }
-    let spoofed_user_agent = spoofed_user_agent.trim();
-    if spoofed_user_agent.is_empty() {
-        return Err(AppError::BadRequest("伪装 User-Agent 不能为空".to_string()));
-    }
 
-    // PB39：preview（创建 source 前的「连通性测试」）也走伪装链路，避免在远端 Devices 表
-    // 先留一个 `movie-rust-preview-...` 痕迹再被覆盖；32 位 hex device_id 不含项目名前缀，
-    // `emby_auth_header_for_device` 内部已经默认 Infuse-Direct on Apple TV / 8.2.4。
+    // preview 使用默认身份预设 Infuse-Direct/8.2.4，User-Agent 也从预设生成
+    let preview_ua = "Infuse-Direct/8.2.4";
     let device_id = Uuid::new_v4().simple().to_string();
     let client = &*crate::http_client::SHARED;
     let auth_endpoint = format!("{server_url}/Users/AuthenticateByName");
+    let preview_auth = emby_auth_header_for_device(device_id.as_str(), None);
     let login_response = client
         .post(&auth_endpoint)
-        .query(&[("reqformat", "json")])
-        .header(header::USER_AGENT.as_str(), spoofed_user_agent)
+        .header(header::USER_AGENT.as_str(), preview_ua)
+        .header(header::CONTENT_TYPE.as_str(), "application/json")
         .header(header::ACCEPT.as_str(), "application/json")
-        .header(header::ACCEPT_ENCODING.as_str(), "identity")
-        .header(
-            "X-Emby-Authorization",
-            emby_auth_header_for_device(device_id.as_str(), None),
-        )
+        .header("Authorization", &preview_auth)
+        .header("X-Emby-Authorization", &preview_auth)
         .json(&serde_json::json!({
             "Username": username,
             "Pw": password,
@@ -908,6 +901,7 @@ pub async fn preview_remote_views(
         parse_remote_json_response(login_response, auth_endpoint.as_str()).await?;
 
     let views_endpoint = format!("{server_url}/Users/{}/Views", login.user.id);
+    let views_auth = emby_auth_header_for_device(device_id.as_str(), Some(login.access_token.as_str()));
     let views_response = client
         .get(&views_endpoint)
         .query(&[
@@ -916,14 +910,11 @@ pub async fn preview_remote_views(
             ("reqformat", "json"),
             ("api_key", login.access_token.as_str()),
         ])
-        .header(header::USER_AGENT.as_str(), spoofed_user_agent)
+        .header(header::USER_AGENT.as_str(), preview_ua)
         .header(header::ACCEPT.as_str(), "application/json")
-        .header(header::ACCEPT_ENCODING.as_str(), "identity")
         .header("X-Emby-Token", login.access_token.as_str())
-        .header(
-            "X-Emby-Authorization",
-            emby_auth_header_for_device(device_id.as_str(), Some(login.access_token.as_str())),
-        )
+        .header("Authorization", &views_auth)
+        .header("X-Emby-Authorization", &views_auth)
         .send()
         .await?;
     if !views_response.status().is_success() {
@@ -947,9 +938,8 @@ pub async fn preview_remote_views(
         let info_resp = client
             .get(&info_endpoint)
             .query(&[("api_key", login.access_token.as_str())])
-            .header(header::USER_AGENT.as_str(), spoofed_user_agent)
+            .header(header::USER_AGENT.as_str(), preview_ua)
             .header(header::ACCEPT.as_str(), "application/json")
-            .header(header::ACCEPT_ENCODING.as_str(), "identity")
             .header("X-Emby-Token", login.access_token.as_str())
             .send()
             .await;
@@ -4905,16 +4895,15 @@ fn build_remote_stream_builder(
     } else {
         client.get(endpoint)
     };
+    let stream_auth = emby_auth_header(source, Some(token));
     builder = builder
         .header(
             header::USER_AGENT.as_str(),
-            source.spoofed_user_agent.as_str(),
+            source.effective_user_agent(),
         )
         .header("X-Emby-Token", token)
-        .header(
-            "X-Emby-Authorization",
-            emby_auth_header(source, Some(token)),
-        );
+        .header("Authorization", &stream_auth)
+        .header("X-Emby-Authorization", &stream_auth);
     for (key, value) in extra_headers {
         if key.trim().is_empty() || value.trim().is_empty() {
             continue;
@@ -5272,20 +5261,18 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
         // 这样无论调用点是 fetch_remote_items_page_for_view（顺序循环）还是后续可能
         // 引入的并发路径，都会在网关层（per-source mutex）形成「全局最低间隔」屏障。
         throttle_remote_request(source_id, request_interval_ms).await;
+        let auth_value = emby_auth_header(source, Some(token.as_str()));
         let mut request = client
             .get(endpoint)
             .query(&normalized_query)
             .header(
                 header::USER_AGENT.as_str(),
-                source.spoofed_user_agent.as_str(),
+                source.effective_user_agent(),
             )
             .header(header::ACCEPT.as_str(), "application/json")
-            .header(header::ACCEPT_ENCODING.as_str(), "identity")
             .header("X-Emby-Token", token.as_str())
-            .header(
-                "X-Emby-Authorization",
-                emby_auth_header(source, Some(token.as_str())),
-            )
+            .header("Authorization", &auth_value)
+            .header("X-Emby-Authorization", &auth_value)
             // 远端大库（30 万+ 条）单页可达 1000 条 + 全 Fields，单次响应 body 可达数 MB；
             // 全局 SHARED 默认 30s 总超时偏紧，body 读到一半被超时砍断会抛
             // `error decoding response body`，本路径单独放宽到 120s（per-request override，
@@ -5851,16 +5838,17 @@ async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse
         "{}/Users/AuthenticateByName",
         normalize_server_url(&source.server_url)
     );
+    let auth_value = emby_auth_header(source, None);
     let response = client
         .post(&endpoint)
-        .query(&[("reqformat", "json")])
         .header(
             header::USER_AGENT.as_str(),
-            source.spoofed_user_agent.as_str(),
+            source.effective_user_agent(),
         )
+        .header(header::CONTENT_TYPE.as_str(), "application/json")
         .header(header::ACCEPT.as_str(), "application/json")
-        .header(header::ACCEPT_ENCODING.as_str(), "identity")
-        .header("X-Emby-Authorization", emby_auth_header(source, None))
+        .header("Authorization", &auth_value)
+        .header("X-Emby-Authorization", &auth_value)
         .json(&serde_json::json!({
             "Username": source.username,
             "Pw": source.password,
@@ -6160,11 +6148,13 @@ async fn emby_download_bytes(
     token: &str,
     url: &str,
 ) -> Result<Vec<u8>, AppError> {
+    let dl_auth = emby_auth_header(source, Some(token));
     let resp = crate::http_client::SHARED
         .get(url)
-        .header(header::USER_AGENT.as_str(), source.spoofed_user_agent.as_str())
+        .header(header::USER_AGENT.as_str(), source.effective_user_agent())
         .header("X-Emby-Token", token)
-        .header("X-Emby-Authorization", emby_auth_header(source, Some(token)))
+        .header("Authorization", &dl_auth)
+        .header("X-Emby-Authorization", &dl_auth)
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("下载远端资源失败: {e:#} url={url}")))?;
@@ -6987,7 +6977,7 @@ fn emby_auth_header_for_identity(
 ) -> String {
     if let Some(token) = token.filter(|value| !value.trim().is_empty()) {
         format!(
-            "MediaBrowser Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\", Token=\"{}\"",
+            "Emby Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\", Token=\"{}\"",
             client.trim(),
             device.trim(),
             device_id.trim(),
@@ -6996,7 +6986,7 @@ fn emby_auth_header_for_identity(
         )
     } else {
         format!(
-            "MediaBrowser Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\"",
+            "Emby Client=\"{}\", Device=\"{}\", DeviceId=\"{}\", Version=\"{}\"",
             client.trim(),
             device.trim(),
             device_id.trim(),

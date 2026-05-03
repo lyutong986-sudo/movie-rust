@@ -156,6 +156,15 @@ impl DbRemoteEmbySource {
             trimmed
         }
     }
+
+    /// 从身份预设自动生成 User-Agent，格式 `{Client}/{Version}`。
+    /// 与真实客户端行为一致（如 Infuse 发送 `Infuse/8.2.4`），
+    /// 避免浏览器 UA + Emby 认证头混搭被 WAF 视为可疑流量。
+    pub fn effective_user_agent(&self) -> String {
+        let client = self.effective_spoofed_client();
+        let version = self.effective_spoofed_app_version();
+        format!("{client}/{version}")
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
