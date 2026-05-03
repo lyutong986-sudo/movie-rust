@@ -5154,6 +5154,10 @@ const REMOTE_HTTP_MAX_RETRIES: u32 = 3;
 /// 重试退避基线毫秒数；实际间隔为 `BASE * 2^attempt`，attempt 从 0 起算。
 const REMOTE_HTTP_BACKOFF_BASE_MS: u64 = 1000;
 
+/// 设备标识轮换后冷却时间（毫秒）。需要足够长让远端服务器的 rate-limit / 封禁状态重置，
+/// 且让连接池中旧连接自然过期（pool_idle_timeout=60s 内最多保持 4 条空闲连接）。
+const DEVICE_ROTATION_COOLDOWN_MS: u64 = 10_000;
+
 /// 判断状态码是否值得退避后重试。401/403 由上层 token 续登路径单独处理；
 /// 其它 4xx 视为客户端错误（参数错、不存在），重试无意义直接抛错。
 fn is_retryable_status(status: reqwest::StatusCode) -> bool {
@@ -5240,7 +5244,7 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
                         device_rotation_used = true;
                         auth_retry_used = false;
                         last_error = Some(format!("登录失败触发设备标识轮换: {auth_err}"));
-                        tokio::time::sleep(Duration::from_millis(REMOTE_HTTP_BACKOFF_BASE_MS)).await;
+                        tokio::time::sleep(Duration::from_millis(DEVICE_ROTATION_COOLDOWN_MS)).await;
                         continue;
                     }
                 }
@@ -5305,7 +5309,7 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
                         device_rotation_used = true;
                         auth_retry_used = false;
                         last_error = Some(format!("网络错误触发设备标识轮换: {err:#}"));
-                        tokio::time::sleep(Duration::from_millis(REMOTE_HTTP_BACKOFF_BASE_MS)).await;
+                        tokio::time::sleep(Duration::from_millis(DEVICE_ROTATION_COOLDOWN_MS)).await;
                         continue;
                     }
                 }
@@ -5341,7 +5345,7 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
                     device_rotation_used = true;
                     auth_retry_used = false;
                     last_error = Some(format!("持续 {} 触发设备标识轮换", status.as_u16()));
-                    tokio::time::sleep(Duration::from_millis(REMOTE_HTTP_BACKOFF_BASE_MS)).await;
+                    tokio::time::sleep(Duration::from_millis(DEVICE_ROTATION_COOLDOWN_MS)).await;
                     continue;
                 }
             }
@@ -5827,18 +5831,26 @@ async fn ensure_authenticated(
 }
 
 async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse, AppError> {
-    let client = &*crate::http_client::SHARED;
     let endpoint = format!(
         "{}/Users/AuthenticateByName",
         normalize_server_url(&source.server_url)
     );
     let auth_value = emby_auth_header(source, None);
-    let response = client
+    let ua = source.effective_user_agent();
+
+    // 使用一次性 Client，不复用 SHARED 连接池：
+    // 身份轮换后 SHARED 池里可能还残留被远端标记为恶意的旧连接，
+    // 新建 Client 确保用全新 TCP 连接发起登录。
+    let fresh_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let response = fresh_client
         .post(&endpoint)
-        .header(
-            header::USER_AGENT.as_str(),
-            source.effective_user_agent(),
-        )
+        .header(header::USER_AGENT.as_str(), ua)
         .header(header::CONTENT_TYPE.as_str(), "application/json")
         .header(header::ACCEPT.as_str(), "application/json")
         .header("Authorization", &auth_value)

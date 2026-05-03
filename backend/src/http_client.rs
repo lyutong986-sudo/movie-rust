@@ -10,7 +10,7 @@ use crate::error::AppError;
 
 pub static SHARED: LazyLock<Client> = LazyLock::new(|| {
     Client::builder()
-        .pool_max_idle_per_host(32)
+        .pool_max_idle_per_host(4)
         // 长任务（远端 Emby 全量同步可达 1500s+）容易踩到「池里的 keep-alive
         // 连接被中间反代/NAT 静默掐断」：表象就是下一次复用时 body 读到一半抛
         // `error decoding response body`。`tcp_keepalive` 强制周期性发探测，
