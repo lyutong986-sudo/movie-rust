@@ -935,6 +935,14 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             PRIMARY KEY (source_id, remote_series_id)
         )"#,
         r#"CREATE INDEX IF NOT EXISTS idx_remote_emby_series_detail_synced_source ON remote_emby_series_detail_synced(source_id)"#,
+        // person_roles：Emby PersonType `GuestStar`（剧集客串），旧 CHECK 缺此项会导致远端同步 INSERT 失败。
+        r#"ALTER TABLE person_roles DROP CONSTRAINT IF EXISTS person_roles_role_type_check"#,
+        r#"ALTER TABLE person_roles ADD CONSTRAINT person_roles_role_type_check CHECK (
+            role_type IN (
+                'Actor','Director','Writer','Producer','Composer',
+                'Cinematographer','Editor','GuestStar','Other'
+            )
+        )"#,
     ];
 
     for statement in compatibility_sql {

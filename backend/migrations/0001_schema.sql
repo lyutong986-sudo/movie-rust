@@ -647,7 +647,7 @@ CREATE TABLE IF NOT EXISTS person_roles (
     person_id        uuid NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
     media_item_id    uuid NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
     role_type        text NOT NULL
-        CHECK (role_type IN ('Actor','Director','Writer','Producer','Composer','Cinematographer','Editor','Other')),
+        CHECK (role_type IN ('Actor','Director','Writer','Producer','Composer','Cinematographer','Editor','GuestStar','Other')),
     role             text,
     sort_order       integer DEFAULT 0,
     is_featured      boolean DEFAULT false,

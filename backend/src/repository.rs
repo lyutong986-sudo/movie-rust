@@ -2710,6 +2710,7 @@ pub async fn list_item_person_ids(
         ORDER BY
             CASE pr.role_type
                 WHEN 'Actor' THEN 0
+                WHEN 'GuestStar' THEN 0
                 WHEN 'Director' THEN 1
                 WHEN 'Writer' THEN 2
                 WHEN 'Producer' THEN 3
@@ -12068,6 +12069,7 @@ async fn get_item_people(pool: &sqlx::PgPool, item_id: Uuid) -> Result<Vec<Perso
         ORDER BY
             CASE pr.role_type
                 WHEN 'Actor' THEN 0
+                WHEN 'GuestStar' THEN 0
                 WHEN 'Director' THEN 1
                 WHEN 'Writer' THEN 2
                 WHEN 'Producer' THEN 3

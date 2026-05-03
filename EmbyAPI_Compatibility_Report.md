@@ -2831,6 +2831,16 @@ do_refresh_item_metadata_with
 
 ---
 
+## 补丁（2026-05-03）：`person_roles` 校验允许 Emby `GuestStar`
+
+| ID | 现象 | 修复 |
+|----|------|------|
+| PR-GUESTSTAR | PostgreSQL：`new row for relation "person_roles" violates check constraint "person_roles_role_type_check"`，失败行含 `role_type = GuestStar`。远端 Emby 剧集客串演员的 `PersonType` 为 `GuestStar`，PB31 `upsert_remote_people_for_item` 已映射为该字符串，但 `0001_schema.sql` 中 `person_roles.role_type` 的 CHECK 未包含此值。 | 1) `backend/migrations/0001_schema.sql`：CHECK 列表增加 `'GuestStar'`。2) `backend/src/main.rs::ensure_schema_compatibility`：`DROP CONSTRAINT IF EXISTS person_roles_role_type_check` 后 `ADD CONSTRAINT` 写入完整列表（幂等，兼容已部署库）。3) `repository.rs` / `metadata/nfo_writer.rs`：`ORDER BY CASE role_type` 将 `GuestStar` 与 `Actor` 同优先级（仍按 `sort_order` 细分）。 |
+
+**验证：** 重启后端触发 schema 补齐后，远端同步含客串演员的条目应不再在 Postgres 日志中出现上述 ERROR。
+
+---
+
 ## 第三十八批（2026-05-01）：元数据链路审计 PB31–PB35（远端 People / Series 详情 / 锁定字段 / 编辑回写 NFO / TMDB 打分匹配 / 7 类图 / 软删盘 / provider 删除 / PlaybackInfo 重试 / DTO 兜底 / TMDB retry / ETag / TMDB tagline+keywords+person_roles.is_featured）
 
 **触发场景：** 用户要求在 PB30 详情页 fire-and-forget 异步补全的基础上做一次「元数据链路全链路审计」，列出所有"看起来已实现但其实没真写进 DB / 没回写 NFO / 与 Emby SDK 行为不一致"的问题，分批修复。
@@ -4144,6 +4154,26 @@ console：`VIDEOJS: ERROR: (CODE:4 MEDIA_ERR_SRC_NOT_SUPPORTED)`
 - `frontend/package.json`
 - `frontend/src/pages/playback/VideoPlaybackPage.vue`
 - `EmbyAPI_Compatibility_Report.md`
+
+### FE-PB2 播放页兼容性提示 + 失败页结构化建议（2026-05-03）
+
+#### 需求
+
+在 FE-PB1（mpegts.js 浏览器侧解码）基础上，对用户可见地说明「当前格式走哪条链路、可能的局限」，并在**所有播放候选耗尽**时给出可操作的排查建议（不默认依赖服务端转码）。
+
+#### 实现（`VideoPlaybackPage.vue`）
+
+| 编号 | 内容 |
+|------|------|
+| FE-PB2-1 | `playbackHintBanner`：按 `Container` + 视频/音频 `Codec` 计算顶部 `UAlert`（primary / warning），覆盖 FLV/TS、WMV/ASF、AVI、HEVC（非 Safari）、RealMedia、VOB、TrueHD/DTS 等 |
+| FE-PB2-2 | `playbackHintDismissed`：用户点 ✕ 关闭；换片 `loadPlayback`、切换 `MediaSource` 时重置 |
+| FE-PB2-3 | `formatPlaybackFailureHelp(reason)`：解析失败文案关键词（400/HLS/mpegts/MEDIA_ERR_*/401/403/容器/编码）拼接编号建议 |
+| FE-PB2-4 | `composeFinalPlaybackError`：`tryNextSource` 用尽候选时写入带「建议：」多行的 `error` |
+| FE-PB2-5 | `onVideoElementError`：`<video>` `@error` 带上 `MediaError.code` 常量名（如 `MEDIA_ERR_SRC_NOT_SUPPORTED (4)`），便于命中 FE-PB2-3 规则 |
+| FE-PB2-6 | 无 `sourceCandidates` 时明确报错「无可用的播放链路」 |
+| FE-PB2-7 | 错误页标题 `whitespace-pre-line`，多行建议可读 |
+
+`npm run build` ✓（VideoPlaybackPage chunk ~29 kB gzip ~11.4 kB）
 
 ---
 

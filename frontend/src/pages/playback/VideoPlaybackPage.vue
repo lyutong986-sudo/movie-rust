@@ -60,6 +60,8 @@ const pip = ref(false);
 const selectedAudioIndex = ref<number | null>(null);
 const selectedSubtitleIndex = ref<number | null>(null);
 const activeSourceCandidate = ref(0);
+/** 用户关掉顶部兼容性提示后，本次会话内不再弹出（换片或换源会重置） */
+const playbackHintDismissed = ref(false);
 const nextUpEpisode = ref<BaseItemDto | null>(null);
 const upNextDismissed = ref(false);
 const seekPreview = ref<{ x: number; time: number } | null>(null);
@@ -227,6 +229,131 @@ const sourceCandidates = computed<SourceCandidate[]>(() => {
 
   return candidates;
 });
+
+function normCodec(c?: string | null): string {
+  return (c || '').toLowerCase().replace(/\./g, '').trim();
+}
+
+/** 顶部轻提示：根据容器 / 编码预告浏览器侧能力与局限（不等价于报错）。 */
+const playbackHintBanner = computed(() => {
+  const src = currentSource.value;
+  if (!src?.Container) return null;
+  const container = (src.Container || '').toLowerCase().split(',')[0]?.trim() ?? '';
+  const vs = (src.MediaStreams || []).find((s) => s.Type === 'Video');
+  const as = (src.MediaStreams || []).find((s) => s.Type === 'Audio');
+  const vc = normCodec(vs?.Codec);
+  const ac = normCodec(as?.Codec);
+
+  if (container === 'flv' || ['ts', 'mts', 'm2ts', 'mpegts'].includes(container)) {
+    return {
+      color: 'primary' as const,
+      title: '浏览器侧解码',
+      description: `当前封装为 ${container.toUpperCase()}，将通过 mpegts.js 在本机解封装（不经服务器转码）。若卡顿或无法加载，请检查网络；CDN 若未正确响应 Range / CORS 可能导致失败。`
+    };
+  }
+
+  if (['wmv', 'asf'].includes(container) || vc.includes('wmv')) {
+    return {
+      color: 'warning' as const,
+      title: 'WMV / ASF 兼容性提示',
+      description:
+        '多数浏览器无法解码 WMV。将依次尝试直链与 HLS；若均失败，请在「设置 → 转码」开启服务端转码，或使用 VLC / Infuse / Emby 官方客户端。'
+    };
+  }
+
+  if (container === 'avi' || vc === 'mpeg4' || vc === 'msmpeg4v3') {
+    return {
+      color: 'warning' as const,
+      title: 'AVI / MPEG-4 Part 2 提示',
+      description: '浏览器对此类封装支持不稳定。若播放失败，请开启服务端转码或换用原生播放器。'
+    };
+  }
+
+  if (vc === 'hevc' || vc === 'h265') {
+    const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+    const safari = /safari/i.test(ua) && !/chrome|crios|android/i.test(ua);
+    if (!safari) {
+      return {
+        color: 'warning' as const,
+        title: 'HEVC / H.265 提示',
+        description:
+          'Chrome / Firefox 常无法解码 HEVC。若无法播放，请换 Safari / Edge（支持 HEVC 的版本）或启用服务端转码为 H.264。'
+      };
+    }
+  }
+
+  if (['rmvb', 'rm', 'real'].includes(container)) {
+    return {
+      color: 'warning' as const,
+      title: 'RealMedia 无法在浏览器播放',
+      description: '请使用原生播放器打开，或由服务端转封装 / 转码为 MP4。'
+    };
+  }
+
+  if (['vob', 'ifo', 'bup'].includes(container)) {
+    return {
+      color: 'warning' as const,
+      title: 'DVD / VOB 提示',
+      description: 'DVD 结构在浏览器中通常不可播，请使用原生客户端或转码。'
+    };
+  }
+
+  if (ac.includes('truehd') || ac === 'dts' || ac === 'dtshd' || ac.startsWith('dts')) {
+    return {
+      color: 'primary' as const,
+      title: '高清 / 多声道音轨',
+      description: '浏览器可能无法解码部分无损或 DTS 音轨；若无声音请在菜单中切换 AAC / AC3 等兼容音轨。'
+    };
+  }
+
+  return null;
+});
+
+/** 所有候选失败后，根据失败原因 + 当前媒体源生成可读建议（UTF-8）。 */
+function formatPlaybackFailureHelp(reason: string): string {
+  const hints: string[] = [];
+  const r = reason.toLowerCase();
+  const src = currentSource.value;
+  const container = (src?.Container || '').toLowerCase().split(',')[0]?.trim() ?? '';
+  const vs = (src?.MediaStreams || []).find((s) => s.Type === 'Video');
+  const vc = normCodec(vs?.Codec);
+
+  if (r.includes('400') || r.includes('badrequest') || r.includes('转码')) {
+    hints.push('服务端未开启转码或拒绝了 HLS：可在「设置 → 转码」中启用；或使用原生播放器直连 DirectStreamUrl。');
+  }
+  if (r.includes('hls') || r.includes('manifest') || r.includes('level') || r.includes('frag')) {
+    hints.push('HLS 加载失败：可刷新重试；若使用远端媒体库且 CDN 绑定客户端 IP，请将流量模式改为「302 重定向」而非「302 解析直链」。');
+  }
+  if (r.includes('mpegts') || r.includes('mse') || r.includes('mediasource')) {
+    hints.push('mpegts.js 依赖 MSE：请使用 Chrome / Edge / Safari 较新版本，并避免禁用硬件加速。');
+  }
+  if (r.includes('media_err_src_not_supported') || r.includes('(4)') || r.includes('code 4')) {
+    hints.push('浏览器声明无法解码当前源：多为容器或编码不受支持，请尝试开启转码或换客户端。');
+  }
+  if (r.includes('401') || r.includes('403')) {
+    hints.push('鉴权失败：请重新登录，或检查远端媒体库令牌是否在后台已刷新。');
+  }
+  if (['wmv', 'asf'].includes(container) || vc.includes('wmv')) {
+    hints.push('WMV / ASF 在 Web 环境难以支持，强烈建议使用原生播放器或开启服务端转码。');
+  }
+  if (container === 'avi') {
+    hints.push('AVI 兼容性取决于内部编码；失败时请开启转码。');
+  }
+  if (vc === 'hevc' || vc === 'h265') {
+    hints.push('HEVC：可换 Safari / Edge 或要求服务端输出 H.264。');
+  }
+  if (['rmvb', 'rm'].includes(container)) {
+    hints.push('RealMedia 无法在浏览器解码。');
+  }
+
+  return hints.length ? hints.map((h, i) => `${i + 1}. ${h}`).join('\n') : '';
+}
+
+function composeFinalPlaybackError(headline: string): string {
+  const help = formatPlaybackFailureHelp(headline);
+  return help ? `${headline}\n\n建议：\n${help}` : headline;
+}
+
 const posterImage = computed(() =>
   item.value ? api.backdropUrl(item.value) || api.itemImageUrl(item.value) : ''
 );
@@ -312,6 +439,7 @@ watch(subtitleOffset, (offset) => {
 watch(
   () => currentSourceIndex.value,
   async () => {
+    playbackHintDismissed.value = false;
     if (!videoRef.value) return;
     activeSourceCandidate.value = 0;
     await applyPlaybackSource(videoRef.value.currentTime);
@@ -493,10 +621,29 @@ async function applyPlaybackSource(keepTime = 0) {
   }
 }
 
+function onVideoElementError() {
+  const media = videoRef.value;
+  let detail = 'media_error';
+  if (media?.error) {
+    const names: Record<number, string> = {
+      1: 'MEDIA_ERR_ABORTED',
+      2: 'MEDIA_ERR_NETWORK',
+      3: 'MEDIA_ERR_DECODE',
+      4: 'MEDIA_ERR_SRC_NOT_SUPPORTED'
+    };
+    const code = media.error.code;
+    detail = `${names[code] || 'MEDIA_ERR_UNKNOWN'} (${code})`;
+    if (media.error.message) {
+      detail += `: ${media.error.message}`;
+    }
+  }
+  void tryNextSource(detail);
+}
+
 async function tryNextSource(reason = '') {
   if (activeSourceCandidate.value + 1 >= sourceCandidates.value.length) {
     if (reason) {
-      error.value = `播放失败：${reason}`;
+      error.value = composeFinalPlaybackError(`播放失败：${reason}`);
     }
     return;
   }
@@ -507,6 +654,7 @@ async function tryNextSource(reason = '') {
 async function loadPlayback(nextItemId: string) {
   loading.value = true;
   error.value = '';
+  playbackHintDismissed.value = false;
   hasStarted = false;
   hasStopped = false;
   lastProgressSecond = -10;
@@ -578,7 +726,12 @@ async function loadPlayback(nextItemId: string) {
     loading.value = false;
     // v-if="loading" 会在加载期间卸载 <video>，因此需要等 DOM 切回播放器后再设置媒体源。
     await nextTick();
-    if (!error.value && item.value && sourceCandidates.value.length && videoRef.value) {
+    if (!error.value && item.value && !sourceCandidates.value.length) {
+      error.value = composeFinalPlaybackError(
+        '播放失败：无可用的播放链路（缺少 DirectStreamUrl 且当前条目无法请求 HLS）'
+      );
+      item.value = null;
+    } else if (!error.value && item.value && sourceCandidates.value.length && videoRef.value) {
       initVideoJsPlayer();
       await applyPlaybackSource(0);
     }
@@ -1022,7 +1175,9 @@ const rateMenu = computed(() =>
   >
     <UIcon name="i-lucide-circle-alert" class="size-12 opacity-80" />
     <p class="text-sm opacity-70">播放失败</p>
-    <h2 class="text-xl font-semibold">{{ error || '没有找到播放内容' }}</h2>
+    <h2 class="max-w-xl whitespace-pre-line text-center text-xl font-semibold leading-snug">
+      {{ error || '没有找到播放内容' }}
+    </h2>
     <UButton color="neutral" variant="subtle" icon="i-lucide-arrow-left" @click="router.back()">返回</UButton>
   </div>
 
@@ -1034,6 +1189,35 @@ const rateMenu = computed(() =>
     @touchstart.passive="touchOverlay"
     @click.self="togglePlayback"
   >
+    <!-- 兼容性提示（可关闭，不影响播放） -->
+    <div
+      v-if="playbackHintBanner && !playbackHintDismissed"
+      class="pointer-events-auto absolute left-1/2 top-14 z-30 w-[min(92vw,36rem)] -translate-x-1/2"
+    >
+      <div class="relative">
+        <UButton
+          color="neutral"
+          variant="ghost"
+          size="xs"
+          square
+          class="absolute right-1 top-1 z-10 opacity-70 hover:opacity-100"
+          icon="i-lucide-x"
+          aria-label="关闭提示"
+          @click="playbackHintDismissed = true"
+        />
+        <UAlert
+          :color="playbackHintBanner.color"
+          variant="soft"
+          class="pr-10"
+          :icon="
+            playbackHintBanner.color === 'warning' ? 'i-lucide-triangle-alert' : 'i-lucide-info'
+          "
+          :title="playbackHintBanner.title"
+          :description="playbackHintBanner.description"
+        />
+      </div>
+    </div>
+
     <video
       ref="videoRef"
       class="video-js absolute inset-0 h-full w-full bg-black object-contain"
@@ -1048,7 +1232,7 @@ const rateMenu = computed(() =>
       @ratechange="onRateChange"
       @enterpictureinpicture="onEnterPip"
       @leavepictureinpicture="onLeavePip"
-      @error="tryNextSource('media_error')"
+      @error="onVideoElementError"
       @click="togglePlayback"
     >
       <track

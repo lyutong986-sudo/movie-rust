@@ -37,10 +37,11 @@ async fn load_people(pool: &PgPool, item_id: Uuid) -> Result<Vec<NfoPerson>, App
         WHERE pr.media_item_id = $1
         ORDER BY
             CASE pr.role_type
-                WHEN 'Actor'    THEN 0
-                WHEN 'Director' THEN 1
-                WHEN 'Writer'   THEN 2
-                WHEN 'Producer' THEN 3
+                WHEN 'Actor'     THEN 0
+                WHEN 'GuestStar' THEN 0
+                WHEN 'Director'  THEN 1
+                WHEN 'Writer'    THEN 2
+                WHEN 'Producer'  THEN 3
                 ELSE 4
             END,
             pr.sort_order,
