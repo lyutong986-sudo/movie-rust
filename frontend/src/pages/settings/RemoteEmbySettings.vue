@@ -1209,49 +1209,61 @@ onBeforeUnmount(() => {
                 {{ syncPhaseLabel(sourceOperation(source)?.Phase, { remotePrefix: false }) || sourceOperation(source)?.Status }}
               </p>
             </div>
-            <div>
-              <p class="text-muted">已拉取 / 总数</p>
-              <p class="text-highlighted mt-1 font-medium">
-                {{ sourceOperation(source)?.FetchedItems || 0 }} / {{ sourceOperation(source)?.TotalItems || 0 }}
-              </p>
-            </div>
-            <div>
-              <p class="text-muted">入库条目</p>
-              <p class="text-highlighted mt-1 font-medium">{{ sourceOperation(source)?.WrittenFiles || 0 }}</p>
-            </div>
-            <!-- 层级同步：当前正在处理的 Series -->
-            <div
-              v-if="sourceOperation(source)?.CurrentSeries"
-              class="md:col-span-3"
-            >
-              <p class="text-muted">正在处理</p>
-              <p class="text-highlighted mt-1 font-medium truncate">
-                {{ sourceOperation(source)?.CurrentSeries }}
-              </p>
-            </div>
-            <!-- 层级同步增量统计 -->
-            <div
-              v-if="(sourceOperation(source)?.SkippedUnchangedSeries || 0) > 0
-                || (sourceOperation(source)?.SkippedUnchangedSeasons || 0) > 0
-                || (sourceOperation(source)?.ProcessedSeries || 0) > 0"
-              class="md:col-span-3 flex flex-wrap gap-x-4 gap-y-1 text-muted"
-            >
-              <span v-if="(sourceOperation(source)?.ProcessedSeries || 0) > 0">
-                已处理剧集：<span class="text-highlighted font-medium">
+            <!-- 层级同步模式（有 CurrentSeries 或 TotalSeries）-->
+            <template v-if="sourceOperation(source)?.TotalSeries">
+              <div>
+                <p class="text-muted">剧集进度</p>
+                <p class="text-highlighted mt-1 font-medium">
                   {{ sourceOperation(source)?.ProcessedSeries || 0 }} / {{ sourceOperation(source)?.TotalSeries || 0 }}
+                </p>
+              </div>
+              <div>
+                <p class="text-muted">已拉取集数</p>
+                <p class="text-highlighted mt-1 font-medium">{{ sourceOperation(source)?.FetchedItems || 0 }}</p>
+              </div>
+              <div>
+                <p class="text-muted">入库条目</p>
+                <p class="text-highlighted mt-1 font-medium">{{ sourceOperation(source)?.WrittenFiles || 0 }}</p>
+              </div>
+              <div
+                v-if="sourceOperation(source)?.CurrentSeries"
+                class="md:col-span-3"
+              >
+                <p class="text-muted">正在处理</p>
+                <p class="text-highlighted mt-1 font-medium truncate">
+                  {{ sourceOperation(source)?.CurrentSeries }}
+                </p>
+              </div>
+              <div
+                v-if="(sourceOperation(source)?.SkippedUnchangedSeries || 0) > 0
+                  || (sourceOperation(source)?.SkippedUnchangedSeasons || 0) > 0"
+                class="md:col-span-3 flex flex-wrap gap-x-4 gap-y-1 text-muted"
+              >
+                <span v-if="(sourceOperation(source)?.SkippedUnchangedSeries || 0) > 0">
+                  跳过未变化剧集：<span class="text-highlighted font-medium">
+                    {{ sourceOperation(source)?.SkippedUnchangedSeries || 0 }}
+                  </span>
                 </span>
-              </span>
-              <span v-if="(sourceOperation(source)?.SkippedUnchangedSeries || 0) > 0">
-                跳过未变化剧集：<span class="text-highlighted font-medium">
-                  {{ sourceOperation(source)?.SkippedUnchangedSeries || 0 }}
+                <span v-if="(sourceOperation(source)?.SkippedUnchangedSeasons || 0) > 0">
+                  跳过未变化季：<span class="text-highlighted font-medium">
+                    {{ sourceOperation(source)?.SkippedUnchangedSeasons || 0 }}
+                  </span>
                 </span>
-              </span>
-              <span v-if="(sourceOperation(source)?.SkippedUnchangedSeasons || 0) > 0">
-                跳过未变化季：<span class="text-highlighted font-medium">
-                  {{ sourceOperation(source)?.SkippedUnchangedSeasons || 0 }}
-                </span>
-              </span>
-            </div>
+              </div>
+            </template>
+            <!-- 电影/平铺模式 -->
+            <template v-else>
+              <div>
+                <p class="text-muted">已处理 / 总数</p>
+                <p class="text-highlighted mt-1 font-medium">
+                  {{ sourceOperation(source)?.FetchedItems || 0 }} / {{ sourceOperation(source)?.TotalItems || 0 }}
+                </p>
+              </div>
+              <div>
+                <p class="text-muted">入库条目</p>
+                <p class="text-highlighted mt-1 font-medium">{{ sourceOperation(source)?.WrittenFiles || 0 }}</p>
+              </div>
+            </template>
             <!-- 跳过 / 自愈计数 -->
             <div
               v-if="(sourceOperation(source)?.SkippedExisting || 0) > 0
