@@ -60,6 +60,32 @@ static REMOTE_REQUEST_THROTTLE: std::sync::LazyLock<
     RwLock<HashMap<Uuid, Arc<tokio::sync::Mutex<Instant>>>>,
 > = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// per-source 最大并发 HTTP 请求信号量。
+/// 防止瞬间大量并发请求触发远端服务器的限流/WAF 保护。
+/// 所有对远端 Emby 的 HTTP 请求（JSON API + 图片下载）都必须先获取 permit。
+const REMOTE_HTTP_MAX_CONCURRENT_PER_SOURCE: usize = 2;
+static REMOTE_HTTP_CONCURRENCY: std::sync::LazyLock<
+    RwLock<HashMap<Uuid, Arc<tokio::sync::Semaphore>>>,
+> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// 获取给定 source 的 HTTP 并发许可。限制同一时间对同一远端最多 N 个在途请求。
+async fn acquire_http_permit(source_id: Uuid) -> tokio::sync::OwnedSemaphorePermit {
+    let sem = {
+        let read = REMOTE_HTTP_CONCURRENCY.read().await;
+        read.get(&source_id).cloned()
+    };
+    let sem = if let Some(s) = sem {
+        s
+    } else {
+        let mut write = REMOTE_HTTP_CONCURRENCY.write().await;
+        write
+            .entry(source_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(REMOTE_HTTP_MAX_CONCURRENT_PER_SOURCE)))
+            .clone()
+    };
+    sem.acquire_owned().await.expect("HTTP concurrency semaphore closed")
+}
+
 /// PB49：per-source 同步互斥锁。
 ///
 /// 旧链路有两条并发入口，互不感知：
@@ -3143,10 +3169,14 @@ pub async fn cleanup_source_mapped_items(
     )
     .await?;
 
-    // 删除源时清掉它的拉取速率节流槽，避免 HashMap 累积陈旧条目（重新创建同 id 概率极低，但仍清理）
+    // 删除源时清掉它的拉取速率节流槽和并发信号量，避免 HashMap 累积陈旧条目
     {
         let mut throttle = REMOTE_REQUEST_THROTTLE.write().await;
         throttle.remove(&source.id);
+    }
+    {
+        let mut concurrency = REMOTE_HTTP_CONCURRENCY.write().await;
+        concurrency.remove(&source.id);
     }
 
     // PB23：删除源时同步清掉 libraries 表里挂的虚拟路径——
@@ -5197,6 +5227,8 @@ async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
         // 这样无论调用点是 fetch_remote_items_page_for_view（顺序循环）还是后续可能
         // 引入的并发路径，都会在网关层（per-source mutex）形成「全局最低间隔」屏障。
         throttle_remote_request(source_id, request_interval_ms).await;
+        // per-source 并发限制：避免瞬间大量请求触发远端限流/WAF
+        let _http_permit = acquire_http_permit(source_id).await;
         let mut request = client
             .get(endpoint)
             .query(&normalized_query)
@@ -6062,6 +6094,9 @@ async fn emby_download_bytes(
     token: &str,
     url: &str,
 ) -> Result<Vec<u8>, AppError> {
+    // per-source 并发限制：sidecar 图片下载也必须遵守，避免瞬间打爆远端
+    let _http_permit = acquire_http_permit(source.id).await;
+    throttle_remote_request(source.id, source.request_interval_ms).await;
     let resp = crate::http_client::SHARED
         .get(url)
         .header(header::USER_AGENT.as_str(), source.spoofed_user_agent.as_str())
