@@ -221,10 +221,15 @@ fn scan_registry() -> &'static RwLock<ScanOperationRegistry> {
 /// 对单个媒体库执行"增量更新"：根据库是否绑定远端 Emby 源，分发到本地扫描或远端同步。
 ///
 /// 行为约定：
-/// - library 绑定了 `remote_emby_sources` → 先对每个相关源调用 `sync_source_with_progress`（增 / 改 / 删），
+/// - `skip_remote_sync = false`（默认）：library 绑定了 `remote_emby_sources` →
+///   先对每个相关源调用 `sync_source_with_progress`（增 / 改 / 删），
 ///   再 **始终**调用一次本地扫描（含 STRM 物理目录，参见 `library_scan_paths_union_remote_strm`），
 ///   以确保混合库的本地磁盘与 strm 手工删改能及时反映到 DB。
-/// - 否则 → 仅调用 `scanner::scan_single_library_with_db_semaphore` 走本地扫描。
+/// - `skip_remote_sync = true`：跳过远端 Emby 同步，仅调用本地扫描（含 STRM 目录）。
+///   适用于 `/settings/libraries` 的「扫描媒体库」按钮——用户只想扫描本地文件和已有 STRM，
+///   不应意外触发远端全库拉取和图片下载。远端同步仅由 `/settings/remote-emby` 手动触发
+///   或自动增量定时器触发。
+/// - 无远端源 → 仅调用 `scanner::scan_single_library_with_db_semaphore` 走本地扫描。
 ///
 /// 返回的 `ScanSummary` 是该库在本次更新中处理的合并结果。
 pub async fn incremental_update_library(
@@ -232,10 +237,11 @@ pub async fn incremental_update_library(
     library_id: Uuid,
     progress: Option<scanner::ScanProgress>,
     db_semaphore: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    skip_remote_sync: bool,
 ) -> Result<ScanSummary, AppError> {
     let remote_sources =
         repository::find_remote_sources_for_library(&state.pool, library_id).await?;
-    if !remote_sources.is_empty() {
+    if !remote_sources.is_empty() && !skip_remote_sync {
         let mut summary = ScanSummary {
             libraries: 0,
             scanned_files: 0,
@@ -375,10 +381,14 @@ pub async fn incremental_update_library(
 }
 
 /// 遍历所有媒体库，为每个库各自调度本地扫描或远端同步。
+///
+/// `skip_remote_sync`：同 `incremental_update_library` 语义——true 时所有库
+/// 均只做本地文件扫描（含 STRM 目录），不触发远端 Emby 同步。
 pub async fn incremental_update_all_libraries(
     state: &AppState,
     progress: Option<scanner::ScanProgress>,
     db_semaphore: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    skip_remote_sync: bool,
 ) -> Result<ScanSummary, AppError> {
     use futures::stream::{self, StreamExt};
     use std::sync::atomic::{AtomicI64, Ordering};
@@ -406,7 +416,7 @@ pub async fn incremental_update_all_libraries(
             let total_scanned = &total_scanned;
             let total_imported = &total_imported;
             async move {
-                match incremental_update_library(state, library.id, progress, db_semaphore).await {
+                match incremental_update_library(state, library.id, progress, db_semaphore, skip_remote_sync).await {
                     Ok(s) => {
                         total_libraries.fetch_add(s.libraries.max(1), Ordering::Relaxed);
                         total_scanned.fetch_add(s.scanned_files, Ordering::Relaxed);
@@ -636,6 +646,7 @@ async fn enqueue_library_scan(
                             scan_library_id,
                             Some(progress),
                             db_semaphore,
+                            true,
                         )
                         .await
                     } else {
@@ -643,6 +654,7 @@ async fn enqueue_library_scan(
                             &state_for_dispatch,
                             Some(progress),
                             db_semaphore,
+                            true,
                         )
                         .await
                     }
@@ -1050,9 +1062,9 @@ async fn scan_libraries(
     if query.wait_for_completion.unwrap_or(false) {
         let db_sem = Some(state.scan_db_semaphore.clone());
         let summary = if let Some(library_id) = query.library_id {
-            incremental_update_library(&state, library_id, None, db_sem).await?
+            incremental_update_library(&state, library_id, None, db_sem, true).await?
         } else {
-            incremental_update_all_libraries(&state, None, db_sem).await?
+            incremental_update_all_libraries(&state, None, db_sem, true).await?
         };
         return Ok((StatusCode::OK, Json(summary)).into_response());
     }

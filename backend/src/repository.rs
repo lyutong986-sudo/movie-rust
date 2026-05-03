@@ -9275,9 +9275,33 @@ pub async fn upsert_media_item(
                 studios = EXCLUDED.studios,
                 tags = EXCLUDED.tags,
                 production_locations = EXCLUDED.production_locations,
-                image_primary_path = EXCLUDED.image_primary_path,
-                backdrop_path = EXCLUDED.backdrop_path,
-                logo_path = EXCLUDED.logo_path,
+                image_primary_path = CASE
+                    WHEN EXCLUDED.image_primary_path IS NULL THEN media_items.image_primary_path
+                    WHEN media_items.image_primary_path IS NOT NULL
+                         AND media_items.image_primary_path NOT LIKE 'http://%'
+                         AND media_items.image_primary_path NOT LIKE 'https://%'
+                         AND (EXCLUDED.image_primary_path LIKE 'http://%' OR EXCLUDED.image_primary_path LIKE 'https://%')
+                    THEN media_items.image_primary_path
+                    ELSE EXCLUDED.image_primary_path
+                END,
+                backdrop_path = CASE
+                    WHEN EXCLUDED.backdrop_path IS NULL THEN media_items.backdrop_path
+                    WHEN media_items.backdrop_path IS NOT NULL
+                         AND media_items.backdrop_path NOT LIKE 'http://%'
+                         AND media_items.backdrop_path NOT LIKE 'https://%'
+                         AND (EXCLUDED.backdrop_path LIKE 'http://%' OR EXCLUDED.backdrop_path LIKE 'https://%')
+                    THEN media_items.backdrop_path
+                    ELSE EXCLUDED.backdrop_path
+                END,
+                logo_path = CASE
+                    WHEN EXCLUDED.logo_path IS NULL THEN media_items.logo_path
+                    WHEN media_items.logo_path IS NOT NULL
+                         AND media_items.logo_path NOT LIKE 'http://%'
+                         AND media_items.logo_path NOT LIKE 'https://%'
+                         AND (EXCLUDED.logo_path LIKE 'http://%' OR EXCLUDED.logo_path LIKE 'https://%')
+                    THEN media_items.logo_path
+                    ELSE EXCLUDED.logo_path
+                END,
                 thumb_path = EXCLUDED.thumb_path,
                 art_path = EXCLUDED.art_path,
                 banner_path = EXCLUDED.banner_path,

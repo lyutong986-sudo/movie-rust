@@ -479,6 +479,7 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
                 state,
                 Some(scan_progress),
                 Some(state.scan_db_semaphore.clone()),
+                true,
             )
             .await;
             bridge_handle.abort();

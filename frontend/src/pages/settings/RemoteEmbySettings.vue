@@ -286,8 +286,7 @@ function sourceProgressText(source: RemoteEmbySource) {
     return `最近任务完成 · 入库 ${writtenFiles} 个条目`;
   }
   if (operation.Status === 'Failed') {
-    // PB49：失败任务在后端已落库续抓游标，下次点击「重试同步」会从断点继续。
-    return `最近任务失败 · 已运行 ${runtime} 秒 · 重试将从断点续抓`;
+    return `最近任务失败 · 已运行 ${runtime} 秒 · 重试将跳过已入库条目`;
   }
   if (operation.Status === 'Cancelled') {
     const writtenFiles = operation.Result?.WrittenFiles ?? operation.WrittenFiles ?? 0;
@@ -307,10 +306,8 @@ function canSyncSource(source: RemoteEmbySource) {
 
 /** PB49：识别「上次同步失败 / 中断」的状态，用于把按钮文案从「立即同步」切到「重试同步」。
  *
- * 后端在 sync_source_inner 里持久化了 per-source/per-view 续抓游标
- * （remote_emby_source_view_progress 表），失败重试时会自动从游标续抓而不是
- * 从 start_index=0 重头扫；前端这里只负责把按钮文案改成「重试同步」给用户
- * 一个明确的「这次会从断点继续」预期，调用的还是同一个 startRemoteEmbySync 接口。 */
+ * 重试时后端会自动跳过已入库的条目（local_synced_ids fast path），并利用
+ * view 级 etag 缓存跳过未变化的远端库，因此重试不会重新下载已完成的内容。 */
 function isSourceFailedLastRun(source: RemoteEmbySource) {
   const operation = sourceOperation(source);
   if (operation?.Done && (operation.Status === 'Failed' || operation.Status === 'Cancelled')) {

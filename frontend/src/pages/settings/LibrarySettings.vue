@@ -346,8 +346,9 @@ async function submitRename() {
         <template #header>
           <div class="flex items-center justify-between gap-3">
             <div>
-              <p class="text-muted text-xs uppercase tracking-wider">Tasks</p>
+              <p class="text-muted text-xs uppercase tracking-wider">Local Scan</p>
               <h3 class="text-highlighted text-base font-semibold">媒体库扫描任务</h3>
+              <p class="text-muted text-xs mt-0.5">仅扫描本地文件与 STRM，不触发远端媒体库同步</p>
             </div>
             <div class="flex items-center gap-2">
               <UBadge :color="scanStatusColor" variant="soft" size="sm">
