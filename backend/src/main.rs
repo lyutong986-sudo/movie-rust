@@ -196,6 +196,25 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     tracing::info!("Movie Rust backend listening on http://{}", bind_addr);
 
+    // PB42-IC：固化图片代理磁盘缓存目录 + TTL，并启动周期清理任务。
+    // 这必须在 axum::serve 之前完成，避免首批请求碰到未初始化的 OnceLock。
+    {
+        let cache_dir = state.config.image_cache_dir.clone();
+        if let Err(error) = std::fs::create_dir_all(&cache_dir) {
+            tracing::warn!(
+                cache_dir = %cache_dir.to_string_lossy(),
+                error = %error,
+                "PB42-IC：图片缓存目录创建失败，将退化为不缓存"
+            );
+        } else {
+            crate::routes::images::init_image_cache(
+                cache_dir,
+                std::time::Duration::from_secs(state.config.image_cache_ttl_secs),
+            );
+            tokio::spawn(crate::routes::images::image_cache_eviction_loop());
+        }
+    }
+
     tokio::spawn(routes::scheduled_tasks::run_scheduler(state.clone()));
 
     let remote_emby_refresh_pool = state.pool.clone();

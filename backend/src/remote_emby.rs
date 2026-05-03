@@ -6706,6 +6706,148 @@ async fn run_remote_emby_sidecar_download_pass(pool: &sqlx::PgPool) -> Result<us
     Ok(total)
 }
 
+/// PB42-bo (backoff)：单个 source 的连续失败状态。
+///
+/// 当上游 Emby 持续返回 5xx（典型场景：api_key 失效、QPS 限流、上游过载），
+/// 旧实现只会一直按 4 路并发 + 500ms / 15s 节奏重试，导致一段时间里几千条 sidecar
+/// 任务全部失败、日志被刷屏、上游也被持续打。
+///
+/// 现在每个 source 维护一个 in-memory 失败计数 + 暂停截止时间：
+/// - 单条失败 +1；连续达到 `BACKOFF_TRIGGER_THRESHOLD` 就进入 `paused_until` 窗口；
+/// - 每次连续触发都按 30s → 60s → 120s → ... 指数退避，最多 `BACKOFF_MAX`；
+/// - 任意一条成功立即重置计数 / 解除暂停（健康自愈）。
+///
+/// 与已有 `request_interval_ms` 节流的关系：
+/// - 节流是"两次发请求之间最少隔多久"，仍会持续打上游；
+/// - 这里是"上游集中失败时整段窗口先别打"，给上游恢复时间。
+#[derive(Default)]
+struct ImageDownloadBackoffState {
+    consecutive_failures: u32,
+    paused_until: Option<Instant>,
+}
+
+const BACKOFF_TRIGGER_THRESHOLD: u32 = 8;
+const BACKOFF_BASE_SECS: u64 = 30;
+const BACKOFF_MAX_SECS: u64 = 600;
+
+fn image_download_backoff_map() -> &'static DashMap<Uuid, ImageDownloadBackoffState> {
+    static MAP: OnceLock<DashMap<Uuid, ImageDownloadBackoffState>> = OnceLock::new();
+    MAP.get_or_init(DashMap::new)
+}
+
+/// 检查 source 是否处于 backoff 暂停窗口。返回 Some(剩余秒数) 表示应跳过；None 表示可以继续。
+fn check_source_backoff(source_id: Uuid) -> Option<u64> {
+    let map = image_download_backoff_map();
+    let state = map.get(&source_id)?;
+    let until = state.paused_until?;
+    let now = Instant::now();
+    if until > now {
+        Some((until - now).as_secs().max(1))
+    } else {
+        None
+    }
+}
+
+fn record_image_download_success(source_id: Uuid) {
+    let map = image_download_backoff_map();
+    if let Some(mut state) = map.get_mut(&source_id) {
+        if state.consecutive_failures > 0 || state.paused_until.is_some() {
+            tracing::debug!(
+                source_id = %source_id,
+                "PB42-bo：sidecar 图片下载成功，清空 backoff 状态"
+            );
+        }
+        state.consecutive_failures = 0;
+        state.paused_until = None;
+    }
+}
+
+fn record_image_download_failure(source_id: Uuid) {
+    let map = image_download_backoff_map();
+    let mut state = map.entry(source_id).or_default();
+    state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+    if state.consecutive_failures >= BACKOFF_TRIGGER_THRESHOLD {
+        // 失败次数超过阈值，暂停一段时间。
+        // 退避指数：N = consecutive_failures - threshold + 1（首次触发=1，再触发=2，...）
+        let exponent = state
+            .consecutive_failures
+            .saturating_sub(BACKOFF_TRIGGER_THRESHOLD)
+            .min(8); // 2^8 = 256，配合 BASE 30s 已经超过 BACKOFF_MAX
+        let secs = BACKOFF_BASE_SECS
+            .saturating_mul(1u64 << exponent.min(8))
+            .min(BACKOFF_MAX_SECS);
+        let until = Instant::now() + Duration::from_secs(secs);
+        let was_paused = state.paused_until.is_some();
+        state.paused_until = Some(until);
+        if !was_paused || state.consecutive_failures % BACKOFF_TRIGGER_THRESHOLD == 0 {
+            tracing::warn!(
+                source_id = %source_id,
+                consecutive_failures = state.consecutive_failures,
+                pause_secs = secs,
+                "PB42-bo：sidecar 图片连续失败，进入 backoff 暂停窗口"
+            );
+        }
+    }
+}
+
+/// PB42-bo：单 URL 短窗口失败计数缓存。
+///
+/// 上游 Emby 经常对个别 itemId 返回 500（比如该条目本身被删/坏文件），整库
+/// 反复重试这类 URL 会无谓占用 worker 槽位 + 触发上游 4xx 限流。这里维护一个
+/// 小型 LRU（DashMap + 入口数上限），URL 失败 N 次后短窗口内不再重试，
+/// 让 worker 把带宽留给可能成功的条目。窗口过后再放行一次自愈。
+const URL_FAILURE_GIVE_UP_THRESHOLD: u32 = 3;
+const URL_FAILURE_REMEMBER_SECS: u64 = 600; // 10 min
+const URL_FAILURE_CACHE_CAPACITY: usize = 4096;
+
+struct UrlFailureEntry {
+    fail_count: u32,
+    last_failed_at: Instant,
+}
+
+fn url_failure_cache() -> &'static DashMap<String, UrlFailureEntry> {
+    static MAP: OnceLock<DashMap<String, UrlFailureEntry>> = OnceLock::new();
+    MAP.get_or_init(DashMap::new)
+}
+
+fn url_failure_should_skip(url: &str) -> bool {
+    let cache = url_failure_cache();
+    let Some(entry) = cache.get(url) else {
+        return false;
+    };
+    if entry.fail_count < URL_FAILURE_GIVE_UP_THRESHOLD {
+        return false;
+    }
+    let elapsed = entry.last_failed_at.elapsed();
+    elapsed < Duration::from_secs(URL_FAILURE_REMEMBER_SECS)
+}
+
+fn url_failure_record(url: &str) {
+    let cache = url_failure_cache();
+    // 简易 capacity 控制：若超过上限，按"任意命中即清"策略淘汰一批旧条目，
+    // 避免无界增长（DashMap 不像 moka 那样自带 LRU）。
+    if cache.len() >= URL_FAILURE_CACHE_CAPACITY {
+        let now = Instant::now();
+        cache.retain(|_, entry| {
+            now.duration_since(entry.last_failed_at) < Duration::from_secs(URL_FAILURE_REMEMBER_SECS)
+        });
+        // 仍超容量就直接 clear（最坏情况，下一轮重新累计）。
+        if cache.len() >= URL_FAILURE_CACHE_CAPACITY {
+            cache.clear();
+        }
+    }
+    let mut entry = cache.entry(url.to_string()).or_insert(UrlFailureEntry {
+        fail_count: 0,
+        last_failed_at: Instant::now(),
+    });
+    entry.fail_count = entry.fail_count.saturating_add(1);
+    entry.last_failed_at = Instant::now();
+}
+
+fn url_failure_clear(url: &str) {
+    url_failure_cache().remove(url);
+}
+
 /// 单条任务处理：尝试下载该 item 的 1-3 个仍是远端 URL 的图片字段。
 ///
 /// 返回 Ok(true) 表示至少有一张图成功落盘，Ok(false) 表示都失败 / 都跳过，Err 表示底层错误。
@@ -6715,6 +6857,16 @@ async fn process_one_pending_image(
     task: repository::PendingRemoteImageDownload,
     source_cache: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<DbRemoteEmbySource>>>>,
 ) -> Result<bool, AppError> {
+    // PB42-bo：源级别 backoff 检查，命中则直接跳过（不会走 HTTP）。
+    if let Some(remaining) = check_source_backoff(task.source_id) {
+        tracing::trace!(
+            source_id = %task.source_id,
+            item_id = %task.item_id,
+            remaining_secs = remaining,
+            "PB42-bo：source 处于 backoff 窗口，跳过本条 sidecar 任务"
+        );
+        return Ok(false);
+    }
     // 解析 sidecar 目录与 3 个目标文件名。
     let strm_path = std::path::Path::new(task.item_path.as_str());
     let Some(sidecar_dir) = strm_path.parent() else {
@@ -6791,6 +6943,17 @@ async fn process_one_pending_image(
         let dest = sidecar_dir.join(filename);
         // 已经落过盘但 DB 还没追上（比如崩溃在 write 和 update 之间）：也走 UPDATE 一次。
         let already_local = sidecar_exists_nonempty(&dest).await;
+        // PB42-bo：URL 级 give-up 短路。这条 URL 在 10 分钟内已经连续失败 N 次，
+        // 当前轮先放过，节约 worker 槽位 + 不再打上游。窗口过后会自然解禁重试。
+        if !already_local && url_failure_should_skip(url) {
+            tracing::trace!(
+                item_id = %task.item_id,
+                image_type,
+                url,
+                "PB42-bo：URL 短窗口已连续失败超阈值，本轮跳过"
+            );
+            continue;
+        }
         let bytes_result = if already_local {
             Ok(Vec::<u8>::new())
         } else {
@@ -6850,6 +7013,11 @@ async fn process_one_pending_image(
                     );
                     continue;
                 }
+                if !already_local {
+                    // PB42-bo：本次实际跑了一次成功的 HTTP，把 URL 失败计数和源 backoff 都清空。
+                    url_failure_clear(url);
+                    record_image_download_success(task.source_id);
+                }
                 any_success = true;
             }
             Err(error) => {
@@ -6860,6 +7028,9 @@ async fn process_one_pending_image(
                     url,
                     "PB42：远端 sidecar 图片下载失败（保留 URL，下轮重试）"
                 );
+                // PB42-bo：登记失败 → 推进 source backoff + URL 短窗口失败计数。
+                record_image_download_failure(task.source_id);
+                url_failure_record(url);
             }
         }
     }

@@ -5984,6 +5984,28 @@ async fn fast_count_media_items(
         return Ok(count);
     }
 
+    // Resume 列表的 COUNT 通用路径会扫整张 media_items（旧实现实测 1.0+ s），
+    // 因为 fallback 的 `SELECT COUNT(*) FROM media_items WHERE 1 = 1` 既没把 resume_only
+    // 的 EXISTS 子句加上、也没接 user_item_data 上的索引。
+    // user_item_data PRIMARY KEY (user_id, item_id) 让"按 user_id 拉所有 in-progress 行"
+    // 是直接的 index range scan，再用 EXISTS(media_items 同条件) 过滤剩下的 item / library / 类型，
+    // 通常落在 <50ms。
+    if options.resume_only {
+        if let Some(user_id) = options.user_id {
+            let mut builder = QueryBuilder::<Postgres>::new(
+                "SELECT COUNT(*) FROM user_item_data uid WHERE uid.user_id = ",
+            );
+            builder.push_bind(user_id);
+            builder.push(" AND uid.playback_position_ticks > 0");
+            builder.push(" AND EXISTS (SELECT 1 FROM media_items WHERE id = uid.item_id");
+            apply_item_where_conditions(&mut builder, options);
+            push_allowed_library_filter(&mut builder, options);
+            builder.push(")");
+            let count: i64 = builder.build_query_scalar().fetch_one(pool).await?;
+            return Ok(count);
+        }
+    }
+
     let mut builder = QueryBuilder::<Postgres>::new(
         "SELECT COUNT(*) FROM media_items WHERE 1 = 1"
     );
@@ -7092,22 +7114,24 @@ pub async fn get_next_up_episodes(
     };
     let allowed_ids_param: Option<Vec<Uuid>> = allowed_library_ids;
 
-    // When a specific SeriesId is provided, match via:
-    //  1. mi.series_id (populated by scanner / backfill)
-    //  2. mi.parent_id  (Season whose parent is the Series)
-    //  3. parent→parent chain (Episode→Season→Series) when series_id is NULL
-    //  4. mi.library_id (library-level scope)
+    // 当客户端传入具体 scope_id 时，命中以下任一条件即可：
+    //  1. mi.series_id (scanner / backfill 已写入)
+    //  2. mi.parent_id (传入的是 Season ID，Episode 直接挂在它下面)
+    //  3. mi.library_id (传入的是 Library ID)
+    //
+    // 之前还有一条 `EXISTS (SELECT 1 FROM media_items season WHERE season.id = mi.parent_id
+    // AND season.parent_id = $2)`：这是在 series_id 还没回填之前的兜底链路。
+    // 现在 ensure_schema_compatibility 启动时会强制回填 Episode.series_id，
+    // 该 EXISTS 等价于 `mi.series_id = $2`，但会让 Postgres planner 在 BitmapOr
+    // 之外多跑一个嵌套子查询（实测把 NextUp 由 ~10ms 拖到 1.0–1.4s），故移除。
+    // 留下的 3 路 OR 都直接落到 b-tree 索引（series_id / parent_id / library_id），
+    // BitmapOr 后过滤 Episode 是 sub-100ms 路径。
     let (scope_sql_fragment, use_series_fast_path) = if parent_id.is_some() {
         (
             r#"AND (
                 mi.series_id = $2
                 OR mi.parent_id = $2
                 OR mi.library_id = $2
-                OR EXISTS (
-                    SELECT 1 FROM media_items season
-                    WHERE season.id = mi.parent_id
-                      AND season.parent_id = $2
-                )
             )"#,
             true,
         )
@@ -8118,6 +8142,45 @@ pub async fn get_media_item(
     .bind(id)
     .fetch_optional(pool)
     .await?)
+}
+
+/// 把上游 Emby 的原始数字 / hex itemId 映射回本地 media_items.id。
+///
+/// 远程同步阶段会把 upstream 的 ItemId 写到 `provider_ids.RemoteEmbyItemId`
+/// （Episodes/Movies）和 `provider_ids.RemoteEmbySeriesId`（Series 详情同步），
+/// 客户端如果是从 upstream Emby 切过来的、UI 缓存里还残留 upstream 原 ID，
+/// 直接用那个 ID 来访问 `/Items/{id}/Images/...` 就会被 emby_id_to_uuid 解析失败。
+///
+/// 这里在解析失败时按 RemoteEmbyItemId → RemoteEmbySeriesId 的顺序查一下，
+/// 命中就把请求当作本地 UUID 走通常路径，避免出现"明明是有数据的项目，却 400"。
+///
+/// 之所以两个键都查：
+/// - Episode/Movie 行存在 RemoteEmbyItemId（同步主路径里 ensure_remote_episode 写入）
+/// - Series 行存在 RemoteEmbySeriesId（详情同步路径里写入），不存在 RemoteEmbyItemId
+pub async fn find_item_id_by_remote_emby_id(
+    pool: &sqlx::PgPool,
+    remote_id: &str,
+) -> Result<Option<Uuid>, AppError> {
+    let trimmed = remote_id.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        SELECT id
+        FROM media_items
+        WHERE provider_ids->>'RemoteEmbyItemId' = $1
+           OR provider_ids->>'RemoteEmbySeriesId' = $1
+        ORDER BY
+            CASE WHEN provider_ids->>'RemoteEmbyItemId' = $1 THEN 0 ELSE 1 END,
+            updated_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(trimmed)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(id,)| id))
 }
 
 pub async fn list_media_item_children(

@@ -34,6 +34,36 @@ use tokio::fs;
 
 use crate::http_client::SHARED as SHARED_HTTP_CLIENT;
 
+/// 把客户端传过来的 itemId 字符串解析成本地 UUID。
+///
+/// 1. 先按标准 Emby GUID 解析（`emby_id_to_uuid` 已支持去掉 `mediasource_` 前缀、无连字符 hex 等）。
+/// 2. 解析失败时，把它当成"上游 Emby 原始 itemId"再查一遍 `provider_ids`：
+///    - `RemoteEmbyItemId`（Episode/Movie 同步路径写入）
+///    - `RemoteEmbySeriesId`（Series 详情同步路径写入）
+///
+/// 这样 Hills / 网页端等客户端如果还缓存着上游 Emby 的数字 itemId（比如刚从
+/// `https://emby.example.com` 切到我们后端时 UI cache 没失效），就不会一律 400，
+/// 而是命中本地条目走通常的图片代理路径。
+async fn resolve_item_id_with_remote_fallback(
+    pool: &sqlx::PgPool,
+    item_id_str: &str,
+) -> Result<uuid::Uuid, AppError> {
+    if let Ok(uuid) = emby_id_to_uuid(item_id_str) {
+        return Ok(uuid);
+    }
+    if let Some(uuid) = repository::find_item_id_by_remote_emby_id(pool, item_id_str).await? {
+        tracing::debug!(
+            remote_id = %item_id_str,
+            local_id = %uuid,
+            "通过 RemoteEmbyItemId/RemoteEmbySeriesId 把上游 itemId 映射到本地 UUID"
+        );
+        return Ok(uuid);
+    }
+    Err(AppError::BadRequest(format!(
+        "无效的项目ID格式: {item_id_str}"
+    )))
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/Items/{item_id}/Images", get(list_item_images))
@@ -172,8 +202,7 @@ async fn list_item_images(
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
 ) -> Result<Json<Vec<ImageInfoDto>>, AppError> {
-    let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    let item_id = resolve_item_id_with_remote_fallback(&state.pool, &item_id_str).await?;
     let mut images = Vec::new();
     if let Some(item) = repository::get_media_item(&state.pool, item_id).await? {
         let tag = item.date_modified.timestamp().to_string();
@@ -241,8 +270,7 @@ async fn item_image_url_response(
     image_type: &str,
     image_index: Option<i32>,
 ) -> Result<Json<Value>, AppError> {
-    let item_id = emby_id_to_uuid(item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    let item_id = resolve_item_id_with_remote_fallback(&state.pool, item_id_str).await?;
     let normalized = normalized_item_image_type(image_type);
     let idx = image_index.unwrap_or(0);
     let has_image = if let Some(item) = repository::get_media_item(&state.pool, item_id).await? {
@@ -391,10 +419,13 @@ async fn download_item_remote_image(
         .await
         .map_err(|error| AppError::Internal(format!("下载远程图片失败: {error}")))?;
     if !response.status().is_success() {
-        return Err(AppError::NotFound(format!(
-            "远程图片不存在: {}",
-            response.status()
-        )));
+        let upstream_status = response.status();
+        tracing::debug!(
+            image_url = %image_url,
+            upstream_status = %upstream_status,
+            "上游图片返回非 2xx 状态，按 NotFound 处理"
+        );
+        return Err(AppError::NotFound("远程图片不存在".to_string()));
     }
     let content_type = response
         .headers()
@@ -1271,8 +1302,7 @@ async fn serve_item_image(
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let image_query = parse_item_image_query(request.uri());
-    let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    let item_id = resolve_item_id_with_remote_fallback(&state.pool, &item_id_str).await?;
 
     if image_type.eq_ignore_ascii_case("Chapter") {
         let chapter_index = image_index.unwrap_or(0);
@@ -1510,8 +1540,7 @@ async fn get_item_thumbnail_set(
     State(state): State<AppState>,
     Path(item_id_str): Path<String>,
 ) -> Result<Json<ThumbnailSetResponse>, AppError> {
-    let item_id = emby_id_to_uuid(&item_id_str)
-        .map_err(|_| AppError::BadRequest(format!("无效的项目ID格式: {item_id_str}")))?;
+    let item_id = resolve_item_id_with_remote_fallback(&state.pool, &item_id_str).await?;
     let chapters = repository::get_media_chapters(&state.pool, item_id).await?;
     let thumbnails = chapters
         .into_iter()
@@ -1716,10 +1745,15 @@ async fn resolve_person_image_path(
         .await
         .map_err(|error| AppError::Internal(format!("下载人物图片失败: {error}")))?;
     if !response.status().is_success() {
-        return Err(AppError::NotFound(format!(
-            "远程人物图片不存在: {}",
-            response.status()
-        )));
+        let upstream_status = response.status();
+        tracing::debug!(
+            person_id = %person.id,
+            image_type = %image_type,
+            upstream_status = %upstream_status,
+            url = %path,
+            "上游人物图片返回非 2xx 状态，按 NotFound 处理"
+        );
+        return Err(AppError::NotFound("远程人物图片不存在".to_string()));
     }
 
     let content_type = response
@@ -1979,11 +2013,268 @@ async fn serve_local_path(
         .unwrap())
 }
 
+// ---------------------------------------------------------------------------
+// PB42-IC：远端图片磁盘缓存
+//
+// Hills 客户端打开主页瞬间会触发 100+ 张图片代理请求，每张都回源到 upstream
+// Emby 既慢（远端节流 + ffmpeg 解码）又烧上游 QPS。我们在本地落一份缓存：
+//
+//   cache_dir/<key2>/<key>.bin   ← 实际 bytes
+//   cache_dir/<key2>/<key>.ct    ← content-type 字符串
+//
+// `key` = sha256(stripped_url + image_query.etag_suffix())[..16] 16 位 hex；
+// `key2` = key 前 2 位（避免单目录文件过多）。
+//
+// 缓存命中后：
+//   - If-None-Match 只用 `"<key>"` 比较，命中直接 304；
+//   - 否则读盘 → 直接返回（不打 upstream）。
+//
+// 缓存未命中：
+//   - 走原有 SHARED_HTTP_CLIENT 拉取 → apply_item_image_transform → 写盘 → 返回。
+//
+// 旧文件由 `image_cache_eviction_loop` 周期清理（mtime 超出 TTL）。
+// ---------------------------------------------------------------------------
+use std::sync::OnceLock;
+
+static IMAGE_CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static IMAGE_CACHE_TTL: OnceLock<std::time::Duration> = OnceLock::new();
+
+/// 由 `main.rs` 在启动时调用，固化磁盘缓存目录与 TTL。
+pub fn init_image_cache(dir: PathBuf, ttl: std::time::Duration) {
+    let _ = IMAGE_CACHE_DIR.set(dir);
+    let _ = IMAGE_CACHE_TTL.set(ttl);
+}
+
+fn image_cache_dir() -> Option<&'static PathBuf> {
+    IMAGE_CACHE_DIR.get()
+}
+
+/// 从 URL 中剥掉 api_key / X-Emby-Token 等会话级参数，让同一张图片在 token
+/// 刷新前后命中同一个缓存项。
+fn strip_volatile_query_params(url: &str) -> String {
+    let Some(qpos) = url.find('?') else {
+        return url.to_string();
+    };
+    let (base, query) = url.split_at(qpos);
+    let query = &query[1..];
+    let kept: Vec<String> = query
+        .split('&')
+        .filter(|kv| {
+            let key = kv.split('=').next().unwrap_or("");
+            !matches!(
+                key.to_ascii_lowercase().as_str(),
+                "api_key"
+                    | "apikey"
+                    | "x-emby-token"
+                    | "x_emby_token"
+                    | "x-mediabrowser-token"
+                    | "mediabrowsertoken"
+            )
+        })
+        .map(str::to_string)
+        .collect();
+    if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    }
+}
+
+fn remote_image_cache_key(url: &str, image_query: &ItemImageQuery) -> String {
+    use sha2::{Digest, Sha256};
+    let stripped = strip_volatile_query_params(url);
+    let mut hasher = Sha256::new();
+    hasher.update(stripped.as_bytes());
+    hasher.update(image_query.etag_suffix().as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(&digest[..16])
+}
+
+fn remote_image_cache_paths(key: &str) -> Option<(PathBuf, PathBuf)> {
+    let base = image_cache_dir()?;
+    let bucket = &key[..2.min(key.len())];
+    let dir = base.join(bucket);
+    let bin = dir.join(format!("{key}.bin"));
+    let ct = dir.join(format!("{key}.ct"));
+    Some((bin, ct))
+}
+
+async fn remote_image_cache_load(key: &str) -> Option<(Vec<u8>, String)> {
+    let (bin_path, ct_path) = remote_image_cache_paths(key)?;
+    let bytes = tokio::fs::read(&bin_path).await.ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let content_type = tokio::fs::read_to_string(&ct_path)
+        .await
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    Some((bytes, content_type))
+}
+
+async fn remote_image_cache_store(key: &str, bytes: &[u8], content_type: &str) {
+    let Some((bin_path, ct_path)) = remote_image_cache_paths(key) else {
+        return;
+    };
+    if bytes.is_empty() {
+        return;
+    }
+    if let Some(parent) = bin_path.parent() {
+        if let Err(error) = tokio::fs::create_dir_all(parent).await {
+            tracing::debug!(
+                cache_dir = %parent.to_string_lossy(),
+                error = %error,
+                "PB42-IC：创建图片缓存目录失败，跳过本次写入"
+            );
+            return;
+        }
+    }
+    let tmp = bin_path.with_extension("bin.tmp");
+    if let Err(error) = tokio::fs::write(&tmp, bytes).await {
+        tracing::debug!(error = %error, "PB42-IC：写图片缓存 .tmp 失败");
+        return;
+    }
+    if let Err(error) = tokio::fs::rename(&tmp, &bin_path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        tracing::debug!(error = %error, "PB42-IC：rename 图片缓存 .tmp → .bin 失败");
+        return;
+    }
+    if let Err(error) = tokio::fs::write(&ct_path, content_type.as_bytes()).await {
+        tracing::debug!(error = %error, "PB42-IC：写 content-type sidecar 失败");
+    }
+}
+
+/// PB42-IC：周期清理过期缓存文件。每小时跑一次。
+pub async fn image_cache_eviction_loop() {
+    let Some(base) = image_cache_dir().cloned() else {
+        return;
+    };
+    let ttl = IMAGE_CACHE_TTL
+        .get()
+        .copied()
+        .unwrap_or(std::time::Duration::from_secs(7 * 24 * 3600));
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3600));
+    ticker.tick().await; // 跳过启动瞬间
+    loop {
+        ticker.tick().await;
+        if let Err(error) = run_image_cache_eviction_pass(&base, ttl).await {
+            tracing::warn!(error = %error, "PB42-IC：图片缓存清理任务失败");
+        }
+    }
+}
+
+async fn run_image_cache_eviction_pass(base: &std::path::Path, ttl: std::time::Duration) -> std::io::Result<()> {
+    let now = std::time::SystemTime::now();
+    let mut buckets = match tokio::fs::read_dir(base).await {
+        Ok(rd) => rd,
+        Err(_) => return Ok(()),
+    };
+    let mut total_removed: u64 = 0;
+    while let Some(bucket_entry) = buckets.next_entry().await? {
+        let bucket_path = bucket_entry.path();
+        if !bucket_path.is_dir() {
+            continue;
+        }
+        let mut files = match tokio::fs::read_dir(&bucket_path).await {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        while let Some(entry) = files.next_entry().await? {
+            let path = entry.path();
+            let metadata = match entry.metadata().await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let modified = metadata
+                .modified()
+                .unwrap_or(std::time::UNIX_EPOCH);
+            if let Ok(elapsed) = now.duration_since(modified) {
+                if elapsed > ttl {
+                    let _ = tokio::fs::remove_file(&path).await;
+                    total_removed = total_removed.saturating_add(1);
+                }
+            }
+        }
+    }
+    if total_removed > 0 {
+        tracing::info!(removed = total_removed, "PB42-IC：图片缓存清理完成");
+    }
+    Ok(())
+}
+
+/// PB42-IC：基于 cache_key 直接组装 ETag。无论是否命中缓存，同一张图返回的
+/// ETag 都一致 → 客户端 If-None-Match 永远能命中 304。
+fn etag_for_cache_key(key: &str) -> String {
+    format!("\"img-{key}\"")
+}
+
+fn build_remote_image_response(
+    bytes: Vec<u8>,
+    content_type: String,
+    etag: &str,
+    request: &Request<Body>,
+) -> Result<Response, AppError> {
+    let is_head = request.method() == Method::HEAD;
+    let len = bytes.len();
+    let body = if is_head { Body::empty() } else { Body::from(bytes) };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
+        .header(header::CONTENT_LENGTH, len)
+        .body(body)
+        .map_err(|e| AppError::Internal(format!("构建图片响应失败: {e}")))
+}
+
+fn build_not_modified_response(etag: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn if_none_match_hits(req: &Request<Body>, etag: &str) -> bool {
+    let Some(value) = req.headers().get(header::IF_NONE_MATCH) else {
+        return false;
+    };
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    if value == "*" {
+        return true;
+    }
+    // 客户端可能上送 `"img-<key>"` 或 `W/"img-<key>"` 或多值用逗号分隔。
+    let weak = format!("W/{etag}");
+    value
+        .split(',')
+        .map(str::trim)
+        .any(|v| v == etag || v == weak)
+}
+
 async fn serve_remote_image(
     url: &str,
     image_query: &ItemImageQuery,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
+    // PB42-IC：cache_key 不依赖 token / api_key，所以 ETag 也稳定。
+    // 客户端 If-None-Match 在没拿到响应字节的情况下就能直接 304。
+    let cache_key = remote_image_cache_key(url, image_query);
+    let etag = etag_for_cache_key(&cache_key);
+
+    if if_none_match_hits(&request, &etag) {
+        return Ok(build_not_modified_response(&etag));
+    }
+
+    if let Some((bytes, content_type)) = remote_image_cache_load(&cache_key).await {
+        tracing::trace!(cache_key = %cache_key, "PB42-IC：图片缓存命中");
+        return build_remote_image_response(bytes, content_type, &etag, &request);
+    }
+
     let response = SHARED_HTTP_CLIENT
         .get(url)
         .send()
@@ -1992,7 +2283,12 @@ async fn serve_remote_image(
 
     let status = response.status();
     if !status.is_success() {
-        return Err(AppError::NotFound(format!("远程图片不存在: {status}")));
+        tracing::debug!(
+            url = %url,
+            upstream_status = %status,
+            "上游图片返回非 2xx 状态，按 NotFound 处理"
+        );
+        return Err(AppError::NotFound("远程图片不存在".to_string()));
     }
 
     let declared_content_type = response
@@ -2001,17 +2297,6 @@ async fn serve_remote_image(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    // PB35-4 (P2-2)：透传上游 ETag / Last-Modified 给浏览器，让 If-None-Match 重命中。
-    let upstream_etag = response
-        .headers()
-        .get(header::ETAG)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let upstream_last_modified = response
-        .headers()
-        .get(header::LAST_MODIFIED)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
 
     let body_bytes = response
         .bytes()
@@ -2019,53 +2304,12 @@ async fn serve_remote_image(
         .map_err(|e| AppError::Internal(format!("读取远程图片失败: {e}")))?;
     let slice = body_bytes.as_ref();
 
-    let (final_bytes, content_type) =
-        match apply_item_image_transform(slice, image_query)? {
-            Some((b, ct)) => (b, ct),
-            None => (body_bytes.to_vec(), declared_content_type),
-        };
-
-    // PB35-4 (P2-2)：基于内容生成 ETag（上游没给时本地补一份）。
-    let computed_etag = upstream_etag.clone().unwrap_or_else(|| {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        final_bytes.hash(&mut hasher);
-        image_query.etag_suffix().hash(&mut hasher);
-        format!("\"{:x}\"", hasher.finish())
-    });
-    if let Some(if_none_match) = request.headers().get(header::IF_NONE_MATCH) {
-        if let Ok(val) = if_none_match.to_str() {
-            if val == computed_etag || val == format!("W/{computed_etag}") || val == "*" {
-                return Ok(Response::builder()
-                    .status(StatusCode::NOT_MODIFIED)
-                    .header(header::ETAG, &computed_etag)
-                    .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
-                    .body(Body::empty())
-                    .unwrap());
-            }
-        }
-    }
-
-    let is_head = request.method() == Method::HEAD;
-    let final_len = final_bytes.len();
-    let body = if is_head {
-        Body::empty()
-    } else {
-        Body::from(final_bytes)
+    let (final_bytes, content_type) = match apply_item_image_transform(slice, image_query)? {
+        Some((b, ct)) => (b, ct),
+        None => (body_bytes.to_vec(), declared_content_type),
     };
 
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::ETAG, &computed_etag)
-        // PB35-4 (P2-2)：远端图片虽不可控，但通常 tag 已包含 hash → 给一周强缓存。
-        .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
-        .header(header::CONTENT_LENGTH, final_len);
-    if let Some(lm) = upstream_last_modified.as_deref() {
-        builder = builder.header(header::LAST_MODIFIED, lm);
-    }
-    builder
-        .body(body)
-        .map_err(|e| AppError::Internal(format!("构建图片响应失败: {e}")))
+    remote_image_cache_store(&cache_key, &final_bytes, &content_type).await;
+
+    build_remote_image_response(final_bytes, content_type, &etag, &request)
 }

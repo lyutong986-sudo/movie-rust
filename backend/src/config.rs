@@ -20,6 +20,15 @@ pub struct Config {
     pub branding_splashscreen_enabled: bool,
     pub static_dir: PathBuf,
     pub log_dir: PathBuf,
+    /// PB42-IC：远端 / 上游图片代理的本地磁盘缓存目录。
+    ///
+    /// 命中后续 `/Items/{id}/Images/...` 请求时不再回源到 upstream Emby，可大幅
+    /// 削减上游 QPS（Hills 客户端打开主页瞬间会发 100+ 张图请求），同时给
+    /// 304 / If-None-Match 留个稳定 ETag 来源。
+    /// 文件按 cache_key（URL+变换参数 SHA256）落盘，旁边一份 `.ct` 文本记录
+    /// content-type；超过 `image_cache_ttl_secs` 的旧文件由后台 worker 周期清理。
+    pub image_cache_dir: PathBuf,
+    pub image_cache_ttl_secs: u64,
     pub tmdb_api_key: Option<String>,
     pub api_key: Option<String>,
     pub ffmpeg_path: String,
@@ -127,6 +136,13 @@ impl Config {
             log_dir: env::var("LOG_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("logs")),
+            image_cache_dir: env::var("APP_IMAGE_CACHE_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("image_cache")),
+            image_cache_ttl_secs: env::var("APP_IMAGE_CACHE_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(7 * 24 * 3600),
             tmdb_api_key: env::var("TMDB_API_KEY").ok(),
             api_key: env::var("EMBY_API_KEY").ok(),
             ffmpeg_path: env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".to_string()),

@@ -7,8 +7,8 @@ use crate::{
 };
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    extract::{FromRequest, Path, Query, Request, State},
+    http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -476,10 +476,75 @@ async fn no_content_for_session_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 容忍多种载体的 `PlaybackReport` 提取器：
+///
+/// Emby 客户端在 `POST /Sessions/Playing*` 上的实际行为五花八门：
+/// - 官方网页/原生客户端：`Content-Type: application/json` + JSON body（标准）
+/// - Hills 等三方客户端某些版本：把字段塞进 query string，body 为空、Content-Type 缺失
+/// - 旧客户端：`application/x-www-form-urlencoded`
+///
+/// 单纯用 `Json<PlaybackReport>` 会在后两种情况下被 axum 拒成 415，
+/// 进而把客户端的播放上报全部丢掉。这里按 JSON → form → query → 默认 的顺序兜底，
+/// 解析失败时只记 trace 而不再返回 4xx，确保播放统计/会话状态尽量被收下。
+struct LenientPlaybackReport(PlaybackReport);
+
+impl<S> FromRequest<S> for LenientPlaybackReport
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let query = req.uri().query().map(str::to_string).unwrap_or_default();
+        let content_type = req
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        let bytes = Bytes::from_request(req, state)
+            .await
+            .map_err(|err| AppError::BadRequest(format!("无法读取请求体: {err}")))?;
+
+        let body_first = bytes
+            .iter()
+            .copied()
+            .find(|b| !b.is_ascii_whitespace());
+
+        if !bytes.is_empty() {
+            let looks_json = content_type.contains("json")
+                || matches!(body_first, Some(b'{') | Some(b'['));
+            if looks_json {
+                if let Ok(value) = serde_json::from_slice::<PlaybackReport>(&bytes) {
+                    return Ok(Self(value));
+                }
+            }
+            if let Ok(value) = serde_urlencoded::from_bytes::<PlaybackReport>(&bytes) {
+                return Ok(Self(value));
+            }
+            // body 既不是合法 JSON 也不是合法 form：回退 query
+            tracing::trace!(
+                content_type = %content_type,
+                body_len = bytes.len(),
+                "PlaybackReport body 解析失败，回退到 query 参数"
+            );
+        }
+
+        if !query.is_empty() {
+            if let Ok(value) = serde_urlencoded::from_str::<PlaybackReport>(&query) {
+                return Ok(Self(value));
+            }
+        }
+
+        Ok(Self(PlaybackReport::default()))
+    }
+}
+
 async fn playback_started(
     session: AuthSession,
     State(state): State<AppState>,
-    Json(report): Json<PlaybackReport>,
+    LenientPlaybackReport(report): LenientPlaybackReport,
 ) -> Result<StatusCode, AppError> {
     record_report(&state, &session, "Started", report).await
 }
@@ -487,7 +552,7 @@ async fn playback_started(
 async fn playback_ping(
     session: AuthSession,
     State(state): State<AppState>,
-    Json(report): Json<PlaybackReport>,
+    LenientPlaybackReport(report): LenientPlaybackReport,
 ) -> Result<StatusCode, AppError> {
     record_report(&state, &session, "Ping", report).await
 }
@@ -495,7 +560,7 @@ async fn playback_ping(
 async fn playback_progress(
     session: AuthSession,
     State(state): State<AppState>,
-    Json(report): Json<PlaybackReport>,
+    LenientPlaybackReport(report): LenientPlaybackReport,
 ) -> Result<StatusCode, AppError> {
     record_report(&state, &session, "Progress", report).await
 }
@@ -503,7 +568,7 @@ async fn playback_progress(
 async fn playback_stopped(
     session: AuthSession,
     State(state): State<AppState>,
-    Json(report): Json<PlaybackReport>,
+    LenientPlaybackReport(report): LenientPlaybackReport,
 ) -> Result<StatusCode, AppError> {
     record_report(&state, &session, "Stopped", report).await
 }

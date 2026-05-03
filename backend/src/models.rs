@@ -2094,7 +2094,7 @@ pub struct UpdateUserItemDataRequest {
     pub unplayed_item_count: Option<i32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlaybackReport {
     #[serde(default)]

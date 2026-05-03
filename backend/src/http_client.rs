@@ -80,7 +80,9 @@ pub async fn download_image_bytes(url: &str) -> Result<Bytes, AppError> {
             .await
             .map_err(|e| format!("下载远程图片失败: {e}"))?;
         if !response.status().is_success() {
-            return Err(format!("远程图片不存在: {}", response.status()));
+            let upstream_status = response.status();
+            tracing::debug!(url = %url, upstream_status = %upstream_status, "上游图片返回非 2xx 状态");
+            return Err("远程图片不存在".to_string());
         }
         response
             .bytes()
