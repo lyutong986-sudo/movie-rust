@@ -676,7 +676,9 @@ async function previewRemoteViews() {
       ServerUrl: payload.serverUrl.trim(),
       Username: payload.username.trim(),
       Password: payload.password,
-      SpoofedUserAgent: payload.spoofedUserAgent.trim()
+      SpoofedClient: payload.spoofedClient?.trim() || undefined,
+      SpoofedDeviceName: payload.spoofedDeviceName?.trim() || undefined,
+      SpoofedAppVersion: payload.spoofedAppVersion?.trim() || undefined,
     });
     const views = result.Views;
     remoteViews.value = views;

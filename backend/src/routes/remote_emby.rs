@@ -308,6 +308,12 @@ struct PreviewRemoteEmbyViewsRequest {
     password: String,
     #[serde(default, alias = "spoofedUserAgent", alias = "UserAgent")]
     spoofed_user_agent: Option<String>,
+    #[serde(default, alias = "spoofedClient")]
+    spoofed_client: Option<String>,
+    #[serde(default, alias = "spoofedDeviceName")]
+    spoofed_device_name: Option<String>,
+    #[serde(default, alias = "spoofedAppVersion")]
+    spoofed_app_version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -631,11 +637,9 @@ async fn preview_remote_emby_views(
         payload.server_url.as_str(),
         payload.username.as_str(),
         payload.password.as_str(),
-        payload
-            .spoofed_user_agent
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(remote_emby::default_spoofed_user_agent()),
+        payload.spoofed_client.as_deref(),
+        payload.spoofed_device_name.as_deref(),
+        payload.spoofed_app_version.as_deref(),
     )
     .await?;
     Ok(Json(result))

@@ -853,7 +853,9 @@ pub async fn preview_remote_views(
     server_url: &str,
     username: &str,
     password: &str,
-    _spoofed_user_agent: &str,
+    spoofed_client: Option<&str>,
+    spoofed_device_name: Option<&str>,
+    spoofed_app_version: Option<&str>,
 ) -> Result<RemotePreviewResult, AppError> {
     let server_url = normalize_server_url(server_url);
     if server_url.trim().is_empty() {
@@ -867,15 +869,33 @@ pub async fn preview_remote_views(
         return Err(AppError::BadRequest("远端 Emby 密码不能为空".to_string()));
     }
 
-    // preview 使用默认身份预设 Infuse-Direct/8.2.4，User-Agent 也从预设生成
-    let preview_ua = "Infuse-Direct/8.2.4";
+    let client_name = spoofed_client
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("Infuse-Direct");
+    let device_name = spoofed_device_name
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("Apple TV");
+    let version = spoofed_app_version
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or("8.2.4");
+    let preview_ua = format!("{client_name}/{version}");
     let device_id = Uuid::new_v4().simple().to_string();
-    let client = &*crate::http_client::SHARED;
+
+    // 使用一次性 Client 避免 SHARED 连接池被之前的同步请求毒化
+    let fresh_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
     let auth_endpoint = format!("{server_url}/Users/AuthenticateByName");
-    let preview_auth = emby_auth_header_for_device(device_id.as_str(), None);
-    let login_response = client
+    let preview_auth = emby_auth_header_for_identity(
+        client_name, device_name, device_id.as_str(), version, "",
+    );
+    let login_response = fresh_client
         .post(&auth_endpoint)
-        .header(header::USER_AGENT.as_str(), preview_ua)
+        .header(header::USER_AGENT.as_str(), &preview_ua)
         .header(header::CONTENT_TYPE.as_str(), "application/json")
         .header(header::ACCEPT.as_str(), "application/json")
         .header("Authorization", &preview_auth)
@@ -902,16 +922,16 @@ pub async fn preview_remote_views(
 
     let views_endpoint = format!("{server_url}/Users/{}/Views", login.user.id);
     let views_auth = emby_auth_header_for_identity(
-        "Infuse-Direct", "Apple TV", device_id.as_str(), "8.2.4", login.user.id.as_str(),
+        client_name, device_name, device_id.as_str(), version, login.user.id.as_str(),
     );
-    let views_response = client
+    let views_response = fresh_client
         .get(&views_endpoint)
         .query(&[
             ("Fields", "CollectionType,ChildCount,RecursiveItemCount"),
             ("EnableTotalRecordCount", "true"),
             ("api_key", login.access_token.as_str()),
         ])
-        .header(header::USER_AGENT.as_str(), preview_ua)
+        .header(header::USER_AGENT.as_str(), &preview_ua)
         .header(header::ACCEPT.as_str(), "application/json")
         .header("X-Emby-Token", login.access_token.as_str())
         .header("Authorization", &views_auth)
@@ -933,13 +953,13 @@ pub async fn preview_remote_views(
         .items
         .retain(|view| !view.id.trim().is_empty() && !view.name.trim().is_empty());
 
-    // 获取远端服务器名称（/System/Info 需要认证，/System/Info/Public 公开可访问）
+    // 获取远端服务器名称
     let server_name = {
         let info_endpoint = format!("{server_url}/System/Info");
-        let info_resp = client
+        let info_resp = fresh_client
             .get(&info_endpoint)
             .query(&[("api_key", login.access_token.as_str())])
-            .header(header::USER_AGENT.as_str(), preview_ua)
+            .header(header::USER_AGENT.as_str(), &preview_ua)
             .header(header::ACCEPT.as_str(), "application/json")
             .header("X-Emby-Token", login.access_token.as_str())
             .send()

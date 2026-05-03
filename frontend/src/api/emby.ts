@@ -1662,6 +1662,9 @@ export class EmbyApi {
     Username: string;
     Password: string;
     SpoofedUserAgent?: string;
+    SpoofedClient?: string;
+    SpoofedDeviceName?: string;
+    SpoofedAppVersion?: string;
   }) {
     return this.request<RemoteEmbyPreviewResult>('/api/admin/remote-emby/views/preview', {
       method: 'POST',
