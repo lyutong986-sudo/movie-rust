@@ -2851,6 +2851,14 @@ do_refresh_item_metadata_with
 
 ---
 
+## 补丁（2026-05-03）：设置页「Webhook」配置 UI（FE-WEBHOOKS）
+
+| ID | 现象 | 修复 |
+|----|------|------|
+| FE-WEBHOOKS | 出向 Webhook 仅存 PostgreSQL `webhooks` 表 + `GET/POST /Webhooks` 等 API，前端无入口，用户误以为「没有入库」、不知如何对接 Sakura。 | `frontend`：新增 `/settings/webhooks`（`WebhooksSettings.vue`）拉取 `/Webhooks` + `/Notifications/Types`，支持新建/编辑/删除/测试；`emby.ts` 增加 `listWebhooks`、`createWebhook`、`updateWebhook`、`deleteWebhook`、`testWebhook`、`notificationsWebhookTypes`。侧栏与设置首页已挂入口。 |
+
+---
+
 ## 第三十八批（2026-05-01）：元数据链路审计 PB31–PB35（远端 People / Series 详情 / 锁定字段 / 编辑回写 NFO / TMDB 打分匹配 / 7 类图 / 软删盘 / provider 删除 / PlaybackInfo 重试 / DTO 兜底 / TMDB retry / ETag / TMDB tagline+keywords+person_roles.is_featured）
 
 **触发场景：** 用户要求在 PB30 详情页 fire-and-forget 异步补全的基础上做一次「元数据链路全链路审计」，列出所有"看起来已实现但其实没真写进 DB / 没回写 NFO / 与 Emby SDK 行为不一致"的问题，分批修复。

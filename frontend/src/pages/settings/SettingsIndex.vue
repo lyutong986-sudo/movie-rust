@@ -106,6 +106,12 @@ const adminEntries = computed<SettingsEntry[]>(() => [
     to: '/settings/apikeys'
   },
   {
+    icon: 'i-lucide-webhook',
+    title: 'Webhook',
+    description: '配置出向 HTTP 回调（Sakura / 自建 BOT）：播放进度与登录等事件。',
+    to: '/settings/webhooks'
+  },
+  {
     icon: 'i-lucide-timer',
     title: '计划任务',
     description: '媒体库扫描、元数据刷新、缓存清理等后台任务。',

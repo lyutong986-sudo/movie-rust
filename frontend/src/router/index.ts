@@ -154,6 +154,12 @@ export const router = createRouter({
       meta: { title: 'API Key', section: 'admin', admin: true }
     },
     {
+      path: '/settings/webhooks',
+      name: 'settings-webhooks',
+      component: () => import('../pages/settings/WebhooksSettings.vue'),
+      meta: { title: 'Webhook', section: 'admin', admin: true }
+    },
+    {
       path: '/settings/logs-and-activity',
       name: 'settings-logs-and-activity',
       component: () => import('../pages/settings/LogsActivitySettings.vue'),

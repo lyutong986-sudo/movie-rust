@@ -185,6 +185,30 @@ export interface ApiKeyInfo {
   IsActive?: boolean;
 }
 
+/** 出向 Webhook（PostgreSQL `webhooks` 表，兼容 Emby Webhooks 插件 payload） */
+export interface WebhookInfo {
+  Id: string;
+  Name: string;
+  Url: string;
+  Enabled: boolean;
+  Events: string[];
+  ContentType?: string;
+  HasSecret?: boolean;
+  Headers?: Record<string, unknown>;
+  CreatedAt: string;
+  UpdatedAt: string;
+  LastStatus?: number | null;
+  LastError?: string | null;
+  LastTriggeredAt?: string | null;
+}
+
+export interface WebhookNotificationType {
+  Type: string;
+  Name?: string;
+  Category?: string;
+  IsBasedOnUserEvent?: boolean;
+}
+
 export interface PlaylistInfo {
   Id: string;
   Name: string;
@@ -1080,6 +1104,60 @@ export class EmbyApi {
   async deleteAuthKey(key: string) {
     return this.request<void>(`/Auth/Keys/${encodeURIComponent(key)}`, {
       method: 'DELETE'
+    });
+  }
+
+  /** 列出已配置的出向 Webhook（管理员） */
+  async listWebhooks() {
+    return this.request<WebhookInfo[]>('/Webhooks');
+  }
+
+  /** Emby 兼容：可订阅的事件类型（用于勾选 UI） */
+  async notificationsWebhookTypes() {
+    return this.request<WebhookNotificationType[]>('/Notifications/Types');
+  }
+
+  async createWebhook(body: {
+    Name: string;
+    Url: string;
+    Enabled: boolean;
+    Events: string[];
+    ContentType?: string;
+    Secret?: string;
+    Headers?: Record<string, unknown>;
+  }) {
+    return this.request<WebhookInfo>('/Webhooks', {
+      method: 'POST',
+      body
+    });
+  }
+
+  async updateWebhook(id: string, body: {
+    Name: string;
+    Url: string;
+    Enabled: boolean;
+    Events: string[];
+    ContentType?: string;
+    /** 留空则不修改已有密钥 */
+    Secret?: string;
+    Headers?: Record<string, unknown>;
+  }) {
+    return this.request<WebhookInfo>(`/Webhooks/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      body
+    });
+  }
+
+  async deleteWebhook(id: string) {
+    return this.request<void>(`/Webhooks/${encodeURIComponent(id)}`, {
+      method: 'DELETE'
+    });
+  }
+
+  /** 投递测试事件 `webhook.test`（须已启用） */
+  async testWebhook(id: string) {
+    return this.request<{ Status?: string; Message?: string }>(`/Webhooks/${encodeURIComponent(id)}/Test`, {
+      method: 'POST'
     });
   }
 
