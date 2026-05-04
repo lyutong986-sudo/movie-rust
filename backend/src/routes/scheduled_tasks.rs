@@ -64,7 +64,9 @@ fn builtin_tasks() -> Vec<TaskDescriptor> {
         TaskDescriptor {
             id: "metadata-refresh",
             name: "元数据刷新",
-            description: "对缺少或过期元数据的条目调用 TMDB 等外部源进行刷新。",
+            description: "对本地媒体库（Movie/Series/Season/Episode）中元数据过期 7 天及以上的条目，\
+                通过 TMDB 等外部源刷新；远端 Emby 条目交由远端同步链路单独处理，\
+                锁定元数据的条目跳过。",
             category: "Metadata",
             default_triggers: vec![TriggerInfo {
                 trigger_type: "DailyTrigger",
@@ -488,23 +490,118 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
             Ok(())
         }
         "metadata-refresh" => {
-            let candidates = repository::list_media_items(
-                &state.pool,
-                repository::ItemListOptions {
-                    include_types: vec!["Movie".into(), "Series".into()],
-                    recursive: true,
-                    start_index: 0,
-                    limit: 200,
-                    ..Default::default()
-                },
-            )
-            .await?;
-            let total = candidates.items.len().max(1);
-            for (i, item) in candidates.items.iter().enumerate() {
-                let pct = (i as f64 / total as f64) * 100.0;
-                set_progress(&state.pool, task_id, pct).await;
-                let _ = crate::routes::items::do_refresh_item_metadata(state, item.id).await;
+            // PB51-Refresh：彻底重做 metadata-refresh 调度任务。
+            //
+            // 之前实现的三个硬伤（已修复）：
+            //   1) `limit: 200`，不分页 → 大库（如 549K 条）每天只摸前 200 条，
+            //      其余条目永远不会被定时任务覆盖。
+            //   2) 仅 Movie/Series → Episode/Season 元数据漂移走不到这一刷。
+            //   3) 不区分远端与本地 → 远端条目在 03:00 集中触发上游 Emby，叠加
+            //      remote-emby AutoInterval / GlobalScheduled 的同步，是上次「触发
+            //      封号」的同源风险。
+            //
+            // 新链路（用户选 C 路线）：
+            //   - 全量分页：稳定按 start_index 步进，不依赖 SQL stale 过滤，避免
+            //     pagination-while-mutating 的 offset 错位。
+            //   - In-loop 跳过 remote-Emby：交回 remote-emby 同步链路统一处理。
+            //   - In-loop 跳过 lock_data：尊重用户「锁定元数据」语义。
+            //   - In-loop 跳过 staleness 阈值内的条目（< STALE_DAYS 天内已动过）：
+            //     避免每天都把同样条目刷一遍。
+            //   - 包含 Movie / Series / Season / Episode 四类。
+            //   - Per-page progress：以 processed/total 上报百分比，UI 可见动态。
+            //   - 单条失败仅 warn，不中断整个任务。
+            const PAGE_SIZE: i64 = 200;
+            const STALE_DAYS: i64 = 7;
+            let stale_cutoff = Utc::now() - chrono::Duration::days(STALE_DAYS);
+            let mut start_index: i64 = 0;
+            let mut total_count: i64 = 0;
+            let mut processed: i64 = 0;
+            let mut refreshed: i64 = 0;
+            let mut skipped_remote: i64 = 0;
+            let mut skipped_locked: i64 = 0;
+            let mut skipped_fresh: i64 = 0;
+            let mut errored: i64 = 0;
+            loop {
+                let page = repository::list_media_items(
+                    &state.pool,
+                    repository::ItemListOptions {
+                        include_types: vec![
+                            "Movie".into(),
+                            "Series".into(),
+                            "Season".into(),
+                            "Episode".into(),
+                        ],
+                        recursive: true,
+                        start_index,
+                        limit: PAGE_SIZE,
+                        // 仅在第一页拉一次 total，后续页省掉 fast_count 子查询
+                        enable_total_record_count: start_index == 0,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                if start_index == 0 {
+                    total_count = page.total_record_count.max(1);
+                    tracing::info!(
+                        total_count,
+                        stale_cutoff = %stale_cutoff,
+                        "metadata-refresh: 开始全量分页刷新"
+                    );
+                }
+                if page.items.is_empty() {
+                    break;
+                }
+                let page_len = page.items.len() as i64;
+                for item in &page.items {
+                    processed += 1;
+                    // C 路线核心：远端 Emby 条目交给 remote-emby 同步链路处理，
+                    // 本任务不在 03:00 二次撞远端，避免 WAF / 速率限制叠加。
+                    if crate::remote_emby::remote_marker_for_db_item(item).is_some() {
+                        skipped_remote += 1;
+                        continue;
+                    }
+                    // lock_data 条目 do_refresh_item_metadata_with 内部也会跳过；
+                    // 这里提前过滤省掉一次 DB 往返，并便于统计。
+                    if item.lock_data {
+                        skipped_locked += 1;
+                        continue;
+                    }
+                    // staleness 阈值：N 天内动过的本地条目认为"够新"，本轮不刷。
+                    // 触发刷新会改写 date_modified → 自动落到 fresh 区间，下一日不再重复刷。
+                    if item.date_modified > stale_cutoff {
+                        skipped_fresh += 1;
+                        continue;
+                    }
+                    let pct = (processed as f64 / total_count as f64).min(1.0) * 100.0;
+                    set_progress(&state.pool, task_id, pct).await;
+                    if let Err(err) =
+                        crate::routes::items::do_refresh_item_metadata(state, item.id).await
+                    {
+                        errored += 1;
+                        tracing::warn!(
+                            item_id = %item.id,
+                            name = %item.name,
+                            error = %err,
+                            "metadata-refresh: 单条刷新失败，继续下一条"
+                        );
+                    } else {
+                        refreshed += 1;
+                    }
+                }
+                if page_len < PAGE_SIZE {
+                    break;
+                }
+                start_index += PAGE_SIZE;
             }
+            tracing::info!(
+                processed,
+                refreshed,
+                skipped_remote,
+                skipped_locked,
+                skipped_fresh,
+                errored,
+                "metadata-refresh: 任务完成"
+            );
             set_progress(&state.pool, task_id, 100.0).await;
             Ok(())
         }
