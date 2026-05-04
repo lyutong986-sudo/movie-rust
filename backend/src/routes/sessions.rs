@@ -640,6 +640,11 @@ async fn record_report(
         if repository::get_media_item(&state.pool, item_id).await?.is_none() {
             return Err(AppError::NotFound("媒体条目不存在".to_string()));
         }
+        if !session.is_admin
+            && !repository::user_can_access_item(&state.pool, user_id, item_id).await?
+        {
+            return Err(AppError::Forbidden);
+        }
     }
     let session_id_for_event = repository::resolve_session_id_for_play_queue(
         &state.pool,

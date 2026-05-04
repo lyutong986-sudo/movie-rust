@@ -2938,7 +2938,7 @@ pub async fn get_session(
 pub async fn list_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, AppError> {
     Ok(sqlx::query_as::<_, AuthSessionRow>(
         r#"
-        SELECT
+        SELECT DISTINCT ON (s.device_id, s.user_id)
             s.access_token,
             s.user_id,
             u.name AS user_name,
@@ -2955,7 +2955,7 @@ pub async fn list_sessions(pool: &sqlx::PgPool) -> Result<Vec<AuthSessionRow>, A
         INNER JOIN users u ON u.id = s.user_id
         WHERE s.session_type = 'Interactive'
           AND (s.expires_at IS NULL OR s.expires_at > now())
-        ORDER BY s.last_activity_at DESC
+        ORDER BY s.device_id, s.user_id, s.last_activity_at DESC
         "#,
     )
     .fetch_all(pool)
@@ -2996,7 +2996,7 @@ pub async fn list_sessions_for_user(
 ) -> Result<Vec<AuthSessionRow>, AppError> {
     Ok(sqlx::query_as::<_, AuthSessionRow>(
         r#"
-        SELECT
+        SELECT DISTINCT ON (s.device_id)
             s.access_token,
             s.user_id,
             u.name AS user_name,
@@ -3014,7 +3014,7 @@ pub async fn list_sessions_for_user(
         WHERE s.user_id = $1
           AND s.session_type = 'Interactive'
           AND (s.expires_at IS NULL OR s.expires_at > now())
-        ORDER BY s.last_activity_at DESC
+        ORDER BY s.device_id, s.last_activity_at DESC
         "#,
     )
     .bind(user_id)
@@ -3190,6 +3190,23 @@ pub async fn delete_sessions_for_user(pool: &sqlx::PgPool, user_id: Uuid) -> Res
     }
 
     Ok(())
+}
+
+pub async fn cleanup_stale_sessions(pool: &sqlx::PgPool) -> Result<u64, AppError> {
+    let stale_tokens = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT access_token FROM sessions
+        WHERE (expires_at IS NOT NULL AND expires_at < now())
+           OR (last_activity_at < now() - INTERVAL '30 days')
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let count = stale_tokens.len() as u64;
+    for token in stale_tokens {
+        delete_session(pool, &token).await?;
+    }
+    Ok(count)
 }
 
 pub async fn update_media_item_image_path(
@@ -6158,21 +6175,30 @@ async fn fast_count_media_items(
         && options.tags.is_empty()
         && options.years.is_empty()
         && options.person_ids.is_empty()
+        && options.person_types.is_empty()
         && options.is_played.is_none()
         && options.is_favorite.is_none()
         && !options.resume_only
         && options.studios.is_empty()
         && options.official_ratings.is_empty()
         && options.min_community_rating.is_none()
+        && options.min_premiere_date.is_none()
+        && options.max_premiere_date.is_none()
         && options.containers.is_empty()
         && options.audio_codecs.is_empty()
         && options.video_codecs.is_empty()
         && options.has_overview.is_none()
         && options.has_subtitles.is_none()
+        && options.has_trailer.is_none()
         && options.has_tmdb_id.is_none()
         && options.has_imdb_id.is_none()
         && options.series_status.is_empty()
+        && options.name_starts_with.as_ref().map_or(true, |s| s.trim().is_empty())
+        && options.is_folder.is_none()
+        && options.is_hd.is_none()
         && options.filters.is_none()
+        && options.any_provider_id_equals.is_empty()
+        && options.exclude_types.is_empty()
         && !has_user_library_filter;
 
     if simple_filter && options.parent_id.is_none() {
@@ -8981,7 +9007,7 @@ pub async fn record_playback_event(
                 r#"
                 INSERT INTO user_item_data
                     (user_id, item_id, playback_position_ticks, is_played, play_count, last_played_date, updated_at)
-                VALUES ($1, $2, COALESCE($3, 0), $4, CASE WHEN $4 THEN 1 ELSE 0 END, now(), now())
+                VALUES ($1, $2, $3, $4, CASE WHEN $4 THEN 1 ELSE 0 END, now(), now())
                 ON CONFLICT (user_id, item_id)
                 DO UPDATE SET
                     playback_position_ticks = COALESCE(EXCLUDED.playback_position_ticks, user_item_data.playback_position_ticks),

@@ -5155,3 +5155,58 @@ Err(e) => {
 `cargo check` 通过（0 errors）。
 
 ---
+
+## 全链路审计修复（2026-05-04）
+
+基于 6 个并行审计子任务（架构/数据库/图片/远程同步/认证播放/前端兼容性）发现的 28 个问题，按 P0-P3 优先级分批修复。
+
+### P0 — 数据损坏/安全风险
+
+#### P0-1. 电影删除未按 View 过滤 — 多视图下误删
+- **文件**: `backend/src/remote_emby.rs` L2522-2534
+- **问题**: 电影层级删除查询仅按 `RemoteEmbySourceId` + `Movie` 过滤，缺少 `RemoteEmbyViewId = $view_id` 条件。多视图/多库合并时会误删其它视图的电影。
+- **修复**: 与 Series 删除逻辑对齐，SQL 增加 `AND provider_ids->>'RemoteEmbyViewId' = $2` 绑定 `view.id`。
+
+#### P0-2. person_ids/person_types SQL 拼装（误报）
+- **结论**: 审计验证后确认括号平衡正确，`pr` 别名始终在 EXISTS 子查询内部。无需修改。
+
+#### P0-3. 播放上报未校验条目访问权限
+- **文件**: `backend/src/routes/sessions.rs` L639-642
+- **问题**: `record_report` 只验证 `item_id` 存在，未调用 `user_can_access_item`，知晓 GUID 的用户可对无库权限的条目写入播放进度。
+- **修复**: 在 `get_media_item` 检查后增加 `user_can_access_item` + `is_admin` 绕过校验，未授权返回 403 Forbidden。
+
+#### P0-4. position_ticks=None 时进度被清零
+- **文件**: `backend/src/repository.rs` L8984
+- **问题**: INSERT 使用 `COALESCE($3, 0)`，`position_ticks` 为 None 时写入 0，ON CONFLICT 时 `COALESCE(0, existing)` = 0 覆盖已有进度。
+- **修复**: INSERT 改为 `$3`（保持 NULL），ON CONFLICT 中 `COALESCE(EXCLUDED.playback_position_ticks, user_item_data.playback_position_ticks)` 仅当新值非 NULL 时覆盖。
+
+### P1 — 功能错误
+
+#### P1-1. list_media_items 与 fast_count 过滤条件不对称
+- **文件**: `backend/src/repository.rs` `fast_count_media_items`
+- **问题**: `simple_filter` 快速路径守卫缺少 `has_trailer`、`name_starts_with`、`is_folder`、`is_hd`、`any_provider_id_equals`、`min/max_premiere_date`、`exclude_types`、`person_types` 等检查，导致这些过滤条件存在时快速路径返回未过滤的总数。
+- **修复**: 补全 `simple_filter` 守卫条件，与 `has_no_conditions` 完全对齐。
+
+#### P1-2. Episode 批处理超时后静默 continue
+- **文件**: `backend/src/remote_emby.rs` L2232-2241
+- **问题**: 120s 超时后 `continue` 跳过该 Season，同步整体仍报成功。
+- **修复**: 新增 `timed_out_seasons` 计数器，超时 Season 记录到 `RemoteEmbySyncResult.partial_error`，写入 `last_sync_error` 字段供前端/管理员查看。
+
+#### P1-5. Session 无 TTL / 无定期清理 / DeviceId 未去重
+- **文件**: `backend/src/repository.rs` + `backend/src/routes/scheduled_tasks.rs`
+- **问题**: 交互式会话默认 `expires_at IS NULL`，无后台清理；`/Sessions` 返回所有行不做 DeviceId 去重，导致大量重复会话。
+- **修复**:
+  - `list_sessions` / `list_sessions_for_user` 使用 `DISTINCT ON (device_id, user_id)` 按最近活动去重。
+  - 新增 `cleanup_stale_sessions` 函数，清理已过期或 30 天无活动的会话。
+  - 新增 `cleanup-sessions` 定时任务（每 24 小时执行）。
+
+#### P1-6. TMDB Logo 回退硬编码返回 None
+- **文件**: `backend/src/routes/images.rs` `find_tmdb_image_fallback`
+- **问题**: Logo 类型直接 `return None`，无法走 TMDB 回退。
+- **修复**: 新增 TMDB `/images` API 调用获取 logos 列表，优先选择 zh/en 语言的 logo，回退到第一个可用 logo。
+
+### 编译验证
+
+`cargo check` 通过（0 errors，55 pre-existing warnings unchanged）。
+
+---

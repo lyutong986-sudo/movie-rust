@@ -257,6 +257,7 @@ pub struct RemoteEmbySyncResult {
     pub written_files: usize,
     pub source_root: String,
     pub scan_summary: ScanSummary,
+    pub partial_error: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1082,8 +1083,13 @@ pub async fn sync_source_with_progress(
         }
     }
     let sync_state_result = match &result {
-        Ok(_) => {
-            repository::update_remote_emby_source_sync_state(&state.pool, source.id, None).await
+        Ok(sync_result) => {
+            repository::update_remote_emby_source_sync_state(
+                &state.pool,
+                source.id,
+                sync_result.partial_error.as_deref(),
+            )
+            .await
         }
         Err(error) => {
             let error_message = error.to_string();
@@ -1407,6 +1413,7 @@ async fn sync_source_inner(
     let mut remote_series_ids_by_view: HashMap<String, HashSet<String>> = HashMap::new();
     let mut remote_movie_ids_by_view: HashMap<String, HashSet<String>> = HashMap::new();
     let mut total_deleted = 0u64;
+    let mut timed_out_seasons: Vec<String> = Vec::new();
 
     if let Some(handle) = &progress {
         handle.set_phase("SyncingRemoteItems", 5.0);
@@ -2229,6 +2236,7 @@ async fn sync_source_inner(
                     {
                         Ok(v) => v,
                         Err(_) => {
+                            let desc = format!("{} S{}", remote_series.name, season_number);
                             tracing::error!(
                                 source_id = %source.id,
                                 series = %remote_series.name,
@@ -2237,6 +2245,7 @@ async fn sync_source_inner(
                                 timeout_secs = 120,
                                 "PB49 (FX5-B)：Episode 批量入库 runtime 级超时，本 Season 跳过"
                             );
+                            timed_out_seasons.push(desc);
                             continue;
                         }
                     };
@@ -2525,11 +2534,13 @@ async fn sync_source_inner(
                     FROM media_items
                     WHERE provider_ids->>'RemoteEmbySourceId' = $1
                       AND item_type = 'Movie'
+                      AND provider_ids->>'RemoteEmbyViewId' = $2
                       AND provider_ids->>'RemoteEmbyItemId' IS NOT NULL
                       AND provider_ids->>'RemoteEmbyItemId' <> ''
                     "#,
                 )
                 .bind(source.id.to_string())
+                .bind(&view.id)
                 .fetch_all(&state.pool)
                 .await?;
 
@@ -2661,12 +2672,22 @@ async fn sync_source_inner(
         );
     }
 
+    let partial_error = if timed_out_seasons.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Episode 批处理超时（需重扫）: {}",
+            timed_out_seasons.join(", ")
+        ))
+    };
+
     Ok(RemoteEmbySyncResult {
         source_id: source.id,
         source_name: source.name.clone(),
         written_files,
         source_root: strm_workspace.to_string_lossy().to_string(),
         scan_summary,
+        partial_error,
     })
 }
 

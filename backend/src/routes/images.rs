@@ -2107,9 +2107,26 @@ async fn find_tmdb_image_fallback(
             return None;
         }
         let json: serde_json::Value = resp.json().await.ok()?;
+        if image_type.eq_ignore_ascii_case("logo") {
+            let images_url = format!(
+                "https://api.themoviedb.org/3/{media_type}/{tmdb_id}/images?api_key={key}"
+            );
+            let img_resp = SHARED_HTTP_CLIENT.get(&images_url).send().await.ok()?;
+            if !img_resp.status().is_success() {
+                return None;
+            }
+            let img_json: serde_json::Value = img_resp.json().await.ok()?;
+            let logos = img_json.get("logos")?.as_array()?;
+            let best = logos.iter().find(|l| {
+                l.get("iso_639_1")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|lang| lang == "zh" || lang == "en")
+            }).or_else(|| logos.first())?;
+            let file_path = best.get("file_path")?.as_str()?;
+            return Some(format!("https://image.tmdb.org/t/p/original{file_path}"));
+        }
         let path_field = match image_type.to_ascii_lowercase().as_str() {
             "backdrop" => "backdrop_path",
-            "logo" => return None,
             _ => "poster_path",
         };
         let img_path = json.get(path_field)?.as_str()?;

@@ -112,6 +112,17 @@ fn builtin_tasks() -> Vec<TaskDescriptor> {
                 ..TriggerInfo::default()
             }],
         },
+        TaskDescriptor {
+            id: "cleanup-sessions",
+            name: "清理过期会话",
+            description: "删除已过期或 30 天无活动的会话，防止 sessions 表无限膨胀。",
+            category: "Maintenance",
+            default_triggers: vec![TriggerInfo {
+                trigger_type: "IntervalTrigger",
+                interval_ticks: Some(24 * 3600 * 10_000_000),
+                ..TriggerInfo::default()
+            }],
+        },
     ]
 }
 
@@ -825,6 +836,14 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
             set_progress(&state.pool, task_id, 100.0).await;
             Ok(())
         }
+        "cleanup-sessions" => {
+            let deleted = repository::cleanup_stale_sessions(&state.pool).await?;
+            if deleted > 0 {
+                tracing::info!(deleted, "cleanup-sessions: 已清理过期/不活跃会话");
+            }
+            set_progress(&state.pool, task_id, 100.0).await;
+            Ok(())
+        }
         _ => Err(AppError::NotFound(format!("未知任务: {task_id}"))),
     }
 }
@@ -996,6 +1015,7 @@ mod tests {
             "translation-fallback",
             "cleanup-transcodes",
             "cleanup-activity-log",
+            "cleanup-sessions",
         ] {
             assert!(ids.contains(&expected), "missing task {expected}");
         }
