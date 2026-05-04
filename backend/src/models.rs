@@ -108,9 +108,31 @@ pub struct DbRemoteEmbySource {
     pub enable_auto_delete: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// 运行时字段：最后一次成功连接的 URL（不入库），用于多域名故障转移。
+    #[sqlx(skip)]
+    pub active_server_url: Option<String>,
 }
 
 impl DbRemoteEmbySource {
+    /// 解析 server_url 为多个候选地址列表（逗号/换行分隔）。
+    /// 现有单 URL 配置完全兼容（返回单元素数组）。
+    pub fn server_urls(&self) -> Vec<String> {
+        self.server_url
+            .split(|c: char| c == ',' || c == '\n')
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty() && (s.starts_with("http://") || s.starts_with("https://")))
+            .collect()
+    }
+
+    /// 获取当前活跃的服务器 URL：优先使用运行时缓存，回退到列表第一个。
+    pub fn active_url(&self) -> String {
+        self.active_server_url
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| self.server_url.trim().trim_end_matches('/'))
+            .to_string()
+    }
+
     /// 是否为直链重定向模式（302 redirect，客户端直连远端）
     pub fn is_redirect_mode(&self) -> bool {
         let mode = self.proxy_mode.trim();

@@ -931,10 +931,11 @@ onBeforeUnmount(() => {
           <UFormField label="源名称">
             <UInput v-model="form.name" placeholder="例如：家庭 Emby / 朋友服 A" class="w-full" />
           </UFormField>
-          <UFormField label="远端地址">
-            <UInput
+          <UFormField label="远端地址（多个地址每行一个）">
+            <UTextarea
               v-model="form.serverUrl"
-              placeholder="例如：https://remote.emby.example:8096"
+              :rows="3"
+              placeholder="每行一个地址，例如：&#10;https://aaa.204cloud.com&#10;https://bbb.204cloud.com&#10;http://192.168.1.100:8096"
               class="w-full"
             />
           </UFormField>
@@ -1167,7 +1168,7 @@ onBeforeUnmount(() => {
                     {{ source.Enabled ? '启用' : '禁用' }}
                   </UBadge>
                 </div>
-                <p class="text-muted mt-1 text-xs">{{ source.ServerUrl }}</p>
+                <p class="text-muted mt-1 text-xs">{{ (source.ServerUrl || '').split(/[,\n]/).filter((s: string) => s.trim())[0] || '' }}{{ (source.ServerUrl || '').split(/[,\n]/).filter((s: string) => s.trim()).length > 1 ? ` (+${(source.ServerUrl || '').split(/[,\n]/).filter((s: string) => s.trim()).length - 1} 备用)` : '' }}</p>
               </div>
               <div class="flex gap-2">
                 <UButton
@@ -1444,8 +1445,13 @@ onBeforeUnmount(() => {
             <UFormField label="源名称" class="lg:col-span-2">
               <UInput v-model="editForm.name" class="w-full" />
             </UFormField>
-            <UFormField label="远端地址" class="lg:col-span-2">
-              <UInput v-model="editForm.serverUrl" class="w-full" />
+            <UFormField label="远端地址（多个地址每行一个）" class="lg:col-span-2">
+              <UTextarea
+                v-model="editForm.serverUrl"
+                :rows="3"
+                placeholder="每行一个地址，例如：&#10;https://aaa.204cloud.com&#10;https://bbb.204cloud.com"
+                class="w-full"
+              />
             </UFormField>
             <UFormField label="用户名">
               <UInput v-model="editForm.username" class="w-full" />

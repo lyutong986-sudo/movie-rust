@@ -860,8 +860,12 @@ pub async fn preview_remote_views(
     spoofed_device_name: Option<&str>,
     spoofed_app_version: Option<&str>,
 ) -> Result<RemotePreviewResult, AppError> {
-    let server_url = normalize_server_url(server_url);
-    if server_url.trim().is_empty() {
+    let urls: Vec<String> = server_url
+        .split(|c: char| c == ',' || c == '\n')
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty() && (s.starts_with("http://") || s.starts_with("https://")))
+        .collect();
+    if urls.is_empty() {
         return Err(AppError::BadRequest("远端 Emby 地址不能为空".to_string()));
     }
     let username = username.trim();
@@ -891,56 +895,73 @@ pub async fn preview_remote_views(
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let auth_endpoint = format!("{server_url}/Users/AuthenticateByName");
     let preview_auth = emby_auth_header_for_identity(
         client_name, device_name, device_id.as_str(), version, "",
     );
 
     const PREVIEW_LOGIN_RETRIES: u32 = 2;
     let mut login_response = None;
-    for attempt in 0..=PREVIEW_LOGIN_RETRIES {
-        match fresh_client
-            .post(&auth_endpoint)
-            .header(header::USER_AGENT.as_str(), &preview_ua)
-            .header(header::CONTENT_TYPE.as_str(), "application/json")
-            .header(header::ACCEPT.as_str(), "application/json")
-            .header("Authorization", &preview_auth)
-            .header("X-Emby-Authorization", &preview_auth)
-            .json(&serde_json::json!({
-                "Username": username,
-                "Pw": password,
-                "Password": password,
-            }))
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                login_response = Some(resp);
-                break;
-            }
-            Err(err) => {
-                let is_network = err.is_timeout() || err.is_connect() || err.is_request();
-                if is_network && attempt < PREVIEW_LOGIN_RETRIES {
-                    let delay_ms = 1500u64 << attempt;
-                    tracing::warn!(
-                        endpoint = %auth_endpoint,
-                        attempt = attempt + 1,
-                        error = %err,
-                        "preview_remote_views 登录网络错误，退避后重试"
-                    );
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    continue;
+    let mut connected_url = String::new();
+    let mut last_err_msg = String::new();
+
+    'url_loop: for url in &urls {
+        let auth_endpoint = format!("{url}/Users/AuthenticateByName");
+        for attempt in 0..=PREVIEW_LOGIN_RETRIES {
+            match fresh_client
+                .post(&auth_endpoint)
+                .header(header::USER_AGENT.as_str(), &preview_ua)
+                .header(header::CONTENT_TYPE.as_str(), "application/json")
+                .header(header::ACCEPT.as_str(), "application/json")
+                .header("Authorization", &preview_auth)
+                .header("X-Emby-Authorization", &preview_auth)
+                .json(&serde_json::json!({
+                    "Username": username,
+                    "Pw": password,
+                    "Password": password,
+                }))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    login_response = Some(resp);
+                    connected_url = url.clone();
+                    break 'url_loop;
                 }
-                return Err(AppError::RemoteUnavailable(format!(
-                    "远端服务器 {server_url} 不可达（已重试 {} 次）: {err}",
-                    attempt
-                )));
+                Err(err) => {
+                    let is_network = err.is_timeout() || err.is_connect() || err.is_request();
+                    if is_network && attempt < PREVIEW_LOGIN_RETRIES {
+                        let delay_ms = 1500u64 << attempt;
+                        tracing::warn!(
+                            endpoint = %auth_endpoint,
+                            attempt = attempt + 1,
+                            error = %err,
+                            "preview_remote_views 登录网络错误，退避后重试"
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        continue;
+                    }
+                    if is_network {
+                        tracing::warn!(
+                            url = %url,
+                            error = %err,
+                            "preview_remote_views 该 URL 不可达，尝试下一个"
+                        );
+                        last_err_msg = format!("{err}");
+                        continue 'url_loop;
+                    }
+                    return Err(AppError::RemoteUnavailable(format!(
+                        "远端服务器 {url} 不可达: {err}"
+                    )));
+                }
             }
         }
     }
     let login_resp = login_response.ok_or_else(|| {
-        AppError::RemoteUnavailable(format!("远端服务器 {server_url} 不可达"))
+        AppError::RemoteUnavailable(format!(
+            "所有远端地址均不可达。最近错误: {last_err_msg}"
+        ))
     })?;
+    let server_url = connected_url;
 
     if !login_resp.status().is_success() {
         let status = login_resp.status();
@@ -951,8 +972,11 @@ pub async fn preview_remote_views(
             body
         )));
     }
-    let login: RemoteLoginResponse =
-        parse_remote_json_response(login_resp, auth_endpoint.as_str()).await?;
+    let login: RemoteLoginResponse = parse_remote_json_response(
+        login_resp,
+        &format!("{server_url}/Users/AuthenticateByName"),
+    )
+    .await?;
 
     let views_endpoint = format!("{server_url}/Users/{}/Views", login.user.id);
     let views_auth = emby_auth_header_for_identity(
@@ -4342,8 +4366,7 @@ async fn fetch_and_upsert_series_detail(
     series_dir: &Path,
     view_id: &str,
 ) -> Result<(), AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Users/{user_id}/Items/{remote_series_id}");
+    let path = format!("/Users/{user_id}/Items/{remote_series_id}");
     let query = vec![(
         "Fields".to_string(),
         "Overview,Genres,Studios,Tags,Status,EndDate,ProductionYear,OfficialRating,\
@@ -4352,7 +4375,7 @@ async fn fetch_and_upsert_series_detail(
          AirDays,AirTime,RemoteTrailers"
             .to_string(),
     )];
-    let detail: RemoteBaseItem = match get_json_with_retry(pool, source, &endpoint, &query).await {
+    let detail: RemoteBaseItem = match get_json_with_retry(pool, source, &path, &query).await {
         Ok(value) => value,
         Err(error) => {
             tracing::warn!(
@@ -4559,8 +4582,7 @@ async fn fetch_remote_views(
     source: &mut DbRemoteEmbySource,
     user_id: &str,
 ) -> Result<Vec<RemoteLibraryView>, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Users/{user_id}/Views");
+    let path = format!("/Users/{user_id}/Views");
     let query = vec![
         (
             "Fields".to_string(),
@@ -4569,7 +4591,7 @@ async fn fetch_remote_views(
         ("EnableTotalRecordCount".to_string(), "true".to_string()),
     ];
     let mut response: RemoteViewsResult =
-        get_json_with_retry(pool, source, &endpoint, &query).await?;
+        get_json_with_retry(pool, source, &path, &query).await?;
     response
         .items
         .retain(|view| !view.id.trim().is_empty() && !view.name.trim().is_empty());
@@ -4596,17 +4618,13 @@ async fn fetch_remote_items_page_for_view(
     limit: i64,
     min_date_last_saved: Option<chrono::DateTime<Utc>>,
 ) -> Result<RemoteItemsResult, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let path = format!("/Users/{user_id}/Items");
     let mut query = vec![
         ("Recursive".to_string(), "true".to_string()),
         ("ParentId".to_string(), view_id.to_string()),
         ("IncludeItemTypes".to_string(), "Movie,Episode".to_string()),
         (
             "Fields".to_string(),
-            // PB31-1 / PB34-1：补齐 People（演职员）+ OriginalTitle/SortName/Taglines/
-            // ProductionLocations/AirDays/AirTime/RemoteTrailers 等 Emby BaseItemDto 字段，
-            // 让远端同步一次性带回所有可直接展示的元数据，避免后续依赖按需 TMDB 刷新。
             "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,\
              OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,\
              ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,\
@@ -4626,7 +4644,7 @@ async fn fetch_remote_items_page_for_view(
     if let Some(since) = min_date_last_saved {
         query.push(("MinDateLastSaved".to_string(), since.to_rfc3339()));
     }
-    get_json_with_retry(pool, source, &endpoint, &query).await
+    get_json_with_retry(pool, source, &path, &query).await
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -4777,8 +4795,7 @@ async fn fetch_remote_series_page(
     start_index: i64,
     limit: i64,
 ) -> Result<RemoteSeriesResult, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let path = format!("/Users/{user_id}/Items");
     let query = vec![
         ("Recursive".to_string(), "true".to_string()),
         ("ParentId".to_string(), view_id.to_string()),
@@ -4798,7 +4815,7 @@ async fn fetch_remote_series_page(
         ("StartIndex".to_string(), start_index.to_string()),
         ("Limit".to_string(), limit.to_string()),
     ];
-    get_json_with_retry(pool, source, &endpoint, &query).await
+    get_json_with_retry(pool, source, &path, &query).await
 }
 
 /// 增量模式下拉取 Series 列表（按 DateModified 降序），用于早停优化
@@ -4810,8 +4827,7 @@ async fn fetch_remote_series_page_by_date_modified(
     start_index: i64,
     limit: i64,
 ) -> Result<RemoteSeriesResult, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let path = format!("/Users/{user_id}/Items");
     let query = vec![
         ("Recursive".to_string(), "true".to_string()),
         ("ParentId".to_string(), view_id.to_string()),
@@ -4826,7 +4842,7 @@ async fn fetch_remote_series_page_by_date_modified(
         ("StartIndex".to_string(), start_index.to_string()),
         ("Limit".to_string(), limit.to_string()),
     ];
-    get_json_with_retry(pool, source, &endpoint, &query).await
+    get_json_with_retry(pool, source, &path, &query).await
 }
 
 /// 仅拉取 Series 的 Id 列表（用于删除检测，不请求任何重量字段）
@@ -4838,8 +4854,7 @@ async fn fetch_remote_series_ids_page(
     start_index: i64,
     limit: i64,
 ) -> Result<RemoteSeriesResult, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let path = format!("/Users/{user_id}/Items");
     let query = vec![
         ("Recursive".to_string(), "true".to_string()),
         ("ParentId".to_string(), view_id.to_string()),
@@ -4851,7 +4866,7 @@ async fn fetch_remote_series_ids_page(
         ("StartIndex".to_string(), start_index.to_string()),
         ("Limit".to_string(), limit.to_string()),
     ];
-    get_json_with_retry(pool, source, &endpoint, &query).await
+    get_json_with_retry(pool, source, &path, &query).await
 }
 
 /// 增量模式下拉取 Series 列表的轻量版——只请求增量检测所需的最少字段
@@ -4864,8 +4879,7 @@ async fn fetch_remote_series_page_lightweight(
     start_index: i64,
     limit: i64,
 ) -> Result<RemoteSeriesResult, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let path = format!("/Users/{user_id}/Items");
     let query = vec![
         ("Recursive".to_string(), "true".to_string()),
         ("ParentId".to_string(), view_id.to_string()),
@@ -4880,7 +4894,7 @@ async fn fetch_remote_series_page_lightweight(
         ("StartIndex".to_string(), start_index.to_string()),
         ("Limit".to_string(), limit.to_string()),
     ];
-    get_json_with_retry(pool, source, &endpoint, &query).await
+    get_json_with_retry(pool, source, &path, &query).await
 }
 
 /// 分页拉取某个 movies 库下的 Movie 列表（直接使用 RemoteItemsResult）
@@ -4892,8 +4906,7 @@ async fn fetch_remote_movies_page(
     start_index: i64,
     limit: i64,
 ) -> Result<RemoteItemsResult, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Users/{user_id}/Items");
+    let path = format!("/Users/{user_id}/Items");
     let query = vec![
         ("Recursive".to_string(), "true".to_string()),
         ("ParentId".to_string(), view_id.to_string()),
@@ -4914,7 +4927,7 @@ async fn fetch_remote_movies_page(
         ("StartIndex".to_string(), start_index.to_string()),
         ("Limit".to_string(), limit.to_string()),
     ];
-    get_json_with_retry(pool, source, &endpoint, &query).await
+    get_json_with_retry(pool, source, &path, &query).await
 }
 
 /// 拉取某个 Series 下的所有 Season（/Shows/{seriesId}/Seasons）
@@ -4924,13 +4937,7 @@ async fn fetch_remote_seasons(
     user_id: &str,
     series_id: &str,
 ) -> Result<RemoteSeasonsResult, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Shows/{series_id}/Seasons");
-    // PB49 (FX5-Speed)：对齐上游 Emby web 客户端的减负载参数。
-    //  - EnableUserData=false：不带 UserData，节省每条 ~150 字节
-    //  - EnableTotalRecordCount=false：跳过 server 端 COUNT(*) 开销
-    //  - IsSpecialSeason=false：跳过特别篇 Season（一般也不需要 sync）
-    // Fields 仍保留 ChildCount + ProviderIds（FX1 Season 级 fast-skip 必需）。
+    let path = format!("/Shows/{series_id}/Seasons");
     let query = vec![
         ("UserId".to_string(), user_id.to_string()),
         (
@@ -4943,7 +4950,7 @@ async fn fetch_remote_seasons(
         ("EnableTotalRecordCount".to_string(), "false".to_string()),
         ("IsSpecialSeason".to_string(), "false".to_string()),
     ];
-    get_json_with_retry(pool, source, &endpoint, &query).await
+    get_json_with_retry(pool, source, &path, &query).await
 }
 
 /// 拉取某个 Series 下某个 Season 的所有 Episode（/Shows/{seriesId}/Episodes）
@@ -4954,13 +4961,7 @@ async fn fetch_remote_episodes_for_season(
     series_id: &str,
     season_id: &str,
 ) -> Result<RemoteEpisodesResult, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Shows/{series_id}/Episodes");
-    // PB49 (FX5-Speed)：对齐上游 Emby web 客户端的减负载参数。
-    //  - EnableUserData=false：不带 UserData，节省每集 ~150 字节
-    //  - EnableTotalRecordCount=false：跳过 server 端 COUNT(*) 开销
-    // Fields 保留全集（MediaSources/MediaStreams/People 是 STRM 生成 + person 入库
-    // 真实需要的，不能砍）。
+    let path = format!("/Shows/{series_id}/Episodes");
     let query = vec![
         ("UserId".to_string(), user_id.to_string()),
         ("SeasonId".to_string(), season_id.to_string()),
@@ -4980,7 +4981,7 @@ async fn fetch_remote_episodes_for_season(
         ("EnableUserData".to_string(), "false".to_string()),
         ("EnableTotalRecordCount".to_string(), "false".to_string()),
     ];
-    get_json_with_retry(pool, source, &endpoint, &query).await
+    get_json_with_retry(pool, source, &path, &query).await
 }
 
 /// 拉取某个 Series 下所有 Episode（不限 Season，用于获取全量 Episode ID）
@@ -4991,8 +4992,7 @@ async fn fetch_remote_all_episodes_for_series(
     user_id: &str,
     series_id: &str,
 ) -> Result<RemoteEpisodesResult, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Shows/{series_id}/Episodes");
+    let path = format!("/Shows/{series_id}/Episodes");
     let query = vec![
         ("UserId".to_string(), user_id.to_string()),
         (
@@ -5009,7 +5009,7 @@ async fn fetch_remote_all_episodes_for_series(
                 .to_string(),
         ),
     ];
-    get_json_with_retry(pool, source, &endpoint, &query).await
+    get_json_with_retry(pool, source, &path, &query).await
 }
 
 /// 查询本地 DB 中某个 Series 的 remote counts（逐条查询版，已被 batch_load_series_remote_counts 替代）
@@ -5481,189 +5481,218 @@ async fn send_remote_stream_request(
 ) -> Result<reqwest::Response, AppError> {
     let client = &*crate::http_client::SHARED;
     let empty_headers = HashMap::new();
-    // attempt 0: 正常请求
-    // attempt 1: 清 token 重登后重试
-    // attempt 2: 轮换 DeviceId 后最终重试（仅在 attempt 1 仍 401/403 时触发）
     let max_attempts: u32 = 3;
 
-    for attempt in 0..max_attempts {
-        if attempt == 2 {
-            // 最终兜底：轮换设备标识
-            if !try_rotate_device_identity(pool, source).await {
-                break;
+    let urls = source.server_urls();
+    let active = source.active_url();
+    let mut ordered_urls: Vec<String> = Vec::with_capacity(urls.len().max(1));
+    if let Some(pos) = urls.iter().position(|u| u == &active) {
+        ordered_urls.push(urls[pos].clone());
+        for (i, u) in urls.iter().enumerate() {
+            if i != pos {
+                ordered_urls.push(u.clone());
             }
         }
-        let force_refresh = attempt > 0;
-        match ensure_authenticated(pool, source, force_refresh).await {
-            Ok(_) => {}
-            Err(auth_err) => {
-                if attempt < max_attempts - 1 {
-                    // 登录失败 → 下一轮尝试轮换设备标识
-                    continue;
-                }
-                return Err(auth_err);
-            }
-        }
-        let token = source
-            .access_token
-            .clone()
-            .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
-        let server_url = normalize_server_url(&source.server_url);
-        // PB39：DeviceId 改为读 `source.spoofed_device_id`（首次 create 派生为 32 位 hex），
-        // 不再用 `movie-rust-{uuid}` 这种自爆前缀。空值由 `effective_spoofed_device_id` 回落到
-        // `source.id` 的 32 位 hex，仍然不带项目名前缀。
-        let device_id = source.effective_spoofed_device_id();
+    } else {
+        ordered_urls = if urls.is_empty() { vec![active.clone()] } else { urls };
+    }
 
-        // ── 快速路径：直接构造 Static URL，跳过 PlaybackInfo 往返 ──
-        let static_url = build_remote_static_stream_url(
-            &server_url,
-            remote_item_id,
-            media_source_id,
-            &token,
-            &device_id,
-        );
-        let builder = build_remote_stream_builder(
-            client,
-            &static_url,
-            method,
-            source,
-            &token,
-            request_headers,
-            &empty_headers,
-        );
-        match builder.send().await {
-            Ok(response) => {
-                let status = response.status();
-                if status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT {
-                    return Ok(response);
-                }
-                if matches!(
-                    status,
-                    reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-                ) && attempt < max_attempts - 1
-                {
-                    repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
-                    source.access_token = None;
-                    source.remote_user_id = None;
-                    continue;
-                }
-                // Static URL 返回了非成功状态，回退到 PlaybackInfo 路径
-            }
-            Err(err) => {
-                tracing::debug!(
-                    source_id = %source.id,
-                    remote_item_id = %remote_item_id,
-                    error = %err,
-                    "Static URL 网络错误，回退到 PlaybackInfo 路径"
-                );
-            }
-        }
+    let mut last_network_err: Option<String> = None;
 
-        // ── 回退路径：通过 PlaybackInfo 获取 DirectStreamUrl/TranscodingUrl ──
-        // token 在本轮已获取且未被清除，直接复用
-        let user_id = source
-            .remote_user_id
-            .clone()
-            .ok_or_else(|| AppError::Internal("远端用户ID为空".to_string()))?;
+    'url_loop: for (url_idx, current_url) in ordered_urls.iter().enumerate() {
+        for attempt in 0..max_attempts {
+            if attempt == 2 {
+                if !try_rotate_device_identity(pool, source).await {
+                    break;
+                }
+            }
+            let force_refresh = attempt > 0;
+            match ensure_authenticated(pool, source, force_refresh).await {
+                Ok(_) => {}
+                Err(auth_err) => {
+                    if attempt < max_attempts - 1 {
+                        continue;
+                    }
+                    return Err(auth_err);
+                }
+            }
+            let token = source
+                .access_token
+                .clone()
+                .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
+            let server_url = current_url.as_str();
+            let device_id = source.effective_spoofed_device_id();
 
-        let cache_key = playback_info_cache_key(source.id, remote_item_id, media_source_id);
-        let mut used_cache = false;
-        let playback_info = if let Some(cached) = get_cached_playback_info(&cache_key).await {
-            used_cache = true;
-            cached
-        } else {
-            let fresh = fetch_remote_playback_info(
-                pool,
-                source,
-                user_id.as_str(),
+            let static_url = build_remote_static_stream_url(
+                server_url,
                 remote_item_id,
                 media_source_id,
-                false,
-            )
-            .await?;
-            set_cached_playback_info(cache_key.clone(), fresh.clone()).await;
-            fresh
-        };
-
-        let media_source = select_remote_playback_media_source(
-            playback_info.media_sources.as_slice(),
-            media_source_id,
-        )
-        .ok_or_else(|| AppError::BadRequest("远端 PlaybackInfo 未返回可用媒体源".to_string()))?;
-
-        let endpoint = resolve_playback_info_stream_endpoint(
-            &server_url,
-            &token,
-            remote_item_id,
-            media_source,
-        );
-
-        let builder = build_remote_stream_builder(
-            client,
-            &endpoint,
-            method,
-            source,
-            &token,
-            request_headers,
-            &media_source.required_http_headers,
-        );
-
-        let response = match builder.send().await {
-            Ok(resp) => resp,
-            Err(err) => {
-                if (err.is_timeout() || err.is_connect() || err.is_request())
-                    && attempt < max_attempts - 1
-                {
-                    tracing::warn!(
+                &token,
+                &device_id,
+            );
+            let builder = build_remote_stream_builder(
+                client,
+                &static_url,
+                method,
+                source,
+                &token,
+                request_headers,
+                &empty_headers,
+            );
+            match builder.send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT {
+                        source.active_server_url = Some(current_url.clone());
+                        return Ok(response);
+                    }
+                    if matches!(
+                        status,
+                        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+                    ) && attempt < max_attempts - 1
+                    {
+                        repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
+                        source.access_token = None;
+                        source.remote_user_id = None;
+                        continue;
+                    }
+                }
+                Err(err) => {
+                    let is_network = err.is_timeout() || err.is_connect() || err.is_request();
+                    if is_network && url_idx + 1 < ordered_urls.len() && attempt >= max_attempts - 1 {
+                        tracing::warn!(
+                            source_id = %source.id,
+                            url = %current_url,
+                            error = %err,
+                            "Static URL 网络错误且重试耗尽，切换到下一 URL"
+                        );
+                        last_network_err = Some(format!("{err}"));
+                        continue 'url_loop;
+                    }
+                    tracing::debug!(
                         source_id = %source.id,
                         remote_item_id = %remote_item_id,
-                        attempt = attempt + 1,
                         error = %err,
-                        "PlaybackInfo 流请求网络错误，下一轮重试"
+                        "Static URL 网络错误，回退到 PlaybackInfo 路径"
                     );
+                }
+            }
+
+            let user_id = source
+                .remote_user_id
+                .clone()
+                .ok_or_else(|| AppError::Internal("远端用户ID为空".to_string()))?;
+
+            let cache_key = playback_info_cache_key(source.id, remote_item_id, media_source_id);
+            let mut used_cache = false;
+            let playback_info = if let Some(cached) = get_cached_playback_info(&cache_key).await {
+                used_cache = true;
+                cached
+            } else {
+                let fresh = fetch_remote_playback_info(
+                    pool,
+                    source,
+                    user_id.as_str(),
+                    remote_item_id,
+                    media_source_id,
+                    false,
+                )
+                .await?;
+                set_cached_playback_info(cache_key.clone(), fresh.clone()).await;
+                fresh
+            };
+
+            let media_source = select_remote_playback_media_source(
+                playback_info.media_sources.as_slice(),
+                media_source_id,
+            )
+            .ok_or_else(|| AppError::BadRequest("远端 PlaybackInfo 未返回可用媒体源".to_string()))?;
+
+            let endpoint = resolve_playback_info_stream_endpoint(
+                server_url,
+                &token,
+                remote_item_id,
+                media_source,
+            );
+
+            let builder = build_remote_stream_builder(
+                client,
+                &endpoint,
+                method,
+                source,
+                &token,
+                request_headers,
+                &media_source.required_http_headers,
+            );
+
+            let response = match builder.send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    let is_network = err.is_timeout() || err.is_connect() || err.is_request();
+                    if is_network && attempt < max_attempts - 1 {
+                        tracing::warn!(
+                            source_id = %source.id,
+                            remote_item_id = %remote_item_id,
+                            attempt = attempt + 1,
+                            error = %err,
+                            "PlaybackInfo 流请求网络错误，下一轮重试"
+                        );
+                        let mut cache = PLAYBACK_INFO_CACHE.write().await;
+                        cache.remove(&cache_key);
+                        drop(cache);
+                        continue;
+                    }
+                    if is_network && url_idx + 1 < ordered_urls.len() {
+                        tracing::warn!(
+                            source_id = %source.id,
+                            url = %current_url,
+                            error = %err,
+                            "PlaybackInfo 流请求网络错误且重试耗尽，切换到下一 URL"
+                        );
+                        last_network_err = Some(format!("{err}"));
+                        continue 'url_loop;
+                    }
+                    return Err(AppError::RemoteUnavailable(format!(
+                        "远端流媒体服务不可达: {err}"
+                    )));
+                }
+            };
+            let status = response.status();
+            if matches!(
+                status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            ) && attempt < max_attempts - 1
+            {
+                {
                     let mut cache = PLAYBACK_INFO_CACHE.write().await;
                     cache.remove(&cache_key);
-                    drop(cache);
-                    continue;
                 }
-                return Err(AppError::RemoteUnavailable(format!(
-                    "远端流媒体服务不可达: {err}"
-                )));
+                repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
+                source.access_token = None;
+                source.remote_user_id = None;
+                continue;
             }
-        };
-        let status = response.status();
-        if matches!(
-            status,
-            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-        ) && attempt < max_attempts - 1
-        {
+            if status == reqwest::StatusCode::NOT_FOUND && used_cache && attempt < max_attempts - 1
             {
                 let mut cache = PLAYBACK_INFO_CACHE.write().await;
                 cache.remove(&cache_key);
+                drop(cache);
+                continue;
             }
-            repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
-            source.access_token = None;
-            source.remote_user_id = None;
-            continue;
+            source.active_server_url = Some(current_url.clone());
+            return Ok(response);
         }
-        if status == reqwest::StatusCode::NOT_FOUND && used_cache && attempt < max_attempts - 1 {
-            let mut cache = PLAYBACK_INFO_CACHE.write().await;
-            cache.remove(&cache_key);
-            drop(cache);
-            continue;
-        }
-        return Ok(response);
     }
 
-    // PB35-2：所有重试用完仍未拿到可用流，记 warn 并把错误明确成「远端不可用」。
     tracing::warn!(
         source_id = %source.id,
         remote_item_id = %remote_item_id,
-        "PB35-2：远端 Emby PlaybackInfo 全部 attempt 均失败，已耗尽重试"
+        "PB35-2：远端 Emby PlaybackInfo 全部 URL/attempt 均失败，已耗尽重试"
     );
-    Err(AppError::RemoteUnavailable(
-        "远端 Emby 当前不可用（重登失败或所有 attempt 均超时），请稍后再试".to_string(),
-    ))
+    Err(AppError::RemoteUnavailable(format!(
+        "远端 Emby 当前不可用（所有地址均不可达），请稍后再试。最近错误: {}",
+        last_network_err.unwrap_or_else(|| "重登失败或所有 attempt 均超时".into())
+    )))
 }
 
 fn resolve_playback_info_stream_endpoint(
@@ -5775,234 +5804,251 @@ async fn try_rotate_device_identity(
     }
 }
 
+/// `path` 为相对路径（如 `/Users/{uid}/Items`），函数内部拼接 base URL。
+/// 当前 URL 重试耗尽时自动切换到 `source.server_urls()` 中的下一个地址。
 async fn get_json_with_retry<T: serde::de::DeserializeOwned>(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
-    endpoint: &str,
+    path: &str,
     query: &[(String, String)],
 ) -> Result<T, AppError> {
     let client = &*crate::http_client::SHARED;
-    let mut auth_retry_used = false;
-    let mut device_rotation_used = false;
+    let urls = source.server_urls();
+    if urls.is_empty() {
+        return Err(AppError::BadRequest("远端源未配置服务器地址".into()));
+    }
+
+    let active = source.active_url();
+    let mut ordered_urls: Vec<&str> = Vec::with_capacity(urls.len());
+    if let Some(pos) = urls.iter().position(|u| u == &active) {
+        ordered_urls.push(&urls[pos]);
+        for (i, u) in urls.iter().enumerate() {
+            if i != pos {
+                ordered_urls.push(u);
+            }
+        }
+    } else {
+        for u in &urls {
+            ordered_urls.push(u);
+        }
+    }
+
     let mut last_error: Option<String> = None;
 
-    // 重试循环：max_retries 次「网络/5xx 错误」退避重试 + 最多 1 次 401/403 续登重试
-    // + 最多 1 次设备标识轮换重试（末尾 fallback）。
-    // 这三类重试相互独立计数：
-    //   - auth_retry_used：401/403 触发的「清 token 重登」是否已用掉；
-    //   - device_rotation_used：设备标识轮换是否已用掉（最终兜底）；
-    //   - retry_count：5xx / 网络错误 触发的退避重试次数。
-    let request_interval_ms = source.request_interval_ms;
-    let source_id = source.id;
-    for retry_count in 0..=REMOTE_HTTP_MAX_RETRIES {
-        match ensure_authenticated(pool, source, false).await {
-            Ok(_) => {}
-            Err(auth_err) => {
-                // 登录本身失败（可能设备被封禁），尝试轮换 DeviceId 后重新登录
-                if !device_rotation_used {
-                    let rotated = try_rotate_device_identity(pool, source).await;
-                    if rotated {
-                        device_rotation_used = true;
-                        auth_retry_used = false;
-                        last_error = Some(format!("登录失败触发设备标识轮换: {auth_err}"));
-                        tokio::time::sleep(Duration::from_millis(DEVICE_ROTATION_COOLDOWN_MS)).await;
+    for (url_idx, base_url) in ordered_urls.iter().enumerate() {
+        let endpoint = format!("{}{}", base_url, path);
+        let mut auth_retry_used = false;
+        let mut device_rotation_used = false;
+        let request_interval_ms = source.request_interval_ms;
+        let source_id = source.id;
+
+        for retry_count in 0..=REMOTE_HTTP_MAX_RETRIES {
+            match ensure_authenticated(pool, source, false).await {
+                Ok(_) => {}
+                Err(auth_err) => {
+                    if !device_rotation_used {
+                        let rotated = try_rotate_device_identity(pool, source).await;
+                        if rotated {
+                            device_rotation_used = true;
+                            auth_retry_used = false;
+                            last_error = Some(format!("登录失败触发设备标识轮换: {auth_err}"));
+                            tokio::time::sleep(Duration::from_millis(DEVICE_ROTATION_COOLDOWN_MS))
+                                .await;
+                            continue;
+                        }
+                    }
+                    return Err(auth_err);
+                }
+            }
+            let token = source
+                .access_token
+                .clone()
+                .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
+            let normalized_query = query.to_vec();
+            throttle_remote_request(source_id, request_interval_ms).await;
+            let auth_value = emby_auth_header(source, Some(token.as_str()));
+            let mut request = client
+                .get(&endpoint)
+                .query(&normalized_query)
+                .header(
+                    header::USER_AGENT.as_str(),
+                    source.effective_user_agent(),
+                )
+                .header(header::ACCEPT.as_str(), "application/json")
+                .header("X-Emby-Token", token.as_str())
+                .header("Authorization", &auth_value)
+                .header("X-Emby-Authorization", &auth_value)
+                .timeout(Duration::from_secs(120));
+
+            request = request.query(&[("api_key", token.as_str())]);
+
+            let response = match request.send().await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if is_retryable_network_error(&err) && retry_count < REMOTE_HTTP_MAX_RETRIES {
+                        let delay_ms = REMOTE_HTTP_BACKOFF_BASE_MS << retry_count;
+                        tracing::warn!(
+                            endpoint = %endpoint,
+                            attempt = retry_count + 1,
+                            max_retries = REMOTE_HTTP_MAX_RETRIES,
+                            delay_ms,
+                            is_timeout = err.is_timeout(),
+                            is_connect = err.is_connect(),
+                            is_request = err.is_request(),
+                            is_body = err.is_body(),
+                            error = %err,
+                            error_debug = ?err,
+                            "远端 Emby 网络错误，退避后重试"
+                        );
+                        last_error = Some(format!("{err:#}"));
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                         continue;
                     }
-                }
-                return Err(auth_err);
-            }
-        }
-        let token = source
-            .access_token
-            .clone()
-            .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
-        let normalized_query = query.to_vec();
-        // 拉取速率节流：实际发出请求前先按 `source.request_interval_ms` 等候足够时间，
-        // 这样无论调用点是 fetch_remote_items_page_for_view（顺序循环）还是后续可能
-        // 引入的并发路径，都会在网关层（per-source mutex）形成「全局最低间隔」屏障。
-        throttle_remote_request(source_id, request_interval_ms).await;
-        let auth_value = emby_auth_header(source, Some(token.as_str()));
-        let mut request = client
-            .get(endpoint)
-            .query(&normalized_query)
-            .header(
-                header::USER_AGENT.as_str(),
-                source.effective_user_agent(),
-            )
-            .header(header::ACCEPT.as_str(), "application/json")
-            .header("X-Emby-Token", token.as_str())
-            .header("Authorization", &auth_value)
-            .header("X-Emby-Authorization", &auth_value)
-            // 远端大库（30 万+ 条）单页可达 1000 条 + 全 Fields，单次响应 body 可达数 MB；
-            // 全局 SHARED 默认 30s 总超时偏紧，body 读到一半被超时砍断会抛
-            // `error decoding response body`，本路径单独放宽到 120s（per-request override，
-            // 不影响 TMDB / 图片 / 反代直链等其它复用 SHARED 的链路）。
-            .timeout(Duration::from_secs(120));
-
-        request = request.query(&[("api_key", token.as_str())]);
-
-        let response = match request.send().await {
-            Ok(resp) => resp,
-            Err(err) => {
-                if is_retryable_network_error(&err) && retry_count < REMOTE_HTTP_MAX_RETRIES {
-                    let delay_ms = REMOTE_HTTP_BACKOFF_BASE_MS << retry_count;
-                    tracing::warn!(
-                        endpoint,
-                        attempt = retry_count + 1,
-                        max_retries = REMOTE_HTTP_MAX_RETRIES,
-                        delay_ms,
-                        is_timeout = err.is_timeout(),
-                        is_connect = err.is_connect(),
-                        is_request = err.is_request(),
-                        is_body = err.is_body(),
-                        error = %err,
+                    if is_retryable_network_error(&err) && url_idx + 1 < ordered_urls.len() {
+                        tracing::warn!(
+                            base_url = %base_url,
+                            error = %err,
+                            "当前 URL 网络重试耗尽，切换到下一 URL"
+                        );
+                        last_error = Some(format!("{err:#}"));
+                        break; // break inner retry loop → try next URL
+                    }
+                    if !device_rotation_used {
+                        let rotated = try_rotate_device_identity(pool, source).await;
+                        if rotated {
+                            device_rotation_used = true;
+                            auth_retry_used = false;
+                            last_error =
+                                Some(format!("网络错误触发设备标识轮换: {err:#}"));
+                            tokio::time::sleep(Duration::from_millis(
+                                DEVICE_ROTATION_COOLDOWN_MS,
+                            ))
+                            .await;
+                            continue;
+                        }
+                    }
+                    tracing::error!(
+                        endpoint = %endpoint,
                         error_debug = ?err,
-                        "远端 Emby 网络错误，退避后重试"
+                        "远端 Emby 请求失败（不可重试或重试耗尽）"
                     );
-                    last_error = Some(format!("{err:#}"));
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    return Err(err.into());
+                }
+            };
+
+            let status = response.status();
+
+            if matches!(
+                status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            ) {
+                if !auth_retry_used {
+                    auth_retry_used = true;
+                    repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
+                    source.access_token = None;
+                    source.remote_user_id = None;
+                    invalidate_playback_info_cache_for_source(source.id).await;
                     continue;
                 }
-                // 网络重试耗尽 → 尝试设备标识轮换作为最终兜底
                 if !device_rotation_used {
                     let rotated = try_rotate_device_identity(pool, source).await;
                     if rotated {
                         device_rotation_used = true;
                         auth_retry_used = false;
-                        last_error = Some(format!("网络错误触发设备标识轮换: {err:#}"));
-                        tokio::time::sleep(Duration::from_millis(DEVICE_ROTATION_COOLDOWN_MS)).await;
+                        last_error =
+                            Some(format!("持续 {} 触发设备标识轮换", status.as_u16()));
+                        tokio::time::sleep(Duration::from_millis(DEVICE_ROTATION_COOLDOWN_MS))
+                            .await;
                         continue;
                     }
                 }
-                tracing::error!(
-                    endpoint,
-                    error_debug = ?err,
-                    "远端 Emby 请求失败（不可重试或重试耗尽）"
-                );
-                return Err(err.into());
             }
-        };
 
-        let status = response.status();
-
-        // 401/403：清 token + 重登，仅允许一次（避免凭证错误时无限循环）。
-        if matches!(
-            status,
-            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-        ) {
-            if !auth_retry_used {
-                auth_retry_used = true;
-                repository::clear_remote_emby_source_auth_state(pool, source.id).await?;
-                source.access_token = None;
-                source.remote_user_id = None;
-                // PB22：重登 + 清 PlaybackInfo 缓存（与 PB15 一致），下一轮 ensure_authenticated 会重新拿 token。
-                invalidate_playback_info_cache_for_source(source.id).await;
+            if is_retryable_status(status) && retry_count < REMOTE_HTTP_MAX_RETRIES {
+                let body_preview = response
+                    .text()
+                    .await
+                    .unwrap_or_default()
+                    .chars()
+                    .take(200)
+                    .collect::<String>();
+                let delay_ms = REMOTE_HTTP_BACKOFF_BASE_MS << retry_count;
+                tracing::warn!(
+                    endpoint = %endpoint,
+                    status = %status,
+                    attempt = retry_count + 1,
+                    max_retries = REMOTE_HTTP_MAX_RETRIES,
+                    delay_ms,
+                    body_preview = %body_preview,
+                    "远端 Emby 上游错误（5xx/429/408），退避后重试"
+                );
+                last_error = Some(format!("HTTP {} {}", status.as_u16(), body_preview));
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 continue;
             }
-            // auth 重试已用但仍 401/403 → 设备可能被远端封禁，尝试轮换 DeviceId
-            if !device_rotation_used {
-                let rotated = try_rotate_device_identity(pool, source).await;
-                if rotated {
-                    device_rotation_used = true;
-                    auth_retry_used = false;
-                    last_error = Some(format!("持续 {} 触发设备标识轮换", status.as_u16()));
-                    tokio::time::sleep(Duration::from_millis(DEVICE_ROTATION_COOLDOWN_MS)).await;
-                    continue;
-                }
-            }
-        }
 
-        // 5xx / 429 / 408：退避后重试。
-        if is_retryable_status(status) && retry_count < REMOTE_HTTP_MAX_RETRIES {
-            let body_preview = response
-                .text()
-                .await
-                .unwrap_or_default()
-                .chars()
-                .take(200)
-                .collect::<String>();
-            let delay_ms = REMOTE_HTTP_BACKOFF_BASE_MS << retry_count;
-            tracing::warn!(
-                endpoint,
-                status = %status,
-                attempt = retry_count + 1,
-                max_retries = REMOTE_HTTP_MAX_RETRIES,
-                delay_ms,
-                body_preview = %body_preview,
-                "远端 Emby 上游错误（5xx/429/408），退避后重试"
-            );
-            last_error = Some(format!("HTTP {} {}", status.as_u16(), body_preview));
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            continue;
-        }
-
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Internal(format!(
-                "远端 Emby 请求失败: {} {}",
-                status.as_u16(),
-                body
-            )));
-        }
-
-        // status=200 之后的 body 读取阶段也可能瞬时失败：
-        //   - 上游 / 反代 / NAT 中途掐断 keep-alive 长连接 → hyper IncompleteMessage
-        //   - per-request `.timeout(120s)` 烧到 body 读阶段触发
-        //   - 解压 / chunked 流自身错误
-        // 这些在 reqwest 里都标记为 `is_body() == true`（Display 字面量
-        // 「error decoding response body」），与 send 阶段的网络错误同属可重试类。
-        // 故意放进同一个 `for retry_count` 循环里复用 `is_retryable_network_error`
-        // + 退避策略，保证「拉了 11% 撞一次连接重置 → 整个同步任务直接 Failed」
-        // 这条 1605s 大库灾难路径（status=200 + body decode err）也会按
-        // 1s/2s/4s 退避重试，不再一击毙命。
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("-")
-            .to_string();
-        let bytes = match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                if is_retryable_network_error(&err) && retry_count < REMOTE_HTTP_MAX_RETRIES {
-                    let delay_ms = REMOTE_HTTP_BACKOFF_BASE_MS << retry_count;
-                    tracing::warn!(
-                        endpoint,
-                        status = %status,
-                        attempt = retry_count + 1,
-                        max_retries = REMOTE_HTTP_MAX_RETRIES,
-                        delay_ms,
-                        content_type = %content_type,
-                        error = %err,
-                        error_debug = ?err,
-                        "远端 Emby 响应 body 读取失败，退避后重试"
-                    );
-                    last_error =
-                        Some(format!("body read err (status={}): {err:#}", status.as_u16()));
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    continue;
-                }
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
                 return Err(AppError::Internal(format!(
-                    "远端响应读取失败: endpoint={endpoint}, status={}, content_type={content_type}, error={err}",
-                    status.as_u16()
+                    "远端 Emby 请求失败: {} {}",
+                    status.as_u16(),
+                    body
                 )));
             }
-        };
-        return serde_json::from_slice::<T>(bytes.as_ref()).map_err(|error| {
-            let preview = String::from_utf8_lossy(bytes.as_ref())
-                .chars()
-                .take(280)
-                .collect::<String>();
-            AppError::Internal(format!(
-                "远端JSON解析失败: endpoint={endpoint}, status={}, content_type={content_type}, error={error}, body预览={preview}",
-                status.as_u16()
-            ))
-        });
+
+            let content_type = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("-")
+                .to_string();
+            let bytes = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    if is_retryable_network_error(&err) && retry_count < REMOTE_HTTP_MAX_RETRIES {
+                        let delay_ms = REMOTE_HTTP_BACKOFF_BASE_MS << retry_count;
+                        tracing::warn!(
+                            endpoint = %endpoint,
+                            status = %status,
+                            attempt = retry_count + 1,
+                            max_retries = REMOTE_HTTP_MAX_RETRIES,
+                            delay_ms,
+                            content_type = %content_type,
+                            error = %err,
+                            error_debug = ?err,
+                            "远端 Emby 响应 body 读取失败，退避后重试"
+                        );
+                        last_error = Some(format!(
+                            "body read err (status={}): {err:#}",
+                            status.as_u16()
+                        ));
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        continue;
+                    }
+                    return Err(AppError::Internal(format!(
+                        "远端响应读取失败: endpoint={endpoint}, status={}, content_type={content_type}, error={err}",
+                        status.as_u16()
+                    )));
+                }
+            };
+            // 成功时记住该 URL
+            source.active_server_url = Some(base_url.to_string());
+            return serde_json::from_slice::<T>(bytes.as_ref()).map_err(|error| {
+                let preview = String::from_utf8_lossy(bytes.as_ref())
+                    .chars()
+                    .take(280)
+                    .collect::<String>();
+                AppError::Internal(format!(
+                    "远端JSON解析失败: endpoint={endpoint}, status={}, content_type={content_type}, error={error}, body预览={preview}",
+                    status.as_u16()
+                ))
+            });
+        }
     }
 
     Err(AppError::Internal(format!(
-        "远端 Emby 请求多次重试仍失败 endpoint={} 最近错误: {}",
-        endpoint,
+        "远端 Emby 请求多次重试仍失败 path={} 最近错误: {}",
+        path,
         last_error.unwrap_or_else(|| "未记录".to_string())
     )))
 }
@@ -6044,8 +6090,7 @@ async fn fetch_remote_playback_info(
     media_source_id: Option<&str>,
     is_playback: bool,
 ) -> Result<RemotePlaybackInfo, AppError> {
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Items/{remote_item_id}/PlaybackInfo");
+    let path = format!("/Items/{remote_item_id}/PlaybackInfo");
     let mut query = vec![
         ("UserId".to_string(), user_id.to_string()),
         ("StartTimeTicks".to_string(), "0".to_string()),
@@ -6061,7 +6106,7 @@ async fn fetch_remote_playback_info(
             query.push(("MediaSourceId".to_string(), value.trim().to_string()));
         }
     }
-    get_json_with_retry(pool, source, &endpoint, &query).await
+    get_json_with_retry(pool, source, &path, &query).await
 }
 
 fn select_remote_playback_media_source<'a>(
@@ -6404,7 +6449,7 @@ async fn ensure_authenticated(
     }
 
     match login_remote(source).await {
-        Ok(login) => {
+        Ok((login, active_url)) => {
             let token_changed =
                 source.access_token.as_deref() != Some(login.access_token.as_str());
             repository::update_remote_emby_source_auth_state(
@@ -6416,6 +6461,7 @@ async fn ensure_authenticated(
             .await?;
             source.remote_user_id = Some(login.user.id.clone());
             source.access_token = Some(login.access_token.clone());
+            source.active_server_url = Some(active_url);
             if token_changed {
                 invalidate_playback_info_cache_for_source(source.id).await;
             }
@@ -6435,14 +6481,16 @@ async fn ensure_authenticated(
     }
 }
 
-async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse, AppError> {
+/// 对单个 URL 尝试登录，内部含指数退避重试。
+/// 返回 `Ok((response, url))` 表示该 URL 登录成功。
+async fn try_login_single_url(
+    source: &DbRemoteEmbySource,
+    base_url: &str,
+) -> Result<(RemoteLoginResponse, String), AppError> {
     const LOGIN_MAX_RETRIES: u32 = 3;
     const LOGIN_BACKOFF_BASE_MS: u64 = 1500;
 
-    let endpoint = format!(
-        "{}/Users/AuthenticateByName",
-        normalize_server_url(&source.server_url)
-    );
+    let endpoint = format!("{}/Users/AuthenticateByName", base_url);
     let auth_value = emby_auth_header(source, None);
     let ua = source.effective_user_agent();
 
@@ -6482,7 +6530,9 @@ async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse
                         body
                     )));
                 }
-                return parse_remote_json_response(resp, endpoint.as_str()).await;
+                let login_resp: RemoteLoginResponse =
+                    parse_remote_json_response(resp, endpoint.as_str()).await?;
+                return Ok((login_resp, base_url.to_string()));
             }
             Err(err) => {
                 let is_network = err.is_timeout() || err.is_connect() || err.is_request();
@@ -6501,20 +6551,46 @@ async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     last_err = Some(AppError::RemoteUnavailable(format!(
                         "远端服务器 {} 不可达: {err}",
-                        source.server_url
+                        base_url
                     )));
                     continue;
                 }
                 return Err(AppError::RemoteUnavailable(format!(
                     "远端服务器 {} 登录失败（已重试 {} 次）: {err}",
-                    source.server_url, attempt
+                    base_url, attempt
                 )));
             }
         }
     }
 
     Err(last_err.unwrap_or_else(|| {
-        AppError::RemoteUnavailable(format!("远端服务器 {} 不可达", source.server_url))
+        AppError::RemoteUnavailable(format!("远端服务器 {} 不可达", base_url))
+    }))
+}
+
+/// 遍历所有候选 URL 尝试登录，返回 `(login_response, 成功的 base_url)`。
+async fn login_remote(source: &DbRemoteEmbySource) -> Result<(RemoteLoginResponse, String), AppError> {
+    let urls = source.server_urls();
+    if urls.is_empty() {
+        return Err(AppError::BadRequest("远端源未配置服务器地址".into()));
+    }
+    let mut last_err: Option<AppError> = None;
+    for url in &urls {
+        match try_login_single_url(source, url).await {
+            Ok(result) => {
+                tracing::info!(url = %url, "远端 Emby 登录成功");
+                return Ok(result);
+            }
+            Err(err) if matches!(&err, AppError::RemoteUnavailable(_)) => {
+                tracing::warn!(url = %url, error = %err, "该 URL 不可达，尝试下一个");
+                last_err = Some(err);
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        AppError::RemoteUnavailable("所有远端地址均不可达".into())
     }))
 }
 
@@ -7848,9 +7924,8 @@ pub async fn refresh_single_remote_item(
 
     // 拉远端单条 BaseItem。Fields 列表与 `fetch_remote_items_page_for_view` 保持一致，
     // 这样 process_one_remote_sync_item 拿到的字段集和"批量同步"路径完全等价。
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!(
-        "{server_url}/Users/{user_id}/Items/{remote_id}",
+    let path = format!(
+        "/Users/{user_id}/Items/{remote_id}",
         user_id = user_id,
         remote_id = marker.remote_item_id,
     );
@@ -7867,7 +7942,7 @@ pub async fn refresh_single_remote_item(
             .to_string(),
     )];
     let base_item: RemoteBaseItem =
-        get_json_with_retry(&state.pool, &mut source, &endpoint, &query).await?;
+        get_json_with_retry(&state.pool, &mut source, &path, &query).await?;
 
     // 上下文状态：单条刷新只处理一个条目，所有共享映射都用空集合 + 一次性 atomics。
     // 注意 `local_synced_ids` 必须留空，否则会触发"已入库 fast-skip"绕过本次刷新。
@@ -8216,9 +8291,7 @@ pub async fn diagnostic_fetch_sample_items(
         .await?
         .ok_or_else(|| AppError::NotFound("远端 Emby 源不存在".to_string()))?;
     let user_id = ensure_authenticated(pool, &mut source, false).await?;
-    let server_url = normalize_server_url(&source.server_url);
-    let endpoint = format!("{server_url}/Users/{user_id}/Items");
-    // 默认请求所有可能影响 sync 的字段；用户也可显式覆盖
+    let path = format!("/Users/{user_id}/Items");
     let default_fields = "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,\
         OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,\
         ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,\
@@ -8242,5 +8315,5 @@ pub async fn diagnostic_fetch_sample_items(
     if let Some(pid) = parent_id.filter(|p| !p.trim().is_empty()) {
         query.push(("ParentId".to_string(), pid.trim().to_string()));
     }
-    get_json_with_retry::<serde_json::Value>(pool, &mut source, &endpoint, &query).await
+    get_json_with_retry::<serde_json::Value>(pool, &mut source, &path, &query).await
 }

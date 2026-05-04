@@ -5411,3 +5411,57 @@ PB49 FX5 解决的是"同步主循环中 HTTP 请求静默挂起"问题（`tokio
 `cargo check` 通过（0 errors，55 pre-existing warnings unchanged）。
 
 ---
+
+## PB50：远端 Emby 源多域名故障转移（Multi-URL Failover）
+
+**日期**：2026-05-05
+
+### 问题背景
+
+用户反馈：远端 Emby 服务器因网络波动（尤其是 CDN 域名不稳定）频繁触发"不可达"错误。本地播放器从未遇到此问题，因为用户可以手动切换域名。
+
+**需求**：允许单个远端 Emby 源配置多个服务器地址（域名/IP），当主地址不可达时自动切换到备选地址。
+
+### 实现方案
+
+**数据层**：无 schema 变更。`server_url` 字段保持 `TEXT`，多个地址用换行符或逗号分隔存储。
+
+**核心变更**：
+
+| 文件 | 变更 |
+|------|------|
+| `backend/src/models.rs` | `DbRemoteEmbySource` 添加 `server_urls()` 方法（解析多地址列表）、`active_url()` 方法（获取当前活跃 URL）、`active_server_url: Option<String>` 运行时字段（`#[sqlx(skip)]`） |
+| `backend/src/remote_emby.rs` — `login_remote` | 重构为 `try_login_single_url` + 外层遍历所有候选 URL；登录成功时记住活跃 URL |
+| `backend/src/remote_emby.rs` — `get_json_with_retry` | 改为接收相对路径（`/Users/{id}/Items`），内部拼接 base URL；当前 URL 网络重试耗尽自动切换下一 URL |
+| `backend/src/remote_emby.rs` — `send_remote_stream_request` | 外层添加 URL 循环；Static URL 和 PlaybackInfo 流请求失败后切换到备选 URL |
+| `backend/src/remote_emby.rs` — `preview_remote_views` | 遍历所有输入 URL 尝试登录连接 |
+| `backend/src/remote_emby.rs` — 所有 `normalize_server_url(&source.server_url)` | 替换为 `source.active_url()`（13 处） |
+| `frontend/.../RemoteEmbySettings.vue` | "远端地址" `UInput` → `UTextarea`（多行输入）；列表显示主 URL + "(+N 备用)" 标记 |
+
+### 故障转移流程
+
+```
+用户配置:
+  http://aaa.204cloud.com
+  http://bbb.204cloud.com
+  http://192.168.1.100:8096
+
+请求流程:
+  1. 尝试 active_url (上次成功的)
+  2. 该 URL 重试耗尽 → 标记为不可达
+  3. 切换到下一个 URL 继续
+  4. 成功后更新 active_server_url 缓存
+```
+
+### 兼容性
+
+- 现有单 URL 配置完全兼容（`server_urls()` 返回单元素数组）
+- 数据库无需迁移
+- API 契约不变（`ServerUrl` 字段从传单个变为传多个换行/逗号分隔）
+- 前端旧数据（单个 URL）自动兼容（textarea 中显示为一行）
+
+### 编译验证
+
+`cargo check` 通过（0 errors）；`vue-tsc --noEmit` 通过。
+
+---
