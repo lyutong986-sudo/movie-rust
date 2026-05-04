@@ -12866,6 +12866,7 @@ fn effective_container_from_target(item: &DbMediaItem, strm_target: Option<&str>
             local_path
                 .extension()
                 .map(|ext| ext.to_string_lossy().to_string())
+                .filter(|ext| !ext.eq_ignore_ascii_case("strm"))
         })
         .unwrap_or_else(|| "mp4".to_string());
     first_container(&raw)
@@ -12881,7 +12882,7 @@ pub fn first_container(value: &str) -> String {
         .unwrap_or("mp4")
         .trim()
         .trim_start_matches('.');
-    if v.is_empty() {
+    if v.is_empty() || v.eq_ignore_ascii_case("strm") {
         "mp4".to_string()
     } else {
         v.to_string()
