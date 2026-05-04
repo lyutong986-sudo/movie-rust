@@ -1791,6 +1791,45 @@ async fn analyze_imported_media(
         return Ok(());
     }
 
+    // 远端 Emby 同步过来的条目元数据已经在 `process_one_remote_sync_item` 阶段
+    // 由 `synthesize_analysis_from_base_item` 从分页响应里完整合成（width/height/codec
+    // /runtime/MediaStreams 全套），扫描端再跑一次 ffprobe 不会拿到新信息——但会以
+    // **裸 ffprobe（Lavf UA、没有 X-Emby-Token / Authorization 伪装头、没有源里的
+    // spoofed_user_agent）** 直接对远端 `/Videos/{id}/stream` 发请求。一次同步下来
+    // 几千上万条 STRM 同时被扫描，远端服务器很容易把这种"同 api_key、外星 UA、
+    // 短时密集 GET"的流量识别为播放滥用并封号。
+    //
+    // 与 routes/items.rs::playback_info 已有的 `remote_marker_for_db_item` 护栏对齐，
+    // 在扫描入口先检查一次：远端 Emby 条目直接跳过 ffprobe 探测。
+    if naming::is_strm(file) {
+        match repository::get_media_item(pool, item_id).await {
+            Ok(Some(item)) => {
+                if crate::remote_emby::remote_marker_for_db_item(&item).is_some() {
+                    tracing::debug!(
+                        item_id = %item_id,
+                        file = %file.display(),
+                        "扫描跳过远端 Emby 条目的远端 ffprobe（元数据已由同步链路写入，避免触发远端封禁）"
+                    );
+                    return Ok(());
+                }
+            }
+            Ok(None) => {
+                // 条目刚被删了：跳过分析（继续也没意义，UPDATE 会 0 行）
+                return Ok(());
+            }
+            Err(error) => {
+                // DB 查询失败 → 保守起见直接跳过，避免把 ffprobe 打到远端
+                tracing::warn!(
+                    item_id = %item_id,
+                    file = %file.display(),
+                    error = %error,
+                    "扫描查 media_items 失败，跳过 STRM 远端探测以避免封号风险"
+                );
+                return Ok(());
+            }
+        }
+    }
+
     let analysis = if naming::is_strm(file) {
         let _permit = runtime.acquire(WorkLimiterKind::MediaAnalysis).await;
         match tokio::fs::read_to_string(file).await {
@@ -3296,6 +3335,34 @@ async fn extract_chapter_images(
 ) {
     if !file.exists() {
         return;
+    }
+
+    // 远端 Emby 条目：每章一次 `ffmpeg -ss N -i <remote URL> -frames:v 1` 会逐
+    // chapter 对远端发起一次"播放式拖动 GET"，单条剧集就可能 20+ 次远端 seek，
+    // 比 analyze_imported_media 的 ffprobe 触发风控更严重。统一在入口拦截。
+    if naming::is_strm(file) {
+        match repository::get_media_item(pool, item_id).await {
+            Ok(Some(item)) => {
+                if crate::remote_emby::remote_marker_for_db_item(&item).is_some() {
+                    tracing::debug!(
+                        item_id = %item_id,
+                        file = %file.display(),
+                        "扫描跳过远端 Emby 条目的章节缩略图 ffmpeg（避免触发远端封禁）"
+                    );
+                    return;
+                }
+            }
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    item_id = %item_id,
+                    file = %file.display(),
+                    error = %error,
+                    "扫描查 media_items 失败，跳过 STRM 章节缩略图提取以避免封号风险"
+                );
+                return;
+            }
+        }
     }
 
     enum FfmpegInput {

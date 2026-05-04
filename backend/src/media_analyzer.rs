@@ -86,17 +86,55 @@ pub async fn analyze_media_file(path: &Path) -> Result<MediaAnalysisResult, Medi
         ));
     }
 
-    let probe_result = run_ffprobe(path.as_os_str()).await?;
+    let probe_result = run_ffprobe_local(path.as_os_str()).await?;
     parse_probe_result(&probe_result)
 }
 
-/// 分析远程媒体URL
+/// 远端 ffprobe 探测时携带的伪装信息。
+///
+/// 不传时按裸 ffprobe 行为发起请求，UA 默认为 `Lavf/<ver>`。这种"匿名"指纹在
+/// 大批量针对同一 Emby 服务器的探测中很容易被风控识别为播放滥用、触发封号。
+/// 涉及远端 Emby 源时应通过 [`analyze_remote_media_with_options`] 注入和正常
+/// 播放链路一致的 `User-Agent` + `X-Emby-Token` / `Authorization` 头。
+#[derive(Debug, Default, Clone)]
+pub struct RemoteProbeOptions {
+    /// 替换默认 ffprobe 用户代理，例如 `Infuse-Direct/8.2.4`。
+    pub user_agent: Option<String>,
+    /// 随请求一起发送的 HTTP 头（按 ffmpeg `-headers` 语义拼接，每条以 `\r\n` 分隔）。
+    /// 典型用法：`[("X-Emby-Token", token), ("Authorization", auth_header_value)]`。
+    pub headers: Vec<(String, String)>,
+}
+
+impl RemoteProbeOptions {
+    pub fn is_empty(&self) -> bool {
+        self.user_agent.is_none() && self.headers.is_empty()
+    }
+}
+
+/// 分析远程媒体 URL（裸 ffprobe，不带任何伪装头）。
+///
+/// 仅推荐对**非远端 Emby 源**的 STRM 使用。远端 Emby 条目的元数据已在同步阶段
+/// 由分页响应里 `Fields=MediaSources,MediaStreams` 合成完毕，扫描端不需要、也
+/// 不应该再走这条裸 ffprobe 路径，否则极易触发远端封号——参见
+/// `scanner::analyze_imported_media` 里的护栏。
 pub async fn analyze_remote_media(url: &str) -> Result<MediaAnalysisResult, MediaAnalyzerError> {
-    let probe_result = run_ffprobe(url).await?;
+    analyze_remote_media_with_options(url, &RemoteProbeOptions::default()).await
+}
+
+/// 带伪装头的远程 ffprobe 探测。当 `opts.user_agent` 与 `opts.headers` 与正常
+/// 播放链路一致时，远端服务器看到的请求指纹就跟客户端拉流是同一台"设备"，
+/// 不会被风控判作异常。
+pub async fn analyze_remote_media_with_options(
+    url: &str,
+    opts: &RemoteProbeOptions,
+) -> Result<MediaAnalysisResult, MediaAnalyzerError> {
+    let probe_result = run_ffprobe_remote(url, opts).await?;
     parse_probe_result(&probe_result)
 }
 
-async fn run_ffprobe(target: impl AsRef<OsStr>) -> Result<serde_json::Value, MediaAnalyzerError> {
+async fn run_ffprobe_local(
+    target: impl AsRef<OsStr>,
+) -> Result<serde_json::Value, MediaAnalyzerError> {
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -108,6 +146,61 @@ async fn run_ffprobe(target: impl AsRef<OsStr>) -> Result<serde_json::Value, Med
             "-show_chapters",
         ])
         .arg(target)
+        .output()
+        .await
+        .map_err(|e| MediaAnalyzerError::FfprobeError(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(MediaAnalyzerError::FfprobeError(format!(
+            "ffprobe 失败: {}",
+            stderr
+        )));
+    }
+
+    let json_output = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&json_output).map_err(|e| MediaAnalyzerError::ParseError(e.to_string()))
+}
+
+async fn run_ffprobe_remote(
+    url: &str,
+    opts: &RemoteProbeOptions,
+) -> Result<serde_json::Value, MediaAnalyzerError> {
+    let mut cmd = Command::new("ffprobe");
+    cmd.args([
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        "-show_chapters",
+    ]);
+
+    // -user_agent / -headers 都是 libavformat http demuxer 的输入选项，必须放在 -i 前。
+    if let Some(ua) = opts.user_agent.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        cmd.arg("-user_agent").arg(ua);
+    }
+    if !opts.headers.is_empty() {
+        let mut joined = String::new();
+        for (key, value) in &opts.headers {
+            let key_trim = key.trim();
+            let value_trim = value.trim();
+            if key_trim.is_empty() || value_trim.is_empty() {
+                continue;
+            }
+            joined.push_str(key_trim);
+            joined.push_str(": ");
+            joined.push_str(value_trim);
+            joined.push_str("\r\n");
+        }
+        if !joined.is_empty() {
+            cmd.arg("-headers").arg(joined);
+        }
+    }
+    cmd.arg(url);
+
+    let output = cmd
         .output()
         .await
         .map_err(|e| MediaAnalyzerError::FfprobeError(e.to_string()))?;
