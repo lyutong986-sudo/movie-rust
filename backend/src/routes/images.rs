@@ -1163,10 +1163,24 @@ async fn serve_person_image(
     request: Request<Body>,
 ) -> Result<Response, AppError> {
     let image_query = parse_item_image_query(request.uri());
-    let path = resolve_person_image_path(&state, &name, &image_type)
-        .await?
-        .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
-    serve_image(Some(&state), &path, request, &image_query).await
+    let method = request.method().clone();
+    let if_none_match = request
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    match resolve_person_image_path(&state, &name, &image_type).await {
+        Ok(Some(path)) => {
+            let result = serve_image(Some(&state), &path, request, &image_query).await;
+            if result.is_ok() {
+                return result;
+            }
+            placeholder_image_response(&state, &image_type, &image_query, method, if_none_match).await
+        }
+        _ => {
+            placeholder_image_response(&state, &image_type, &image_query, method, if_none_match).await
+        }
+    }
 }
 
 async fn upload_item_image_impl(
@@ -1354,10 +1368,19 @@ async fn serve_item_image(
 
     let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
         if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
-            if let Some(path) = resolve_person_image_path(&state, &person.id, &image_type).await? {
-                return serve_image(Some(&state), &path, request, &image_query).await;
+            let method = request.method().clone();
+            let if_none_match = request
+                .headers()
+                .get(header::IF_NONE_MATCH)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            if let Ok(Some(path)) = resolve_person_image_path(&state, &person.id, &image_type).await {
+                let result = serve_image(Some(&state), &path, request, &image_query).await;
+                if result.is_ok() {
+                    return result;
+                }
             }
-            return Err(AppError::NotFound("图片不存在".to_string()));
+            return placeholder_image_response(&state, &image_type, &image_query, method, if_none_match).await;
         }
         if let Some(library) = repository::get_library(&state.pool, item_id).await? {
             let normalized = normalized_item_image_type(&image_type);
@@ -1466,7 +1489,8 @@ async fn serve_item_image(
             remote_source.as_ref(),
         )
         .await;
-        if let Err(AppError::NotFound(_)) = &result {
+        let should_fallback = matches!(&result, Err(AppError::NotFound(_)) | Err(AppError::Internal(_)));
+        if should_fallback {
             if let Some(fallback_url) =
                 find_tmdb_image_fallback(&state.pool, &item, &normalized, state.config.tmdb_api_key.as_deref()).await
             {
@@ -1592,13 +1616,39 @@ fn spawn_remote_image_persist(
                 );
             }
             Err(e) => {
+                let is_not_found = matches!(&e, AppError::NotFound(_));
                 tracing::warn!(
                     item_id = %item.id,
                     image_type = %image_type,
                     backdrop_index = backdrop_index.unwrap_or(-1),
                     error = %e,
-                    "远端 Emby 图片落盘失败，下次请求仍会走远端"
+                    clear_dead_url = is_not_found,
+                    "远端 Emby 图片落盘失败"
                 );
+                if is_not_found {
+                    if let Err(clear_err) = repository::update_media_item_image_path(
+                        &state.pool,
+                        item.id,
+                        &image_type,
+                        None,
+                        backdrop_index,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            item_id = %item.id,
+                            image_type = %image_type,
+                            error = %clear_err,
+                            "清除死链 image_path 失败"
+                        );
+                    } else {
+                        tracing::info!(
+                            item_id = %item.id,
+                            image_type = %image_type,
+                            "已清除远端 404 死链，下次请求将走 TMDB/占位图回退"
+                        );
+                    }
+                }
             }
         }
         crate::refresh_queue::end_image_persist(item.id, &image_type, backdrop_index);
@@ -2287,11 +2337,18 @@ async fn resolve_person_image_path(
     .ok_or_else(|| AppError::NotFound("人物不存在".to_string()))?;
 
     let normalized = normalized_item_image_type(image_type);
-    let response = SHARED_HTTP_CLIENT
-        .get(&path)
-        .send()
-        .await
-        .map_err(|error| AppError::Internal(format!("下载人物图片失败: {error}")))?;
+    let response = match SHARED_HTTP_CLIENT.get(&path).send().await {
+        Ok(resp) => resp,
+        Err(error) => {
+            tracing::warn!(
+                person_id = %person.id,
+                image_type = %image_type,
+                error = %error,
+                "下载人物图片失败，回退占位图"
+            );
+            return Ok(None);
+        }
+    };
     if !response.status().is_success() {
         let upstream_status = response.status();
         tracing::debug!(
@@ -2299,9 +2356,19 @@ async fn resolve_person_image_path(
             image_type = %image_type,
             upstream_status = %upstream_status,
             url = %path,
-            "上游人物图片返回非 2xx 状态，按 NotFound 处理"
+            "上游人物图片返回非 2xx 状态，清除死链并回退占位图"
         );
-        return Err(AppError::NotFound("远程人物图片不存在".to_string()));
+        let person_uuid = emby_id_to_uuid(&person.id).ok();
+        if let Some(pid) = person_uuid {
+            let _ = repository::update_person_image_path(
+                &state.pool,
+                pid,
+                &normalized,
+                None,
+            )
+            .await;
+        }
+        return Ok(None);
     }
 
     let content_type = response
