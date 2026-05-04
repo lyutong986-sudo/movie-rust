@@ -9933,8 +9933,16 @@ pub fn session_to_dto(session: &AuthSessionRow, server_id: Uuid) -> SessionInfoD
 }
 
 /// Batch library statistics: one query for all libraries
+///
+/// 字段语义按 EmbySDK CollectionFolder 对齐：
+/// - `child_count`：库内**顶层**条目数（Series/Movie/Folder/BoxSet 之和，
+///   不含 Season/Episode 这类嵌套子节点）。Sidebar 上显示的就是这个数字。
+/// - `recursive_item_count`：库内全量 media_items 数（含所有后代）。
+/// - `movie_count` / `series_count`：分别精确到顶层电影/剧集数，用于
+///   `MovieCount` / `SeriesCount` 字段输出。
 pub struct LibraryStats {
     pub child_count: i64,
+    pub recursive_item_count: i64,
     pub movie_count: i32,
     pub series_count: i32,
 }
@@ -9957,16 +9965,37 @@ pub async fn batch_library_stats(
 
     let mut stats: std::collections::HashMap<Uuid, LibraryStats> = library_ids
         .iter()
-        .map(|id| (*id, LibraryStats { child_count: 0, movie_count: 0, series_count: 0 }))
+        .map(|id| {
+            (
+                *id,
+                LibraryStats {
+                    child_count: 0,
+                    recursive_item_count: 0,
+                    movie_count: 0,
+                    series_count: 0,
+                },
+            )
+        })
         .collect();
 
     for (lib_id, item_type, count) in rows {
         if let Some(s) = stats.get_mut(&lib_id) {
-            s.child_count += count;
-            if item_type.as_deref() == Some("Movie") {
-                s.movie_count = count as i32;
-            } else if item_type.as_deref() == Some("Series") {
-                s.series_count = count as i32;
+            s.recursive_item_count += count;
+            // top-level item types: Movie / Series / BoxSet / Folder。
+            // Season / Episode / Audio / Video 等是嵌套子节点，不计入 ChildCount。
+            match item_type.as_deref() {
+                Some("Movie") => {
+                    s.movie_count = count as i32;
+                    s.child_count += count;
+                }
+                Some("Series") => {
+                    s.series_count = count as i32;
+                    s.child_count += count;
+                }
+                Some("BoxSet") | Some("Folder") => {
+                    s.child_count += count;
+                }
+                _ => {}
             }
         }
     }
@@ -9979,16 +10008,28 @@ pub async fn library_to_item_dto_with_stats(
     server_id: Uuid,
     stats: Option<&LibraryStats>,
 ) -> Result<BaseItemDto, AppError> {
-    let (child_count, movie_count, series_count) = if let Some(s) = stats {
-        (s.child_count, s.movie_count, s.series_count)
+    let (child_count, recursive_item_count, movie_count, series_count) = if let Some(s) = stats {
+        (s.child_count, s.recursive_item_count, s.movie_count, s.series_count)
     } else {
-        let c = count_library_children(pool, library.id).await?;
+        // 兜底：单独 SQL 一次性算齐顶层（Movie/Series/BoxSet/Folder）+ 全量 + 分类统计。
+        // 走到这里说明 batch_library_stats 没把这库放进 map，理论上不会发生。
         let m = count_library_items_by_type(pool, library.id, "Movie").await?;
         let s = count_library_items_by_type(pool, library.id, "Series").await?;
-        (c, m, s)
+        let total = count_library_children(pool, library.id).await?;
+        let top = (m as i64) + (s as i64);
+        (top, total, m, s)
     };
 
-    library_to_item_dto_inner(pool, library, server_id, child_count, movie_count, series_count).await
+    library_to_item_dto_inner(
+        pool,
+        library,
+        server_id,
+        child_count,
+        recursive_item_count,
+        movie_count,
+        series_count,
+    )
+    .await
 }
 
 pub async fn library_to_item_dto(
@@ -9996,19 +10037,30 @@ pub async fn library_to_item_dto(
     library: &DbLibrary,
     server_id: Uuid,
 ) -> Result<BaseItemDto, AppError> {
-    let child_count = count_library_children(pool, library.id).await?;
+    let recursive_item_count = count_library_children(pool, library.id).await?;
     let movie_count = count_library_items_by_type(pool, library.id, "Movie").await?;
     let series_count = count_library_items_by_type(pool, library.id, "Series").await?;
-    library_to_item_dto_inner(pool, library, server_id, child_count, movie_count, series_count).await
+    let child_count = (movie_count as i64) + (series_count as i64);
+    library_to_item_dto_inner(
+        pool,
+        library,
+        server_id,
+        child_count,
+        recursive_item_count,
+        movie_count,
+        series_count,
+    )
+    .await
 }
 
 async fn library_to_item_dto_inner(
     pool: &sqlx::PgPool,
     library: &DbLibrary,
     server_id: Uuid,
-    _recursive_item_count: i64,
-    _movie_count: i32,
-    _series_count: i32,
+    child_count: i64,
+    recursive_item_count: i64,
+    movie_count: i32,
+    series_count: i32,
 ) -> Result<BaseItemDto, AppError> {
     let locations = library_paths(library);
 
@@ -10086,10 +10138,10 @@ async fn library_to_item_dto_inner(
         local_trailer_count: None,
         display_preferences_id: None,
         playlist_item_id: None,
-        recursive_item_count: None,
+        recursive_item_count: if recursive_item_count > 0 { Some(recursive_item_count) } else { None },
         season_count: None,
-        series_count: None,
-        movie_count: None,
+        series_count: if series_count > 0 { Some(series_count) } else { None },
+        movie_count: if movie_count > 0 { Some(movie_count) } else { None },
         status: None,
         air_days: Vec::new(),
         air_time: None,
@@ -10134,7 +10186,11 @@ async fn library_to_item_dto_inner(
         locked_fields: Vec::new(),
         lock_data: None,
         special_feature_count: None,
-        child_count: Some(locations.len().max(1) as i64),
+        // EmbySDK CollectionFolder.ChildCount = 顶层直接子项数（不含 Season/Episode）。
+        // 旧版本误把 `locations.len()`（库扫描路径数）当成 ChildCount，导致 sidebar
+        // 永远显示 1 / 3 而不是真实数。这里用 batch_library_stats 已算出来的
+        // Movie+Series+BoxSet+Folder 之和。
+        child_count: Some(child_count.max(0)),
         display_order: None,
         primary_image_aspect_ratio: None,
         completion_percentage: None,

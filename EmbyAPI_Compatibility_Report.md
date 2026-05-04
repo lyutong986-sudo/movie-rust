@@ -17,6 +17,60 @@
 > - **根因**：`backend/src/models.rs::QueryResult<T>` 序列化时输出了一个非 EmbySDK 字段 `StartIndex`。**EmbySDK 的 `QueryResultBaseItemDto` 只定义两个字段：`Items: List<BaseItemDto>` 和 `TotalRecordCount: int?`**（参见 `模板项目/EmbySDK/SampleCode/RestApi/Emby.ApiClient/Emby.ApiClient/Model/QueryResultBaseItemDto.cs` 第 33/39 行；全 SDK 任何 DTO 里都没有 `StartIndex` 字段）。Hills 用 EmbySDK 自动生成的 DTO + Jackson/Gson 严格反序列化（`FAIL_ON_UNKNOWN_PROPERTIES=true`），整个 `QueryResultBaseItemDto` 因为多了 `StartIndex` 字段反序列化失败，但其内部对 `BaseItemDto` 数组用了宽松模式所以 60 条 items 仍能解出 → 现象表现为"能看到第一页但拿不到 `TotalRecordCount` → 客户端按 items.length 当总数 → 不再发翻页请求"。AfuseKt 不严格，所以不受影响。
 > - **修复**：`backend/src/models.rs` 的 `QueryResult.start_index` 由 `#[serde(skip_serializing_if = "Option::is_none")]` 改为 `#[serde(skip)]`，**永远不写入 JSON**。Rust 内部代码的所有 `start_index: Some(0)` 赋值都保留（不需要改动 routes 任何调用），只是不再外露到响应里。
 > - **影响**：所有 `/Users/{id}/Items`、`/Items`、`/Shows/NextUp`、`/Shows/Upcoming`、`/Shows/MissingEpisodes`、`/Persons`、`/Genres`、`/Search/Hints`、`/Devices`、`/Sessions` 等使用 `QueryResult<T>` 包装的列表端点全部受益。前端 ui-4 与 lin_player 模板验证均不读 `StartIndex` 字段，无回归风险。
+>
+> ⑦ **2026-05-04 二阶段：分页计数错配 + 非 SDK 字段彻底清理（StartIndex 修复后 Hills 仍卡在 60 条问题的真根因）**：
+> - **现象（用 MCP 浏览器在 https://test.emby.yun:4443/ 抓的真实数据）**：上线 ⑥ 修复后，`/Users/{id}/Items?Limit=60&StartIndex=0&ParentId=...&IncludeItemTypes=Series&Recursive=true` 仍然返回 `TotalRecordCount: 660`，但 `Items` 数组只有 **59 条**；`Limit=10→9`、`Limit=20→19`、`Limit=30→29`、`Limit=100→98`、`Limit=200→197`、`Limit=700→539`。全量去重后总共只能枚举出 653 条不同 Id。Hills 等严格客户端按 `items.length == limit` 判断"是否还有下一页"，看到 59<60 就直接停翻页。
+> - **根因 1（分页计数错配）**：`repository::list_media_items` 在 SQL `LIMIT 60` 取回 60 行**之后**调用 `deduplicate_media_items()` 按 `provider_ids` 折叠同一作品的重复条目；但 `total_record_count` 走的是 `fast_count_media_items` 的纯 `COUNT(*)`，不应用同样的折叠。两侧不一致导致客户端看到"声称 660 条 / 第一页只有 59 条"。这个折叠由 `ItemListOptions.group_items_into_collections` 控制，而 `routes/items.rs:1297` 默认 `unwrap_or(true)` —— **EmbySDK 全网搜索 `GroupItemsIntoCollections` 没有匹配（rg 命中 0 文件）**，证明这是 Emby 私有的非 SDK 内部参数，第三方客户端绝不会主动传，默认就该是 `false`。
+> - **根因 2（非 SDK 残留字段）**：`BaseItemDto.image_blur_hashes` (Jellyfin 私有扩展) 和 `BaseItemDto.thumb_image_tag` (SDK 只有 `ParentThumbImageTag`，无顶层 `ThumbImageTag`) 还在序列化输出。即使 Java Gson 默认 lenient，部分严格客户端 / 自实现解析器仍可能受影响。
+> - **修复**：
+>   1. `backend/src/routes/items.rs:1297` 把 `group_items_into_collections.unwrap_or(true)` 改为 `unwrap_or(false)`，与 EmbySDK 默认行为对齐。`/Items/.../Similar` 端点（line 6756）保持 `true` 不变（推荐场景下去重影片是正确语义）。
+>   2. `backend/src/models.rs` 把 `BaseItemDto.image_blur_hashes` 与 `BaseItemDto.thumb_image_tag` 的 `#[serde(skip_serializing_if = "Option::is_none")]` 改为 `#[serde(skip)]`，永远不写入 JSON，Rust 内部数据传递保留。
+> - **预期效果**：`Limit=60&StartIndex=0` 返回 60 条；`Limit=200&StartIndex=0` 返回 200 条；`TotalRecordCount` 与全量分页累计去重一致。Hills 看到 60 == limit 后会继续滚动加载第二页。
+> - **影响 / 风险**：
+>   - ui-4 前端 `MediaCard.vue` 用 `ImageBlurHashes` 做封面占位图 —— 现在拿不到，会优雅降级为没有 blurhash 占位（直接显示加载中）。这是 EmbySDK 标准代价，符合"项目对比 EmbySDK 后端围着 SDK 修"的原则。后续如要保留占位图体验，应改用前端本地生成（小图 base64 缩略）而非依赖服务端非 SDK 字段。
+>   - 部分库里 provider id 重复的剧集（约 1% 数据）以前会被合并成一条，现在会全部展示。这反而符合 Emby 官方"每个 Series 实体独立"的预期。如确需折叠，前端可显式带 `&GroupItemsIntoCollections=true` 调用，但客户端基本不会用。
+> - **验证脚本（已通过 chrome-devtools MCP 跑过基线，部署后请重跑）**：
+>   ```js
+>   const t = localStorage.getItem('movie-rust-token');
+>   const u = '515E3DC9-47CA-4F16-8C63-0D53C8090612';
+>   const p = 'FD85B5F3-06A7-444E-9F7B-00079ADA2201';
+>   const base = `/emby/Users/${u}/Items?Recursive=true&ParentId=${p}&IncludeItemTypes=Series&SortBy=DateLastContentAdded,SortName&SortOrder=Descending`;
+>   for (const lim of [10, 60, 100, 200]) {
+>     const r = await (await fetch(`${base}&Limit=${lim}&StartIndex=0`, { headers: { 'X-Emby-Token': t } })).json();
+>     console.log(`Limit=${lim}: total=${r.TotalRecordCount} count=${r.Items.length}`);
+>   }
+>   // 修复前：Limit=10→9, 60→59, 100→98, 200→197
+>   // 修复后预期：每行 count == limit
+>   ```
+>
+> ⑧ **2026-05-04 三阶段：`/Users/{id}/Views` CollectionFolder.ChildCount 误用扫描路径数（sidebar 显示永远是 1 或 3）**：
+> - **现象（chrome-devtools MCP 实测）**：sidebar 上每个媒体库的徽标固定显示 1 或 3，而真实数据是：儿童=865、儿童教育=399、国漫=660。前端 `AppLayout.vue:130` 直接读 `library.ChildCount` 显示，所以 sidebar 错。
+> - **根因**：`backend/src/repository.rs:10137`（旧版） `child_count: Some(locations.len().max(1) as i64)` 直接用了 `library_paths(library)` 返回的扫描路径数当 ChildCount。一个库通常配 1 条或 3 条扫描路径，所以全部 sidebar 数字非 1 即 3。**更糟的是 `library_to_item_dto_inner` 上游已经传入了 `_recursive_item_count / _movie_count / _series_count` 三个真实统计参数，但 inner 函数全部加了 `_` 前缀直接丢弃**。
+> - **修复**（与 EmbySDK CollectionFolder 字段语义对齐）：
+>   1. `LibraryStats` 拆出两个语义清晰的字段：`child_count`（顶层 Series+Movie+BoxSet+Folder 之和）和 `recursive_item_count`（所有 media_items 全量含 Season/Episode）。
+>   2. `batch_library_stats` 按 item_type 分桶累加：Series/Movie 累入 child_count 同时分别记 series_count/movie_count；BoxSet/Folder 也累入 child_count；Season/Episode/Audio/Video 等只算入 recursive_item_count，不算 ChildCount。
+>   3. `library_to_item_dto_inner` 把三个参数去掉 `_` 前缀实际写到 dto：
+>      - `dto.child_count = Some(child_count.max(0))`
+>      - `dto.recursive_item_count = Some(recursive_item_count) if > 0`
+>      - `dto.movie_count = Some(movie_count) if > 0`
+>      - `dto.series_count = Some(series_count) if > 0`
+> - **影响 / 风险**：
+>   - sidebar 上"儿童 3" → "儿童 865" 这种巨大的视觉变化是**正确**的——之前那个 3 才是 bug。
+>   - `MediaFolders` / `Views` 同步受益。
+>   - Season/Episode 不计入 ChildCount 是 EmbySDK 标准（CollectionFolder 是顶层文件夹，子项就该是 Series/Movie 等顶层条目，不是底层每集）。
+> - **部署后验证脚本**：
+>   ```js
+>   const t = localStorage.getItem('movie-rust-token');
+>   const u = '515E3DC9-47CA-4F16-8C63-0D53C8090612';
+>   const v = await (await fetch(`/emby/Users/${u}/Views`, { headers: { 'X-Emby-Token': t } })).json();
+>   console.table(v.Items.map(it => ({
+>     Name: it.Name, ChildCount: it.ChildCount,
+>     RecursiveItemCount: it.RecursiveItemCount,
+>     SeriesCount: it.SeriesCount, MovieCount: it.MovieCount
+>   })));
+>   // 修复前：所有 ChildCount 都是 1 或 3
+>   // 修复后预期：tvshows 库 ChildCount = SeriesCount，movies 库 = MovieCount
+>   ```
 
 ---
 
