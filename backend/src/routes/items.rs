@@ -4060,40 +4060,53 @@ pub(crate) async fn do_refresh_item_metadata_with(
         return Ok(());
     }
 
-    // PB-Refresh：带远端 Emby 标记的条目，优先把远端作为权威源拉一次，
-    // TMDB 仅在远端拉取失败或不适用时兜底。
+    // PB-Refresh + PB52：带远端 Emby 标记的条目走「远端 → TMDB → 翻译」三段式回落。
     //
-    // 设计依据：
-    //   1) 远端 Emby 是 STRM 条目的"源真相"——播放走的就是远端流，元数据自然以远端为准；
-    //   2) TMDB 字段命名/排序/年份偶尔与远端不一致，反向覆盖会让本地详情与播放体验脱节；
-    //   3) 用户在「编辑源」里已经维护了远端鉴权 / 伪装 UA，刷新走远端比 TMDB 更稳定。
+    //   1) 远端 Emby——STRM 条目的源真相（鉴权/UA 都已维护，最可信）；
+    //   2) 远端写回后若 name/overview 仍非目标语言，让 TMDB 用
+    //      `preferred_metadata_language=zh-CN` 再覆盖一次。TMDB 偶尔比远端多一份人工
+    //      中文版（影迷社群补传），比模型翻译更准确；
+    //   3) 仍非目标语言才动用翻译兜底（函数末尾的 translate_item_text_fields 会兜住）。
     //
-    // 不阻断用户：远端不可达时记 warn 并 fall-through 到 TMDB（保留旧行为做兜底）。
+    // 典型故障样本：BBC CBeebies 出品的 `Wonderblocks` series——远端 series 头部中文
+    // OK 但 episode overview 全英文。旧实现远端拉成功直接 return → 跳过 TMDB →
+    // 直奔 Youdao；改回三段式后能让 TMDB 先覆盖能覆盖的部分，剩下再翻。
+    //
+    // 不阻断用户：远端不可达 / 不适用本类型仍走下面的 TMDB 兜底。
     if remote_emby::remote_marker_for_db_item(&item).is_some() {
         match remote_emby::refresh_single_remote_item(state, &item).await {
             Ok(true) => {
+                if remote_metadata_satisfies_target_language(state, item.id).await {
+                    tracing::info!(
+                        item_id = %item.id,
+                        name = %item.name,
+                        item_type = %item.item_type,
+                        "刷新元数据：远端写回已是目标语言，跳过 TMDB 二次覆盖"
+                    );
+                    // 走一次兜底翻译收尾——通常是 no-op（语种检测命中即返回原文），
+                    // 但仍统一调一次保持「失败被 swallow + 写日志」的行为对齐其它路径。
+                    if let Err(err) = crate::metadata::translator::translate_item_text_fields(
+                        state,
+                        item.id,
+                        crate::metadata::translator::TranslationTrigger::ManualRefresh,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            item_id = %item.id,
+                            ?err,
+                            "远端刷新后的兜底翻译失败（不影响主流程）"
+                        );
+                    }
+                    return Ok(());
+                }
                 tracing::info!(
                     item_id = %item.id,
                     name = %item.name,
                     item_type = %item.item_type,
-                    "刷新元数据：已从远端 Emby 重新拉取并落库（远端权威，跳过 TMDB 覆盖）"
+                    "PB52：远端写回 name/overview 非目标语言，回落 TMDB 二次覆盖再走翻译兜底"
                 );
-                // PB52：远端落库后也走兜底翻译。Wonderblocks 这类剧 series 头部
-                // 已是中文但 episode overview 是英文，必须在这里二次翻译。
-                if let Err(err) = crate::metadata::translator::translate_item_text_fields(
-                    state,
-                    item.id,
-                    crate::metadata::translator::TranslationTrigger::ManualRefresh,
-                )
-                .await
-                {
-                    tracing::warn!(
-                        item_id = %item.id,
-                        ?err,
-                        "远端刷新后的兜底翻译失败（不影响主流程）"
-                    );
-                }
-                return Ok(());
+                // 不 return，继续往下走 TMDB 路径。
             }
             Ok(false) => {
                 tracing::debug!(
@@ -4352,6 +4365,50 @@ pub(crate) async fn do_refresh_item_metadata_with(
     }
 
     Ok(())
+}
+
+/// PB52：判断远端写回的元数据是否已是「目标语言」，决定是否还需要 TMDB 二次覆盖。
+///
+/// 返回值含义：
+/// - `true`  — 已满足目标语言（或未启用翻译兜底 / 翻译未配置），继续保持旧的「远端权威」
+///   行为：早出 return，不让 TMDB 覆盖远端写回的字段。
+/// - `false` — 翻译已启用且远端写回的 name/overview 非目标语言，调用方应让流程
+///   fall-through 到 TMDB 路径，让 TMDB 的 `preferred_metadata_language=zh-CN`
+///   尝试覆盖；剩下没有目标语言版本的字段最后由翻译兜底兜住。
+///
+/// 启发式检测：把 overview（更长，语种特征更稳定）和 name 拼起来跑
+/// `looks_like_target_language`；两者全空时返回 `false` 让 TMDB 试着补内容。
+async fn remote_metadata_satisfies_target_language(
+    state: &AppState,
+    item_id: Uuid,
+) -> bool {
+    let Some(translator) = state.translator.as_ref() else {
+        return true;
+    };
+    let settings = translator.current().await;
+    if !settings.ready() {
+        return true;
+    }
+    let row: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT name, overview FROM media_items WHERE id = $1")
+            .bind(item_id)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten();
+    let Some((name, overview)) = row else {
+        // 行不存在不是这个函数能处理的——保守返回 true 避免误触发 TMDB。
+        return true;
+    };
+    let overview_trim = overview.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let name_trim = name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let combined = match (overview_trim, name_trim) {
+        (Some(o), Some(n)) => format!("{o} {n}"),
+        (Some(o), None) => o.to_string(),
+        (None, Some(n)) => n.to_string(),
+        (None, None) => return false, // 远端没给任何文字字段——让 TMDB 来填。
+    };
+    crate::metadata::translator::looks_like_target_language(&combined, &settings.target_lang)
 }
 
 /// 根据 Season/Episode 回溯到所属 Series。
