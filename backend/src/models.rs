@@ -486,7 +486,11 @@ pub struct AuthSessionRow {
 pub struct QueryResult<T> {
     pub items: Vec<T>,
     pub total_record_count: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // EmbySDK QueryResultBaseItemDto 只定义了 Items + TotalRecordCount。
+    // 第三方客户端（Hills 等）在严格反序列化时遇到 StartIndex 会抛 UnknownProperty
+    // 让整段响应失效，导致它们认为只有第一页那几十条数据，从而无法翻页。
+    // 这里保留字段供 Rust 端内部传递，但永远不写入 JSON。
+    #[serde(skip)]
     pub start_index: Option<i64>,
 }
 
