@@ -708,54 +708,67 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
                 return Ok(());
             }
 
+            // PB52-Translate：审计发现旧实现有两个致命 bug 让 04:00 调度任务 3 秒就 Completed：
+            //   1) `list_media_items(..)..Default::default()` 隐含 `group_items_into_collections=true`，
+            //      首页 200 条原始记录会被 `deduplicate_media_items` 按 provider id 折叠
+            //      成 N 条。当 N < PAGE_SIZE 时 `if page_len < PAGE_SIZE { break }` 会
+            //      在「我们以为还有数据」的情况下直接退出，第二页都不会拉。和 hills
+            //      客户端 60 条 bug 是同一个根因。
+            //   2) ORDER BY sort_name + OFFSET 翻页：sort_name 不是稳定排序键（同名
+            //      条目顺序在不同 OFFSET 之间漂移），多页之间会出现遗漏 / 重复。OFFSET
+            //      在百万级条目时也会越翻越慢。
+            //
+            // 修复：抛掉 `list_media_items`，直接走 SQL，按 id 主键升序游标分页
+            // (`AND id > $cursor ORDER BY id ASC LIMIT $page`)。`media_items.id` 是
+            // PK，用主键索引扫描既稳定又快；`lock_data=false` 直接下推到 SQL，省掉
+            // 客户端跳过逻辑。
             const PAGE_SIZE: i64 = 200;
-            let mut start_index: i64 = 0;
-            let mut total_count: i64 = 0;
+            let total_count: i64 = sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*)::bigint FROM media_items
+                WHERE item_type IN ('Movie','Series','Season','Episode')
+                  AND lock_data = false
+                "#,
+            )
+            .fetch_one(&state.pool)
+            .await?;
+            let total_for_progress = total_count.max(1);
+            tracing::info!(
+                total_count,
+                target_lang = %settings.target_lang,
+                "translation-fallback: 开始全量翻译兜底"
+            );
+
+            let mut cursor: Option<uuid::Uuid> = None;
             let mut processed: i64 = 0;
             let mut translated: i64 = 0;
-            let mut skipped_locked: i64 = 0;
             let mut errored: i64 = 0;
             loop {
-                let page = repository::list_media_items(
-                    &state.pool,
-                    repository::ItemListOptions {
-                        include_types: vec![
-                            "Movie".into(),
-                            "Series".into(),
-                            "Season".into(),
-                            "Episode".into(),
-                        ],
-                        recursive: true,
-                        start_index,
-                        limit: PAGE_SIZE,
-                        enable_total_record_count: start_index == 0,
-                        ..Default::default()
-                    },
+                let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+                    r#"
+                    SELECT id, name FROM media_items
+                    WHERE item_type IN ('Movie','Series','Season','Episode')
+                      AND lock_data = false
+                      AND ($1::uuid IS NULL OR id > $1)
+                    ORDER BY id ASC
+                    LIMIT $2
+                    "#,
                 )
+                .bind(cursor)
+                .bind(PAGE_SIZE)
+                .fetch_all(&state.pool)
                 .await?;
-                if start_index == 0 {
-                    total_count = page.total_record_count.max(1);
-                    tracing::info!(
-                        total_count,
-                        target_lang = %settings.target_lang,
-                        "translation-fallback: 开始全量分页翻译兜底"
-                    );
-                }
-                if page.items.is_empty() {
+                if rows.is_empty() {
                     break;
                 }
-                let page_len = page.items.len() as i64;
-                for item in &page.items {
+                let page_len = rows.len() as i64;
+                for (item_id, item_name) in &rows {
                     processed += 1;
-                    if item.lock_data {
-                        skipped_locked += 1;
-                        continue;
-                    }
-                    let pct = (processed as f64 / total_count as f64).min(1.0) * 100.0;
+                    let pct = (processed as f64 / total_for_progress as f64).min(1.0) * 100.0;
                     set_progress(&state.pool, task_id, pct).await;
                     match crate::metadata::translator::translate_item_text_fields(
                         state,
-                        item.id,
+                        *item_id,
                         crate::metadata::translator::TranslationTrigger::ScheduledTask,
                     )
                     .await
@@ -765,23 +778,22 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
                         Err(err) => {
                             errored += 1;
                             tracing::warn!(
-                                item_id = %item.id,
-                                name = %item.name,
+                                item_id = %item_id,
+                                name = %item_name,
                                 error = %err,
                                 "translation-fallback: 单条翻译失败，继续下一条"
                             );
                         }
                     }
                 }
+                cursor = rows.last().map(|(id, _)| *id);
                 if page_len < PAGE_SIZE {
                     break;
                 }
-                start_index += PAGE_SIZE;
             }
             tracing::info!(
                 processed,
                 translated,
-                skipped_locked,
                 errored,
                 target_lang = %settings.target_lang,
                 "translation-fallback: 任务完成"

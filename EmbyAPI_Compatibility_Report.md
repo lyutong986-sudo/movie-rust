@@ -43,6 +43,57 @@
 >   // 修复后预期：每行 count == limit
 >   ```
 >
+> ⑫ **2026-05-04 七阶段：「翻译兜底」调度任务 3 秒就 Completed 的链路审计（首页折叠后立即 break + OFFSET 翻页漂移）**：
+> - **现象**：UI `/dashboard/scheduler` 显示 `翻译兜底 / Completed / 上次耗时 3 秒`，但库里有上百条非中文标题/简介。3 秒明显跑不完任何实质翻译，怀疑链路有 bug。
+> - **根因 1（致命：首页折叠后 page_len < PAGE_SIZE 直接 break）**：`backend/src/routes/scheduled_tasks.rs::run_task("translation-fallback")` 旧实现里：
+>   ```rust
+>   let page = repository::list_media_items(
+>       &state.pool,
+>       repository::ItemListOptions {
+>           include_types: vec!["Movie".into(),"Series".into(),"Season".into(),"Episode".into()],
+>           recursive: true,
+>           start_index, limit: PAGE_SIZE, // 200
+>           enable_total_record_count: start_index == 0,
+>           ..Default::default()  // ← group_items_into_collections=true（隐式默认！）
+>       },
+>   ).await?;
+>   if page_len < PAGE_SIZE { break; }
+>   ```
+>   `ItemListOptions::default().group_items_into_collections == true`（见 `repository.rs:6045`），首页 SQL 拉 200 条原始记录后会被 `deduplicate_media_items()` 按 provider id 折叠。当折叠后 `page_len < 200`（库里只要有重复 provider id 的剧集就会触发，例如 BoxSet / 多版本 Movie），任务首页就立刻 `break`，**第二页根本不会拉**——和 `⑦` 章节修过的 Hills 客户端"60→59"的 bug 是同一个根因。
+> - **根因 2（次要：OFFSET + sort_name 翻页不稳定）**：即使绕过根因 1，旧实现 `start_index += PAGE_SIZE` 用 SQL OFFSET。`list_media_items` 默认 `ORDER BY sort_name ASC NULLS LAST`，sort_name 不是稳定排序键（同 sort_name 的条目在不同 OFFSET 之间顺序可能漂移），多页之间会出现遗漏 / 重复跑。深翻页 OFFSET 性能也线性退化。
+> - **根因 3（轻微：进度条不准）**：`total_count = page.total_record_count` 走 `fast_count_media_items` 是**未去重的**原始 COUNT(*)，但循环里 `processed` 是去重后的数量，进度永远跑不到 100%。
+> - **修复**：`backend/src/routes/scheduled_tasks.rs::run_task("translation-fallback")` 抛掉 `list_media_items`，改用直接 SQL 游标分页：
+>   ```rust
+>   let total_count: i64 = sqlx::query_scalar(
+>       r#"SELECT COUNT(*)::bigint FROM media_items
+>          WHERE item_type IN ('Movie','Series','Season','Episode') AND lock_data = false"#,
+>   ).fetch_one(&state.pool).await?;
+>   let mut cursor: Option<uuid::Uuid> = None;
+>   loop {
+>       let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+>           r#"SELECT id, name FROM media_items
+>              WHERE item_type IN ('Movie','Series','Season','Episode') AND lock_data = false
+>                AND ($1::uuid IS NULL OR id > $1)
+>              ORDER BY id ASC LIMIT $2"#,
+>       ).bind(cursor).bind(PAGE_SIZE).fetch_all(&state.pool).await?;
+>       if rows.is_empty() { break; }
+>       for (id, name) in &rows { /* translate_item_text_fields */ }
+>       cursor = rows.last().map(|(id, _)| *id);
+>       if rows.len() < PAGE_SIZE as usize { break; }
+>   }
+>   ```
+>   - **不再被折叠**：直接走 SQL，`group_items_into_collections` 与 `deduplicate_media_items` 完全不参与。
+>   - **稳定排序**：`media_items.id` 是 PK，按 id 升序游标分页（`AND id > $cursor`）天然唯一稳定，深翻页也是主键索引扫描，O(log n) 不退化。
+>   - **lock_data 下推 SQL**：`AND lock_data = false` 直接在 PG 过滤，省掉旧实现的 Rust 端 `if item.lock_data { skipped += 1; continue; }` 跳过逻辑（`is_locked: Some(false)` 在 `list_media_items` 里**没有实际过滤**——`repository.rs:6809` 仅处理 `Some(true)` 的短路；改 SQL 后这个隐患也清了）。
+>   - **进度条对齐**：`total_count` 与循环 `processed` 都基于"未锁定的 Movie/Series/Season/Episode"，比例正确。
+> - **预期效果**：
+>   - `04:00` 任务跑完后 `last_exec.DurationTicks` 反映**真实**翻译耗时（一般几十秒到几分钟，取决于库大小、缓存命中率、Youdao QPS 限流）；不再出现 3 秒就 Completed 的假象。
+>   - `tracing::info!("translation-fallback: 任务完成", processed, translated, errored)` 日志里 `processed` 应当 ≈ DB 中未锁定 Movie/Series/Season/Episode 总数，可作回归基线。
+> - **影响 / 风险**：
+>   - 任务不再依赖 `list_media_items`，与"客户端可见列表"语义完全解耦——这正是预期的（兜底任务想穷举所有未锁定条目，本来就不该被 BoxSet 折叠之类的展示逻辑影响）。
+>   - 旧的 `skipped_locked` 计数从结束日志中移除（lock_data 下推到 SQL，从根上不会进入循环）。
+> - **验证**：`cargo check -p movie-rust-backend` 通过；下次 04:00 自然触发后看 `task:translation-fallback:last_exec` JSON 的 `DurationTicks` 与 `processed`。
+>
 > ⑨ **2026-05-04 四阶段：审计日志（`movie-rust-20260504193229.log`）暴露的两类性能 P0 问题**：
 > - **问题 A：递归 CTE 慢查询撑爆连接池（67 条慢 SQL + 100+ 条 `time to acquire exceeded slow threshold` 2s+）**：
 >   - **现象**：`/Users/{uid}/Items?IncludeItemTypes=Series&Limit=30&...` / `/Users/{uid}/Items/Latest?IncludeItemTypes=Series&...` 等列表请求里，`count_recursive_children_batch` / `count_unplayed_children_batch` 每页都跑一次全表 `WITH RECURSIVE descendants AS (SELECT id, parent_id ... FROM media_items WHERE parent_id = ANY($1) UNION ALL SELECT m.id, m.parent_id, d.root_id FROM media_items m INNER JOIN descendants d ON m.parent_id = d.id)`，单查询 `elapsed=1.2-1.5s`，对应日志 67 条 `slow statement: execution time exceeded alert threshold`。这把 sqlx 连接池打满后，所有后续请求（图片 / Episodes / Sessions/Playing/Progress / 远端代理）都开始 `acquired connection, but time to acquire exceeded slow threshold aquired_after_secs=2.0xx-2.7xx` 排队，整个服务进入级联降级。
