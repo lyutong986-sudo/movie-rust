@@ -67,6 +67,44 @@
 >   - `time to acquire exceeded slow threshold` 应清零（连接池不再排队）。
 >   - 单图请求只剩 1 条 `remote_emby_sources WHERE id = $1`，无 `ORDER BY name` 配对。
 >
+> ⑩ **2026-05-04 五阶段：远端 Emby 图片首次访问即落盘 + 程序生成占位图（避免每次请求都打远端 / 客户端等待 / broken image）**：
+> - **痛点 1：远端 Emby 条目的 `image_*_path` 字段保存的是远程 URL（`http://upstream.emby/Items/.../Images/Primary?tag=xxx`）**
+>   - 每次 `/emby/Items/{id}/Images/Primary?...` 命中这种 item，都得拉远端、做 transform、写入 PB42-IC 缓存（cache_dir，TTL 7 天）。
+>   - 缓存键基于 `url + transform 参数 sha256`，**同一图不同尺寸 / quality 会缓存多份**；TTL 到期 / 客户端清缓存后又得回远端。
+>   - 远端慢 / 限流 / 临时不可达时，整个图片接口直接 404，前端拿到 broken image。
+> - **痛点 2：媒体确实没图（`image_primary_path = NULL` 且 TMDB fallback 也找不到）时直接返回 404**
+>   - 客户端显示破碎图标，体验极差。
+>   - 后台 `spawn_image_fallback_refresh` 已经在异步抓 TMDB，但客户端不知道，下次再请求才能看到真图。
+> - **修复 A：远端 Emby 图首次访问立即异步落盘 + UPDATE DB**：
+>   - 新增 `refresh_queue::IMAGE_PERSISTING: DashSet<(item_id, image_type, backdrop_idx)>` + `try_begin_image_persist` / `end_image_persist`，按三元组去重防并发重复下载。
+>   - 新增 `routes/images.rs::spawn_remote_image_persist(state, item, image_type, backdrop_idx, source, remote_url)`：fire-and-forget 后台任务，调用 `persist_remote_emby_image_to_local`：
+>     1. 用 `build_authenticated_emby_image_request` 构造带伪装鉴权头的 GET（与 `serve_remote_image` 走同一通道，覆盖 WAF / 必须带 token / UA 的远端）。
+>     2. 扩展名优先看 URL 后缀，落不到再读响应 `Content-Type` 推断（`image/jpeg → jpg`，`image/png → png`，`image/webp → webp`），最后兜 `jpg`。
+>     3. 路径用 `item_image_storage_path_pub`（与 scanner 走同一目录约定，复用 `static_dir/item-images/` 或库内 sidecar 文件名规则）。
+>     4. 写盘成功后 `repository::update_media_item_image_path(pool, item_id, image_type, Some(local_path), backdrop_index)` 把 DB 字段从远程 URL 切到本地路径。
+>   - `serve_item_image` 在 `path_is_remote && remote_source.is_some()` 时调一次 `spawn_remote_image_persist`，**当前请求继续走 `serve_image_with_source` 拿到带 transform 的远端图返回**（不阻塞），后台默默落盘。
+>   - **预期效果**：每条远端 Emby item 的每个 image_type 首次被请求后，最多 1 秒内 DB `image_primary_path` 等字段就变成本地路径。第二次起所有客户端请求直接走 `serve_local_path`（fs::read），零远端流量、零 PB42-IC 依赖、永久持久化。
+> - **修复 B：程序生成占位图（404 兜底）**：
+>   - 新增 `placeholder_image_response(state, image_type, image_query, method, if_none_match)` 与 `generate_placeholder_jpeg(width, height, image_type)`：
+>     - 按 image_type 选默认尺寸：Primary 400x600（2:3 海报）、Backdrop/Thumb 800x450（16:9）、Logo 500x200、Banner 1000x185、Disc/Art 500x500。
+>     - 生成内容：顶到底深灰渐变背景 + 中央"画框 / 山形 / 太阳"几何图标（无字体依赖，纯 image crate 像素操作）+ 底部 image_type 颜色色条（Primary 红、Backdrop 蓝、Logo 金、Banner 紫、Disc 绿，方便日志/截图区分）。
+>     - 编码 JPEG（quality=78），缓存到 `state.config.static_dir.join("placeholders").join("{type}-{w}x{h}.jpg")`，第二次起直接读盘不再重画。
+>     - 同样支持 client 的 `maxWidth/maxHeight/quality/format` transform（共用 `apply_item_image_transform`），避免一张大占位图把窄屏带宽吃光。
+>     - 所有 `image::ImageBuffer` / `JpegEncoder` 操作都放在 `tokio::task::spawn_blocking` 里，避免 image crate 内部类型污染 axum handler future 的 `Send` bound。
+>     - 响应：`Content-Type: image/jpeg`，`X-Placeholder: 1`，`Cache-Control: public, max-age=300`（**5 分钟短缓存**：后台 `spawn_image_fallback_refresh` 抓到真图 / `spawn_remote_image_persist` 落盘后，下次请求最迟 5 分钟内就能看到真图替换占位）。
+>   - `serve_item_image` 三处原来 `Err(NotFound)` 全部改为 `placeholder_image_response`：
+>     1. 远端图加载失败 + TMDB fallback 也失败 → 占位图。
+>     2. 远端图加载失败 + 无 TMDB fallback → 占位图（同时 `spawn_image_fallback_refresh`）。
+>     3. 数据库无 path 且无 TMDB fallback → 占位图（同时 `spawn_image_fallback_refresh`）。
+> - **影响 / 风险**：
+>   - **存储占用**：远端 Emby item 量级越大，落盘后磁盘占用越多。但这是必要成本，否则永远依赖远端 / 缓存。如果库里 10 万 item × 4 种 image_type × 平均 100KB ≈ 40GB，可接受；如果不接受，未来加配置开关 `APP_REMOTE_EMBY_IMAGE_PERSIST=false` 关掉。
+>   - **占位图 ETag 5 分钟缓存**：意味着真图替换最坏 5 分钟才能被客户端看到。比"立刻替换"差，但比"永远 broken"好。可后续按 image_type 调短为 60 秒。
+>   - **PB42-IC 依然保留**：远端图片首次请求 / 持久化任务还没跑完时仍有 cache 兜底，避免雪崩。
+> - **未来可继续延伸**：
+>   - 把 `library` / `person` 没图时的 404 也换成占位图（目前只覆盖 `media_items`）。
+>   - 占位图生成尺寸支持按 `maxWidth` 直接生成原生分辨率，省一次 transform。
+>   - 持久化任务失败计数 & 退避（避免 401/403 后无限重试，类似 PB42-bo 的 source-level 退避）。
+>
 > ⑧ **2026-05-04 三阶段：`/Users/{id}/Views` CollectionFolder.ChildCount 误用扫描路径数（sidebar 显示永远是 1 或 3）**：
 > - **现象（chrome-devtools MCP 实测）**：sidebar 上每个媒体库的徽标固定显示 1 或 3，而真实数据是：儿童=865、儿童教育=399、国漫=660。前端 `AppLayout.vue:130` 直接读 `library.ChildCount` 显示，所以 sidebar 错。
 > - **根因**：`backend/src/repository.rs:10137`（旧版） `child_count: Some(locations.len().max(1) as i64)` 直接用了 `library_paths(library)` 返回的扫描路径数当 ChildCount。一个库通常配 1 条或 3 条扫描路径，所以全部 sidebar 数字非 1 即 3。**更糟的是 `library_to_item_dto_inner` 上游已经传入了 `_recursive_item_count / _movie_count / _series_count` 三个真实统计参数，但 inner 函数全部加了 `_` 前缀直接丢弃**。

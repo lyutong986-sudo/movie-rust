@@ -1422,7 +1422,33 @@ async fn serve_item_image(
             path.clone()
         };
 
+        // 远端 Emby 图片：本次请求继续走远程拉 + transform，但同时启动后台任务
+        // 把原图（无 transform）下载到本地 + UPDATE DB image_*_path。下次相同 item
+        // 再来请求时直接走本地 serve_local_path，不再触达远端，也不再依赖 PB42-IC 缓存。
+        if path_is_remote {
+            if let Some(source) = remote_source.clone() {
+                let backdrop_idx = if normalized.eq_ignore_ascii_case("Backdrop") {
+                    Some(idx)
+                } else {
+                    None
+                };
+                spawn_remote_image_persist(
+                    &state,
+                    &item,
+                    &normalized,
+                    backdrop_idx,
+                    source,
+                    path.clone(),
+                );
+            }
+        }
+
         let method = request.method().clone();
+        let if_none_match = request
+            .headers()
+            .get(header::IF_NONE_MATCH)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
         let result = serve_image_with_source(
             Some(&state),
             &effective_path,
@@ -1444,16 +1470,27 @@ async fn serve_item_image(
                 );
                 spawn_image_fallback_refresh(&state, item.id);
                 let fallback_req = Request::builder()
-                    .method(method)
+                    .method(method.clone())
                     .body(Body::empty())
                     .unwrap_or_default();
-                return serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req, None).await;
+                let fb = serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req, None).await;
+                if let Err(AppError::NotFound(_)) = &fb {
+                    return placeholder_image_response(&state, &normalized, &image_query, method, if_none_match).await;
+                }
+                return fb;
             }
             spawn_image_fallback_refresh(&state, item.id);
+            return placeholder_image_response(&state, &normalized, &image_query, method, if_none_match).await;
         }
         return result;
     }
 
+    let method = request.method().clone();
+    let if_none_match = request
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     if let Some(fallback_url) = find_tmdb_image_fallback(&state.pool, &item, &normalized, state.config.tmdb_api_key.as_deref()).await {
         tracing::debug!(
             item_id = %item.id,
@@ -1462,14 +1499,18 @@ async fn serve_item_image(
         );
         spawn_image_fallback_refresh(&state, item.id);
         let fallback_req = Request::builder()
-            .method(request.method().clone())
+            .method(method.clone())
             .body(Body::empty())
             .unwrap_or_default();
-        return serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req, None).await;
+        let fb = serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req, None).await;
+        if let Err(AppError::NotFound(_)) = &fb {
+            return placeholder_image_response(&state, &normalized, &image_query, method, if_none_match).await;
+        }
+        return fb;
     }
 
     spawn_image_fallback_refresh(&state, item.id);
-    Err(AppError::NotFound("图片不存在".to_string()))
+    placeholder_image_response(&state, &normalized, &image_query, method, if_none_match).await
 }
 
 /// 图片 404 时异步触发 TMDB 元数据/图片补全。
@@ -1498,6 +1539,439 @@ fn spawn_image_fallback_refresh(state: &AppState, item_id: uuid::Uuid) {
         }
         crate::refresh_queue::end_refresh(item_id);
     });
+}
+
+/// 把"远端 Emby 条目的图片 URL"异步下载到本地，下载完成后把 DB 中的 `image_*_path`
+/// 由远程 URL 改成本地文件路径。下次同一条 item 请求图片就会直接走 `serve_local_path`，
+/// 不再触达远端、不再依赖 PB42-IC 的 cache_dir TTL（默认 7 天会被 evict）。
+///
+/// 用 `(item_id, image_type, backdrop_index)` 三元组在 `refresh_queue::IMAGE_PERSISTING`
+/// 里去重。当前请求**不阻塞**，仍然走 `serve_remote_image` 拿到带 transform 的图返回，
+/// 同时后台默默把原图（无 transform）写盘 + update DB。
+fn spawn_remote_image_persist(
+    state: &AppState,
+    item: &crate::models::DbMediaItem,
+    image_type: &str,
+    backdrop_index: Option<i32>,
+    source: crate::models::DbRemoteEmbySource,
+    remote_url: String,
+) {
+    if !crate::refresh_queue::try_begin_image_persist(item.id, image_type, backdrop_index) {
+        return;
+    }
+    let state = state.clone();
+    let item = item.clone();
+    let image_type = image_type.to_string();
+    tokio::spawn(async move {
+        match persist_remote_emby_image_to_local(
+            &state,
+            &item,
+            &image_type,
+            backdrop_index,
+            &source,
+            &remote_url,
+        )
+        .await
+        {
+            Ok(local_path) => {
+                tracing::info!(
+                    item_id = %item.id,
+                    image_type = %image_type,
+                    backdrop_index = backdrop_index.unwrap_or(-1),
+                    local_path = %local_path,
+                    "远端 Emby 图片已落盘到本地，DB 路径已切换"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    item_id = %item.id,
+                    image_type = %image_type,
+                    backdrop_index = backdrop_index.unwrap_or(-1),
+                    error = %e,
+                    "远端 Emby 图片落盘失败，下次请求仍会走远端"
+                );
+            }
+        }
+        crate::refresh_queue::end_image_persist(item.id, &image_type, backdrop_index);
+    });
+}
+
+async fn persist_remote_emby_image_to_local(
+    state: &AppState,
+    item: &crate::models::DbMediaItem,
+    image_type: &str,
+    backdrop_index: Option<i32>,
+    source: &crate::models::DbRemoteEmbySource,
+    remote_url: &str,
+) -> Result<String, AppError> {
+    let library_options = item_library_options(state, item.id).await?;
+    let response = crate::remote_emby::build_authenticated_emby_image_request(
+        &SHARED_HTTP_CLIENT,
+        source,
+        remote_url,
+    )
+    .send()
+    .await
+    .map_err(|e| AppError::Internal(format!("远端图片请求失败: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::NotFound(format!(
+            "远端图片不存在 (HTTP {})",
+            status.as_u16()
+        )));
+    }
+
+    // 优先用 URL 后缀，落不到再看 Content-Type，最后兜 jpg。
+    let extension = crate::naming::extension_from_url(remote_url)
+        .filter(|ext| {
+            crate::naming::IMAGE_EXTENSIONS
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+        })
+        .or_else(|| {
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(extension_from_content_type)
+        })
+        .unwrap_or_else(|| "jpg".to_string());
+
+    let target_path = item_image_storage_path_pub(
+        state,
+        item,
+        &library_options,
+        image_type,
+        backdrop_index,
+        &extension,
+    );
+
+    let body_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("读取远端图片失败: {e}")))?;
+    if body_bytes.is_empty() {
+        return Err(AppError::Internal("远端图片内容为空".to_string()));
+    }
+
+    if let Some(parent) = target_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(AppError::Io)?;
+    }
+    tokio::fs::write(&target_path, &body_bytes)
+        .await
+        .map_err(AppError::Io)?;
+
+    let path_str = target_path.to_string_lossy().to_string();
+    repository::update_media_item_image_path(
+        &state.pool,
+        item.id,
+        image_type,
+        Some(&path_str),
+        backdrop_index,
+    )
+    .await?;
+    Ok(path_str)
+}
+
+fn extension_from_content_type(content_type: &str) -> Option<String> {
+    let lower = content_type.to_ascii_lowercase();
+    let mime = lower.split(';').next().unwrap_or("").trim();
+    Some(match mime {
+        "image/jpeg" | "image/jpg" => "jpg".to_string(),
+        "image/png" => "png".to_string(),
+        "image/webp" => "webp".to_string(),
+        _ => return None,
+    })
+}
+
+/// 程序生成的占位图。当媒体真没有图片字段、TMDB 也找不到回退时，与其返回 404 让
+/// 客户端显示破碎图标，不如返回一张程序合成的灰底海报，前端立刻有视觉反馈，后台
+/// `spawn_image_fallback_refresh` 拉到真图后下次请求自然替换（占位图带 5 分钟短缓存）。
+///
+/// 按 image_type 选不同长宽比，命中文件缓存（`static_dir/placeholders/{type}-{w}x{h}.jpg`）
+/// 后续直接读盘，避免每个 404 都重画一遍。
+///
+/// 实现细节：所有 `image::ImageBuffer` / `JpegEncoder` 操作都放在 `spawn_blocking`
+/// 里完成，绝不跨 axum 的 await 持有 image crate 内部类型，避免 handler future 的
+/// `Send` bound 被这些类型污染。
+async fn placeholder_image_response(
+    state: &AppState,
+    image_type: &str,
+    image_query: &ItemImageQuery,
+    method: Method,
+    if_none_match: Option<String>,
+) -> Result<Response, AppError> {
+    let normalized = normalized_item_image_type(image_type);
+    let (width, height) = placeholder_dimensions(&normalized);
+
+    let placeholders_dir = state.config.static_dir.join("placeholders");
+    let cache_path =
+        placeholders_dir.join(format!("{}-{}x{}.jpg", normalized.to_ascii_lowercase(), width, height));
+
+    let raw_bytes: Vec<u8> = match tokio::fs::read(&cache_path).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let normalized_owned = normalized.clone();
+            let bytes = tokio::task::spawn_blocking(move || {
+                generate_placeholder_jpeg(width, height, &normalized_owned)
+            })
+            .await
+            .map_err(|e| AppError::Internal(format!("占位图生成线程异常: {e}")))??;
+            if let Some(parent) = cache_path.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            let _ = tokio::fs::write(&cache_path, &bytes).await;
+            bytes
+        }
+    };
+
+    // 占位图也支持客户端附带的 transform（缩放 / 质量），不然窄屏拉一张大图浪费流量。
+    let image_query_owned = image_query.clone();
+    let (final_bytes, content_type) = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, String), AppError> {
+        match apply_item_image_transform(&raw_bytes, &image_query_owned)? {
+            Some((b, ct)) => Ok((b, ct)),
+            None => Ok((raw_bytes, "image/jpeg".to_string())),
+        }
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("占位图变换线程异常: {e}")))??;
+
+    let etag = format!(
+        "\"placeholder-{}-{w}x{h}-{q}\"",
+        normalized.to_ascii_lowercase(),
+        w = width,
+        h = height,
+        q = image_query.etag_suffix(),
+    );
+
+    if let Some(val) = if_none_match {
+        if val == etag || val == format!("W/{}", etag) || val == "*" {
+            return Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(header::ETAG, &etag)
+                .header(header::CACHE_CONTROL, "public, max-age=300")
+                .body(Body::empty())
+                .map_err(|e| AppError::Internal(format!("构建占位图响应失败: {e}")));
+        }
+    }
+
+    let is_head = method == Method::HEAD;
+    let len = final_bytes.len();
+    let body = if is_head { Body::empty() } else { Body::from(final_bytes) };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ETAG, etag)
+        // 5 分钟短缓存：后台 refresh_queue 抓到真图后，下次请求最迟 5 分钟内就能看到。
+        .header(header::CACHE_CONTROL, "public, max-age=300")
+        .header("X-Placeholder", "1")
+        .header(header::CONTENT_LENGTH, len)
+        .body(body)
+        .map_err(|e| AppError::Internal(format!("构建占位图响应失败: {e}")))
+}
+
+fn placeholder_dimensions(normalized_image_type: &str) -> (u32, u32) {
+    match normalized_image_type {
+        "Backdrop" | "Thumb" => (800, 450),
+        "Logo" => (500, 200),
+        "Banner" => (1000, 185),
+        "Disc" | "Art" => (500, 500),
+        _ => (400, 600), // Primary / poster 2:3
+    }
+}
+
+/// 用 image crate 生成一张极简灰底 + 中心几何占位图标的 JPEG。无字体依赖。
+fn generate_placeholder_jpeg(width: u32, height: u32, image_type: &str) -> Result<Vec<u8>, AppError> {
+    use image::{ImageBuffer, Rgb};
+
+    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(width, height);
+
+    // 顶部到底部的深灰渐变，避免纯色看着假。
+    for y in 0..height {
+        let t = y as f32 / height.max(1) as f32;
+        let v = (32.0 + t * 18.0) as u8; // 32 → 50
+        for x in 0..width {
+            img.put_pixel(x, y, Rgb([v, v, (v as u16 + 4).min(255) as u8]));
+        }
+    }
+
+    // 中心画一个圆角"画框"占位图标：外框 + 内部小圆 + 斜线（山形），
+    // 没字体也能让用户一眼看出"这是占位图"。
+    let cx = width as i32 / 2;
+    let cy = height as i32 / 2;
+    let frame_w = (width.min(height) as f32 * 0.55) as i32;
+    let frame_h = (frame_w as f32 * 0.7) as i32;
+    let frame_x = cx - frame_w / 2;
+    let frame_y = cy - frame_h / 2;
+    let stroke = (frame_w / 32).max(2);
+
+    let stroke_color = Rgb([110u8, 110, 120]);
+    let fill_color = Rgb([60u8, 60, 70]);
+    let accent_color = Rgb([140u8, 140, 150]);
+
+    // 外框
+    draw_rect_outline(&mut img, frame_x, frame_y, frame_w, frame_h, stroke, stroke_color);
+
+    // 内部填充（稍亮一点的色块）
+    fill_rect(
+        &mut img,
+        frame_x + stroke,
+        frame_y + stroke,
+        frame_w - 2 * stroke,
+        frame_h - 2 * stroke,
+        fill_color,
+    );
+
+    // 山形斜线（左下到右上的两段折线，模拟 placeholder 图标里的山）
+    let bottom = frame_y + frame_h - stroke - 1;
+    let mid_x = frame_x + frame_w / 2;
+    draw_thick_line(
+        &mut img,
+        frame_x + stroke,
+        bottom,
+        mid_x,
+        frame_y + frame_h / 3,
+        stroke,
+        accent_color,
+    );
+    draw_thick_line(
+        &mut img,
+        mid_x,
+        frame_y + frame_h / 3,
+        frame_x + frame_w - stroke,
+        bottom,
+        stroke,
+        accent_color,
+    );
+
+    // 右上小圆（"太阳"）
+    let sun_r = (frame_w / 16).max(3);
+    let sun_x = frame_x + frame_w * 3 / 4;
+    let sun_y = frame_y + frame_h / 4;
+    fill_circle(&mut img, sun_x, sun_y, sun_r, accent_color);
+
+    // 底部加 image_type 提示色条（不画字，用颜色区分类型，方便排查）
+    let tag_color = type_tag_color(image_type);
+    let tag_h = (height / 32).max(2);
+    fill_rect(
+        &mut img,
+        0,
+        height as i32 - tag_h as i32,
+        width as i32,
+        tag_h as i32,
+        tag_color,
+    );
+
+    let mut buf: Vec<u8> = Vec::with_capacity((width * height) as usize);
+    let mut encoder = JpegEncoder::new_with_quality(&mut buf, 78);
+    encoder
+        .encode(img.as_raw(), width, height, ExtendedColorType::Rgb8)
+        .map_err(|e| AppError::Internal(format!("占位图编码失败: {e}")))?;
+    Ok(buf)
+}
+
+fn type_tag_color(image_type: &str) -> image::Rgb<u8> {
+    use image::Rgb;
+    match image_type {
+        "Backdrop" | "Thumb" => Rgb([78, 132, 188]),
+        "Logo" => Rgb([188, 152, 78]),
+        "Banner" => Rgb([162, 98, 188]),
+        "Disc" | "Art" => Rgb([78, 188, 132]),
+        _ => Rgb([188, 78, 98]), // Primary
+    }
+}
+
+fn draw_rect_outline(
+    img: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    stroke: i32,
+    color: image::Rgb<u8>,
+) {
+    fill_rect(img, x, y, w, stroke, color);
+    fill_rect(img, x, y + h - stroke, w, stroke, color);
+    fill_rect(img, x, y, stroke, h, color);
+    fill_rect(img, x + w - stroke, y, stroke, h, color);
+}
+
+fn fill_rect(
+    img: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: image::Rgb<u8>,
+) {
+    let img_w = img.width() as i32;
+    let img_h = img.height() as i32;
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(img_w);
+    let y1 = (y + h).min(img_h);
+    for yy in y0..y1 {
+        for xx in x0..x1 {
+            img.put_pixel(xx as u32, yy as u32, color);
+        }
+    }
+}
+
+fn draw_thick_line(
+    img: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    thickness: i32,
+    color: image::Rgb<u8>,
+) {
+    // 简化的 Bresenham + 用 thickness×thickness 的方块代替单像素描点。
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let half = thickness / 2;
+    let mut x = x0;
+    let mut y = y0;
+    loop {
+        fill_rect(img, x - half, y - half, thickness, thickness, color);
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+fn fill_circle(
+    img: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+    cx: i32,
+    cy: i32,
+    r: i32,
+    color: image::Rgb<u8>,
+) {
+    let r2 = r * r;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r2 {
+                let x = cx + dx;
+                let y = cy + dy;
+                if x >= 0 && y >= 0 && (x as u32) < img.width() && (y as u32) < img.height() {
+                    img.put_pixel(x as u32, y as u32, color);
+                }
+            }
+        }
+    }
 }
 
 /// 数据库无路径 / 空白路径时，以及本地文件缺失时，尝试从 series_episode_catalog 或 TMDB API 构建回退 URL。

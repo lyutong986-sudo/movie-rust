@@ -20,3 +20,29 @@ pub fn end_refresh(item_id: Uuid) {
 pub fn is_refreshing(item_id: Uuid) -> bool {
     REFRESHING.contains(&item_id)
 }
+
+/// Tracks (item_id, image_type, backdrop_index) currently being persisted to local
+/// disk to avoid concurrent re-download of the same remote-Emby image.
+///
+/// `backdrop_index` 用 i32（`-1` 代表 None，0 = 主壁纸，>0 = 第 N 张）。
+static IMAGE_PERSISTING: LazyLock<DashSet<(Uuid, String, i32)>> = LazyLock::new(DashSet::new);
+
+/// 标记一张图片正在被异步持久化到本地。已在持久化中的同一图片直接跳过，避免重复下载。
+pub fn try_begin_image_persist(item_id: Uuid, image_type: &str, backdrop_index: Option<i32>) -> bool {
+    let key = (
+        item_id,
+        image_type.to_ascii_lowercase(),
+        backdrop_index.unwrap_or(-1),
+    );
+    IMAGE_PERSISTING.insert(key)
+}
+
+/// 持久化任务结束，无论成功失败都要释放，否则同一图永远拒绝重试。
+pub fn end_image_persist(item_id: Uuid, image_type: &str, backdrop_index: Option<i32>) {
+    let key = (
+        item_id,
+        image_type.to_ascii_lowercase(),
+        backdrop_index.unwrap_or(-1),
+    );
+    IMAGE_PERSISTING.remove(&key);
+}
