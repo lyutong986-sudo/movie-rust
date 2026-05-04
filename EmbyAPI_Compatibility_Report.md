@@ -5375,6 +5375,33 @@ Err(e) => {
 | `backend/src/remote_emby.rs` `login_remote` | 加入 **3 次退避重试**（1.5s / 3s / 6s backoff），仅对 `is_timeout \| is_connect \| is_request` 类网络错误重试；凭证错误（HTTP 4xx）不重试直接报 `BadRequest`；总超时从 15s 放宽到 20s |
 | `backend/src/remote_emby.rs` `preview_remote_views` | 登录阶段加入 **2 次退避重试**（1.5s / 3s），同理仅网络错误触发 |
 
+### 补充修复：播放链路网络韧性（同步可达但播放不可达）
+
+**现象**：同步媒体库正常工作，但播放时报远端不可达。
+
+**根因**：同步成功后 token 缓存在内存中，后续 API 调用不需要重新登录。播放时从 DB 加载 source 对象：
+1. 用缓存的 token 发送 Static 流请求 → 远端返回 401（token 已过期）
+2. 清空 token → 重试 → 触发 `login_remote` → 远端此时网络不稳定 → 失败
+3. 错误传播给客户端为 500 InternalServerError
+
+**补充修复**：
+| 位置 | 变更 |
+|------|------|
+| `send_remote_stream_request` 最终错误 | `AppError::Internal` → `AppError::RemoteUnavailable`（502） |
+| `send_remote_stream_request` PlaybackInfo 流请求 | 原来网络错误直接 `?` 传播，现在改为 `continue`（下一轮重试），网络不可恢复时返回 `RemoteUnavailable` |
+| `proxy_item_stream_internal_with_source` redirect_direct 模式 | 区分网络错误 vs 认证错误：网络不可达时直接回落 redirect 模式（客户端自己跟随 302），不再无谓触发 `login_remote` |
+
+### 补充修复：`ensure_authenticated` 韧性语义（模拟客户端行为）
+
+**对照发现**：本地播放器模板（Hills/LinPlayer）从不在播放路径上调用 `AuthenticateByName`。它只在用户手动登录时获取一次 token，之后所有请求（包括播放）直接传递存储的 token。如果 token 过期，播放器只是收到 401 再让用户手动重登——**绝不在播放关键路径上阻塞重登录**。
+
+我们的后端作为远端 Emby 的中间代理，原逻辑是：token 过期 → `ensure_authenticated(force_refresh=true)` → 同步调用 `login_remote` → 如果远端不可达就整个播放请求失败。
+
+**修复**：当 `force_refresh = true` 但 `login_remote` 因网络不可达（`RemoteUnavailable`）失败时，若本地已有旧 token/user_id → **静默复用旧凭证继续**（不传播错误）。逻辑：
+- 旧 token 可能仍被远端接受（远端 token TTL 尚未真正过期，只是刷新超前了或刷新失败）
+- 即使旧 token 也被远端拒绝（401），上层 `send_remote_stream_request` 的设备轮换兜底仍会触发
+- 效果：播放请求不再因"重登录不可达"而直接失败，行为对齐客户端"用已有 token 先试"的策略
+
 ### 与 PB49 FX5 的关系
 
 PB49 FX5 解决的是"同步主循环中 HTTP 请求静默挂起"问题（`tokio::time::timeout` 硬上限 + Series/Season 级别跳过），保护对象是**数据拉取阶段**的请求。本次修复补全的是**认证阶段**的空白——`login_remote` 在 PB49 之前和之后都没有 retry 机制，只依赖外层 `ensure_authenticated` 的设备轮换（对纯网络问题无效）。两者互补。

@@ -3201,35 +3201,50 @@ async fn proxy_item_stream_internal_with_source(
             match resolve_remote_redirect_chain(source, &redirect_url, &token).await {
                 Ok(resolved) => resolved,
                 Err(first_err) => {
-                    tracing::warn!(
-                        source_id = %source.id,
-                        remote_item_id = %remote_item_id,
-                        error = %first_err,
-                        "redirect_direct 第一次解析失败，强制刷新令牌后重试"
-                    );
-                    ensure_authenticated(&state.pool, source, true).await?;
-                    let refreshed_token = source
-                        .access_token
-                        .clone()
-                        .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
-                    redirect_url = build_remote_stream_redirect_url(
-                        source,
-                        remote_item_id,
-                        media_source_id,
-                        &refreshed_token,
-                    );
-                    match resolve_remote_redirect_chain(source, &redirect_url, &refreshed_token)
+                    let is_network_err = matches!(&first_err, AppError::RemoteUnavailable(_));
+                    if is_network_err {
+                        tracing::warn!(
+                            source_id = %source.id,
+                            remote_item_id = %remote_item_id,
+                            error = %first_err,
+                            "redirect_direct 网络不可达，跳过重登直接回落 redirect 模式"
+                        );
+                        redirect_url
+                    } else {
+                        tracing::warn!(
+                            source_id = %source.id,
+                            remote_item_id = %remote_item_id,
+                            error = %first_err,
+                            "redirect_direct 第一次解析失败，强制刷新令牌后重试"
+                        );
+                        ensure_authenticated(&state.pool, source, true).await?;
+                        let refreshed_token = source
+                            .access_token
+                            .clone()
+                            .ok_or_else(|| AppError::Internal("远端登录令牌为空".to_string()))?;
+                        redirect_url = build_remote_stream_redirect_url(
+                            source,
+                            remote_item_id,
+                            media_source_id,
+                            &refreshed_token,
+                        );
+                        match resolve_remote_redirect_chain(
+                            source,
+                            &redirect_url,
+                            &refreshed_token,
+                        )
                         .await
-                    {
-                        Ok(resolved) => resolved,
-                        Err(second_err) => {
-                            tracing::warn!(
-                                source_id = %source.id,
-                                remote_item_id = %remote_item_id,
-                                error = %second_err,
-                                "redirect_direct 重试仍失败，回落到 redirect 模式（带新 token）"
-                            );
-                            redirect_url
+                        {
+                            Ok(resolved) => resolved,
+                            Err(second_err) => {
+                                tracing::warn!(
+                                    source_id = %source.id,
+                                    remote_item_id = %remote_item_id,
+                                    error = %second_err,
+                                    "redirect_direct 重试仍失败，回落到 redirect 模式（带新 token）"
+                                );
+                                redirect_url
+                            }
                         }
                     }
                 }
@@ -5534,8 +5549,13 @@ async fn send_remote_stream_request(
                 }
                 // Static URL 返回了非成功状态，回退到 PlaybackInfo 路径
             }
-            Err(_) => {
-                // 网络错误，回退到 PlaybackInfo
+            Err(err) => {
+                tracing::debug!(
+                    source_id = %source.id,
+                    remote_item_id = %remote_item_id,
+                    error = %err,
+                    "Static URL 网络错误，回退到 PlaybackInfo 路径"
+                );
             }
         }
 
@@ -5588,7 +5608,29 @@ async fn send_remote_stream_request(
             &media_source.required_http_headers,
         );
 
-        let response = builder.send().await?;
+        let response = match builder.send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                if (err.is_timeout() || err.is_connect() || err.is_request())
+                    && attempt < max_attempts - 1
+                {
+                    tracing::warn!(
+                        source_id = %source.id,
+                        remote_item_id = %remote_item_id,
+                        attempt = attempt + 1,
+                        error = %err,
+                        "PlaybackInfo 流请求网络错误，下一轮重试"
+                    );
+                    let mut cache = PLAYBACK_INFO_CACHE.write().await;
+                    cache.remove(&cache_key);
+                    drop(cache);
+                    continue;
+                }
+                return Err(AppError::RemoteUnavailable(format!(
+                    "远端流媒体服务不可达: {err}"
+                )));
+            }
+        };
         let status = response.status();
         if matches!(
             status,
@@ -5605,9 +5647,6 @@ async fn send_remote_stream_request(
             continue;
         }
         if status == reqwest::StatusCode::NOT_FOUND && used_cache && attempt < max_attempts - 1 {
-            // 远端 DirectStreamUrl/TranscodingUrl 已失效（如 token rotate、媒体源 ID 变更）；
-            // 清掉过期 PlaybackInfo 缓存，下一轮 attempt 会拉取 fresh PlaybackInfo 重试一次
-            // （token 仍有效，无需 clear_remote_emby_source_auth_state）。
             let mut cache = PLAYBACK_INFO_CACHE.write().await;
             cache.remove(&cache_key);
             drop(cache);
@@ -5617,14 +5656,13 @@ async fn send_remote_stream_request(
     }
 
     // PB35-2：所有重试用完仍未拿到可用流，记 warn 并把错误明确成「远端不可用」。
-    // 之前直接抛 Unauthorized，客户端不知道是凭证还是远端宕机，这里上报更清晰的语义。
     tracing::warn!(
         source_id = %source.id,
         remote_item_id = %remote_item_id,
         "PB35-2：远端 Emby PlaybackInfo 全部 attempt 均失败，已耗尽重试"
     );
-    Err(AppError::Internal(
-        "远端 Emby 当前不可用（401/403 重登仍失败或所有 attempt 均超时），请稍后再试".to_string(),
+    Err(AppError::RemoteUnavailable(
+        "远端 Emby 当前不可用（重登失败或所有 attempt 均超时），请稍后再试".to_string(),
     ))
 }
 
@@ -6341,41 +6379,60 @@ fn remote_item_key_from_path(path: &str) -> Option<String> {
 /// ```
 ///
 /// `force_refresh = true` 强制重登（本地 token/user_id 未必失效，但调用方有理由怀疑）。
+///
+/// **韧性语义**：当 `force_refresh = true` 但 `login_remote` 因网络不可达失败时，
+/// 若本地已有旧 token/user_id，则**不传播错误**而是静默复用旧凭证——
+/// 模拟本地播放器行为（永不在播放关键路径上阻塞重登录）。
+/// 旧 token 可能仍被远端接受（远端 token TTL 尚未真正过期，只是我们的刷新超前了），
+/// 即使最终被远端拒绝 (401)，上层 `send_remote_stream_request` 也会再次设备轮换兜底。
 async fn ensure_authenticated(
     pool: &sqlx::PgPool,
     source: &mut DbRemoteEmbySource,
     force_refresh: bool,
 ) -> Result<String, AppError> {
-    if !force_refresh
-        && source
-            .remote_user_id
-            .as_ref()
-            .is_some_and(|value| !value.trim().is_empty())
+    let has_existing_credentials = source
+        .remote_user_id
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
         && source
             .access_token
             .as_ref()
-            .is_some_and(|value| !value.trim().is_empty())
-    {
+            .is_some_and(|value| !value.trim().is_empty());
+
+    if !force_refresh && has_existing_credentials {
         return Ok(source.remote_user_id.clone().unwrap_or_default());
     }
 
-    let login = login_remote(source).await?;
-    let token_changed = source.access_token.as_deref() != Some(login.access_token.as_str());
-    repository::update_remote_emby_source_auth_state(
-        pool,
-        source.id,
-        login.user.id.as_str(),
-        login.access_token.as_str(),
-    )
-    .await?;
-    source.remote_user_id = Some(login.user.id.clone());
-    source.access_token = Some(login.access_token.clone());
-    // PB15：force_refresh 路径或首次 token 变更后清掉本源的 PlaybackInfo 缓存，
-    // 避免跨 token 复用旧直链。仅在 token 真的换了时清，避免无谓抖动。
-    if token_changed {
-        invalidate_playback_info_cache_for_source(source.id).await;
+    match login_remote(source).await {
+        Ok(login) => {
+            let token_changed =
+                source.access_token.as_deref() != Some(login.access_token.as_str());
+            repository::update_remote_emby_source_auth_state(
+                pool,
+                source.id,
+                login.user.id.as_str(),
+                login.access_token.as_str(),
+            )
+            .await?;
+            source.remote_user_id = Some(login.user.id.clone());
+            source.access_token = Some(login.access_token.clone());
+            if token_changed {
+                invalidate_playback_info_cache_for_source(source.id).await;
+            }
+            Ok(login.user.id)
+        }
+        Err(err) => {
+            if has_existing_credentials && matches!(&err, AppError::RemoteUnavailable(_)) {
+                tracing::warn!(
+                    source_id = %source.id,
+                    error = %err,
+                    "远端登录不可达，复用已有凭证继续（模拟客户端行为）"
+                );
+                return Ok(source.remote_user_id.clone().unwrap_or_default());
+            }
+            Err(err)
+        }
     }
-    Ok(login.user.id)
 }
 
 async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse, AppError> {
