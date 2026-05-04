@@ -416,7 +416,14 @@ impl FromRequestParts<AppState> for OptionalAuthSession {
             }
 
             match repository::get_session(&state.pool, &token).await {
-                Ok(Some(session)) => Ok(OptionalAuthSession(Some(session.into()))),
+                Ok(Some(session)) => {
+                    if let Some(expires_at) = session.expires_at {
+                        if expires_at < chrono::Utc::now() {
+                            return Ok(OptionalAuthSession(None));
+                        }
+                    }
+                    Ok(OptionalAuthSession(Some(session.into())))
+                }
                 Ok(None) => Ok(OptionalAuthSession(None)),
                 Err(e) => Err(e.into()),
             }

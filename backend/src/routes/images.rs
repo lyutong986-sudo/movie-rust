@@ -1489,7 +1489,14 @@ async fn serve_item_image(
             remote_source.as_ref(),
         )
         .await;
-        let should_fallback = matches!(&result, Err(AppError::NotFound(_)) | Err(AppError::Internal(_)));
+        let should_fallback = match &result {
+            Err(AppError::NotFound(_)) => true,
+            Err(AppError::Internal(msg)) => {
+                msg.contains("下载") || msg.contains("远端") || msg.contains("connect")
+                    || msg.contains("timeout") || msg.contains("HTTP 4") || msg.contains("HTTP 5")
+            }
+            _ => false,
+        };
         if should_fallback {
             if let Some(fallback_url) =
                 find_tmdb_image_fallback(&state.pool, &item, &normalized, state.config.tmdb_api_key.as_deref()).await

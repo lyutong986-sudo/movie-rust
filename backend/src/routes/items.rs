@@ -5551,8 +5551,7 @@ async fn playback_info(
     let force_transcoding = !transcode_reasons.is_empty();
 
     let playback_item_id = crate::models::uuid_to_emby_guid(&item.id);
-    let playback_user_id = info.user_id.unwrap_or(session.user_id);
-    let playback_user_id = uuid_to_emby_guid(&playback_user_id);
+    let playback_user_id = uuid_to_emby_guid(&session.user_id);
     for media_source in &mut media_sources {
         let media_source_id = media_source.id.clone();
         media_source.direct_stream_url = Some(build_direct_stream_url(

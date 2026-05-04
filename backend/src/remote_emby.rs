@@ -6666,27 +6666,51 @@ async fn emby_download_bytes(
     token: &str,
     url: &str,
 ) -> Result<Vec<u8>, AppError> {
+    const MAX_RETRIES: u32 = 2;
     let dl_auth = emby_auth_header(source, Some(token));
-    let resp = crate::http_client::SHARED
-        .get(url)
-        .header(header::USER_AGENT.as_str(), source.effective_user_agent())
-        .header("X-Emby-Token", token)
-        .header("Authorization", &dl_auth)
-        .header("X-Emby-Authorization", &dl_auth)
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("下载远端资源失败: {e:#} url={url}")))?;
-    if !resp.status().is_success() {
-        return Err(AppError::Internal(format!(
-            "下载远端 HTTP {} {}",
-            resp.status().as_u16(),
-            url
-        )));
+    let mut last_err = None;
+    for attempt in 0..=MAX_RETRIES {
+        let resp = crate::http_client::SHARED
+            .get(url)
+            .header(header::USER_AGENT.as_str(), source.effective_user_agent())
+            .header("X-Emby-Token", token)
+            .header("Authorization", &dl_auth)
+            .header("X-Emby-Authorization", &dl_auth)
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                return r
+                    .bytes()
+                    .await
+                    .map(|b| b.to_vec())
+                    .map_err(|e| AppError::Internal(format!("读取远端字节失败: {e}")));
+            }
+            Ok(r) if r.status().as_u16() == 404 || r.status().as_u16() == 403 => {
+                return Err(AppError::Internal(format!(
+                    "下载远端 HTTP {} {}",
+                    r.status().as_u16(),
+                    url
+                )));
+            }
+            Ok(r) => {
+                last_err = Some(format!("HTTP {}", r.status().as_u16()));
+            }
+            Err(e) if is_retryable_network_error(&e) => {
+                last_err = Some(format!("{e:#}"));
+            }
+            Err(e) => {
+                return Err(AppError::Internal(format!("下载远端资源失败: {e:#} url={url}")));
+            }
+        }
+        if attempt < MAX_RETRIES {
+            tokio::time::sleep(Duration::from_millis(500 << attempt)).await;
+        }
     }
-    resp.bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|e| AppError::Internal(format!("读取远端字节失败: {e}")))
+    Err(AppError::Internal(format!(
+        "下载远端资源失败（重试 {MAX_RETRIES} 次后）: {} url={url}",
+        last_err.unwrap_or_default()
+    )))
 }
 
 async fn write_remote_strm_bundle(

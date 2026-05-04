@@ -5259,3 +5259,35 @@ Err(e) => {
 `cargo check` 通过（0 errors，55 pre-existing warnings unchanged）。
 
 ---
+
+## 全链路审计修复 — 第四阶段（2026-05-04）
+
+### P2 — 性能/一致性（补充）
+
+#### P2-5. sidecar 图片下载加 HTTP 重试
+- **文件**: `backend/src/remote_emby.rs` `emby_download_bytes`
+- **问题**: 与 `get_json_with_retry` 不同，单次失败直接报错，无重试。
+- **修复**: 增加最多 2 次重试（500ms/1s 退避），仅对可重试的网络错误和 5xx 重试，403/404 直接返回。
+
+### P3 — 设计/可观测性
+
+#### P3-1. OptionalAuthSession 补齐过期二次检查
+- **文件**: `backend/src/auth.rs` `OptionalAuthSession::from_request_parts`
+- **问题**: SQL 已过滤过期会话，但 `AuthSession` 有 Rust 侧二次检查而 `OptionalAuthSession` 无。
+- **修复**: 在 `get_session` 返回后增加 `expires_at < now()` 检查，过期返回 `None`。
+
+#### P3-3. should_fallback 区分 Internal 类型
+- **文件**: `backend/src/routes/images.rs` L1492
+- **问题**: 所有 `AppError::Internal` 都触发 TMDB 回退，掩盖磁盘 IO/解码异常等真实错误。
+- **修复**: 仅当错误消息包含网络相关关键词（下载/远端/connect/timeout/HTTP 4xx/5xx）时才回退。
+
+#### P3-8. PlaybackInfo UserId 可被请求覆盖
+- **文件**: `backend/src/routes/items.rs` L5553-5555
+- **问题**: `playback_user_id = info.user_id.unwrap_or(session.user_id)`，客户端可传入其它用户 ID 写入转码 URL。
+- **修复**: 强制使用 `session.user_id`，忽略请求体中的 `user_id`。
+
+### 编译验证
+
+`cargo check` 通过（0 errors，55 pre-existing warnings unchanged）。
+
+---
