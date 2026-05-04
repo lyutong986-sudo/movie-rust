@@ -5349,3 +5349,38 @@ Err(e) => {
 `cargo check` 通过（0 errors，55 pre-existing warnings unchanged）。
 
 ---
+
+## 2026-05-04 — 远端 Emby 登录链路网络韧性修复（login_remote retry + 错误分类优化）
+
+### 现象
+
+用户反馈连接远端 Emby 源 `http://aaa.204cloud.com` 时出现两类错误：
+```
+{"ErrorCode":"InternalServerError","ErrorMessage":"内部错误: HTTP请求错误: ... connection error -> Connection reset by peer (os error 104)"}
+{"ErrorCode":"InternalServerError","ErrorMessage":"内部错误: HTTP请求错误: ... operation timed out"}
+```
+错误发生在 `login_remote` → `POST /Users/AuthenticateByName` 阶段，远端服务器网络不稳定时直接失败。
+
+### 根因分析
+
+1. **`login_remote` 无重试逻辑**：该函数只尝试一次 HTTP 请求（15s 超时），远端服务器暂时性网络抖动（connection reset / timeout）直接抛错。对比同文件的 `get_json_with_retry` 有完整的 3 次退避重试 + 设备轮换，但 `login_remote` 没有享受到同等保护。
+2. **错误分类不当**：所有 `reqwest::Error`（包括网络不可达、超时等）统一转换为 `AppError::Internal`（HTTP 500 InternalServerError），给用户造成"后端代码出 bug"的误解。实际是远端上游不可达，应为 502 Bad Gateway 语义。
+3. **`preview_remote_views`（测试连接）同样无重试**：前端添加/测试远端源时走该函数，网络波动直接报 500。
+
+### 修复（3 个文件）
+
+| 文件 | 变更 |
+|------|------|
+| `backend/src/error.rs` | 新增 `AppError::RemoteUnavailable(String)` 变体 → HTTP 502 / ErrorCode=`RemoteServerUnavailable`；`From<reqwest::Error>` 判断 `is_timeout() \| is_connect() \| is_request()` 时映射到 `RemoteUnavailable` 而非 `Internal` |
+| `backend/src/remote_emby.rs` `login_remote` | 加入 **3 次退避重试**（1.5s / 3s / 6s backoff），仅对 `is_timeout \| is_connect \| is_request` 类网络错误重试；凭证错误（HTTP 4xx）不重试直接报 `BadRequest`；总超时从 15s 放宽到 20s |
+| `backend/src/remote_emby.rs` `preview_remote_views` | 登录阶段加入 **2 次退避重试**（1.5s / 3s），同理仅网络错误触发 |
+
+### 与 PB49 FX5 的关系
+
+PB49 FX5 解决的是"同步主循环中 HTTP 请求静默挂起"问题（`tokio::time::timeout` 硬上限 + Series/Season 级别跳过），保护对象是**数据拉取阶段**的请求。本次修复补全的是**认证阶段**的空白——`login_remote` 在 PB49 之前和之后都没有 retry 机制，只依赖外层 `ensure_authenticated` 的设备轮换（对纯网络问题无效）。两者互补。
+
+### 编译验证
+
+`cargo check` 通过（0 errors，55 pre-existing warnings unchanged）。
+
+---

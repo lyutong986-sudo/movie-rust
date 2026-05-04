@@ -17,6 +17,8 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("内部错误: {0}")]
     Internal(String),
+    #[error("远端服务不可达: {0}")]
+    RemoteUnavailable(String),
     #[error("FFmpeg错误: {0}")]
     FfmpegError(String),
     #[error("转码功能已禁用")]
@@ -44,6 +46,9 @@ impl IntoResponse for AppError {
             AppError::Sqlx(_) => (StatusCode::INTERNAL_SERVER_ERROR, "DatabaseError"),
             AppError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "IOError"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "InternalServerError"),
+            AppError::RemoteUnavailable(_) => {
+                (StatusCode::BAD_GATEWAY, "RemoteServerUnavailable")
+            }
             AppError::FfmpegError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "FfmpegError"),
             AppError::TranscodingDisabled => (StatusCode::BAD_REQUEST, "TranscodingDisabled"),
             AppError::InvalidTranscodingProtocol(_) => {
@@ -75,14 +80,18 @@ impl From<anyhow::Error> for AppError {
 
 impl From<reqwest::Error> for AppError {
     fn from(value: reqwest::Error) -> Self {
+        let is_network = value.is_timeout() || value.is_connect() || value.is_request();
         let mut detail = format!("HTTP请求错误: {value}");
-        // 展开完整错误链，暴露真正的内层原因（TLS/DNS/connection reset等）
         let mut source = std::error::Error::source(&value);
         while let Some(inner) = source {
             detail.push_str(&format!(" -> {inner}"));
             source = std::error::Error::source(inner);
         }
-        AppError::Internal(detail)
+        if is_network {
+            AppError::RemoteUnavailable(detail)
+        } else {
+            AppError::Internal(detail)
+        }
     }
 }
 

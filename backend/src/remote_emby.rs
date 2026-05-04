@@ -884,10 +884,9 @@ pub async fn preview_remote_views(
     let preview_ua = format!("{client_name}/{version}");
     let device_id = Uuid::new_v4().simple().to_string();
 
-    // 使用一次性 Client 避免 SHARED 连接池被之前的同步请求毒化
     let fresh_client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(20))
         .pool_max_idle_per_host(0)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
@@ -896,24 +895,56 @@ pub async fn preview_remote_views(
     let preview_auth = emby_auth_header_for_identity(
         client_name, device_name, device_id.as_str(), version, "",
     );
-    let login_response = fresh_client
-        .post(&auth_endpoint)
-        .header(header::USER_AGENT.as_str(), &preview_ua)
-        .header(header::CONTENT_TYPE.as_str(), "application/json")
-        .header(header::ACCEPT.as_str(), "application/json")
-        .header("Authorization", &preview_auth)
-        .header("X-Emby-Authorization", &preview_auth)
-        .json(&serde_json::json!({
-            "Username": username,
-            "Pw": password,
-            "Password": password,
-        }))
-        .send()
-        .await?;
 
-    if !login_response.status().is_success() {
-        let status = login_response.status();
-        let body = login_response.text().await.unwrap_or_default();
+    const PREVIEW_LOGIN_RETRIES: u32 = 2;
+    let mut login_response = None;
+    for attempt in 0..=PREVIEW_LOGIN_RETRIES {
+        match fresh_client
+            .post(&auth_endpoint)
+            .header(header::USER_AGENT.as_str(), &preview_ua)
+            .header(header::CONTENT_TYPE.as_str(), "application/json")
+            .header(header::ACCEPT.as_str(), "application/json")
+            .header("Authorization", &preview_auth)
+            .header("X-Emby-Authorization", &preview_auth)
+            .json(&serde_json::json!({
+                "Username": username,
+                "Pw": password,
+                "Password": password,
+            }))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                login_response = Some(resp);
+                break;
+            }
+            Err(err) => {
+                let is_network = err.is_timeout() || err.is_connect() || err.is_request();
+                if is_network && attempt < PREVIEW_LOGIN_RETRIES {
+                    let delay_ms = 1500u64 << attempt;
+                    tracing::warn!(
+                        endpoint = %auth_endpoint,
+                        attempt = attempt + 1,
+                        error = %err,
+                        "preview_remote_views 登录网络错误，退避后重试"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+                return Err(AppError::RemoteUnavailable(format!(
+                    "远端服务器 {server_url} 不可达（已重试 {} 次）: {err}",
+                    attempt
+                )));
+            }
+        }
+    }
+    let login_resp = login_response.ok_or_else(|| {
+        AppError::RemoteUnavailable(format!("远端服务器 {server_url} 不可达"))
+    })?;
+
+    if !login_resp.status().is_success() {
+        let status = login_resp.status();
+        let body = login_resp.text().await.unwrap_or_default();
         return Err(AppError::BadRequest(format!(
             "远端 Emby 登录失败: {} {}",
             status.as_u16(),
@@ -921,7 +952,7 @@ pub async fn preview_remote_views(
         )));
     }
     let login: RemoteLoginResponse =
-        parse_remote_json_response(login_response, auth_endpoint.as_str()).await?;
+        parse_remote_json_response(login_resp, auth_endpoint.as_str()).await?;
 
     let views_endpoint = format!("{server_url}/Users/{}/Views", login.user.id);
     let views_auth = emby_auth_header_for_identity(
@@ -6348,6 +6379,9 @@ async fn ensure_authenticated(
 }
 
 async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse, AppError> {
+    const LOGIN_MAX_RETRIES: u32 = 3;
+    const LOGIN_BACKOFF_BASE_MS: u64 = 1500;
+
     let endpoint = format!(
         "{}/Users/AuthenticateByName",
         normalize_server_url(&source.server_url)
@@ -6355,41 +6389,76 @@ async fn login_remote(source: &DbRemoteEmbySource) -> Result<RemoteLoginResponse
     let auth_value = emby_auth_header(source, None);
     let ua = source.effective_user_agent();
 
-    // 使用一次性 Client，不复用 SHARED 连接池：
-    // 身份轮换后 SHARED 池里可能还残留被远端标记为恶意的旧连接，
-    // 新建 Client 确保用全新 TCP 连接发起登录。
     let fresh_client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(20))
         .pool_max_idle_per_host(0)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let response = fresh_client
-        .post(&endpoint)
-        .header(header::USER_AGENT.as_str(), ua)
-        .header(header::CONTENT_TYPE.as_str(), "application/json")
-        .header(header::ACCEPT.as_str(), "application/json")
-        .header("Authorization", &auth_value)
-        .header("X-Emby-Authorization", &auth_value)
-        .json(&serde_json::json!({
-            "Username": source.username,
-            "Pw": source.password,
-            "Password": source.password,
-        }))
-        .send()
-        .await?;
+    let mut last_err: Option<AppError> = None;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(AppError::BadRequest(format!(
-            "远端 Emby 登录失败: {} {}",
-            status.as_u16(),
-            body
-        )));
+    for attempt in 0..=LOGIN_MAX_RETRIES {
+        let response = fresh_client
+            .post(&endpoint)
+            .header(header::USER_AGENT.as_str(), &ua)
+            .header(header::CONTENT_TYPE.as_str(), "application/json")
+            .header(header::ACCEPT.as_str(), "application/json")
+            .header("Authorization", &auth_value)
+            .header("X-Emby-Authorization", &auth_value)
+            .json(&serde_json::json!({
+                "Username": source.username,
+                "Pw": source.password,
+                "Password": source.password,
+            }))
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(AppError::BadRequest(format!(
+                        "远端 Emby 登录失败: {} {}",
+                        status.as_u16(),
+                        body
+                    )));
+                }
+                return parse_remote_json_response(resp, endpoint.as_str()).await;
+            }
+            Err(err) => {
+                let is_network = err.is_timeout() || err.is_connect() || err.is_request();
+                if is_network && attempt < LOGIN_MAX_RETRIES {
+                    let delay_ms = LOGIN_BACKOFF_BASE_MS << attempt;
+                    tracing::warn!(
+                        endpoint = %endpoint,
+                        attempt = attempt + 1,
+                        max_retries = LOGIN_MAX_RETRIES,
+                        delay_ms,
+                        is_timeout = err.is_timeout(),
+                        is_connect = err.is_connect(),
+                        error = %err,
+                        "远端 Emby 登录网络错误，退避后重试"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    last_err = Some(AppError::RemoteUnavailable(format!(
+                        "远端服务器 {} 不可达: {err}",
+                        source.server_url
+                    )));
+                    continue;
+                }
+                return Err(AppError::RemoteUnavailable(format!(
+                    "远端服务器 {} 登录失败（已重试 {} 次）: {err}",
+                    source.server_url, attempt
+                )));
+            }
+        }
     }
-    parse_remote_json_response(response, endpoint.as_str()).await
+
+    Err(last_err.unwrap_or_else(|| {
+        AppError::RemoteUnavailable(format!("远端服务器 {} 不可达", source.server_url))
+    }))
 }
 
 /// Series 目录显示名兜底逻辑。统一供 `build_relative_strm_path`、
