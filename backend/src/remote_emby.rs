@@ -7829,6 +7829,95 @@ fn emby_auth_header_for_identity(
     }
 }
 
+/// 在数据库里所有启用的远端 Emby 源中，按 host(:port) 查找匹配 `url` 的那一条。
+///
+/// 用于：
+/// - 图片代理：远端 Emby 落库时存的是裸 URL（`http://aaa.204cloud.com/emby/Items/.../Images/Primary?...`），
+///   后端代理拉取时需要找到背后的 source 注入 `api_key + X-Emby-Token + Authorization + 伪装 UA`。
+/// - 「上传现有远端图片」：picker 点击 `LocalMetadata` 条目时，
+///   后端 `/Items/{id}/RemoteImages/Download` 也要带这套头才能下到字节。
+///
+/// 匹配规则：仅比较 scheme + host + port（忽略路径），避免 `view_strm_workspace` 改造前后
+/// 同一上游 IP 因为路径前缀差异错过命中。
+pub async fn find_remote_emby_source_for_url(
+    pool: &sqlx::PgPool,
+    url: &str,
+) -> Option<DbRemoteEmbySource> {
+    let target = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return None,
+    };
+    let target_host = target.host_str()?.to_ascii_lowercase();
+    let target_port = target.port_or_known_default();
+    let sources = repository::list_remote_emby_sources(pool).await.ok()?;
+    sources.into_iter().find(|src| {
+        let parsed = match url::Url::parse(&src.server_url) {
+            Ok(u) => u,
+            Err(_) => return false,
+        };
+        let host_matches = parsed
+            .host_str()
+            .map(|h| h.eq_ignore_ascii_case(&target_host))
+            .unwrap_or(false);
+        let port_matches = parsed.port_or_known_default() == target_port;
+        host_matches && port_matches
+    })
+}
+
+/// 给 `client.get(url)` 注入远端 Emby 鉴权所需的全套伪装头：
+/// - `api_key=<source.access_token>` 追加到 query string（已存在则覆盖）
+/// - `User-Agent: {Client}/{Version}`（伪装成 Infuse / 配置的客户端，避免裸 reqwest UA 触发 WAF）
+/// - `X-Emby-Token: <access_token>`
+/// - `Authorization` / `X-Emby-Authorization`：按 EmbySDK 官方规范拼装的 UserId/Client/Device/DeviceId/Version
+///
+/// 调用方只需把 `url` 原样传入；本函数返回带所有头的 `RequestBuilder`，
+/// 调用 `.send()` 后即可像普通 http 请求一样处理 status / body。
+pub fn build_authenticated_emby_image_request(
+    client: &reqwest::Client,
+    source: &DbRemoteEmbySource,
+    url: &str,
+) -> reqwest::RequestBuilder {
+    let token = source
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or("");
+
+    // 把 api_key 写进 URL；如果上游 URL 已经带过期 token，也覆盖成最新的
+    let final_url = if token.is_empty() {
+        url.to_string()
+    } else {
+        match url::Url::parse(url) {
+            Ok(mut parsed) => {
+                let mut pairs: Vec<(String, String)> = parsed
+                    .query_pairs()
+                    .filter(|(k, _)| !k.eq_ignore_ascii_case("api_key"))
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect();
+                pairs.push(("api_key".to_string(), token.to_string()));
+                parsed.query_pairs_mut().clear().extend_pairs(&pairs);
+                parsed.into()
+            }
+            Err(_) => {
+                let sep = if url.contains('?') { '&' } else { '?' };
+                format!("{url}{sep}api_key={token}")
+            }
+        }
+    };
+
+    let auth_value = emby_auth_header(source, Some(token));
+    let mut builder = client
+        .get(&final_url)
+        .header(header::USER_AGENT.as_str(), source.effective_user_agent());
+    if !token.is_empty() {
+        builder = builder.header("X-Emby-Token", token);
+    }
+    builder
+        .header("Authorization", &auth_value)
+        .header("X-Emby-Authorization", &auth_value)
+}
+
 fn normalize_remote_view_ids(values: &[String]) -> Vec<String> {
     let mut normalized = Vec::new();
     for raw in values {

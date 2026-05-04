@@ -413,19 +413,38 @@ async fn download_item_remote_image(
         .work_limiters
         .acquire(WorkLimiterKind::TmdbMetadata)
         .await;
-    let response = SHARED_HTTP_CLIENT
-        .get(image_url)
+    // 来自远端 Emby 源的图片 URL（落库时不带 token）需要走伪装鉴权链路；
+    // 否则严格 WAF 上游会一律 401/403/404，picker 点同一张图一直「远程图片不存在」。
+    let authenticated_source =
+        crate::remote_emby::find_remote_emby_source_for_url(&state.pool, image_url).await;
+    let response = if let Some(source) = authenticated_source.as_ref() {
+        crate::remote_emby::build_authenticated_emby_image_request(
+            &SHARED_HTTP_CLIENT,
+            source,
+            image_url,
+        )
         .send()
         .await
-        .map_err(|error| AppError::Internal(format!("下载远程图片失败: {error}")))?;
+        .map_err(|error| AppError::Internal(format!("下载远程图片失败: {error}")))?
+    } else {
+        SHARED_HTTP_CLIENT
+            .get(image_url)
+            .send()
+            .await
+            .map_err(|error| AppError::Internal(format!("下载远程图片失败: {error}")))?
+    };
     if !response.status().is_success() {
         let upstream_status = response.status();
         tracing::debug!(
             image_url = %image_url,
             upstream_status = %upstream_status,
+            authenticated = %authenticated_source.is_some(),
             "上游图片返回非 2xx 状态，按 NotFound 处理"
         );
-        return Err(AppError::NotFound("远程图片不存在".to_string()));
+        return Err(AppError::NotFound(format!(
+            "远程图片不存在 (HTTP {})",
+            upstream_status.as_u16()
+        )));
     }
     let content_type = response
         .headers()
@@ -1137,7 +1156,7 @@ async fn serve_person_image(
     let path = resolve_person_image_path(&state, &name, &image_type)
         .await?
         .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
-    serve_image(&path, request, &image_query).await
+    serve_image(Some(&state), &path, request, &image_query).await
 }
 
 async fn upload_item_image_impl(
@@ -1290,7 +1309,7 @@ async fn serve_genre_image(
     let path = repository::get_genre_image_path(&state.pool, &name, &image_type)
         .await?
         .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
-    serve_image(&path, request, &image_query).await
+    serve_image(Some(&state), &path, request, &image_query).await
 }
 
 async fn serve_item_image(
@@ -1314,19 +1333,19 @@ async fn serve_item_image(
         let path = chapter
             .image_path
             .ok_or_else(|| AppError::NotFound("章节图片不存在".to_string()))?;
-        return serve_image(&path, request, &image_query).await;
+        return serve_image(Some(&state), &path, request, &image_query).await;
     }
 
     if let Some(path) =
         repository::get_missing_episode_image_path(&state.pool, item_id, &image_type).await?
     {
-        return serve_image(&path, request, &image_query).await;
+        return serve_image(Some(&state), &path, request, &image_query).await;
     }
 
     let Some(item) = repository::get_media_item(&state.pool, item_id).await? else {
         if let Some(person) = repository::get_person_by_uuid(&state.pool, item_id).await? {
             if let Some(path) = resolve_person_image_path(&state, &person.id, &image_type).await? {
-                return serve_image(&path, request, &image_query).await;
+                return serve_image(Some(&state), &path, request, &image_query).await;
             }
             return Err(AppError::NotFound("图片不存在".to_string()));
         }
@@ -1335,13 +1354,13 @@ async fn serve_item_image(
             if normalized.eq_ignore_ascii_case("Primary") {
                 if let Some(path) = library.primary_image_path.as_ref() {
                     if !path.trim().is_empty() {
-                        return serve_image(path, request, &image_query).await;
+                        return serve_image(Some(&state), path, request, &image_query).await;
                     }
                 }
                 if let Some((_, child_path, _)) =
                     repository::first_library_child_image(&state.pool, library.id).await?
                 {
-                    return serve_image(&child_path, request, &image_query).await;
+                    return serve_image(Some(&state), &child_path, request, &image_query).await;
                 }
             }
             return Err(AppError::NotFound("图片不存在".to_string()));
@@ -1398,23 +1417,25 @@ async fn serve_item_image(
         };
 
         let method = request.method().clone();
-        let result = serve_image(&effective_path, request, &image_query).await;
+        let result = serve_image(Some(&state), &effective_path, request, &image_query).await;
         if let Err(AppError::NotFound(_)) = &result {
-            if !path.starts_with("http://") && !path.starts_with("https://") {
-                if let Some(fallback_url) =
-                    find_tmdb_image_fallback(&state.pool, &item, &normalized, state.config.tmdb_api_key.as_deref()).await
-                {
-                    tracing::debug!(
-                        item_id = %item.id,
-                        image_type = %normalized,
-                        "本地图片文件不存在，回退到 TMDB 远程代理"
-                    );
-                    let fallback_req = Request::builder()
-                        .method(method)
-                        .body(Body::empty())
-                        .unwrap_or_default();
-                    return serve_remote_image(&fallback_url, &image_query, fallback_req).await;
-                }
+            // PB50：上游远端 Emby 拉取失败（图片被删 / 上游迁移 / WAF 拦截）也走 TMDB 回退。
+            // 之前只对 local 路径开放回退，导致整个远端站点不可达时首页所有海报全空。
+            if let Some(fallback_url) =
+                find_tmdb_image_fallback(&state.pool, &item, &normalized, state.config.tmdb_api_key.as_deref()).await
+            {
+                let from_remote = path.starts_with("http://") || path.starts_with("https://");
+                tracing::debug!(
+                    item_id = %item.id,
+                    image_type = %normalized,
+                    from_remote,
+                    "原图加载失败，回退到 TMDB 远程代理"
+                );
+                let fallback_req = Request::builder()
+                    .method(method)
+                    .body(Body::empty())
+                    .unwrap_or_default();
+                return serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req).await;
             }
         }
         return result;
@@ -1430,7 +1451,7 @@ async fn serve_item_image(
             .method(request.method().clone())
             .body(Body::empty())
             .unwrap_or_default();
-        return serve_remote_image(&fallback_url, &image_query, fallback_req).await;
+        return serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req).await;
     }
 
     Err(AppError::NotFound("图片不存在".to_string()))
@@ -1582,7 +1603,7 @@ async fn serve_user_image(
         .ok_or_else(|| AppError::NotFound("图片不存在".to_string()))?;
 
     let image_query = parse_item_image_query(request.uri());
-    serve_image(&path, request, &image_query).await
+    serve_image(Some(&state), &path, request, &image_query).await
 }
 
 async fn upload_user_image(
@@ -1650,6 +1671,7 @@ async fn delete_user_image(
 }
 
 async fn get_remote_image(
+    State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
     request: Request<Body>,
 ) -> Result<Response, AppError> {
@@ -1658,7 +1680,7 @@ async fn get_remote_image(
         .ok_or_else(|| AppError::BadRequest("缺少 ImageUrl 参数".to_string()))?;
 
     let image_query = parse_item_image_query(request.uri());
-    serve_remote_image(image_url, &image_query, request).await
+    serve_remote_image(Some(&state), image_url, &image_query, request).await
 }
 
 fn normalized_user_image_type(image_type: &str) -> String {
@@ -1938,12 +1960,13 @@ fn apply_item_image_transform(
 }
 
 async fn serve_image(
+    state: Option<&AppState>,
     path: &str,
     request: Request<Body>,
     image_query: &ItemImageQuery,
 ) -> Result<Response, AppError> {
     if path.starts_with("http://") || path.starts_with("https://") {
-        serve_remote_image(path, image_query, request).await
+        serve_remote_image(state, path, image_query, request).await
     } else {
         serve_local_path(PathBuf::from(path), request, image_query).await
     }
@@ -2257,6 +2280,7 @@ fn if_none_match_hits(req: &Request<Body>, etag: &str) -> bool {
 }
 
 async fn serve_remote_image(
+    state: Option<&AppState>,
     url: &str,
     image_query: &ItemImageQuery,
     request: Request<Body>,
@@ -2275,11 +2299,28 @@ async fn serve_remote_image(
         return build_remote_image_response(bytes, content_type, &etag, &request);
     }
 
-    let response = SHARED_HTTP_CLIENT
-        .get(url)
+    // 命中已配置的远端 Emby 源时改用伪装鉴权头：覆盖 WAF 严格、必须带 token / 特定 UA 的上游。
+    // 落库的远端图片 URL 不带 token，裸 GET 容易被反爬拦下来；找到对应 source 后注入完整身份。
+    let authenticated_source = match state {
+        Some(state) => crate::remote_emby::find_remote_emby_source_for_url(&state.pool, url).await,
+        None => None,
+    };
+    let response = if let Some(source) = authenticated_source.as_ref() {
+        crate::remote_emby::build_authenticated_emby_image_request(
+            &SHARED_HTTP_CLIENT,
+            source,
+            url,
+        )
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("获取远程图片失败: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("获取远程图片失败: {e}")))?
+    } else {
+        SHARED_HTTP_CLIENT
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("获取远程图片失败: {e}")))?
+    };
 
     let status = response.status();
     if !status.is_success() {
@@ -2288,7 +2329,12 @@ async fn serve_remote_image(
             upstream_status = %status,
             "上游图片返回非 2xx 状态，按 NotFound 处理"
         );
-        return Err(AppError::NotFound("远程图片不存在".to_string()));
+        // 把 HTTP status 透出到错误体里：401/403 → 远端鉴权失效需要刷 token；
+        // 404 → 上游把图片删了 / 上游条目变更；429/5xx → 限流或上游故障。
+        return Err(AppError::NotFound(format!(
+            "远程图片不存在 (HTTP {})",
+            status.as_u16()
+        )));
     }
 
     let declared_content_type = response
