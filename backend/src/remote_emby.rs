@@ -7478,6 +7478,227 @@ async fn run_remote_library_monitor_pass(
     Ok(())
 }
 
+/// 单条「远端 Emby 条目」按需刷新：拉远端最新 BaseItem，重写本地 STRM/侧车，
+/// 把 metadata / media streams / chapters / people / images 全部刷一遍。
+///
+/// 由 `routes/items.rs::do_refresh_item_metadata_with` 在用户点击「刷新元数据」时
+/// 优先调用——远端 Emby 是这些条目的"源真相"，应该先吃远端再考虑 TMDB 兜底。
+///
+/// 返回值语义：
+///   * `Ok(true)`  本函数已经把元数据从远端刷新落库，调用方应跳过后续 TMDB 路径
+///                 （避免 TMDB 反向覆盖远端权威字段）；
+///   * `Ok(false)` 条目不适合走远端单条刷新（如不是 Movie/Episode/Series），调用方
+///                 应回落到 TMDB 路径；
+///   * `Err(_)`    远端不可达 / 鉴权失败 / 源被禁用等硬错误，调用方按业务决定是否
+///                 兜底（建议 fall-through 到 TMDB，实在不行再返回错误给用户）。
+///
+/// 与 `sync_source_with_progress` 的差异：
+///   * 单条粒度，不进 sync 注册表，不显示进度卡片（点击元数据刷新本就是单条操作）；
+///   * `force_refresh_sidecar=true`，明确尊重用户"刷新一次"的意图覆盖侧车；
+///   * 内部仍调 `process_one_remote_sync_item` / `fetch_and_upsert_series_detail`，
+///     避免与 sync 主链路出现行为飘移。
+pub async fn refresh_single_remote_item(
+    state: &AppState,
+    item: &crate::models::DbMediaItem,
+) -> Result<bool, AppError> {
+    let marker = match remote_marker_for_db_item(item) {
+        Some(m) => m,
+        None => return Ok(false),
+    };
+
+    let item_kind = item.item_type.as_str();
+    let is_movie = item_kind.eq_ignore_ascii_case("Movie");
+    let is_episode = item_kind.eq_ignore_ascii_case("Episode");
+    let is_series = item_kind.eq_ignore_ascii_case("Series");
+    if !(is_movie || is_episode || is_series) {
+        // Season 在 Emby 元数据上几乎是 Series 的衍生，没有独立的远端"刷新"语义；
+        // Folder/View 不是用户点刷新的目标。统一让调用方回落 TMDB。
+        tracing::debug!(
+            item_id = %item.id,
+            item_type = %item.item_type,
+            "刷新元数据：远端单条刷新仅支持 Movie/Episode/Series，其它类型回落 TMDB"
+        );
+        return Ok(false);
+    }
+
+    let mut source = repository::get_remote_emby_source(&state.pool, marker.source_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "远端 Emby 源不存在：source_id={}（条目带远端标记但源已删除）",
+                marker.source_id
+            ))
+        })?;
+    if !source.enabled {
+        return Err(AppError::BadRequest(format!(
+            "远端 Emby 源「{}」已禁用，无法从远端刷新条目；请先启用源或在「编辑源」中重新连通",
+            source.name
+        )));
+    }
+
+    let user_id = ensure_authenticated(&state.pool, &mut source, false).await?;
+
+    // 条目所属本地库：DbMediaItem 不带 library_id，单独查一次（带索引）。
+    let library_id = repository::item_library_id(&state.pool, item.id)
+        .await?
+        .ok_or_else(|| AppError::Internal(format!("条目 {} 未挂到任何 library", item.id)))?;
+
+    // ── view_id / view_name：先用条目 provider_ids 标记，再回落 source 第一项 ──
+    let view_id_marker = item
+        .provider_ids
+        .get("RemoteEmbyViewId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let remote_views: Vec<RemoteViewPreview> =
+        serde_json::from_value(source.remote_views.clone()).unwrap_or_default();
+    let (view_id, view_name) = match view_id_marker {
+        Some(id) => {
+            let name = remote_views
+                .iter()
+                .find(|v| v.id.eq_ignore_ascii_case(&id))
+                .map(|v| v.name.clone())
+                .unwrap_or_else(|| id.clone());
+            (id, name)
+        }
+        None => match remote_views.first() {
+            Some(view) => (view.id.clone(), view.name.clone()),
+            None => {
+                return Err(AppError::BadRequest(
+                    "远端 Emby 源未配置 remote_views，无法定位条目所属库".to_string(),
+                ));
+            }
+        },
+    };
+
+    // Series 走专用 fetch_and_upsert_series_detail：它直接用 series_db_id 写回本地行，
+    // 不需要重建 STRM/Season 目录树（Series 没有 STRM 文件）。
+    if is_series {
+        let series_dir = std::path::Path::new(item.path.as_str()).to_path_buf();
+        if let Some(parent) = series_dir.parent() {
+            if let Err(err) = tokio::fs::create_dir_all(parent).await {
+                tracing::warn!(
+                    item_id = %item.id,
+                    parent = %parent.display(),
+                    error = %err,
+                    "刷新元数据：Series 父目录创建失败（不阻断后续 fetch）"
+                );
+            }
+        }
+        fetch_and_upsert_series_detail(
+            &state.pool,
+            &mut source,
+            user_id.as_str(),
+            marker.remote_item_id.as_str(),
+            item.id,
+            library_id,
+            item.parent_id,
+            series_dir.as_path(),
+            view_id.as_str(),
+        )
+        .await?;
+        return Ok(true);
+    }
+
+    // Movie / Episode：复用全量 sync 用的 process_one_remote_sync_item，
+    // 让远端最新 BaseItem 一次性把 media_items + media_streams + media_chapters +
+    // people + images + STRM + NFO 全部刷一遍。
+    let playback_token = source
+        .access_token
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| AppError::Internal("远端令牌为空，无法刷新单条远端条目".to_string()))?;
+
+    // STRM workspace 复刻 sync 路径：{strm_output_path}/{sanitize(source.name)}/{sanitize(view_name)}
+    // strm_workspace_for_source 已处理 strm_output_path=None 的硬错误（必填校验）。
+    let strm_workspace = strm_workspace_for_source(&source)?;
+    let view_strm_workspace = strm_workspace.join(sanitize_segment(view_name.as_str()));
+    if let Err(err) = tokio::fs::create_dir_all(&view_strm_workspace).await {
+        return Err(AppError::Internal(format!(
+            "创建 STRM 工作目录 {} 失败：{}",
+            view_strm_workspace.display(),
+            err
+        )));
+    }
+
+    // 拉远端单条 BaseItem。Fields 列表与 `fetch_remote_items_page_for_view` 保持一致，
+    // 这样 process_one_remote_sync_item 拿到的字段集和"批量同步"路径完全等价。
+    let server_url = normalize_server_url(&source.server_url);
+    let endpoint = format!(
+        "{server_url}/Users/{user_id}/Items/{remote_id}",
+        user_id = user_id,
+        remote_id = marker.remote_item_id,
+    );
+    let query = vec![(
+        "Fields".to_string(),
+        "SeriesName,SeasonName,ProductionYear,ParentIndexNumber,IndexNumber,Overview,\
+         OfficialRating,CommunityRating,CriticRating,PremiereDate,RunTimeTicks,\
+         ProviderIds,Genres,Studios,Tags,MediaSources,MediaStreams,\
+         ImageTags,BackdropImageTags,SeriesId,SeasonId,\
+         SeriesPrimaryImageTag,ParentBackdropImageTags,ParentBackdropItemId,\
+         ParentLogoItemId,ParentLogoImageTag,Status,EndDate,\
+         People,OriginalTitle,SortName,Taglines,ProductionLocations,\
+         AirDays,AirTime,RemoteTrailers"
+            .to_string(),
+    )];
+    let base_item: RemoteBaseItem =
+        get_json_with_retry(&state.pool, &mut source, &endpoint, &query).await?;
+
+    // 上下文状态：单条刷新只处理一个条目，所有共享映射都用空集合 + 一次性 atomics。
+    // 注意 `local_synced_ids` 必须留空，否则会触发"已入库 fast-skip"绕过本次刷新。
+    let series_parent_map: DashMap<String, Uuid> = DashMap::new();
+    let season_parent_map: DashMap<String, Uuid> = DashMap::new();
+    let series_detail_synced: DashSet<String> = DashSet::new();
+    let tvshow_roots_written: DashSet<PathBuf> = DashSet::new();
+    let fetched_count = AtomicU64::new(0);
+    let written_files = AtomicU64::new(0);
+    let series_detail_semaphore = Arc::new(tokio::sync::Semaphore::new(2));
+    let series_detail_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let local_synced_ids: DashMap<String, String> = DashMap::new();
+    let skipped_existing = AtomicU64::new(0);
+    let strm_missing_reprocessed = AtomicU64::new(0);
+
+    process_one_remote_sync_item(
+        state,
+        &source,
+        base_item,
+        view_id.as_str(),
+        view_name.as_str(),
+        view_strm_workspace.as_path(),
+        library_id,
+        user_id.as_str(),
+        playback_token.as_str(),
+        &series_parent_map,
+        &season_parent_map,
+        &series_detail_synced,
+        &tvshow_roots_written,
+        &fetched_count,
+        &written_files,
+        &series_detail_semaphore,
+        &series_detail_handles,
+        &local_synced_ids,
+        &skipped_existing,
+        &strm_missing_reprocessed,
+        1,
+        None,
+        true, // force_refresh_sidecar：用户主动要求刷新，覆盖既有 NFO/图片/字幕
+    )
+    .await?;
+
+    // Episode 入口下，process_one_remote_sync_item 会 spawn 一个 series_detail 后台任务
+    // 去刷新它的父 Series。"刷新元数据"是用户预期的同步操作，等它跑完再返回，
+    // 避免用户立刻刷页面看不到 Series 字段被更新。
+    let mut handles = series_detail_handles.lock().await;
+    for h in handles.drain(..) {
+        let _ = h.await;
+    }
+    drop(handles);
+
+    Ok(true)
+}
+
 fn build_local_proxy_url(
     config: &Config,
     source_id: Uuid,

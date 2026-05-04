@@ -14,7 +14,7 @@ use crate::{
         PlaybackInfoResponse, QueryResult, TranscodingInfoDto, UpdateUserItemDataRequest,
         UserItemDataDto, UserItemDataQuery,
     },
-    naming,
+    naming, remote_emby,
     repository::{self, ItemListOptions, UpdateUserDataInput},
     state::AppState,
     work_limiter::{WorkLimiterConfig, WorkLimiterKind},
@@ -4058,6 +4058,44 @@ pub(crate) async fn do_refresh_item_metadata_with(
             "PB32-1：item.lock_data=true，跳过元数据刷新（用户已锁定）"
         );
         return Ok(());
+    }
+
+    // PB-Refresh：带远端 Emby 标记的条目，优先把远端作为权威源拉一次，
+    // TMDB 仅在远端拉取失败或不适用时兜底。
+    //
+    // 设计依据：
+    //   1) 远端 Emby 是 STRM 条目的"源真相"——播放走的就是远端流，元数据自然以远端为准；
+    //   2) TMDB 字段命名/排序/年份偶尔与远端不一致，反向覆盖会让本地详情与播放体验脱节；
+    //   3) 用户在「编辑源」里已经维护了远端鉴权 / 伪装 UA，刷新走远端比 TMDB 更稳定。
+    //
+    // 不阻断用户：远端不可达时记 warn 并 fall-through 到 TMDB（保留旧行为做兜底）。
+    if remote_emby::remote_marker_for_db_item(&item).is_some() {
+        match remote_emby::refresh_single_remote_item(state, &item).await {
+            Ok(true) => {
+                tracing::info!(
+                    item_id = %item.id,
+                    name = %item.name,
+                    item_type = %item.item_type,
+                    "刷新元数据：已从远端 Emby 重新拉取并落库（远端权威，跳过 TMDB 覆盖）"
+                );
+                return Ok(());
+            }
+            Ok(false) => {
+                tracing::debug!(
+                    item_id = %item.id,
+                    item_type = %item.item_type,
+                    "刷新元数据：远端单条刷新不适用于该类型，回落 TMDB 兜底"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    item_id = %item.id,
+                    name = %item.name,
+                    error = %err,
+                    "刷新元数据：远端拉取失败，回落 TMDB 兜底"
+                );
+            }
+        }
     }
 
     let kind = item.item_type.as_str();
