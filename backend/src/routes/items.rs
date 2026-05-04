@@ -264,7 +264,7 @@ async fn libraries_as_query_result_for_user(
     Ok(Json(QueryResult {
         total_record_count: items.len() as i64,
         items,
-        start_index: Some(0),
+        start_index: None,
     }))
 }
 
@@ -603,7 +603,7 @@ fn virtual_folder_item_with_user_data(name: &str, item_type: &str, server_id: Uu
     let mut item = virtual_folder_item(name, item_type, server_id);
     item.user_data = crate::models::UserItemDataDto {
         playback_position_ticks: 0,
-        play_count: 0,
+        play_count: Some(0),
         is_favorite: false,
         played: false,
         ..Default::default()
@@ -617,7 +617,7 @@ fn virtual_folder_item(name: &str, item_type: &str, server_id: Uuid) -> BaseItem
     item.id = name.to_string();
     item.guid = None;
     item.etag = None;
-    item.can_delete = false;
+    item.can_delete = Some(false);
     item.can_download = false;
     item.can_edit_items = Some(false);
     item.presentation_unique_key = Some(format!("{name}_"));
@@ -6574,7 +6574,7 @@ fn trim_item_heavy_fields(item: &mut BaseItemDto, requested_fields: &[String]) {
     }
     if !contains_ignore_case(requested_fields, "RemoteTrailers") {
         item.remote_trailers.clear();
-        item.local_trailer_count = 0;
+        item.local_trailer_count = Some(0);
     }
     if !contains_ignore_case(requested_fields, "Genres") {
         item.genres.clear();

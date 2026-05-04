@@ -133,7 +133,7 @@ pub(crate) fn person_to_base_item(person: PersonDto, server_id: Uuid) -> BaseIte
     item.id = person.id.clone();
     item.guid = None;
     item.etag = person.primary_image_tag.clone();
-    item.can_delete = false;
+    item.can_delete = Some(false);
     item.can_download = false;
     item.can_edit_items = Some(false);
     item.presentation_unique_key = Some(format!("{}_", person.id));

@@ -139,7 +139,7 @@ fn genre_to_base_item(genre: GenreDto, server_id: uuid::Uuid) -> BaseItemDto {
     item.id = id.clone();
     item.guid = None;
     item.etag = None;
-    item.can_delete = false;
+    item.can_delete = Some(false);
     item.can_download = false;
     item.can_edit_items = Some(false);
     item.presentation_unique_key = Some(format!("{id}_"));
@@ -158,7 +158,7 @@ fn genre_to_base_item(genre: GenreDto, server_id: uuid::Uuid) -> BaseItemDto {
         .collect::<BTreeMap<_, _>>();
     item.user_data = crate::models::UserItemDataDto {
         playback_position_ticks: 0,
-        play_count: 0,
+        play_count: Some(0),
         is_favorite: false,
         played: false,
         ..Default::default()

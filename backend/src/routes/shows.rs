@@ -683,7 +683,7 @@ fn trim_episode_heavy_fields(item: &mut BaseItemDto, requested_fields: &[String]
     }
     if !contains_ignore_case(requested_fields, "RemoteTrailers") {
         item.remote_trailers.clear();
-        item.local_trailer_count = 0;
+        item.local_trailer_count = Some(0);
     }
     if !contains_ignore_case(requested_fields, "Genres") {
         item.genres.clear();

@@ -1302,7 +1302,8 @@ pub struct BaseItemDto {
     pub etag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date_modified: Option<DateTime<Utc>>,
-    pub can_delete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_delete: Option<bool>,
     pub can_download: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub can_edit_items: Option<bool>,
@@ -1310,7 +1311,8 @@ pub struct BaseItemDto {
     pub supports_resume: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presentation_unique_key: Option<String>,
-    pub supports_sync: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_sync: Option<bool>,
     #[serde(rename = "Type")]
     pub item_type: String,
     pub is_folder: bool,
@@ -1372,12 +1374,18 @@ pub struct BaseItemDto {
     pub community_rating: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub critic_rating: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub taglines: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub remote_trailers: Vec<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub people: Vec<PersonDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub studios: Vec<NameLongIdDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tag_items: Vec<NameLongIdDto>,
-    pub local_trailer_count: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_trailer_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_preferences_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1460,12 +1468,18 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_studio: Option<String>,
     pub user_data: UserItemDataDto,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub media_sources: Vec<MediaSourceDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub media_streams: Vec<MediaStreamDto>,
-    pub part_count: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part_count: Option<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub chapters: Vec<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub locked_fields: Vec<String>,
-    pub lock_data: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock_data: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub special_feature_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1504,7 +1518,8 @@ pub struct UserItemDataDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unplayed_item_count: Option<i32>,
     pub playback_position_ticks: i64,
-    pub play_count: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub play_count: Option<i32>,
     pub is_favorite: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub likes: Option<bool>,
