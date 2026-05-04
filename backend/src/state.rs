@@ -6,9 +6,16 @@ use crate::{
 use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+#[derive(Clone)]
+pub struct LoginAttemptRecord {
+    pub failures: u32,
+    pub last_failure: Instant,
+}
 
 /// Emby-compatible server-side events broadcast to WebSocket clients.
 #[derive(Debug, Clone)]
@@ -57,4 +64,6 @@ pub struct AppState {
     pub remote_sync_global_semaphore: Arc<Semaphore>,
     /// Broadcast channel for server events (WebSocket push to clients)
     pub event_tx: tokio::sync::broadcast::Sender<ServerEvent>,
+    /// Per-IP login failure tracking for brute-force protection
+    pub login_attempts: Arc<DashMap<String, LoginAttemptRecord>>,
 }

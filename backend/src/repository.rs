@@ -6758,12 +6758,41 @@ pub async fn list_media_items(
     }
 
     if !options.any_provider_id_equals.is_empty() {
-        builder
-            .push(
-                " AND EXISTS (SELECT 1 FROM jsonb_each_text(provider_ids) provider WHERE provider.value = ANY(",
-            )
-            .push_bind(options.any_provider_id_equals)
-            .push("))");
+        let parsed: Vec<(String, String)> = options
+            .any_provider_id_equals
+            .iter()
+            .filter_map(|item| {
+                let dot_pos = item.find('.')?;
+                let raw_key = &item[..dot_pos];
+                let value = &item[dot_pos + 1..];
+                let normalized_key = {
+                    let mut chars = raw_key.chars();
+                    match chars.next() {
+                        Some(c) => {
+                            let mut k = c.to_uppercase().collect::<String>();
+                            k.push_str(&raw_key[c.len_utf8()..]);
+                            k
+                        }
+                        None => return None,
+                    }
+                };
+                Some((normalized_key, value.to_string()))
+            })
+            .collect();
+        if !parsed.is_empty() {
+            builder.push(" AND (");
+            for (i, (key, value)) in parsed.iter().enumerate() {
+                if i > 0 {
+                    builder.push(" OR ");
+                }
+                let mut map = serde_json::Map::new();
+                map.insert(key.clone(), Value::String(value.clone()));
+                builder
+                    .push("provider_ids @> ")
+                    .push_bind(sqlx::types::Json(Value::Object(map)));
+            }
+            builder.push(")");
+        }
     }
 
     if let Some(has_overview) = options.has_overview {
@@ -7145,6 +7174,18 @@ pub async fn list_media_items(
             }
             "Random" => {
                 builder.push("random()");
+            }
+            "IsFavoriteOrLiked" | "IsFavoriteOrLikes" => {
+                if let Some(user_id) = options.user_id {
+                    builder
+                        .push(
+                            "COALESCE((SELECT uid.is_favorite::int FROM user_item_data uid WHERE uid.user_id = ",
+                        )
+                        .push_bind(user_id)
+                        .push(" AND uid.item_id = media_items.id), 0)");
+                } else {
+                    builder.push("sort_name");
+                }
             }
             _ => {
                 builder.push("sort_name");

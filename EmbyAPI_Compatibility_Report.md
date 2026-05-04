@@ -5291,3 +5291,61 @@ Err(e) => {
 `cargo check` 通过（0 errors，55 pre-existing warnings unchanged）。
 
 ---
+
+## 日志驱动修复 — 第五阶段（2026-05-04 22:11 日志）
+
+基于生产日志 `movie-rust-20260504221145.log`（62K+ 行）和 MCP 实时检查综合诊断。
+
+### 修复的问题
+
+#### 1. AnyProviderIdEquals 查询语义错误 + 慢查询（P0 级）
+- **文件**: `backend/src/repository.rs` L6760-6790
+- **问题**: `AnyProviderIdEquals=Tmdb.274149` 格式传入后，SQL 用 `jsonb_each_text(provider_ids).value = ANY($1)` 匹配，但 JSONB 中 value 是 `"274149"` 而输入是 `"Tmdb.274149"`，**永远不会匹配**。同时 `jsonb_each_text` 全行展开无索引支持，导致 4 次 >1s 慢查询。
+- **修复**:
+  - 正确解析 `Provider.Value` 格式（按首个 `.` 分割，首字母大写规范化 key）
+  - 使用 `provider_ids @> $json::jsonb` 容器运算符替代 `jsonb_each_text`
+  - 添加 `idx_media_items_provider_ids_gin` GIN 索引（`jsonb_path_ops`）加速 `@>` 查询
+
+#### 2. IsFavoriteOrLiked 排序键未实现（P1 级）
+- **文件**: `backend/src/repository.rs` L7175-7185
+- **问题**: `SortBy=IsFavoriteOrLiked,Random` 中 `IsFavoriteOrLiked` 落入 default 分支变成 `sort_name` 排序，完全失去"收藏优先"语义。
+- **修复**: 新增 `IsFavoriteOrLiked` / `IsFavoriteOrLikes` 匹配分支，使用 `COALESCE((SELECT uid.is_favorite::int FROM user_item_data ...), 0)` 子查询实现正确的收藏排序。
+
+#### 3. AuthenticateByName 登录暴力破解保护（P1 级）
+- **文件**: `backend/src/routes/users.rs`, `backend/src/state.rs`
+- **问题**: 日志显示 18 次 `AuthenticateByName 403` 集中在 2 分钟内，无任何限速保护。
+- **修复**:
+  - `AppState` 新增 `login_attempts: Arc<DashMap<String, LoginAttemptRecord>>` 按 IP 跟踪失败次数
+  - `authenticate()` 入口检查：同一 IP 连续 5 次失败后锁定 300 秒
+  - 登录成功自动清除该 IP 的失败记录
+
+#### 4. Chapter 图片请求全部 404（P2 级）
+- **文件**: `backend/src/routes/images.rs` L1350-1370
+- **问题**: 176 次 `/Items/{id}/Images/Chapter/{index}` 请求全部返回 404，因为章节没有生成缩略图（STRM 文件无法本地提取帧）。
+- **修复**: Chapter 图片不存在时依次回退到条目的 `thumb_path` → `image_primary_path` → 占位图，避免 404 错误。
+
+#### 5. 启动图片去重 SQL 性能优化（P3 级）
+- **文件**: `backend/src/main.rs` L1090-1180
+- **问题**: 7 条独立的 `WITH dup_xxx AS (...) UPDATE ...` 语句分别扫描全表，日志显示其中 2 条 >1s（且 `rows_affected=0` 表明 bug 已修复无重复数据）。
+- **修复**: 合并为单条 SQL，一次扫描完成所有 7 种图片路径的去重检查。
+
+### 新增索引
+
+| 索引名 | 表 | 定义 |
+|--------|-----|------|
+| `idx_media_items_provider_ids_gin` | `media_items` | `USING GIN (provider_ids jsonb_path_ops)` |
+
+### 日志中其他观察（无需修复）
+
+| 现象 | 次数 | 说明 |
+|------|------|------|
+| 远端图片落盘 404 + `clear_dead_url=true` | 12 | 第三阶段的负缓存机制正常工作 |
+| ffprobe STRM 文件失败 | 5 | 预期行为，STRM 文件无本地媒体流 |
+| sidecar 图片 backoff | 1 | 远端源 PB42-bo 连续 8 次失败后 30s 暂停窗口 |
+| redirect_direct 超时 | 2 | 远端播放源网络超时，自动重试令牌刷新 |
+
+### 编译验证
+
+`cargo check` 通过（0 errors，55 pre-existing warnings unchanged）。
+
+---

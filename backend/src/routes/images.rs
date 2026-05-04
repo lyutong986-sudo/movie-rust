@@ -1350,14 +1350,29 @@ async fn serve_item_image(
     if image_type.eq_ignore_ascii_case("Chapter") {
         let chapter_index = image_index.unwrap_or(0);
         let chapters = repository::get_media_chapters(&state.pool, item_id).await?;
-        let chapter = chapters
+        if let Some(chapter) = chapters
             .into_iter()
-            .find(|chapter| chapter.chapter_index == chapter_index)
-            .ok_or_else(|| AppError::NotFound("章节图片不存在".to_string()))?;
-        let path = chapter
-            .image_path
-            .ok_or_else(|| AppError::NotFound("章节图片不存在".to_string()))?;
-        return serve_image(Some(&state), &path, request, &image_query).await;
+            .find(|c| c.chapter_index == chapter_index)
+        {
+            if let Some(ref path) = chapter.image_path {
+                return serve_image(Some(&state), path, request, &image_query).await;
+            }
+        }
+        if let Some(item) = repository::get_media_item(&state.pool, item_id).await? {
+            if let Some(ref path) = item.thumb_path {
+                return serve_image(Some(&state), path, request, &image_query).await;
+            }
+            if let Some(ref path) = item.image_primary_path {
+                return serve_image(Some(&state), path, request, &image_query).await;
+            }
+        }
+        let method = request.method().clone();
+        let if_none_match = request
+            .headers()
+            .get("if-none-match")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        return placeholder_image_response(&state, "Thumb", &image_query, method, if_none_match).await;
     }
 
     if let Some(path) =

@@ -477,6 +477,23 @@ async fn authenticate(
     headers: HeaderMap,
     payload: AuthenticateByNameRequest,
 ) -> Result<Json<AuthenticationResult>, AppError> {
+    const MAX_FAILURES: u32 = 5;
+    const LOCKOUT_SECS: u64 = 300;
+
+    let client_ip = auth::infer_client_ip(&headers).unwrap_or_else(|| "unknown".to_string());
+    if let Some(record) = state.login_attempts.get(&client_ip) {
+        if record.failures >= MAX_FAILURES
+            && record.last_failure.elapsed().as_secs() < LOCKOUT_SECS
+        {
+            tracing::warn!(
+                ip = %client_ip,
+                failures = record.failures,
+                "登录限速：IP 连续失败过多，暂时锁定"
+            );
+            return Err(AppError::Forbidden);
+        }
+    }
+
     let username = payload
         .username
         .as_deref()
@@ -520,6 +537,13 @@ async fn authenticate(
             _ => false,
         };
         if !legacy_ok {
+            state.login_attempts.entry(client_ip.clone()).and_modify(|r| {
+                r.failures += 1;
+                r.last_failure = std::time::Instant::now();
+            }).or_insert(crate::state::LoginAttemptRecord {
+                failures: 1,
+                last_failure: std::time::Instant::now(),
+            });
             repository::record_failed_login(&state.pool, &user).await?;
             crate::webhooks::dispatch(
                 state,
@@ -558,6 +582,7 @@ async fn authenticate(
 
     auth::ensure_login_policy(state, &headers, &user, device_id.as_deref()).await?;
     repository::clear_failed_login_count(&state.pool, &user).await?;
+    state.login_attempts.remove(&client_ip);
 
     let session = repository::create_session(
         &state.pool,

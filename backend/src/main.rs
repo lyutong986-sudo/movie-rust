@@ -176,6 +176,7 @@ async fn main() -> Result<()> {
         scan_db_semaphore: Arc::new(tokio::sync::Semaphore::new(scan_db_permits)),
         remote_sync_global_semaphore: Arc::new(tokio::sync::Semaphore::new(remote_sync_capacity)),
         event_tx,
+        login_attempts: Arc::new(dashmap::DashMap::new()),
     };
 
     // SPA 入口：
@@ -742,6 +743,7 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_sort_trgm ON media_items USING gin (sort_name gin_trgm_ops)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_remote_item_id ON media_items ((provider_ids->>'RemoteEmbyItemId')) WHERE provider_ids->>'RemoteEmbyItemId' IS NOT NULL"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_remote_source_id ON media_items ((provider_ids->>'RemoteEmbySourceId')) WHERE provider_ids->>'RemoteEmbySourceId' IS NOT NULL"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_provider_ids_gin ON media_items USING GIN (provider_ids jsonb_path_ops)"#,
         // -------------------------------------------------------------------
         // user_item_data：Emby UserItemDataDto 预留列。
         // -------------------------------------------------------------------
@@ -1086,95 +1088,32 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         // 字段清空后 spawn_remote_image_persist 在下次请求时按修复后的目录规则
         // 重新落盘，自然恢复。
         r#"
-        WITH dup_primary AS (
-            SELECT image_primary_path
+        WITH local_paths AS (
+            SELECT id, image_primary_path, backdrop_path, logo_path, thumb_path, banner_path, disc_path, art_path
             FROM media_items
-            WHERE image_primary_path IS NOT NULL
-              AND image_primary_path NOT LIKE 'http://%'
-              AND image_primary_path NOT LIKE 'https://%'
-            GROUP BY image_primary_path
-            HAVING COUNT(*) > 1
-        )
-        UPDATE media_items SET image_primary_path = NULL
-        WHERE image_primary_path IN (SELECT image_primary_path FROM dup_primary)
-        "#,
-        r#"
-        WITH dup_backdrop AS (
-            SELECT backdrop_path
-            FROM media_items
-            WHERE backdrop_path IS NOT NULL
-              AND backdrop_path NOT LIKE 'http://%'
-              AND backdrop_path NOT LIKE 'https://%'
-            GROUP BY backdrop_path
-            HAVING COUNT(*) > 1
-        )
-        UPDATE media_items SET backdrop_path = NULL
-        WHERE backdrop_path IN (SELECT backdrop_path FROM dup_backdrop)
-        "#,
-        r#"
-        WITH dup_logo AS (
-            SELECT logo_path
-            FROM media_items
-            WHERE logo_path IS NOT NULL
-              AND logo_path NOT LIKE 'http://%'
-              AND logo_path NOT LIKE 'https://%'
-            GROUP BY logo_path
-            HAVING COUNT(*) > 1
-        )
-        UPDATE media_items SET logo_path = NULL
-        WHERE logo_path IN (SELECT logo_path FROM dup_logo)
-        "#,
-        r#"
-        WITH dup_thumb AS (
-            SELECT thumb_path
-            FROM media_items
-            WHERE thumb_path IS NOT NULL
-              AND thumb_path NOT LIKE 'http://%'
-              AND thumb_path NOT LIKE 'https://%'
-            GROUP BY thumb_path
-            HAVING COUNT(*) > 1
-        )
-        UPDATE media_items SET thumb_path = NULL
-        WHERE thumb_path IN (SELECT thumb_path FROM dup_thumb)
-        "#,
-        r#"
-        WITH dup_banner AS (
-            SELECT banner_path
-            FROM media_items
-            WHERE banner_path IS NOT NULL
-              AND banner_path NOT LIKE 'http://%'
-              AND banner_path NOT LIKE 'https://%'
-            GROUP BY banner_path
-            HAVING COUNT(*) > 1
-        )
-        UPDATE media_items SET banner_path = NULL
-        WHERE banner_path IN (SELECT banner_path FROM dup_banner)
-        "#,
-        r#"
-        WITH dup_disc AS (
-            SELECT disc_path
-            FROM media_items
-            WHERE disc_path IS NOT NULL
-              AND disc_path NOT LIKE 'http://%'
-              AND disc_path NOT LIKE 'https://%'
-            GROUP BY disc_path
-            HAVING COUNT(*) > 1
-        )
-        UPDATE media_items SET disc_path = NULL
-        WHERE disc_path IN (SELECT disc_path FROM dup_disc)
-        "#,
-        r#"
-        WITH dup_art AS (
-            SELECT art_path
-            FROM media_items
-            WHERE art_path IS NOT NULL
-              AND art_path NOT LIKE 'http://%'
-              AND art_path NOT LIKE 'https://%'
-            GROUP BY art_path
-            HAVING COUNT(*) > 1
-        )
-        UPDATE media_items SET art_path = NULL
-        WHERE art_path IN (SELECT art_path FROM dup_art)
+        ),
+        dup_primary  AS (SELECT image_primary_path  AS p FROM local_paths WHERE image_primary_path  NOT LIKE 'http%' AND image_primary_path  IS NOT NULL GROUP BY image_primary_path  HAVING COUNT(*) > 1),
+        dup_backdrop AS (SELECT backdrop_path        AS p FROM local_paths WHERE backdrop_path       NOT LIKE 'http%' AND backdrop_path       IS NOT NULL GROUP BY backdrop_path        HAVING COUNT(*) > 1),
+        dup_logo     AS (SELECT logo_path            AS p FROM local_paths WHERE logo_path           NOT LIKE 'http%' AND logo_path           IS NOT NULL GROUP BY logo_path            HAVING COUNT(*) > 1),
+        dup_thumb    AS (SELECT thumb_path           AS p FROM local_paths WHERE thumb_path          NOT LIKE 'http%' AND thumb_path          IS NOT NULL GROUP BY thumb_path           HAVING COUNT(*) > 1),
+        dup_banner   AS (SELECT banner_path          AS p FROM local_paths WHERE banner_path         NOT LIKE 'http%' AND banner_path         IS NOT NULL GROUP BY banner_path          HAVING COUNT(*) > 1),
+        dup_disc     AS (SELECT disc_path            AS p FROM local_paths WHERE disc_path           NOT LIKE 'http%' AND disc_path           IS NOT NULL GROUP BY disc_path            HAVING COUNT(*) > 1),
+        dup_art      AS (SELECT art_path             AS p FROM local_paths WHERE art_path            NOT LIKE 'http%' AND art_path            IS NOT NULL GROUP BY art_path             HAVING COUNT(*) > 1)
+        UPDATE media_items SET
+            image_primary_path = CASE WHEN image_primary_path IN (SELECT p FROM dup_primary)  THEN NULL ELSE image_primary_path END,
+            backdrop_path      = CASE WHEN backdrop_path      IN (SELECT p FROM dup_backdrop)  THEN NULL ELSE backdrop_path      END,
+            logo_path          = CASE WHEN logo_path          IN (SELECT p FROM dup_logo)      THEN NULL ELSE logo_path          END,
+            thumb_path         = CASE WHEN thumb_path         IN (SELECT p FROM dup_thumb)     THEN NULL ELSE thumb_path         END,
+            banner_path        = CASE WHEN banner_path        IN (SELECT p FROM dup_banner)    THEN NULL ELSE banner_path        END,
+            disc_path          = CASE WHEN disc_path          IN (SELECT p FROM dup_disc)      THEN NULL ELSE disc_path          END,
+            art_path           = CASE WHEN art_path           IN (SELECT p FROM dup_art)       THEN NULL ELSE art_path           END
+        WHERE image_primary_path IN (SELECT p FROM dup_primary)
+           OR backdrop_path      IN (SELECT p FROM dup_backdrop)
+           OR logo_path          IN (SELECT p FROM dup_logo)
+           OR thumb_path         IN (SELECT p FROM dup_thumb)
+           OR banner_path        IN (SELECT p FROM dup_banner)
+           OR disc_path          IN (SELECT p FROM dup_disc)
+           OR art_path           IN (SELECT p FROM dup_art)
         "#,
     ];
 
