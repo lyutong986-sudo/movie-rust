@@ -1453,7 +1453,10 @@ pub struct BaseItemDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_index_number: Option<i32>,
     pub image_tags: BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // EmbySDK BaseItemDto 没有 ImageBlurHashes 字段（这是 Jellyfin 私有扩展）。
+    // 第三方严格客户端（Hills 等）遇到未知字段会丢失整段响应，
+    // 因此即使数据库里存了，对外也不再序列化。
+    #[serde(skip)]
     pub image_blur_hashes: Option<BTreeMap<String, BTreeMap<String, String>>>,
     pub backdrop_image_tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1468,7 +1471,9 @@ pub struct BaseItemDto {
     pub parent_thumb_item_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_thumb_image_tag: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // EmbySDK BaseItemDto 只有 ParentThumbImageTag，没有顶层 ThumbImageTag。
+    // Thumb 图实际通过 image_tags["Thumb"] 传递；这里保留内部字段，但不序列化。
+    #[serde(skip)]
     pub thumb_image_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_primary_image_tag: Option<String>,

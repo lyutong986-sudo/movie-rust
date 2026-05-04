@@ -1294,7 +1294,11 @@ fn item_list_options_from_query(
         fields: query.fields.clone(),
         start_index: query.start_index.unwrap_or(0),
         limit: query.limit.unwrap_or(100),
-        group_items_into_collections: query.group_items_into_collections.unwrap_or(true),
+        // EmbySDK 没有 GroupItemsIntoCollections 这个枚举，默认必须为 false。
+        // 旧的 true 会让 SQL 取完整页（LIMIT 60）后再用 provider id 折叠，
+        // 出现 TotalRecordCount=660 / Items.len()=59 的错配，
+        // 严格按 `len == limit 才有下一页` 翻页的客户端（Hills 等）会直接停翻页。
+        group_items_into_collections: query.group_items_into_collections.unwrap_or(false),
         collapse_box_set_items: query.collapse_box_set_items.unwrap_or(false),
         enable_total_record_count: query.enable_total_record_count.unwrap_or(true),
         ..ItemListOptions::default()
