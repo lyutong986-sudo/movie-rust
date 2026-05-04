@@ -1420,8 +1420,6 @@ async fn serve_item_image(
         let method = request.method().clone();
         let result = serve_image(Some(&state), &effective_path, request, &image_query).await;
         if let Err(AppError::NotFound(_)) = &result {
-            // PB50：上游远端 Emby 拉取失败（图片被删 / 上游迁移 / WAF 拦截）也走 TMDB 回退。
-            // 之前只对 local 路径开放回退，导致整个远端站点不可达时首页所有海报全空。
             if let Some(fallback_url) =
                 find_tmdb_image_fallback(&state.pool, &item, &normalized, state.config.tmdb_api_key.as_deref()).await
             {
@@ -1432,12 +1430,14 @@ async fn serve_item_image(
                     from_remote,
                     "原图加载失败，回退到 TMDB 远程代理"
                 );
+                spawn_image_fallback_refresh(&state, item.id);
                 let fallback_req = Request::builder()
                     .method(method)
                     .body(Body::empty())
                     .unwrap_or_default();
                 return serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req).await;
             }
+            spawn_image_fallback_refresh(&state, item.id);
         }
         return result;
     }
@@ -1448,6 +1448,7 @@ async fn serve_item_image(
             image_type = %normalized,
             "数据库未配置图片路径，回退到 TMDB 远程代理"
         );
+        spawn_image_fallback_refresh(&state, item.id);
         let fallback_req = Request::builder()
             .method(request.method().clone())
             .body(Body::empty())
@@ -1455,7 +1456,36 @@ async fn serve_item_image(
         return serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req).await;
     }
 
+    spawn_image_fallback_refresh(&state, item.id);
     Err(AppError::NotFound("图片不存在".to_string()))
+}
+
+/// 图片 404 时异步触发 TMDB 元数据/图片补全。
+/// 使用 refresh_queue 去重，同一条目不会重复触发。
+fn spawn_image_fallback_refresh(state: &AppState, item_id: uuid::Uuid) {
+    if !crate::refresh_queue::try_begin_refresh(item_id) {
+        return;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        tracing::info!(
+            item_id = %item_id,
+            "图片缺失兜底：后台触发 TMDB 元数据/图片补全"
+        );
+        if let Err(e) = super::items::do_refresh_item_metadata(&state, item_id).await {
+            tracing::warn!(
+                item_id = %item_id,
+                error = %e,
+                "图片缺失兜底：后台元数据补全失败"
+            );
+        } else {
+            tracing::info!(
+                item_id = %item_id,
+                "图片缺失兜底：后台元数据/图片补全完成"
+            );
+        }
+        crate::refresh_queue::end_refresh(item_id);
+    });
 }
 
 /// 数据库无路径 / 空白路径时，以及本地文件缺失时，尝试从 series_episode_catalog 或 TMDB API 构建回退 URL。
