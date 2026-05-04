@@ -1436,11 +1436,9 @@ pub struct BaseItemDto {
     pub index_number_end: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_index_number: Option<i32>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub image_tags: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_blur_hashes: Option<BTreeMap<String, BTreeMap<String, String>>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub backdrop_image_tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_logo_item_id: Option<String>,
@@ -1497,7 +1495,7 @@ pub struct NameLongIdDto {
     pub id: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "PascalCase")]
 pub struct UserItemDataDto {
     #[serde(skip_serializing_if = "Option::is_none")]

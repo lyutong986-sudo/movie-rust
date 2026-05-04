@@ -156,6 +156,13 @@ fn genre_to_base_item(genre: GenreDto, server_id: uuid::Uuid) -> BaseItemDto {
         .unwrap_or_default()
         .into_iter()
         .collect::<BTreeMap<_, _>>();
+    item.user_data = crate::models::UserItemDataDto {
+        playback_position_ticks: 0,
+        play_count: 0,
+        is_favorite: false,
+        played: false,
+        ..Default::default()
+    };
     item
 }
 

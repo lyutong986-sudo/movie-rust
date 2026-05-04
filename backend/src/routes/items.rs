@@ -314,16 +314,62 @@ async fn user_item_counts(
     ))
 }
 
+/// Shared query struct for filter/aggregation endpoints (Tags, Studios, Years, OfficialRatings, etc.)
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct FilterAggregateQuery {
+    #[serde(default, alias = "userId", deserialize_with = "crate::models::deserialize_optional_uuid")]
+    user_id: Option<Uuid>,
+    #[serde(default, alias = "parentId")]
+    parent_id: Option<String>,
+    #[serde(default, alias = "includeItemTypes")]
+    include_item_types: Option<String>,
+    #[serde(default, alias = "recursive", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
+    recursive: Option<bool>,
+    #[serde(default, alias = "sortBy")]
+    sort_by: Option<String>,
+    #[serde(default, alias = "sortOrder")]
+    sort_order: Option<String>,
+    #[serde(default, alias = "limit", deserialize_with = "crate::models::deserialize_option_i64_lenient")]
+    limit: Option<i64>,
+    #[serde(default, alias = "startIndex", deserialize_with = "crate::models::deserialize_option_i64_lenient")]
+    start_index: Option<i64>,
+    #[serde(default, rename = "api_key", alias = "ApiKey", alias = "apiKey")]
+    _api_key: Option<String>,
+}
+
+/// Resolve ParentId to library_id for scoped aggregation.
+async fn resolve_filter_library_id(
+    state: &AppState,
+    parent_id: Option<&str>,
+) -> Result<Option<Uuid>, AppError> {
+    let parent_id = match parent_id {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => return Ok(None),
+    };
+    let uuid = crate::models::emby_id_to_uuid(parent_id)
+        .map_err(|_| AppError::BadRequest("Invalid ParentId".to_string()))?;
+    if let Some(library) = repository::get_library(&state.pool, uuid).await? {
+        Ok(Some(library.id))
+    } else {
+        Ok(Some(uuid))
+    }
+}
+
 async fn studios(
     session: AuthSession,
     State(state): State<AppState>,
+    Query(query): Query<FilterAggregateQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    // PB18：受限用户只能聚合自己可见库的工作室列表，避免隐藏库的工作室名称泄露。
     let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
-    let items = repository::aggregate_array_values(&state.pool, "studios", allowed.as_deref())
+    let library_id = resolve_filter_library_id(&state, query.parent_id.as_deref()).await?;
+    let include_types = parse_include_types(query.include_item_types.as_deref());
+    let items = repository::aggregate_array_values_scoped(
+        &state.pool, "studios", library_id, &include_types, allowed.as_deref(),
+    )
         .await?
         .into_iter()
-        .map(|name| virtual_folder_item(&name, "Studio", state.config.server_id))
+        .map(|name| virtual_folder_item_with_user_data(&name, "Studio", state.config.server_id))
         .collect::<Vec<_>>();
     Ok(Json(QueryResult {
         total_record_count: items.len() as i64,
@@ -335,12 +381,13 @@ async fn studios(
 async fn artists(
     _session: AuthSession,
     State(state): State<AppState>,
+    Query(_query): Query<FilterAggregateQuery>,
 ) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
     let items = repository::aggregate_artists(&state.pool)
         .await?
         .into_iter()
         .map(|(id, name)| {
-            let mut item = virtual_folder_item(&name, "MusicArtist", state.config.server_id);
+            let mut item = virtual_folder_item_with_user_data(&name, "MusicArtist", state.config.server_id);
             item.id = uuid_to_emby_guid(&id);
             item.guid = Some(uuid_to_emby_guid(&id));
             item.display_preferences_id = Some(uuid_to_emby_guid(&id));
@@ -395,19 +442,15 @@ async fn studio_items(
 async fn tags(
     session: AuthSession,
     State(state): State<AppState>,
-) -> Result<Json<QueryResult<BaseItemDto>>, AppError> {
-    // PB18：tags 同 studios，按可见库收敛。
+    Query(query): Query<FilterAggregateQuery>,
+) -> Result<Json<Value>, AppError> {
     let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
-    let items = repository::aggregate_array_values(&state.pool, "tags", allowed.as_deref())
-        .await?
-        .into_iter()
-        .map(|name| virtual_folder_item(&name, "Tag", state.config.server_id))
-        .collect::<Vec<_>>();
-    Ok(Json(QueryResult {
-        total_record_count: items.len() as i64,
-        items,
-        start_index: Some(0),
-    }))
+    let library_id = resolve_filter_library_id(&state, query.parent_id.as_deref()).await?;
+    let include_types = parse_include_types(query.include_item_types.as_deref());
+    let values = repository::aggregate_array_values_scoped(
+        &state.pool, "tags", library_id, &include_types, allowed.as_deref(),
+    ).await?;
+    Ok(Json(name_only_list_result(values)))
 }
 
 async fn tag(
@@ -430,23 +473,29 @@ async fn tag_items(
 async fn official_ratings(
     session: AuthSession,
     State(state): State<AppState>,
+    Query(query): Query<FilterAggregateQuery>,
 ) -> Result<Json<Value>, AppError> {
-    // PB18：official_rating 列表按可见库收敛。
     let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
-    Ok(Json(string_list_result(
-        repository::aggregate_text_values(&state.pool, "official_rating", allowed.as_deref()).await?,
-    )))
+    let library_id = resolve_filter_library_id(&state, query.parent_id.as_deref()).await?;
+    let include_types = parse_include_types(query.include_item_types.as_deref());
+    let values = repository::aggregate_text_values_scoped(
+        &state.pool, "official_rating", library_id, &include_types, allowed.as_deref(),
+    ).await?;
+    Ok(Json(name_only_list_result(values)))
 }
 
 async fn containers(
     session: AuthSession,
     State(state): State<AppState>,
+    Query(query): Query<FilterAggregateQuery>,
 ) -> Result<Json<Value>, AppError> {
-    // PB18：container 列表按可见库收敛。
     let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
-    Ok(Json(string_list_result(
-        repository::aggregate_text_values(&state.pool, "container", allowed.as_deref()).await?,
-    )))
+    let library_id = resolve_filter_library_id(&state, query.parent_id.as_deref()).await?;
+    let include_types = parse_include_types(query.include_item_types.as_deref());
+    let values = repository::aggregate_text_values_scoped(
+        &state.pool, "container", library_id, &include_types, allowed.as_deref(),
+    ).await?;
+    Ok(Json(name_only_list_result(values)))
 }
 
 async fn audio_codecs(
@@ -483,23 +532,24 @@ async fn subtitle_codecs(
 async fn years(
     session: AuthSession,
     State(state): State<AppState>,
+    Query(query): Query<FilterAggregateQuery>,
 ) -> Result<Json<Value>, AppError> {
-    // PB18：years 列表按可见库收敛。
     let allowed = repository::effective_library_filter_for_user(&state.pool, session.user_id).await?;
-    let items = repository::aggregate_years(&state.pool, allowed.as_deref())
-        .await?
-        .into_iter()
-        .map(|year| {
-            json!({
-                "Name": year.to_string(),
-                "Id": year.to_string(),
-                "Type": "Year",
-                "ProductionYear": year,
-                "IsFolder": true
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(Json(query_result_from_items(items)))
+    let library_id = resolve_filter_library_id(&state, query.parent_id.as_deref()).await?;
+    let include_types = parse_include_types(query.include_item_types.as_deref());
+    let mut years = repository::aggregate_years_scoped(
+        &state.pool, library_id, &include_types, allowed.as_deref(),
+    ).await?;
+    if query.sort_order.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("Descending")) {
+        years.sort_unstable_by(|a, b| b.cmp(a));
+    } else {
+        years.sort_unstable();
+    }
+    let items: Vec<Value> = years.into_iter()
+        .map(|year| json!({"Name": year.to_string()}))
+        .collect();
+    let total = items.len();
+    Ok(Json(json!({ "Items": items, "TotalRecordCount": total })))
 }
 
 async fn items(
@@ -532,6 +582,13 @@ fn string_list_result(values: Vec<String>) -> Value {
     json!({ "Items": values, "TotalRecordCount": total, "StartIndex": 0 })
 }
 
+/// Emby official format: `{"Items": [{"Name": "..."},  ...], "TotalRecordCount": N}`
+fn name_only_list_result(values: Vec<String>) -> Value {
+    let total = values.len();
+    let items: Vec<Value> = values.into_iter().map(|name| json!({"Name": name})).collect();
+    json!({ "Items": items, "TotalRecordCount": total })
+}
+
 fn query_result_from_items(items: Vec<Value>) -> Value {
     let total = items.len();
     json!({
@@ -539,6 +596,19 @@ fn query_result_from_items(items: Vec<Value>) -> Value {
         "TotalRecordCount": total,
         "StartIndex": 0
     })
+}
+
+/// Virtual folder item with UserData and BackdropImageTags (matching Emby official format).
+fn virtual_folder_item_with_user_data(name: &str, item_type: &str, server_id: Uuid) -> BaseItemDto {
+    let mut item = virtual_folder_item(name, item_type, server_id);
+    item.user_data = crate::models::UserItemDataDto {
+        playback_position_ticks: 0,
+        play_count: 0,
+        is_favorite: false,
+        played: false,
+        ..Default::default()
+    };
+    item
 }
 
 fn virtual_folder_item(name: &str, item_type: &str, server_id: Uuid) -> BaseItemDto {

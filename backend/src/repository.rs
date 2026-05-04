@@ -7080,6 +7080,123 @@ pub async fn aggregate_stream_codecs(
     .await?)
 }
 
+/// Scoped aggregation: aggregate array values (genres/tags/studios) filtered by
+/// library_id and include_types, plus user visibility constraints.
+pub async fn aggregate_array_values_scoped(
+    pool: &sqlx::PgPool,
+    field: &str,
+    library_id: Option<Uuid>,
+    include_types: &[String],
+    allowed_library_ids: Option<&[Uuid]>,
+) -> Result<Vec<String>, AppError> {
+    if matches!(allowed_library_ids, Some(ids) if ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+    if library_id.is_none() && include_types.is_empty() {
+        return aggregate_array_values(pool, field, allowed_library_ids).await;
+    }
+    let (column, limit) = match field {
+        "tags" => ("tags", 1000),
+        "studios" => ("studios", 1000),
+        "genres" => ("genres", 500),
+        _ => return Ok(Vec::new()),
+    };
+    let types_lower: Vec<String> = include_types.iter().map(|t| t.to_lowercase()).collect();
+    let sql = format!(
+        r#"
+        SELECT DISTINCT value
+        FROM media_items, unnest({col}) AS value
+        WHERE btrim(value) <> ''
+          AND ($1::uuid IS NULL OR library_id = $1)
+          AND ($2::text[] IS NULL OR lower(item_type) = ANY($2))
+          AND ($3::uuid[] IS NULL OR library_id = ANY($3))
+        ORDER BY value
+        LIMIT {lim}
+        "#,
+        col = column,
+        lim = limit
+    );
+    Ok(sqlx::query_scalar::<_, String>(&sql)
+        .bind(library_id)
+        .bind(if types_lower.is_empty() { None } else { Some(&types_lower) })
+        .bind(allowed_library_ids.map(<[Uuid]>::to_vec))
+        .fetch_all(pool)
+        .await?)
+}
+
+/// Scoped aggregation: aggregate text values (official_rating/container) filtered by
+/// library_id and include_types.
+pub async fn aggregate_text_values_scoped(
+    pool: &sqlx::PgPool,
+    field: &str,
+    library_id: Option<Uuid>,
+    include_types: &[String],
+    allowed_library_ids: Option<&[Uuid]>,
+) -> Result<Vec<String>, AppError> {
+    if matches!(allowed_library_ids, Some(ids) if ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+    if library_id.is_none() && include_types.is_empty() {
+        return aggregate_text_values(pool, field, allowed_library_ids).await;
+    }
+    let column = match field {
+        "container" => "container",
+        "official_rating" => "official_rating",
+        _ => return Ok(Vec::new()),
+    };
+    let types_lower: Vec<String> = include_types.iter().map(|t| t.to_lowercase()).collect();
+    let sql = format!(
+        r#"
+        SELECT DISTINCT {col} AS value
+        FROM media_items
+        WHERE {col} IS NOT NULL AND btrim({col}) <> ''
+          AND ($1::uuid IS NULL OR library_id = $1)
+          AND ($2::text[] IS NULL OR lower(item_type) = ANY($2))
+          AND ($3::uuid[] IS NULL OR library_id = ANY($3))
+        ORDER BY {col}
+        "#,
+        col = column
+    );
+    Ok(sqlx::query_scalar::<_, String>(&sql)
+        .bind(library_id)
+        .bind(if types_lower.is_empty() { None } else { Some(&types_lower) })
+        .bind(allowed_library_ids.map(<[Uuid]>::to_vec))
+        .fetch_all(pool)
+        .await?)
+}
+
+/// Scoped aggregation: aggregate years filtered by library_id and include_types.
+pub async fn aggregate_years_scoped(
+    pool: &sqlx::PgPool,
+    library_id: Option<Uuid>,
+    include_types: &[String],
+    allowed_library_ids: Option<&[Uuid]>,
+) -> Result<Vec<i32>, AppError> {
+    if matches!(allowed_library_ids, Some(ids) if ids.is_empty()) {
+        return Ok(Vec::new());
+    }
+    if library_id.is_none() && include_types.is_empty() {
+        return aggregate_years(pool, allowed_library_ids).await;
+    }
+    let types_lower: Vec<String> = include_types.iter().map(|t| t.to_lowercase()).collect();
+    Ok(sqlx::query_scalar::<_, i32>(
+        r#"
+        SELECT DISTINCT production_year
+        FROM media_items
+        WHERE production_year IS NOT NULL
+          AND ($1::uuid IS NULL OR library_id = $1)
+          AND ($2::text[] IS NULL OR lower(item_type) = ANY($2))
+          AND ($3::uuid[] IS NULL OR library_id = ANY($3))
+        ORDER BY production_year DESC
+        "#,
+    )
+    .bind(library_id)
+    .bind(if types_lower.is_empty() { None } else { Some(&types_lower) })
+    .bind(allowed_library_ids.map(<[Uuid]>::to_vec))
+    .fetch_all(pool)
+    .await?)
+}
+
 pub async fn aggregate_artists(pool: &sqlx::PgPool) -> Result<Vec<(Uuid, String)>, AppError> {
     Ok(sqlx::query_as::<_, (Uuid, String)>(
         r#"
