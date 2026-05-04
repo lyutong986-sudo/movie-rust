@@ -1385,29 +1385,34 @@ async fn serve_item_image(
     .filter(|p| !p.trim().is_empty());
 
     if let Some(path) = path_opt {
-        // 远端 Emby 条目的图片 URL（无 token）：动态追加 access_token
-        let effective_path = if (path.starts_with("http://") || path.starts_with("https://"))
-            && item
+        // 远端 Emby 条目的图片 URL（无 token）：动态追加 access_token。
+        // 同时把 source 透传给 serve_image_with_source，省掉 serve_remote_image 内部的
+        // list_remote_emby_sources 全表扫（审计日志里每张图都打两次 remote_emby_sources，
+        // 一次按 id 一次按 name，这里就是其中一次）。
+        let path_is_remote = path.starts_with("http://") || path.starts_with("https://");
+        let remote_source = if path_is_remote {
+            let source_id_opt = item
                 .provider_ids
                 .get("RemoteEmbySourceId")
                 .and_then(|v| v.as_str())
-                .is_some()
-        {
-            let source_token = async {
-                let source_id_str = item
-                    .provider_ids
-                    .get("RemoteEmbySourceId")
-                    .and_then(|v| v.as_str())?;
-                let source_id = uuid::Uuid::parse_str(source_id_str).ok()?;
-                let source = repository::get_remote_emby_source(&state.pool, source_id)
+                .and_then(|s| uuid::Uuid::parse_str(s).ok());
+            match source_id_opt {
+                Some(source_id) => repository::get_remote_emby_source(&state.pool, source_id)
                     .await
-                    .ok()??;
-                source
-                    .access_token
-                    .filter(|t| !t.trim().is_empty())
+                    .ok()
+                    .flatten(),
+                None => None,
             }
-            .await;
-            if let Some(token) = source_token {
+        } else {
+            None
+        };
+
+        let effective_path = if path_is_remote {
+            if let Some(token) = remote_source
+                .as_ref()
+                .and_then(|s| s.access_token.as_ref())
+                .filter(|t| !t.trim().is_empty())
+            {
                 let sep = if path.contains('?') { '&' } else { '?' };
                 format!("{path}{sep}api_key={token}")
             } else {
@@ -1418,7 +1423,14 @@ async fn serve_item_image(
         };
 
         let method = request.method().clone();
-        let result = serve_image(Some(&state), &effective_path, request, &image_query).await;
+        let result = serve_image_with_source(
+            Some(&state),
+            &effective_path,
+            request,
+            &image_query,
+            remote_source.as_ref(),
+        )
+        .await;
         if let Err(AppError::NotFound(_)) = &result {
             if let Some(fallback_url) =
                 find_tmdb_image_fallback(&state.pool, &item, &normalized, state.config.tmdb_api_key.as_deref()).await
@@ -1435,7 +1447,7 @@ async fn serve_item_image(
                     .method(method)
                     .body(Body::empty())
                     .unwrap_or_default();
-                return serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req).await;
+                return serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req, None).await;
             }
             spawn_image_fallback_refresh(&state, item.id);
         }
@@ -1453,7 +1465,7 @@ async fn serve_item_image(
             .method(request.method().clone())
             .body(Body::empty())
             .unwrap_or_default();
-        return serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req).await;
+        return serve_remote_image(Some(&state), &fallback_url, &image_query, fallback_req, None).await;
     }
 
     spawn_image_fallback_refresh(&state, item.id);
@@ -1711,7 +1723,7 @@ async fn get_remote_image(
         .ok_or_else(|| AppError::BadRequest("缺少 ImageUrl 参数".to_string()))?;
 
     let image_query = parse_item_image_query(request.uri());
-    serve_remote_image(Some(&state), image_url, &image_query, request).await
+    serve_remote_image(Some(&state), image_url, &image_query, request, None).await
 }
 
 fn normalized_user_image_type(image_type: &str) -> String {
@@ -1996,8 +2008,25 @@ async fn serve_image(
     request: Request<Body>,
     image_query: &ItemImageQuery,
 ) -> Result<Response, AppError> {
+    serve_image_with_source(state, path, request, image_query, None).await
+}
+
+/// 与 `serve_image` 同义，但允许调用方把已经查到的 `DbRemoteEmbySource` 传进来，
+/// 避免 `serve_remote_image` 再走一次 `find_remote_emby_source_for_url`（全表 SELECT
+/// `remote_emby_sources` ORDER BY name）。
+///
+/// 审计日志（2026-05-04）显示每张远端 Emby 图片都触发两次 `remote_emby_sources`
+/// 查询：一次 `WHERE id = $1`（拿 token），一次 `ORDER BY name`（host 匹配）。
+/// 把已知 source 透传下去后第二次可以省掉，单图请求只剩一次按主键的查询。
+async fn serve_image_with_source(
+    state: Option<&AppState>,
+    path: &str,
+    request: Request<Body>,
+    image_query: &ItemImageQuery,
+    authenticated_source: Option<&crate::models::DbRemoteEmbySource>,
+) -> Result<Response, AppError> {
     if path.starts_with("http://") || path.starts_with("https://") {
-        serve_remote_image(state, path, image_query, request).await
+        serve_remote_image(state, path, image_query, request, authenticated_source).await
     } else {
         serve_local_path(PathBuf::from(path), request, image_query).await
     }
@@ -2315,6 +2344,7 @@ async fn serve_remote_image(
     url: &str,
     image_query: &ItemImageQuery,
     request: Request<Body>,
+    known_source: Option<&crate::models::DbRemoteEmbySource>,
 ) -> Result<Response, AppError> {
     // PB42-IC：cache_key 不依赖 token / api_key，所以 ETag 也稳定。
     // 客户端 If-None-Match 在没拿到响应字节的情况下就能直接 304。
@@ -2332,11 +2362,22 @@ async fn serve_remote_image(
 
     // 命中已配置的远端 Emby 源时改用伪装鉴权头：覆盖 WAF 严格、必须带 token / 特定 UA 的上游。
     // 落库的远端图片 URL 不带 token，裸 GET 容易被反爬拦下来；找到对应 source 后注入完整身份。
-    let authenticated_source = match state {
-        Some(state) => crate::remote_emby::find_remote_emby_source_for_url(&state.pool, url).await,
-        None => None,
+    //
+    // 调用方若已根据 item.provider_ids.RemoteEmbySourceId 拿到 source，就直接复用，
+    // 避免再走 list_remote_emby_sources 的全表扫（审计日志里这条会和 `WHERE id = $1`
+    // 成对出现，每张图等于打两次表）。
+    let lookup_source = if known_source.is_some() {
+        None
+    } else {
+        match state {
+            Some(state) => {
+                crate::remote_emby::find_remote_emby_source_for_url(&state.pool, url).await
+            }
+            None => None,
+        }
     };
-    let response = if let Some(source) = authenticated_source.as_ref() {
+    let authenticated_source = known_source.or(lookup_source.as_ref());
+    let response = if let Some(source) = authenticated_source {
         crate::remote_emby::build_authenticated_emby_image_request(
             &SHARED_HTTP_CLIENT,
             source,

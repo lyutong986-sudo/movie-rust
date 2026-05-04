@@ -43,6 +43,30 @@
 >   // 修复后预期：每行 count == limit
 >   ```
 >
+> ⑨ **2026-05-04 四阶段：审计日志（`movie-rust-20260504193229.log`）暴露的两类性能 P0 问题**：
+> - **问题 A：递归 CTE 慢查询撑爆连接池（67 条慢 SQL + 100+ 条 `time to acquire exceeded slow threshold` 2s+）**：
+>   - **现象**：`/Users/{uid}/Items?IncludeItemTypes=Series&Limit=30&...` / `/Users/{uid}/Items/Latest?IncludeItemTypes=Series&...` 等列表请求里，`count_recursive_children_batch` / `count_unplayed_children_batch` 每页都跑一次全表 `WITH RECURSIVE descendants AS (SELECT id, parent_id ... FROM media_items WHERE parent_id = ANY($1) UNION ALL SELECT m.id, m.parent_id, d.root_id FROM media_items m INNER JOIN descendants d ON m.parent_id = d.id)`，单查询 `elapsed=1.2-1.5s`，对应日志 67 条 `slow statement: execution time exceeded alert threshold`。这把 sqlx 连接池打满后，所有后续请求（图片 / Episodes / Sessions/Playing/Progress / 远端代理）都开始 `acquired connection, but time to acquire exceeded slow threshold aquired_after_secs=2.0xx-2.7xx` 排队，整个服务进入级联降级。
+>   - **根因**：`media_items` 实际 hierarchy 极浅（`Series→Season→Episode` / `BoxSet→Movie` / `Library→Series`），最深 4 层。但 RECURSIVE CTE 不能向 Postgres planner 表达"层数有限"，扫描成本随表行数线性增长。而 `media_items.series_id` / `media_items.season_id` 字段早已存在并建了索引（`idx_media_items_series` / `idx_media_items_episode_nextup`），Series/Season 完全不需要递归。
+>   - **修复**：`backend/src/repository.rs::count_recursive_children_batch` / `count_unplayed_children_batch` 重写为先 `SELECT id, item_type FROM media_items WHERE id = ANY($1)` 按类型分桶（新增 helper `split_folder_ids_by_type` 返回 `FolderBuckets { series_ids, season_ids, other_ids }`）：
+>     1. **Series 桶**：`SELECT series_id, COUNT(*) FROM media_items WHERE series_id = ANY($1) AND item_type IN ('Season', 'Episode') GROUP BY series_id` —— 走 `idx_media_items_series` 索引扫描，返回包含全部 Season+Episode 的递归子代数；UnplayedCount 限定 `item_type = 'Episode'`（Emby 语义只统计可播放叶子）。
+>     2. **Season 桶**：`SELECT season_id, COUNT(*) FROM media_items WHERE season_id = ANY($1) AND item_type = 'Episode' GROUP BY season_id` —— 走 `idx_media_items_episode_nextup` 索引扫描。
+>     3. **其它桶**（BoxSet / Folder / CollectionFolder / AggregateFolder）：仍走原 RECURSIVE CTE，但这些类型的 `parent_ids` 在常规列表里基本只剩 ≤ 1 个，不再是热点。
+>   - **预期效果**：单页 `Series` 列表里 30 个 root → 一条索引扫描秒回（PG 索引 range scan，毫秒级）；连接池排队 warning 应同步消失。
+> - **问题 B：每张远端 Emby 图片触发两次 `remote_emby_sources` 查询**：
+>   - **现象**：日志里几乎每个 `/emby/Items/{id}/Images/Primary?...` 请求都成对出现 `SELECT ... FROM remote_emby_sources WHERE id = $1`（按 id 拿 token）和 `SELECT ... FROM remote_emby_sources ORDER BY name`（全表扫做 host 匹配）。
+>   - **根因**：`routes/images.rs::serve_item_image` 先调 `get_remote_emby_source(source_id)` 拿 `access_token`（拼 `api_key` 进 URL），再走 `serve_image → serve_remote_image`，后者又调 `crate::remote_emby::find_remote_emby_source_for_url`，内部又跑了一次 `list_remote_emby_sources` 全表扫。两次查询拿的是同一行。
+>   - **修复**：
+>     1. `serve_remote_image` 新增 `known_source: Option<&DbRemoteEmbySource>` 参数；调用方传 `Some(&source)` 时直接复用，否则才回退到 `find_remote_emby_source_for_url`。所有现有 4 个调用点都补 `None` 保持兼容。
+>     2. 新增 `serve_image_with_source` 包装函数；`serve_item_image` 在判断到 `path` 是远程 URL 且 `provider_ids.RemoteEmbySourceId` 存在时，一次性 `repository::get_remote_emby_source(source_id)` 拿到完整 `DbRemoteEmbySource`，token 用其 `access_token` 拼 URL，整个 source 引用透传给 `serve_image_with_source(..., remote_source.as_ref())` → `serve_remote_image(..., Some(&source))`。
+>   - **预期效果**：远端 Emby 条目的图片请求从 2 次 SQL 降到 1 次（按主键 `WHERE id = $1`，索引点查），消掉日志里那条 `ORDER BY name` 全表扫。本地图片不受影响。
+> - **未处理的次要问题**（不在本次范围）：
+>   - 29 条 `404 Not Found error=远程图片不存在 / 远程人物图片不存在 / 文件不存在` 警告 → 这是远端上游 Emby 真把图片删了或本地 sidecar 没下载到，PB42-bo 已有 backoff 防止刷屏，本质是数据补全问题。
+>   - `WARN sqlx::query: slow statement` 还有 1 条 `ALTER TABLE person_roles ADD CONSTRAINT ...` 1.7s → 这是启动时的一次性 schema 迁移，正常。
+> - **验证方法**：部署后再抓一份完整日志，确认：
+>   - `slow statement` 中 `WITH RECURSIVE descendants` 应清零或仅剩零星 BoxSet/Folder 场景。
+>   - `time to acquire exceeded slow threshold` 应清零（连接池不再排队）。
+>   - 单图请求只剩 1 条 `remote_emby_sources WHERE id = $1`，无 `ORDER BY name` 配对。
+>
 > ⑧ **2026-05-04 三阶段：`/Users/{id}/Views` CollectionFolder.ChildCount 误用扫描路径数（sidebar 显示永远是 1 或 3）**：
 > - **现象（chrome-devtools MCP 实测）**：sidebar 上每个媒体库的徽标固定显示 1 或 3，而真实数据是：儿童=865、儿童教育=399、国漫=660。前端 `AppLayout.vue:130` 直接读 `library.ChildCount` 显示，所以 sidebar 错。
 > - **根因**：`backend/src/repository.rs:10137`（旧版） `child_count: Some(locations.len().max(1) as i64)` 直接用了 `library_paths(library)` 返回的扫描路径数当 ChildCount。一个库通常配 1 条或 3 条扫描路径，所以全部 sidebar 数字非 1 即 3。**更糟的是 `library_to_item_dto_inner` 上游已经传入了 `_recursive_item_count / _movie_count / _series_count` 三个真实统计参数，但 inner 函数全部加了 `_` 前缀直接丢弃**。

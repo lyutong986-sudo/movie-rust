@@ -5354,8 +5354,61 @@ pub async fn count_item_children_batch(
     Ok(rows.into_iter().collect())
 }
 
+/// 把一批 folder ID 按 item_type 分桶，给递归计数走捷径。
+///
+/// 审计日志（2026-05-04）显示：列表接口（`IncludeItemTypes=Series` 等）每页都对
+/// 每个 folder 跑一次全表 `WITH RECURSIVE descendants ...`，单查询 1.3-1.5s 直接
+/// 撑爆 sqlx 连接池（出现 `time to acquire exceeded slow threshold` 2s+ warning）。
+///
+/// 实际 hierarchy 是 `Series→Season→Episode`，episode 行已经直接挂着 `series_id`
+/// 和 `season_id`，对应索引也都有：
+///   - `idx_media_items_series` ON media_items(series_id)
+///   - `idx_media_items_season_id` ON media_items(season_id)
+/// 所以 Series/Season 完全不需要递归 CTE，一条 GROUP BY 索引扫描秒回。
+struct FolderBuckets {
+    series_ids: Vec<Uuid>,
+    season_ids: Vec<Uuid>,
+    other_ids: Vec<Uuid>,
+}
+
+async fn split_folder_ids_by_type(
+    pool: &sqlx::PgPool,
+    parent_ids: &[Uuid],
+) -> Result<FolderBuckets, AppError> {
+    let rows: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, item_type FROM media_items WHERE id = ANY($1)")
+            .bind(parent_ids)
+            .fetch_all(pool)
+            .await?;
+    let mut series_ids = Vec::new();
+    let mut season_ids = Vec::new();
+    let mut other_ids = Vec::new();
+    let mut known: HashSet<Uuid> = HashSet::with_capacity(rows.len());
+    for (id, item_type) in rows {
+        known.insert(id);
+        match item_type.as_str() {
+            "Series" => series_ids.push(id),
+            "Season" => season_ids.push(id),
+            _ => other_ids.push(id),
+        }
+    }
+    // 表里查不到的 id（理论上不会出现）兜底走通用路径。
+    for id in parent_ids {
+        if !known.contains(id) {
+            other_ids.push(*id);
+        }
+    }
+    Ok(FolderBuckets {
+        series_ids,
+        season_ids,
+        other_ids,
+    })
+}
+
 /// 批量版的递归子代计数。把每个 root 的递归 CTE 合成一次查询，
 /// 避免 `count_recursive_children` 在列表里被 N 次独立执行（递归 CTE 很贵）。
+///
+/// Series/Season 直接走 `series_id` / `season_id` 索引；其余类型才落回递归 CTE。
 pub async fn count_recursive_children_batch(
     pool: &sqlx::PgPool,
     parent_ids: &[Uuid],
@@ -5363,30 +5416,86 @@ pub async fn count_recursive_children_batch(
     if parent_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
-        r#"
-        WITH RECURSIVE descendants AS (
-            SELECT id, parent_id, parent_id AS root_id
+    let buckets = split_folder_ids_by_type(pool, parent_ids).await?;
+
+    let mut result: HashMap<Uuid, i64> = HashMap::with_capacity(parent_ids.len());
+
+    if !buckets.series_ids.is_empty() {
+        // Series 的递归子代 = 该 series 下所有 Season + Episode。media_items 中所有
+        // Episode/Season 行都有 series_id 直接外键，索引扫描即可。
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            r#"
+            SELECT series_id, COUNT(*)::bigint
             FROM media_items
-            WHERE parent_id = ANY($1)
-            UNION ALL
-            SELECT m.id, m.parent_id, d.root_id
-            FROM media_items m
-            INNER JOIN descendants d ON m.parent_id = d.id
+            WHERE series_id = ANY($1)
+              AND item_type IN ('Season', 'Episode')
+            GROUP BY series_id
+            "#,
         )
-        SELECT root_id, COUNT(*)::bigint
-        FROM descendants
-        GROUP BY root_id
-        "#,
-    )
-    .bind(parent_ids)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().collect())
+        .bind(&buckets.series_ids)
+        .fetch_all(pool)
+        .await?;
+        for (id, count) in rows {
+            result.insert(id, count);
+        }
+        for id in &buckets.series_ids {
+            result.entry(*id).or_insert(0);
+        }
+    }
+
+    if !buckets.season_ids.is_empty() {
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            r#"
+            SELECT season_id, COUNT(*)::bigint
+            FROM media_items
+            WHERE season_id = ANY($1)
+              AND item_type = 'Episode'
+            GROUP BY season_id
+            "#,
+        )
+        .bind(&buckets.season_ids)
+        .fetch_all(pool)
+        .await?;
+        for (id, count) in rows {
+            result.insert(id, count);
+        }
+        for id in &buckets.season_ids {
+            result.entry(*id).or_insert(0);
+        }
+    }
+
+    if !buckets.other_ids.is_empty() {
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            r#"
+            WITH RECURSIVE descendants AS (
+                SELECT id, parent_id, parent_id AS root_id
+                FROM media_items
+                WHERE parent_id = ANY($1)
+                UNION ALL
+                SELECT m.id, m.parent_id, d.root_id
+                FROM media_items m
+                INNER JOIN descendants d ON m.parent_id = d.id
+            )
+            SELECT root_id, COUNT(*)::bigint
+            FROM descendants
+            GROUP BY root_id
+            "#,
+        )
+        .bind(&buckets.other_ids)
+        .fetch_all(pool)
+        .await?;
+        for (id, count) in rows {
+            result.insert(id, count);
+        }
+    }
+
+    Ok(result)
 }
 
 /// 批量版：对一批 folder（Series/Season）统计该用户的未看子集数。
 /// 返回 HashMap<parent_id, unplayed_count>。
+///
+/// 同样按 Series/Season/Other 分桶，前两类用索引扫，第三类才走递归 CTE。
 pub async fn count_unplayed_children_batch(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -5395,35 +5504,106 @@ pub async fn count_unplayed_children_batch(
     if parent_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
-        r#"
-        WITH RECURSIVE descendants AS (
-            SELECT id, parent_id, parent_id AS root_id
-            FROM media_items
-            WHERE parent_id = ANY($2)
-            UNION ALL
-            SELECT m.id, m.parent_id, d.root_id
+    let buckets = split_folder_ids_by_type(pool, parent_ids).await?;
+
+    let mut result: HashMap<Uuid, i64> = HashMap::with_capacity(parent_ids.len());
+
+    if !buckets.series_ids.is_empty() {
+        // Emby 的 UnplayedItemCount 语义只算可消费的 Episode（Season 不算 leaf）。
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            r#"
+            SELECT m.series_id,
+                   COUNT(*) FILTER (
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM user_item_data uid
+                           WHERE uid.user_id = $1
+                             AND uid.item_id = m.id
+                             AND uid.is_played = true
+                       )
+                   )::bigint
             FROM media_items m
-            INNER JOIN descendants d ON m.parent_id = d.id
+            WHERE m.series_id = ANY($2)
+              AND m.item_type = 'Episode'
+            GROUP BY m.series_id
+            "#,
         )
-        SELECT d.root_id,
-               COUNT(*) FILTER (
-                   WHERE NOT EXISTS (
-                       SELECT 1 FROM user_item_data uid
-                       WHERE uid.user_id = $1
-                         AND uid.item_id = d.id
-                         AND uid.is_played = true
-                   )
-               )::bigint
-        FROM descendants d
-        GROUP BY d.root_id
-        "#,
-    )
-    .bind(user_id)
-    .bind(parent_ids)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().collect())
+        .bind(user_id)
+        .bind(&buckets.series_ids)
+        .fetch_all(pool)
+        .await?;
+        for (id, count) in rows {
+            result.insert(id, count);
+        }
+        for id in &buckets.series_ids {
+            result.entry(*id).or_insert(0);
+        }
+    }
+
+    if !buckets.season_ids.is_empty() {
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            r#"
+            SELECT m.season_id,
+                   COUNT(*) FILTER (
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM user_item_data uid
+                           WHERE uid.user_id = $1
+                             AND uid.item_id = m.id
+                             AND uid.is_played = true
+                       )
+                   )::bigint
+            FROM media_items m
+            WHERE m.season_id = ANY($2)
+              AND m.item_type = 'Episode'
+            GROUP BY m.season_id
+            "#,
+        )
+        .bind(user_id)
+        .bind(&buckets.season_ids)
+        .fetch_all(pool)
+        .await?;
+        for (id, count) in rows {
+            result.insert(id, count);
+        }
+        for id in &buckets.season_ids {
+            result.entry(*id).or_insert(0);
+        }
+    }
+
+    if !buckets.other_ids.is_empty() {
+        let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+            r#"
+            WITH RECURSIVE descendants AS (
+                SELECT id, parent_id, parent_id AS root_id
+                FROM media_items
+                WHERE parent_id = ANY($2)
+                UNION ALL
+                SELECT m.id, m.parent_id, d.root_id
+                FROM media_items m
+                INNER JOIN descendants d ON m.parent_id = d.id
+            )
+            SELECT d.root_id,
+                   COUNT(*) FILTER (
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM user_item_data uid
+                           WHERE uid.user_id = $1
+                             AND uid.item_id = d.id
+                             AND uid.is_played = true
+                       )
+                   )::bigint
+            FROM descendants d
+            GROUP BY d.root_id
+            "#,
+        )
+        .bind(user_id)
+        .bind(&buckets.other_ids)
+        .fetch_all(pool)
+        .await?;
+        for (id, count) in rows {
+            result.insert(id, count);
+        }
+    }
+
+    Ok(result)
 }
 
 /// 批量版：一次 SQL 拿回多部剧的季数。
