@@ -1392,7 +1392,6 @@ pub struct BaseItemDto {
     pub movie_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub air_days: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub air_time: Option<String>,

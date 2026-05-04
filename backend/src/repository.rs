@@ -5381,6 +5381,47 @@ pub async fn count_recursive_children_batch(
     Ok(rows.into_iter().collect())
 }
 
+/// 批量版：对一批 folder（Series/Season）统计该用户的未看子集数。
+/// 返回 HashMap<parent_id, unplayed_count>。
+pub async fn count_unplayed_children_batch(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    parent_ids: &[Uuid],
+) -> Result<HashMap<Uuid, i64>, AppError> {
+    if parent_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+        r#"
+        WITH RECURSIVE descendants AS (
+            SELECT id, parent_id, parent_id AS root_id
+            FROM media_items
+            WHERE parent_id = ANY($2)
+            UNION ALL
+            SELECT m.id, m.parent_id, d.root_id
+            FROM media_items m
+            INNER JOIN descendants d ON m.parent_id = d.id
+        )
+        SELECT d.root_id,
+               COUNT(*) FILTER (
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM user_item_data uid
+                       WHERE uid.user_id = $1
+                         AND uid.media_item_id = d.id
+                         AND uid.is_played = true
+                   )
+               )::bigint
+        FROM descendants d
+        GROUP BY d.root_id
+        "#,
+    )
+    .bind(user_id)
+    .bind(parent_ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// 批量版：一次 SQL 拿回多部剧的季数。
 pub async fn count_series_seasons_batch(
     pool: &sqlx::PgPool,
@@ -10381,7 +10422,7 @@ pub fn media_item_to_dto_for_list(
         etag: Some(item_etag(item)),
         date_modified: Some(item.date_modified),
         can_delete: true,
-        can_download: true,
+        can_download: !is_folder,
         can_edit_items: Some(true),
         supports_resume: Some(!is_folder),
         // PB35-3：list DTO 也产出 PresentationUniqueKey，让客户端缓存命中
@@ -10620,6 +10661,18 @@ async fn media_item_to_dto_inner(
             Ok(None)
         }
     };
+    let unplayed_count_fut = async {
+        if is_folder {
+            if let Some(uid) = user_id {
+                let map = count_unplayed_children_batch(pool, uid, &[item.id]).await?;
+                Ok::<_, AppError>(map.get(&item.id).copied())
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    };
     let series_and_season_fut = resolve_series_and_season_ids(pool, item);
     let parent_item_fut = async {
         match item.parent_id {
@@ -10635,6 +10688,7 @@ async fn media_item_to_dto_inner(
         child_count,
         recursive_item_count,
         season_count,
+        unplayed_count,
         (series_id, season_id),
         parent_item,
         people,
@@ -10644,6 +10698,7 @@ async fn media_item_to_dto_inner(
         child_count_fut,
         recursive_item_count_fut,
         season_count_fut,
+        unplayed_count_fut,
         series_and_season_fut,
         parent_item_fut,
         people_fut,
@@ -10680,6 +10735,12 @@ async fn media_item_to_dto_inner(
         .height
         .or_else(|| video_stream.and_then(|stream| stream.height));
     let primary_image_aspect_ratio = infer_primary_image_aspect_ratio(item, width, height);
+    if is_folder {
+        if let Some(unplayed) = unplayed_count {
+            user_data.unplayed_item_count = Some(unplayed as i32);
+        }
+    }
+
     let item_detail_media_sources = sanitize_media_sources_for_item_detail(media_sources);
     let provider_ids = provider_ids_for_item(item);
     let primary_image_tag = item
@@ -10792,7 +10853,7 @@ async fn media_item_to_dto_inner(
         etag: Some(item_etag(item)),
         date_modified: Some(item.date_modified),
         can_delete: true,
-        can_download: true,
+        can_download: !is_folder,
         can_edit_items: Some(true),
         supports_resume: Some(!is_folder),
         presentation_unique_key: Some(presentation_unique_key(item, &provider_ids)),

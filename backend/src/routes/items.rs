@@ -1391,11 +1391,12 @@ async fn media_items_to_dto_result(
         Vec::new()
     };
 
-    let (user_data_map, child_counts, recursive_counts, season_counts, streams_map) = tokio::join!(
+    let (user_data_map, child_counts, recursive_counts, season_counts, unplayed_counts, streams_map) = tokio::join!(
         repository::get_user_item_data_batch(&state.pool, user_id, &item_ids),
         repository::count_item_children_batch(&state.pool, &folder_ids),
         repository::count_recursive_children_batch(&state.pool, &folder_ids),
         repository::count_series_seasons_batch(&state.pool, &series_ids),
+        repository::count_unplayed_children_batch(&state.pool, user_id, &folder_ids),
         async {
             if media_source_item_ids.is_empty() {
                 Ok(std::collections::HashMap::new())
@@ -1408,6 +1409,7 @@ async fn media_items_to_dto_result(
     let child_counts = child_counts?;
     let recursive_counts = recursive_counts?;
     let season_counts = season_counts?;
+    let unplayed_counts = unplayed_counts?;
     let streams_map = streams_map?;
 
     let mut items = Vec::with_capacity(result.items.len());
@@ -1441,6 +1443,12 @@ async fn media_items_to_dto_result(
             prefetched_user,
             counts,
         );
+
+        if repository::is_folder_item_public(&item) {
+            if let Some(&unplayed) = unplayed_counts.get(&item.id) {
+                dto.user_data.unplayed_item_count = Some(unplayed as i32);
+            }
+        }
 
         // PB53：MediaSources / MediaStreams 注入。仅 IHasMediaSources 类型有效；
         // Series/Season/Folder/Person 仍为 `[]`（与 Emby 一致）。
