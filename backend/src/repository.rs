@@ -10770,7 +10770,7 @@ pub fn media_item_to_dto_for_list(
         primary_image_tag: primary_image_tag.clone(),
         collection_type: None,
         media_type: (!is_folder).then(|| item.media_type.clone()),
-        container: item.container.clone(),
+        container: item.container.clone().filter(|c| !c.eq_ignore_ascii_case("strm")),
         parent_id: item.parent_id.map(|value| uuid_to_emby_guid(&value)),
         path: sanitize_item_path(item),
         location_type: Some(if item.path.starts_with("http://") || item.path.starts_with("https://") { "Remote".to_string() } else { "FileSystem".to_string() }),
@@ -12898,6 +12898,28 @@ pub fn first_container(value: &str) -> String {
     }
 }
 
+/// 将 ffprobe 的 format_name（如 "mov,mp4,m4a,3gp,3g2,mj2"）规范化为 Emby 客户端
+/// 期望的容器名（如 "mp4"）。ffprobe 输出的格式名与 Emby 约定不同：
+///   mov,mp4,m4a,3gp,3g2,mj2 → mp4
+///   matroska,webm             → mkv
+///   mpegts                    → ts
+///   ogg                       → ogg
+///   flv                       → flv
+///   avi                       → avi
+fn normalize_ffprobe_container(raw: &str) -> String {
+    let first = first_container(raw);
+    match first.to_ascii_lowercase().as_str() {
+        "mov" | "m4a" | "m4v" | "3gp" | "3g2" | "f4v" => "mp4".to_string(),
+        "matroska" | "webm" => "mkv".to_string(),
+        "mpegts" | "mpegtsraw" => "ts".to_string(),
+        "asf" | "asf_stream" => "wmv".to_string(),
+        "hls" | "applehttp" => "ts".to_string(),
+        "dash" => "mp4".to_string(),
+        "mpeg" | "vob" | "dvd" => "mpg".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn infer_timestamp(container: &str) -> Option<String> {
     match container.to_ascii_lowercase().as_str() {
         "ts" | "m2ts" | "mts" | "mpegts" | "mpeg" | "mpg" => Some("None".to_string()),
@@ -13094,6 +13116,12 @@ pub async fn update_media_item_metadata(
         .as_deref()
         .and_then(|s| s.parse::<i64>().ok());
 
+    let container = format
+        .format_name
+        .as_deref()
+        .map(normalize_ffprobe_container)
+        .filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case("strm"));
+
     sqlx::query(
         r#"
         UPDATE media_items
@@ -13104,6 +13132,11 @@ pub async fn update_media_item_metadata(
             runtime_ticks = COALESCE($5, runtime_ticks),
             bit_rate = COALESCE($6, bit_rate),
             size = COALESCE($7, size),
+            container = CASE
+                WHEN $9 IS NOT NULL AND $9 <> '' AND lower($9) <> 'strm'
+                THEN $9
+                ELSE COALESCE(NULLIF(NULLIF(container, ''), 'strm'), $9)
+            END,
             date_modified = now()
         WHERE id = $8
         "#,
@@ -13116,6 +13149,7 @@ pub async fn update_media_item_metadata(
     .bind(bit_rate)
     .bind(file_size)
     .bind(item_id)
+    .bind(container.as_deref())
     .execute(pool)
     .await?;
 
