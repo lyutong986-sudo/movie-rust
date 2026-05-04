@@ -8535,7 +8535,7 @@ pub async fn find_item_id_by_remote_emby_id(
            OR provider_ids->>'RemoteEmbySeriesId' = $1
         ORDER BY
             CASE WHEN provider_ids->>'RemoteEmbyItemId' = $1 THEN 0 ELSE 1 END,
-            updated_at DESC
+            date_modified DESC
         LIMIT 1
         "#,
     )
