@@ -1303,19 +1303,46 @@ async fn media_items_to_dto_result(
         .map(|item| item.id)
         .collect();
 
-    let (user_data_map, child_counts, recursive_counts, season_counts) = tokio::join!(
+    // PB53：客户端要求 `Fields=MediaSources` / `MediaStreams` 时，列表零查询路径
+    // 之前从来不填这两个字段（Emby 官方 DtoService.cs:245-247 是必填的）。
+    // 这里按 IHasMediaSources 类型筛 ID，再用 `get_media_streams_batch` 一条 SQL
+    // 把整页 streams 一次拉回来，避免 N+1。
+    let requested_fields = parse_list(query.fields.as_deref());
+    let want_media_sources = contains_ignore_case(&requested_fields, "MediaSources");
+    let want_media_streams = contains_ignore_case(&requested_fields, "MediaStreams");
+    let media_source_item_ids: Vec<uuid::Uuid> = if want_media_sources || want_media_streams {
+        result
+            .items
+            .iter()
+            .filter(|item| item_type_has_media_sources(&item.item_type))
+            .map(|item| item.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let (user_data_map, child_counts, recursive_counts, season_counts, streams_map) = tokio::join!(
         repository::get_user_item_data_batch(&state.pool, user_id, &item_ids),
         repository::count_item_children_batch(&state.pool, &folder_ids),
         repository::count_recursive_children_batch(&state.pool, &folder_ids),
         repository::count_series_seasons_batch(&state.pool, &series_ids),
+        async {
+            if media_source_item_ids.is_empty() {
+                Ok(std::collections::HashMap::new())
+            } else {
+                repository::get_media_streams_batch(&state.pool, &media_source_item_ids).await
+            }
+        },
     );
     let user_data_map = user_data_map?;
     let child_counts = child_counts?;
     let recursive_counts = recursive_counts?;
     let season_counts = season_counts?;
+    let streams_map = streams_map?;
 
     let mut items = Vec::with_capacity(result.items.len());
     let mut seen_collections: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    let empty_streams: Vec<crate::models::DbMediaStream> = Vec::new();
 
     for item in result.items {
         // CollapseBoxSetItems: replace item with its collection BoxSet
@@ -1338,12 +1365,35 @@ async fn media_items_to_dto_result(
             recursive_item_count: recursive_counts.get(&item.id).copied(),
             season_count: season_counts.get(&item.id).copied(),
         };
-        let dto = repository::media_item_to_dto_for_list(
+        let mut dto = repository::media_item_to_dto_for_list(
             &item,
             state.config.server_id,
             prefetched_user,
             counts,
         );
+
+        // PB53：MediaSources / MediaStreams 注入。仅 IHasMediaSources 类型有效；
+        // Series/Season/Folder/Person 仍为 `[]`（与 Emby 一致）。
+        // - `Fields=MediaSources` → 填充 `dto.media_sources[0]`，内含 streams。
+        // - `Fields=MediaStreams` → 同时把 streams 平铺到 `dto.media_streams`。
+        //   （Emby DtoService.cs:1070-1099：dto.MediaStreams = MediaSources[0].MediaStreams）
+        if (want_media_sources || want_media_streams)
+            && item_type_has_media_sources(&item.item_type)
+        {
+            let item_streams = streams_map.get(&item.id).unwrap_or(&empty_streams);
+            let source = repository::media_source_for_item_with_db_streams(
+                &item,
+                state.config.server_id,
+                item_streams,
+            );
+            if want_media_streams {
+                dto.media_streams = source.media_streams.clone();
+            }
+            if want_media_sources {
+                dto.media_sources = vec![source];
+            }
+        }
+
         items.push(apply_item_response_shape(dto, query));
     }
 
@@ -6350,6 +6400,23 @@ fn parse_list(value: Option<&str>) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+/// PB53：判断条目类型是否实现 Emby `IHasMediaSources`，决定 `Fields=MediaSources`
+/// 是否需要为它填充 `dto.media_sources`。Series / Season / Folder / Person 永远空。
+fn item_type_has_media_sources(item_type: &str) -> bool {
+    matches!(
+        item_type,
+        "Movie"
+            | "Episode"
+            | "Video"
+            | "Audio"
+            | "MusicVideo"
+            | "Trailer"
+            | "AdultVideo"
+            | "LiveTvProgram"
+            | "Recording"
+    )
 }
 
 fn parse_filter_list(value: Option<&str>) -> Vec<String> {

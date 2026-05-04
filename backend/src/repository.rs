@@ -12847,6 +12847,46 @@ pub async fn get_media_streams(
     Ok(streams)
 }
 
+/// PB53：列表接口的媒体流批量预取。`/Users/{id}/Items` 一页 50 条 Movie/Episode
+/// 走原来的 `get_media_streams` 会触发 50 次往返，而客户端（Hills/Yamby、Infuse、
+/// Emby Web）拿到列表 MediaSources 时通常需要其中的 Video/Audio 流来显示分辨率、
+/// 编码、声道等。一条 SQL 通过 `ANY($1)` 把整页的 streams 取回来，按 item_id 分桶。
+pub async fn get_media_streams_batch(
+    pool: &sqlx::PgPool,
+    media_item_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<DbMediaStream>>, AppError> {
+    let mut grouped: std::collections::HashMap<Uuid, Vec<DbMediaStream>> =
+        std::collections::HashMap::with_capacity(media_item_ids.len());
+    if media_item_ids.is_empty() {
+        return Ok(grouped);
+    }
+    let rows = sqlx::query_as::<_, DbMediaStream>(
+        r#"
+        SELECT id, media_item_id, index, stream_type, codec, codec_tag, language, title,
+               is_default, is_forced, is_external, is_hearing_impaired, profile, width, height,
+               channels, sample_rate, bit_rate, bit_depth, channel_layout, aspect_ratio,
+               average_frame_rate, real_frame_rate, is_interlaced, color_range, color_space,
+               color_transfer, color_primaries, rotation, hdr10_plus_present_flag,
+               dv_version_major, dv_version_minor, dv_profile, dv_level,
+               dv_bl_signal_compatibility_id, comment, time_base, codec_time_base,
+               attachment_size, extended_video_sub_type, extended_video_sub_type_description,
+               extended_video_type, is_anamorphic, is_avc, is_external_url,
+               is_text_subtitle_stream, level, pixel_format, ref_frames, stream_start_time_ticks,
+               created_at, updated_at
+        FROM media_streams
+        WHERE media_item_id = ANY($1)
+        ORDER BY media_item_id, index
+        "#,
+    )
+    .bind(media_item_ids)
+    .fetch_all(pool)
+    .await?;
+    for row in rows {
+        grouped.entry(row.media_item_id).or_default().push(row);
+    }
+    Ok(grouped)
+}
+
 pub async fn get_media_chapters(
     pool: &sqlx::PgPool,
     media_item_id: Uuid,
@@ -12904,35 +12944,41 @@ pub async fn find_series_by_name_in_library(
     .await?)
 }
 
-pub async fn get_media_source_with_streams(
-    pool: &sqlx::PgPool,
-    item: &DbMediaItem,
-    server_id: Uuid,
-) -> Result<MediaSourceDto, AppError> {
-    // 获取媒体流
-    let db_streams = get_media_streams(pool, item.id).await?;
-    let db_chapters = get_media_chapters(pool, item.id).await?;
-
-    let local_path_early = Path::new(&item.path);
-    // 兼容旧虚拟路径数据：未触发再同步前 DB 中可能仍有 `REMOTE_EMBY/...` 行
-    let normalized_path_early = item.path.replace('\\', "/");
-    let legacy_virtual_remote_early = normalized_path_early
+/// PB53：判断条目是否远端 Emby/STRM 来源。
+///
+/// 注意 `naming::read_strm_target` 会做磁盘读，仅在 `is_strm()`（按文件后缀）
+/// 命中时才执行；本地常规视频走快路径，零磁盘开销。
+fn is_remote_media_item(item: &DbMediaItem) -> bool {
+    let local_path = Path::new(&item.path);
+    let normalized_path = item.path.replace('\\', "/");
+    let legacy_virtual_remote = normalized_path
         .to_ascii_uppercase()
         .starts_with("REMOTE_EMBY/");
-    let strm_target_early = naming::is_strm(local_path_early)
-        .then(|| naming::read_strm_target(local_path_early))
+    let strm_target = naming::is_strm(local_path)
+        .then(|| naming::read_strm_target(local_path))
         .flatten();
-    let provider_remote_early = item
+    let provider_remote = item
         .provider_ids
         .get("RemoteEmbySourceId")
         .and_then(serde_json::Value::as_str)
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
-    let is_remote_early =
-        strm_target_early.is_some() || legacy_virtual_remote_early || provider_remote_early;
+    strm_target.is_some() || legacy_virtual_remote || provider_remote
+}
 
-    // 转换DbMediaStream为MediaStreamDto
-    let mut media_streams = Vec::new();
+/// PB53：把 DB media_streams 行批量转换成 Emby `MediaStream` DTO。
+///
+/// 抽出来的目的是同时给：
+/// - `get_media_source_with_streams`（PlaybackInfo 单条）
+/// - `media_source_for_item_with_db_streams`（列表批量）
+/// 共用，避免两个地方维护同一段 100+ 行字段映射。
+pub fn convert_db_streams_to_dto(
+    item: &DbMediaItem,
+    db_streams: &[DbMediaStream],
+    server_id: Uuid,
+    is_remote: bool,
+) -> Vec<MediaStreamDto> {
+    let mut media_streams = Vec::with_capacity(db_streams.len());
     for stream in db_streams.iter() {
         let stream_type = match stream.stream_type.as_str() {
             "video" => "Video".to_string(),
@@ -13024,7 +13070,7 @@ pub async fn get_media_source_with_streams(
             level: stream.level,
             pixel_format: stream.pixel_format.clone(),
             profile: stream.profile.clone(),
-            protocol: Some(if is_remote_early { "Http" } else { "File" }.to_string()),
+            protocol: Some(if is_remote { "Http" } else { "File" }.to_string()),
             real_frame_rate: stream.real_frame_rate,
             ref_frames: stream.ref_frames,
             rotation: stream.rotation,
@@ -13040,6 +13086,154 @@ pub async fn get_media_source_with_streams(
             subtitle_location_type,
         });
     }
+    media_streams
+}
+
+/// PB53：列表接口（`/Users/{id}/Items` 等）`Fields=MediaSources` 命中时使用的同步
+/// 构造器。**调用方必须自己批量预取 streams**（见 `get_media_streams_batch`），
+/// 这里不做任何 DB 查询、不扫描 sidecar 字幕、不读 chapters，避免 N+1。
+///
+/// 与 `get_media_source_with_streams` 的差异：
+/// - 不附加 chapters（列表里通常不要 Chapters，单独再请求）。
+/// - 不扫描 sidecar（每条 N×fs.read 太贵；播放前 PlaybackInfo 会补齐）。
+/// - 永远输出一个 MediaSourceDto（即使 db_streams 为空，回退到 `media_source_for_item`）。
+pub fn media_source_for_item_with_db_streams(
+    item: &DbMediaItem,
+    server_id: Uuid,
+    db_streams: &[DbMediaStream],
+) -> MediaSourceDto {
+    let is_remote = is_remote_media_item(item);
+
+    if db_streams.is_empty() {
+        let mut dto = media_source_for_item(item);
+        dto.server_id = Some(uuid_to_emby_guid(&server_id));
+        return dto;
+    }
+
+    let media_streams = convert_db_streams_to_dto(item, db_streams, server_id, is_remote);
+
+    let local_path = Path::new(&item.path);
+    let strm_target = naming::is_strm(local_path)
+        .then(|| naming::read_strm_target(local_path))
+        .flatten();
+    let container = effective_container_from_target(item, strm_target.as_deref());
+    let size = media_source_size(item, is_remote);
+    let item_emby_id = uuid_to_emby_guid(&item.id);
+    let media_source_id = format!("mediasource_{item_emby_id}");
+    let sanitized_path = if is_remote {
+        format!(
+            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}",
+            item_emby_id, container, media_source_id
+        )
+    } else {
+        item.path.clone()
+    };
+
+    MediaSourceDto {
+        chapters: Vec::new(),
+        id: media_source_id.clone(),
+        path: sanitized_path,
+        protocol: if is_remote { "Http" } else { "File" }.to_string(),
+        source_type: "Default".to_string(),
+        container: container.clone(),
+        name: media_source_name(item, strm_target.as_deref()),
+        sort_name: None,
+        is_remote,
+        encoder_path: None,
+        encoder_protocol: None,
+        probe_path: None,
+        probe_protocol: None,
+        has_mixed_protocols: Some(false),
+        supports_direct_play: true,
+        supports_direct_stream: true,
+        supports_transcoding: true,
+        direct_stream_url: Some(format!(
+            "/Videos/{}/stream.{}?Static=true&MediaSourceId={}&mediaSourceId={}",
+            item_emby_id, container, media_source_id, media_source_id
+        )),
+        formats: vec![container.clone()],
+        size,
+        e_tag: Some(item.date_modified.timestamp().to_string()),
+        bitrate: item.bit_rate,
+        default_audio_stream_index: media_streams
+            .iter()
+            .find(|s| s.stream_type == "Audio" && s.is_default)
+            .map(|s| s.index)
+            .or_else(|| {
+                media_streams
+                    .iter()
+                    .find(|s| s.stream_type == "Audio")
+                    .map(|s| s.index)
+            }),
+        default_subtitle_stream_index: media_streams
+            .iter()
+            .find(|s| s.stream_type == "Subtitle" && s.is_default)
+            .map(|s| s.index),
+        run_time_ticks: item.runtime_ticks,
+        container_start_time_ticks: None,
+        is_infinite_stream: Some(false),
+        requires_opening: Some(false),
+        open_token: None,
+        requires_closing: Some(false),
+        live_stream_id: None,
+        buffer_ms: None,
+        requires_looping: Some(false),
+        supports_probing: Some(true),
+        video_type: Some("VideoFile".to_string()),
+        iso_type: None,
+        video_3d_format: None,
+        timestamp: infer_timestamp(&container),
+        ignore_dts: false,
+        ignore_index: false,
+        gen_pts_input: false,
+        required_http_headers: if is_remote {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([("Accept-Ranges".to_string(), "bytes".to_string())])
+        },
+        add_api_key_to_direct_stream_url: Some(false),
+        transcoding_url: None,
+        transcoding_sub_protocol: None,
+        transcoding_container: None,
+        analyze_duration_ms: None,
+        read_at_native_framerate: Some(false),
+        item_id: Some(item_emby_id),
+        server_id: Some(uuid_to_emby_guid(&server_id)),
+        media_streams,
+        media_attachments: Vec::new(),
+    }
+}
+
+pub async fn get_media_source_with_streams(
+    pool: &sqlx::PgPool,
+    item: &DbMediaItem,
+    server_id: Uuid,
+) -> Result<MediaSourceDto, AppError> {
+    // 获取媒体流
+    let db_streams = get_media_streams(pool, item.id).await?;
+    let db_chapters = get_media_chapters(pool, item.id).await?;
+
+    let local_path_early = Path::new(&item.path);
+    // 兼容旧虚拟路径数据：未触发再同步前 DB 中可能仍有 `REMOTE_EMBY/...` 行
+    let normalized_path_early = item.path.replace('\\', "/");
+    let legacy_virtual_remote_early = normalized_path_early
+        .to_ascii_uppercase()
+        .starts_with("REMOTE_EMBY/");
+    let strm_target_early = naming::is_strm(local_path_early)
+        .then(|| naming::read_strm_target(local_path_early))
+        .flatten();
+    let provider_remote_early = item
+        .provider_ids
+        .get("RemoteEmbySourceId")
+        .and_then(serde_json::Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let is_remote_early =
+        strm_target_early.is_some() || legacy_virtual_remote_early || provider_remote_early;
+
+    // 转换DbMediaStream为MediaStreamDto（PB53：抽出去的共用逻辑，PlaybackInfo 与列表共用）
+    let mut media_streams =
+        convert_db_streams_to_dto(item, &db_streams, server_id, is_remote_early);
 
     // 如果没有媒体流，则回退到旧的逻辑
     if media_streams.is_empty() {
