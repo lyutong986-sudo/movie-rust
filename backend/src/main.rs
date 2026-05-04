@@ -113,6 +113,7 @@ async fn main() -> Result<()> {
         library_scan_limit: 2,
         media_analysis_limit: 8,
         tmdb_metadata_limit: 4,
+        translation_limit: 4,
     });
     let http_client = reqwest::Client::builder()
         .pool_max_idle_per_host(32)
@@ -146,10 +147,26 @@ async fn main() -> Result<()> {
         );
     }
 
+    // PB52：翻译兜底服务。从 system_settings 加载持久化配置；首次安装或读不出
+    // 时回退默认值（enabled=false），不影响主链路。
+    let translation_settings =
+        match crate::metadata::translator::load_settings(&pool).await {
+            Ok(settings) => settings,
+            Err(err) => {
+                tracing::warn!(?err, "加载 translation_settings 失败，使用默认值");
+                crate::metadata::translator::TranslationSettings::default()
+            }
+        };
+    let translator = Some(crate::metadata::translator::TranslatorService::new(
+        translation_settings,
+        work_limiters.clone(),
+    ));
+
     let state = AppState {
         pool,
         config,
         metadata_manager: Some(Arc::new(metadata_manager)),
+        translator,
         websocket_sessions: Arc::new(dashmap::DashMap::new()),
         transcoder,
         work_limiters,
@@ -1005,6 +1022,19 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
                 'Cinematographer','Editor','GuestStar','Other'
             )
         )"#,
+        // PB52：翻译兜底缓存表（与 0001_schema.sql 同步）。
+        // 同一原文（source_hash）+ 目标语言 + provider 只缓存一次，避免重复计费。
+        r#"CREATE TABLE IF NOT EXISTS translation_cache (
+            source_hash      bytea NOT NULL,
+            source_lang      varchar(16) NOT NULL DEFAULT 'auto',
+            target_lang      varchar(16) NOT NULL,
+            provider         varchar(32) NOT NULL DEFAULT 'youdao',
+            source_text      text NOT NULL,
+            translated_text  text NOT NULL,
+            created_at       timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (source_hash, target_lang, provider)
+        )"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_translation_cache_created_at ON translation_cache(created_at)"#,
     ];
 
     for statement in compatibility_sql {

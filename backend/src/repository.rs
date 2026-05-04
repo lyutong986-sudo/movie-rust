@@ -634,6 +634,7 @@ fn default_startup_configuration(config: &Config) -> StartupConfiguration {
         library_scan_thread_count: 2,
         strm_analysis_thread_count: 8,
         tmdb_metadata_thread_count: 4,
+        translation_thread_count: 4,
         tmdb_api_key: config.tmdb_api_key.clone().unwrap_or_default(),
         tmdb_api_keys: Vec::new(),
         fanart_api_keys: Vec::new(),
@@ -654,6 +655,7 @@ fn normalize_startup_configuration(configuration: &mut StartupConfiguration) {
     configuration.library_scan_thread_count = configuration.library_scan_thread_count.max(1);
     configuration.strm_analysis_thread_count = configuration.strm_analysis_thread_count.max(1);
     configuration.tmdb_metadata_thread_count = configuration.tmdb_metadata_thread_count.max(1);
+    configuration.translation_thread_count = configuration.translation_thread_count.max(1);
     configuration.db_max_connections = configuration.db_max_connections.max(5);
     configuration.image_download_threads = configuration.image_download_threads.max(1);
     configuration.background_task_threads = configuration.background_task_threads.max(1);
@@ -676,6 +678,7 @@ fn apply_performance_tier(configuration: &mut StartupConfiguration) {
             if configuration.library_scan_thread_count == 0 { configuration.library_scan_thread_count = 1; }
             if configuration.strm_analysis_thread_count == 0 { configuration.strm_analysis_thread_count = 4; }
             if configuration.tmdb_metadata_thread_count == 0 { configuration.tmdb_metadata_thread_count = 2; }
+            if configuration.translation_thread_count == 0 { configuration.translation_thread_count = 2; }
             if configuration.db_max_connections == 0 { configuration.db_max_connections = 10; }
             if configuration.image_download_threads == 0 { configuration.image_download_threads = 4; }
             if configuration.background_task_threads == 0 { configuration.background_task_threads = 2; }
@@ -684,6 +687,7 @@ fn apply_performance_tier(configuration: &mut StartupConfiguration) {
             if configuration.library_scan_thread_count == 0 { configuration.library_scan_thread_count = 8; }
             if configuration.strm_analysis_thread_count == 0 { configuration.strm_analysis_thread_count = 32; }
             if configuration.tmdb_metadata_thread_count == 0 { configuration.tmdb_metadata_thread_count = 16; }
+            if configuration.translation_thread_count == 0 { configuration.translation_thread_count = 8; }
             if configuration.db_max_connections == 0 { configuration.db_max_connections = 50; }
             if configuration.image_download_threads == 0 { configuration.image_download_threads = 24; }
             if configuration.background_task_threads == 0 { configuration.background_task_threads = 12; }
@@ -692,6 +696,7 @@ fn apply_performance_tier(configuration: &mut StartupConfiguration) {
             if configuration.library_scan_thread_count == 0 { configuration.library_scan_thread_count = 16; }
             if configuration.strm_analysis_thread_count == 0 { configuration.strm_analysis_thread_count = 64; }
             if configuration.tmdb_metadata_thread_count == 0 { configuration.tmdb_metadata_thread_count = 32; }
+            if configuration.translation_thread_count == 0 { configuration.translation_thread_count = 16; }
             if configuration.db_max_connections == 0 { configuration.db_max_connections = 100; }
             if configuration.image_download_threads == 0 { configuration.image_download_threads = 48; }
             if configuration.background_task_threads == 0 { configuration.background_task_threads = 24; }
@@ -700,6 +705,7 @@ fn apply_performance_tier(configuration: &mut StartupConfiguration) {
             if configuration.library_scan_thread_count == 0 { configuration.library_scan_thread_count = 32; }
             if configuration.strm_analysis_thread_count == 0 { configuration.strm_analysis_thread_count = 128; }
             if configuration.tmdb_metadata_thread_count == 0 { configuration.tmdb_metadata_thread_count = 64; }
+            if configuration.translation_thread_count == 0 { configuration.translation_thread_count = 32; }
             if configuration.db_max_connections == 0 { configuration.db_max_connections = 200; }
             if configuration.image_download_threads == 0 { configuration.image_download_threads = 96; }
             if configuration.background_task_threads == 0 { configuration.background_task_threads = 48; }
@@ -708,6 +714,7 @@ fn apply_performance_tier(configuration: &mut StartupConfiguration) {
             if configuration.library_scan_thread_count == 0 { configuration.library_scan_thread_count = 2; }
             if configuration.strm_analysis_thread_count == 0 { configuration.strm_analysis_thread_count = 8; }
             if configuration.tmdb_metadata_thread_count == 0 { configuration.tmdb_metadata_thread_count = 4; }
+            if configuration.translation_thread_count == 0 { configuration.translation_thread_count = 4; }
             if configuration.db_max_connections == 0 { configuration.db_max_connections = 20; }
             if configuration.image_download_threads == 0 { configuration.image_download_threads = 8; }
             if configuration.background_task_threads == 0 { configuration.background_task_threads = 4; }

@@ -1220,6 +1220,10 @@ pub struct StartupConfiguration {
     pub strm_analysis_thread_count: i32,
     #[serde(default = "default_tmdb_metadata_thread_count")]
     pub tmdb_metadata_thread_count: i32,
+    /// PB52：翻译兜底（Youdao）并发上限。控制 metadata-refresh / 远端同步过程中
+    /// 调用 Youdao LLM 翻译 API 的最大并发数。免费额度有限，默认放小。
+    #[serde(default = "default_translation_thread_count")]
+    pub translation_thread_count: i32,
     #[serde(default)]
     pub tmdb_api_key: String,
     #[serde(default)]
@@ -1247,6 +1251,10 @@ fn default_strm_analysis_thread_count() -> i32 {
 }
 
 fn default_tmdb_metadata_thread_count() -> i32 {
+    4
+}
+
+fn default_translation_thread_count() -> i32 {
     4
 }
 

@@ -4078,6 +4078,21 @@ pub(crate) async fn do_refresh_item_metadata_with(
                     item_type = %item.item_type,
                     "刷新元数据：已从远端 Emby 重新拉取并落库（远端权威，跳过 TMDB 覆盖）"
                 );
+                // PB52：远端落库后也走兜底翻译。Wonderblocks 这类剧 series 头部
+                // 已是中文但 episode overview 是英文，必须在这里二次翻译。
+                if let Err(err) = crate::metadata::translator::translate_item_text_fields(
+                    state,
+                    item.id,
+                    crate::metadata::translator::TranslationTrigger::ManualRefresh,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        item_id = %item.id,
+                        ?err,
+                        "远端刷新后的兜底翻译失败（不影响主流程）"
+                    );
+                }
                 return Ok(());
             }
             Ok(false) => {
@@ -4322,6 +4337,18 @@ pub(crate) async fn do_refresh_item_metadata_with(
         if let Err(e) = write_nfo_for_refresh(state, &item, is_series).await {
             tracing::warn!(item_id = %item.id, ?e, "写入 NFO 失败");
         }
+    }
+
+    // PB52：兜底翻译。TMDB 偶尔只有英文 overview（典型场景见 BBC CBeebies 系列），
+    // 按 settings 决定是否在写库后调一次 Youdao 翻译覆盖。
+    if let Err(err) = crate::metadata::translator::translate_item_text_fields(
+        state,
+        item.id,
+        crate::metadata::translator::TranslationTrigger::ManualRefresh,
+    )
+    .await
+    {
+        tracing::warn!(item_id = %item.id, ?err, "兜底翻译失败（不影响刷新主流程）");
     }
 
     Ok(())
@@ -4705,6 +4732,7 @@ async fn work_limiter_config(state: &AppState) -> Result<WorkLimiterConfig, AppE
         library_scan_limit: startup.library_scan_thread_count.max(1) as u32,
         media_analysis_limit: startup.strm_analysis_thread_count.max(1) as u32,
         tmdb_metadata_limit: startup.tmdb_metadata_thread_count.max(1) as u32,
+        translation_limit: startup.translation_thread_count.max(1) as u32,
     };
     state.work_limiters.configure(config).await;
     Ok(config)

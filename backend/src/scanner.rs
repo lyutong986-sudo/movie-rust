@@ -402,6 +402,7 @@ async fn scan_libraries(
         library_scan_limit: startup.library_scan_thread_count.max(1) as u32,
         media_analysis_limit: startup.strm_analysis_thread_count.max(1) as u32,
         tmdb_metadata_limit: startup.tmdb_metadata_thread_count.max(1) as u32,
+        translation_limit: startup.translation_thread_count.max(1) as u32,
     };
     work_limiters.configure(limits).await;
     let runtime = match db_semaphore {

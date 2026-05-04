@@ -754,6 +754,7 @@ async fn work_limiter_config(state: &AppState) -> Result<WorkLimiterConfig, AppE
         library_scan_limit: startup.library_scan_thread_count.max(1) as u32,
         media_analysis_limit: startup.strm_analysis_thread_count.max(1) as u32,
         tmdb_metadata_limit: startup.tmdb_metadata_thread_count.max(1) as u32,
+        translation_limit: startup.translation_thread_count.max(1) as u32,
     };
     state.work_limiters.configure(config).await;
     Ok(config)

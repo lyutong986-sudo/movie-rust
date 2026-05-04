@@ -26,6 +26,7 @@ const NAV = [
   { label: '设备', icon: 'i-lucide-monitor', to: '/settings/devices', admin: true },
   { label: 'API Key', icon: 'i-lucide-key-round', to: '/settings/apikeys', admin: true },
   { label: 'Webhook 回调', icon: 'i-lucide-webhook', to: '/settings/webhooks', admin: true },
+  { label: '翻译兜底', icon: 'i-lucide-languages', to: '/settings/translation', admin: true },
   { label: '日志与活动', icon: 'i-lucide-activity', to: '/settings/logs-and-activity', admin: true },
   { label: '网络', icon: 'i-lucide-network', to: '/settings/network', admin: true }
 ];

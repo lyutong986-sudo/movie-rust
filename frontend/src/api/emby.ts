@@ -185,6 +185,37 @@ export interface ApiKeyInfo {
   IsActive?: boolean;
 }
 
+/**
+ * PB52：翻译兜底（Youdao LLM）配置。后端 `translation_settings` 表的 JSON 形态。
+ *
+ * 字段全部使用 snake_case，与后端 `TranslationSettings` 一一对应；前端读到时
+ * `app_secret` 已被脱敏为 `***`，PUT 时如果保留 `***` 表示不变更密钥。
+ */
+export interface TranslationSettings {
+  enabled: boolean;
+  provider: string;
+  app_key: string;
+  app_secret: string;
+  target_lang: string;
+  from_lang: string;
+  translate_name: boolean;
+  translate_overview: boolean;
+  translate_episode: boolean;
+  translate_season_name: boolean;
+  translate_person_overview: boolean;
+  trigger_manual_refresh: boolean;
+  trigger_scheduled_task: boolean;
+  trigger_remote_sync: boolean;
+}
+
+export interface TranslationTestResult {
+  source_text: string;
+  translated_text: string;
+  elapsed_ms: number;
+  provider: string;
+  target_lang: string;
+}
+
 /** 出向 Webhook（PostgreSQL `webhooks` 表，兼容 Emby Webhooks 插件 payload） */
 export interface WebhookInfo {
   Id: string;
@@ -1174,6 +1205,38 @@ export class EmbyApi {
   async testWebhook(id: string) {
     return this.request<{ Status?: string; Message?: string }>(`/Webhooks/${encodeURIComponent(id)}/Test`, {
       method: 'POST'
+    });
+  }
+
+  /** PB52：读取翻译兜底配置（app_secret 已脱敏，前端展示用） */
+  async getTranslationSettings() {
+    return this.request<TranslationSettings>('/Admin/Translation/Settings');
+  }
+
+  /**
+   * 覆盖翻译兜底配置。`app_secret` 留空 / 仅传 `***` 时后端会保留原密钥。
+   * 返回后端归一化后的最新值（仍是脱敏版本）。
+   */
+  async updateTranslationSettings(body: TranslationSettings) {
+    return this.request<TranslationSettings>('/Admin/Translation/Settings', {
+      method: 'PUT',
+      body
+    });
+  }
+
+  /** 翻译连通性测试。`text` 留空时后端用默认 sample。 */
+  async testTranslation(body: { text?: string; from?: string; to?: string }) {
+    return this.request<TranslationTestResult>('/Admin/Translation/Test', {
+      method: 'POST',
+      body
+    });
+  }
+
+  /** 手动批量兜底翻译指定 item id 列表（无视 trigger 开关）。 */
+  async translateItems(itemIds: string[]) {
+    return this.request<{ processed: number }>('/Admin/Translation/Items', {
+      method: 'POST',
+      body: { item_ids: itemIds }
     });
   }
 

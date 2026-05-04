@@ -6,6 +6,7 @@ pub struct WorkLimiterConfig {
     pub library_scan_limit: u32,
     pub media_analysis_limit: u32,
     pub tmdb_metadata_limit: u32,
+    pub translation_limit: u32,
 }
 
 impl WorkLimiterConfig {
@@ -14,6 +15,7 @@ impl WorkLimiterConfig {
             library_scan_limit: self.library_scan_limit.max(1),
             media_analysis_limit: self.media_analysis_limit.max(1),
             tmdb_metadata_limit: self.tmdb_metadata_limit.max(1),
+            translation_limit: self.translation_limit.max(1),
         }
     }
 }
@@ -23,6 +25,7 @@ pub enum WorkLimiterKind {
     LibraryScan,
     MediaAnalysis,
     TmdbMetadata,
+    Translation,
 }
 
 #[derive(Clone)]
@@ -41,6 +44,7 @@ struct LimiterState {
     library_scan_active: u32,
     media_analysis_active: u32,
     tmdb_metadata_active: u32,
+    translation_active: u32,
 }
 
 pub struct WorkPermit {
@@ -57,6 +61,7 @@ impl WorkLimiters {
                     library_scan_active: 0,
                     media_analysis_active: 0,
                     tmdb_metadata_active: 0,
+                    translation_active: 0,
                 }),
                 notify: Notify::new(),
             }),
@@ -108,6 +113,12 @@ impl LimiterState {
                 }
                 self.tmdb_metadata_active += 1;
             }
+            WorkLimiterKind::Translation => {
+                if self.translation_active >= self.limits.translation_limit {
+                    return false;
+                }
+                self.translation_active += 1;
+            }
         }
         true
     }
@@ -122,6 +133,9 @@ impl LimiterState {
             }
             WorkLimiterKind::TmdbMetadata => {
                 self.tmdb_metadata_active = self.tmdb_metadata_active.saturating_sub(1);
+            }
+            WorkLimiterKind::Translation => {
+                self.translation_active = self.translation_active.saturating_sub(1);
             }
         }
     }

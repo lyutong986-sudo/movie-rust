@@ -160,6 +160,12 @@ export const router = createRouter({
       meta: { title: 'Webhook 回调', section: 'admin', admin: true }
     },
     {
+      path: '/settings/translation',
+      name: 'settings-translation',
+      component: () => import('../pages/settings/TranslationSettings.vue'),
+      meta: { title: '翻译兜底', section: 'admin', admin: true }
+    },
+    {
       path: '/settings/logs-and-activity',
       name: 'settings-logs-and-activity',
       component: () => import('../pages/settings/LogsActivitySettings.vue'),

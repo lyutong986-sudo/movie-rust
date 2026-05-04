@@ -4,3 +4,4 @@ pub mod opensubtitles;
 pub mod person_service;
 pub mod provider;
 pub mod tmdb;
+pub mod translator;

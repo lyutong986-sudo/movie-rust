@@ -21,6 +21,7 @@ pub mod sessions;
 pub mod shows;
 pub mod startup;
 pub mod system;
+pub mod translation;
 pub mod trickplay;
 pub mod usage_stats;
 pub mod users;
@@ -81,6 +82,7 @@ fn api_router() -> Router<AppState> {
         .merge(trickplay::router())
         .merge(media_segments::router())
         .merge(remote_emby::router())
+        .merge(translation::router())
         .merge(webhooks::router())
         .merge(usage_stats::router())
 }

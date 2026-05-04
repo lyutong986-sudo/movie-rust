@@ -1,5 +1,6 @@
 use crate::{
-    config::Config, metadata::provider::MetadataProviderManager, transcoder::Transcoder,
+    config::Config, metadata::provider::MetadataProviderManager,
+    metadata::translator::TranslatorService, transcoder::Transcoder,
     work_limiter::WorkLimiters,
 };
 use dashmap::DashMap;
@@ -32,6 +33,9 @@ pub struct AppState {
     pub pool: PgPool,
     pub config: Arc<Config>,
     pub metadata_manager: Option<Arc<MetadataProviderManager>>,
+    /// PB52：翻译兜底服务。可选——前端关闭翻译时构造一个 default-disabled 的实例
+    /// 而不是 None，避免其它模块每次都要 `if let Some(translator)` 判空。
+    pub translator: Option<Arc<TranslatorService>>,
     pub websocket_sessions: Arc<DashMap<uuid::Uuid, crate::routes::websocket::WebSocketSession>>,
     pub transcoder: Transcoder,
     pub work_limiters: WorkLimiters,

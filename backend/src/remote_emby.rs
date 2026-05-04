@@ -2840,6 +2840,7 @@ async fn process_one_remote_sync_item(
                 let item_library_id_copy = item_library_id;
                 let source_id_copy = source.id;
 
+                let state_for_translate = state.clone();
                 let handle = tokio::spawn(async move {
                     // 取消优先：进 spawn 之前任务已被取消就直接放弃；不会触发任何远端 HTTP。
                     if let Some(p) = &progress_owned {
@@ -2886,6 +2887,21 @@ async fn process_one_remote_sync_item(
                                     remote_series_id = %remote_sid_owned,
                                     error = %mark_err,
                                     "PB49 (B2)：写入 series detail 持久化标记失败（不影响内存 dedup，下次 sync 会再拉一次）"
+                                );
+                            }
+                            // PB52：Series 详情写库后兜底翻译。spawn 内部已在限流通道，
+                            // inline 调用即可（一条 series 一次翻译，不会扛住主链路）。
+                            if let Err(err) = crate::metadata::translator::translate_item_text_fields(
+                                &state_for_translate,
+                                series_parent_id_copy,
+                                crate::metadata::translator::TranslationTrigger::RemoteSync,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    series_id = %series_parent_id_copy,
+                                    ?err,
+                                    "PB52：Series 详情兜底翻译失败（非致命）"
                                 );
                             }
                         }
@@ -3004,6 +3020,33 @@ async fn process_one_remote_sync_item(
     let w = written_files.fetch_add(1, Ordering::Relaxed) + 1;
     if let Some(handle) = progress {
         handle.set_streaming_progress(f, w, total_items);
+    }
+
+    // PB52：远端同步落库后挂一次兜底翻译。
+    //
+    // 用 spawn 异步触发：1) 翻译走 work_limiter，再加上语言粗检测+缓存命中，
+    // 单条平均开销其实很小，但远端全量同步可能有 10w+ 条目；inline 调用即使每条
+    // 100ms 也会把全量同步从原本的 1500s 拖到 ~3 小时。spawn 让翻译在 sync 完成
+    // 后慢慢消化，不阻塞主链路。
+    // 2) 翻译失败被 swallow 在 translate_item_text_fields 内部，spawn 出来的
+    //    task panic 不会影响 sync 进度。
+    if !is_strm_self_heal {
+        let state_for_translate = state.clone();
+        tokio::spawn(async move {
+            if let Err(err) = crate::metadata::translator::translate_item_text_fields(
+                &state_for_translate,
+                upserted,
+                crate::metadata::translator::TranslationTrigger::RemoteSync,
+            )
+            .await
+            {
+                tracing::warn!(
+                    item_id = %upserted,
+                    ?err,
+                    "PB52：远端同步后兜底翻译失败（非致命）"
+                );
+            }
+        });
     }
     Ok(())
 }

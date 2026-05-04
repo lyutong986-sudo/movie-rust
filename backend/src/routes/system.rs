@@ -418,6 +418,7 @@ async fn build_system_configuration(state: &AppState) -> Result<Value, crate::er
         "LibraryScanThreadCount": startup.library_scan_thread_count,
         "StrmAnalysisThreadCount": startup.strm_analysis_thread_count,
         "TmdbMetadataThreadCount": startup.tmdb_metadata_thread_count,
+        "TranslationThreadCount": startup.translation_thread_count,
         "TmdbApiKey": startup.tmdb_api_key,
         "TmdbApiKeys": startup.tmdb_api_keys,
         "FanartApiKeys": startup.fanart_api_keys,
@@ -447,6 +448,7 @@ async fn apply_system_configuration_update(
         || payload.get("LibraryScanThreadCount").is_some()
         || payload.get("StrmAnalysisThreadCount").is_some()
         || payload.get("TmdbMetadataThreadCount").is_some()
+        || payload.get("TranslationThreadCount").is_some()
         || payload.get("TmdbApiKey").is_some()
         || payload.get("TmdbApiKeys").is_some()
         || payload.get("FanartApiKeys").is_some()

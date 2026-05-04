@@ -1000,3 +1000,31 @@ CREATE TABLE IF NOT EXISTS webhooks (
 
 CREATE INDEX IF NOT EXISTS idx_webhooks_enabled
     ON webhooks(enabled) WHERE enabled;
+
+-- ---------------------------------------------------------------------------
+-- translation_cache：翻译兜底缓存（PB52）
+--
+-- TMDB / 远端 Emby 同步可能返回非目标语言的 name / overview，此时由有道大模型
+-- 翻译 API 兜底翻译；为避免「同一句英文 overview 在不同 episode/movie 上重复
+-- 计费」，按规范化文本的 SHA-256 做去重缓存。
+--
+-- 设计要点：
+--   - PRIMARY KEY (source_hash, target_lang, provider)：同一原文 + 同一目标
+--     语言只缓存一次；切换 provider（未来扩展 google/deepl）会有独立行。
+--   - source_text 保留原文便于运维诊断；translated_text 是兜底写回 media_items
+--     之前的中间产物。
+--   - created_at 用于将来按 TTL 清理（例如 90 天后强制重译）。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS translation_cache (
+    source_hash      bytea NOT NULL,
+    source_lang      varchar(16) NOT NULL DEFAULT 'auto',
+    target_lang      varchar(16) NOT NULL,
+    provider         varchar(32) NOT NULL DEFAULT 'youdao',
+    source_text      text NOT NULL,
+    translated_text  text NOT NULL,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (source_hash, target_lang, provider)
+);
+
+CREATE INDEX IF NOT EXISTS idx_translation_cache_created_at
+    ON translation_cache(created_at);
