@@ -67,6 +67,40 @@
 >   - `time to acquire exceeded slow threshold` 应清零（连接池不再排队）。
 >   - 单图请求只剩 1 条 `remote_emby_sources WHERE id = $1`，无 `ORDER BY name` 配对。
 >
+> ⑪ **2026-05-04 六阶段：用户名注册 / 重命名 Unicode 加固（防控制字符注入 / 零宽 / 双向控制字符仿冒 / NFC 规范化 / 50 字上限）**：
+> - **背景**：Sakura embyboss bot（`C:\Users\11797\Desktop\Sakura_embyboss-master`）通过 `POST /emby/Users/New {"Name": <用户输入>}` 注册账户，UI 提示「不限制中/英文/emoji，🚫特殊字符」但 **bot 端代码层没有任何字符校验**，直接 `msg.text.split()` 取用户名转发后端。后端是唯一的把关点。
+> - **改造前问题**（实测）：
+>   1. `create_user` 只 `name.trim()`（仅 ASCII 空白）+ 重名检查；不限长度、不过滤控制字符。
+>   2. NUL 字节 `\0` → Postgres 拒绝 → 500 而不是 400。
+>   3. 换行 `\n` / 回车 `\r` / Tab / ANSI 转义 `\x1b[31m` 全部能存，污染日志和 `Authorization` header。
+>   4. 零宽字符（`U+200B`、`U+FEFF`、`U+2060`）能注册 → 与正常用户名「`alice` vs `alice\u200B`」并存，**绕过重名检查**。
+>   5. 双向控制字符（`U+202E` RLO）能注册 → UI 显示反转，可伪装管理员名字。
+>   6. NFC vs NFD 同字面被当作不同用户（`é` 两种码点表达可重复注册）。
+>   7. 全角空格 `U+3000` / 不间断空格 `U+00A0` 不会被 trim → 入库带空格，下次输入正常名匹配不上自己。
+>   8. 用户名长度无上限。
+> - **修复**：新建 `backend/src/username.rs` 模块（141 行 + 11 个单测全过），暴露两个入口：
+>   1. `normalize_and_validate(input) -> Result<String, AppError>`：
+>      - **Unicode trim**：`trim_matches(char::is_whitespace)`，去掉 `U+00A0` / `U+3000` 等所有 Unicode 空白。
+>      - **NFC 规范化**：`unicode-normalization` crate（cargo add 进 dependencies）。
+>      - **拒绝控制字符**：`U+0000..=U+001F` 与 `U+007F..=U+009F`（C0 + DEL + C1）。
+>      - **拒绝零宽 / 双向控制字符**：`U+200B-U+200F`、`U+2028-U+2029`（行/段分隔）、`U+202A-U+202E`（双向覆写）、`U+2060-U+2064` / `U+2066-U+2069`（Word Joiner / 隔离方向）、`U+FEFF`（BOM）。
+>      - **长度上限 50 char**（与 Emby/Jellyfin 官方 Web UI `MaxLength = 50` 对齐，按 Unicode `char` 不是字节）。
+>      - 错误消息中文，明确指出拒绝原因（`U+xxxx`），Sakura bot `_request` 抓 `response.text()` 写日志后 admin 能直接看到。
+>   2. `normalize_for_lookup(input) -> String`：仅 trim + NFC，**不抛错**。给 `get_user_by_name` 用——查询不应用 400 暴露校验细节，让登录正常 401。
+> - **接入点**（覆盖所有 `users.name` 写入路径）：
+>   1. `repository::create_user` (`/Users/New`)：用 `normalize_and_validate`。
+>   2. `repository::rename_user` (`POST /Users/{Id}` Name 字段)：同上。
+>   3. `repository::create_initial_admin`（首次启动 wizard）：同上，"管理员名称不能为空"特化文案保留。
+>   4. `repository::get_user_by_name`（登录、重名检查内部调用）：用 `normalize_for_lookup`，确保第三方 client 多带个全角空格 / `é` 的 NFD 形式也能匹配到正常入库用户。
+> - **前端 UI 同步加固**（`frontend/src/pages/settings/UsersSettings.vue`）：
+>   1. `<UInput v-model="newUserName" :maxlength="50" />` + hint 提示「1-50 字符，支持中/英/emoji，禁控制 / 零宽字符」。
+>   2. `createUser()` 客户端预检 regex `/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u2028-\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/`，命中直接弹错不打后端。
+> - **影响 / 风险**：
+>   - **历史脏数据**：升级前已注册的"带零宽字符 / 控制字符 / 50 字以上"用户名仍能登录（`get_user_by_name` 用 `lower(name) = lower($1)`，匹配的是 DB 里实际存储的字面），但**重命名时会被强制清洗**。如需批量清理可写一次性 SQL：`SELECT id, name FROM users WHERE name ~ '[\\u0000-\\u001F\\u200B-\\u200F\\u202A-\\u202E\\uFEFF]' OR char_length(name) > 50`。
+>   - **Sakura UX 链**：bot 端 `_request` 在 400 时只 `LOGGER.error` 不展示给用户。要让用户看到"用户名包含控制字符"具体提示，需要 bot 项目自己改 `emby_create`（看 `EmbyApiResult.error` 透传给 `msg.reply`）。这是 Sakura 项目侧的工作，不在本仓库范围。
+>   - **不会影响**：emoji（🎬Bob）、CJK（小明）、含空格姓名（"Bob Smith"）、`. _ - + @ # ! ? ( )` 常见符号——这些都通过 11 个单元测试覆盖确认。
+> - **验证**：`cargo test --bin movie-rust-backend username::` → `11 passed; 0 failed`。
+>
 > ⑩ **2026-05-04 五阶段：远端 Emby 图片首次访问即落盘 + 程序生成占位图（避免每次请求都打远端 / 客户端等待 / broken image）**：
 > - **痛点 1：远端 Emby 条目的 `image_*_path` 字段保存的是远程 URL（`http://upstream.emby/Items/.../Images/Primary?tag=xxx`）**
 >   - 每次 `/emby/Items/{id}/Images/Primary?...` 命中这种 item，都得拉远端、做 transform、写入 PB42-IC 缓存（cache_dir，TTL 7 天）。

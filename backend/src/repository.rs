@@ -592,10 +592,14 @@ pub async fn create_initial_admin(
         return Err(AppError::Forbidden);
     }
 
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(AppError::BadRequest("管理员名称不能为空".to_string()));
-    }
+    // 复用注册路径同一套规则。管理员的名字也走 50 字上限 + 拒绝控制 / 零宽字符。
+    let name = crate::username::normalize_and_validate(name)
+        .map_err(|e| match e {
+            AppError::BadRequest(msg) if msg == "用户名不能为空" => {
+                AppError::BadRequest("管理员名称不能为空".to_string())
+            }
+            other => other,
+        })?;
     if password.trim().is_empty() {
         return Err(AppError::BadRequest("管理员密码不能为空".to_string()));
     }
@@ -610,7 +614,7 @@ pub async fn create_initial_admin(
         "#,
     )
     .bind(id)
-    .bind(name)
+    .bind(&name)
     .bind(password_hash)
     .bind(serde_json::to_value(UserPolicyDto {
         is_administrator: true,
@@ -2214,6 +2218,11 @@ pub async fn upsert_person_role(
 }
 
 pub async fn get_user_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Option<DbUser>, AppError> {
+    // 输入端做和注册一样的轻量规范化（trim Unicode 空白 + NFC），保证：
+    // 1. 第三方 client 多带个全角空格 / `é` 的 NFD 形式也能匹配到正常入库用户；
+    // 2. 与 `create_user` 入库前的规范化对齐，不会出现"创建成功但登录查不到"的诡异。
+    // 不在这里抛错（让登录路径正常 401，而不是返回 400 暴露用户名校验细节）。
+    let normalized = crate::username::normalize_for_lookup(name);
     Ok(sqlx::query_as::<_, DbUser>(
         r#"
         SELECT id, name, password_hash, is_admin, is_hidden, is_disabled, policy,
@@ -2224,7 +2233,7 @@ pub async fn get_user_by_name(pool: &sqlx::PgPool, name: &str) -> Result<Option<
         WHERE lower(name) = lower($1)
         "#,
     )
-    .bind(name)
+    .bind(&normalized)
     .fetch_optional(pool)
     .await?)
 }
@@ -2251,12 +2260,11 @@ pub async fn create_user(
     password: Option<&str>,
     copy_from_user_id: Option<Uuid>,
 ) -> Result<DbUser, AppError> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(AppError::BadRequest("用户名不能为空".to_string()));
-    }
+    // 集中校验：trim Unicode 空白 + NFC + 拒绝控制 / 零宽 / 双向控制字符 + 长度上限。
+    // 失败的 BadRequest 文案给客户端看，Sakura embyboss 等 bot 可直接转发给终端用户。
+    let name = crate::username::normalize_and_validate(name)?;
 
-    if get_user_by_name(pool, name).await?.is_some() {
+    if get_user_by_name(pool, &name).await?.is_some() {
         return Err(AppError::BadRequest("用户已存在".to_string()));
     }
 
@@ -2466,29 +2474,28 @@ pub async fn set_user_easy_password(
     Ok(())
 }
 
-/// 改名：Emby `POST /Users/{Id}` 允许 admin 重命名用户，这里统一做 trim + 唯一性校验。
+/// 改名：Emby `POST /Users/{Id}` 允许 admin 重命名用户。集中走
+/// `username::normalize_and_validate`，与注册同一套规则（控制字符 / 零宽字符 /
+/// 双向控制字符 / 50 字上限 / NFC + Unicode trim）+ 唯一性校验。
 pub async fn rename_user(
     pool: &sqlx::PgPool,
     user_id: Uuid,
     new_name: &str,
 ) -> Result<(), AppError> {
-    let trimmed = new_name.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::BadRequest("用户名不能为空".to_string()));
-    }
+    let normalized = crate::username::normalize_and_validate(new_name)?;
     let current = get_user_by_id(pool, user_id)
         .await?
         .ok_or_else(|| AppError::NotFound("用户不存在".to_string()))?;
-    if current.name == trimmed {
+    if current.name == normalized {
         return Ok(());
     }
-    if let Some(existing) = get_user_by_name(pool, trimmed).await? {
+    if let Some(existing) = get_user_by_name(pool, &normalized).await? {
         if existing.id != user_id {
             return Err(AppError::BadRequest("用户名已被占用".to_string()));
         }
     }
     sqlx::query("UPDATE users SET name = $1, date_modified = now() WHERE id = $2")
-        .bind(trimmed)
+        .bind(&normalized)
         .bind(user_id)
         .execute(pool)
         .await?;

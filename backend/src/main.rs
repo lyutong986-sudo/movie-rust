@@ -16,6 +16,7 @@ mod scanner;
 mod security;
 mod state;
 mod transcoder;
+mod username;
 mod webhooks;
 mod work_limiter;
 

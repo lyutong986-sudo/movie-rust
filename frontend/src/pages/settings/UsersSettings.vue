@@ -245,6 +245,18 @@ async function createUser() {
     error.value = '请输入用户名';
     return;
   }
+  // 与后端 username::normalize_and_validate 保持一致的客户端预检：
+  // - 拒绝控制字符 / 零宽 / 双向控制字符（U+202E 等可被用来伪装管理员名）
+  // - 长度 ≤ 50 char
+  const forbidden = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u2028-\u2029\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
+  if (forbidden.test(name)) {
+    error.value = '用户名不能包含控制字符 / 零宽 / 双向控制字符';
+    return;
+  }
+  if ([...name].length > 50) {
+    error.value = '用户名长度需在 1-50 之间';
+    return;
+  }
   saving.value = true;
   error.value = '';
   try {
@@ -398,8 +410,8 @@ function userStatus(account: UserDto) {
           <h3 class="text-highlighted text-sm font-semibold">新建用户</h3>
         </template>
         <div class="grid gap-3 sm:grid-cols-4">
-          <UFormField label="用户名">
-            <UInput v-model="newUserName" class="w-full" />
+          <UFormField label="用户名" hint="1-50 字符，支持中/英/emoji，禁控制 / 零宽字符">
+            <UInput v-model="newUserName" :maxlength="50" class="w-full" />
           </UFormField>
           <UFormField label="初始密码" hint="可留空">
             <UInput v-model="newPassword" type="password" class="w-full" />
