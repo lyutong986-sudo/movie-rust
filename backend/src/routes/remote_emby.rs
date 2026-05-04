@@ -370,6 +370,33 @@ struct RemoteEmbySyncResponse {
     scan_summary: crate::models::ScanSummary,
 }
 
+/// 远端 Emby 同步任务的触发来源。前端 `/settings/remote-emby` 把这个字段
+/// 翻译成中文 chip（"立即同步" / "自动增量" / "实时监控" / "全局扫描"），
+/// 让用户能立刻分辨某次后台同步是用户点的还是定时任务自动跑的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncTrigger {
+    /// 用户在 `/settings/remote-emby` 点了「立即同步」/「重试同步」。
+    Manual,
+    /// 源粒度 `auto_sync_interval_minutes` 到点触发（`remote_emby_auto_sync_loop`）。
+    AutoInterval,
+    /// 库粒度 `EnableRealtimeMonitor` 5 分钟轮询触发（`remote_library_monitor_loop`）。
+    LibraryMonitor,
+    /// 全局媒体库扫描 / 计划任务触发（`routes/admin.rs::incremental_update_library`）。
+    GlobalScheduled,
+}
+
+impl SyncTrigger {
+    /// 序列化到 DTO 用的稳定字符串值（前端按此判断 chip 颜色 / 文案）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyncTrigger::Manual => "Manual",
+            SyncTrigger::AutoInterval => "AutoInterval",
+            SyncTrigger::LibraryMonitor => "LibraryMonitor",
+            SyncTrigger::GlobalScheduled => "GlobalScheduled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct RemoteEmbySyncOperationDto {
@@ -379,6 +406,8 @@ struct RemoteEmbySyncOperationDto {
     status: String,
     progress: f64,
     phase: String,
+    /// 触发来源。`"Manual" | "AutoInterval" | "LibraryMonitor" | "GlobalScheduled"`。
+    trigger: String,
     total_items: u64,
     fetched_items: u64,
     written_files: u64,
@@ -410,6 +439,7 @@ struct RemoteEmbySyncOperationState {
     status: &'static str,
     progress: f64,
     phase: String,
+    trigger: SyncTrigger,
     total_items: u64,
     fetched_items: u64,
     written_files: u64,
@@ -446,6 +476,7 @@ impl RemoteEmbySyncOperationState {
             status: self.status.to_string(),
             progress: self.progress,
             phase: self.phase.clone(),
+            trigger: self.trigger.as_str().to_string(),
             total_items: self.total_items,
             fetched_items: self.fetched_items,
             written_files: self.written_files,
@@ -788,7 +819,7 @@ async fn sync_remote_emby_source(
     Path(source_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
     auth::require_admin(&session)?;
-    let operation_id = enqueue_remote_emby_sync(&state, source_id).await?;
+    let operation_id = enqueue_remote_emby_sync(&state, source_id, SyncTrigger::Manual).await?;
     let operation = {
         let registry = remote_emby_sync_registry().read().await;
         registry
@@ -916,7 +947,26 @@ async fn proxy_remote_emby_item(
     .await
 }
 
-async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<Uuid, AppError> {
+/// 把一次远端 Emby 同步请求加入运行队列，并返回 operation_id。
+///
+/// 4 条触发路径都通过这个统一入口注册到 `remote_emby_sync_registry`：
+///   * `SyncTrigger::Manual` —— `/settings/remote-emby` 用户手动点同步；
+///   * `SyncTrigger::AutoInterval` —— 源粒度 `auto_sync_interval_minutes` 到点；
+///   * `SyncTrigger::LibraryMonitor` —— 库粒度 `EnableRealtimeMonitor` 5 分钟轮询；
+///   * `SyncTrigger::GlobalScheduled` —— 全局媒体库扫描 / 计划任务带的远端同步。
+///
+/// 这样前端 `/settings/remote-emby` 拉到的 operations 列表能囊括所有定时 / 后台
+/// 同步，并配合 DTO 的 `Trigger` 字段告诉用户"为什么这一次同步在跑"。
+///
+/// **去重语义**（per source）：
+///   * 同 source 已有未完成 operation 且未请求取消 → 返回该 active_id，调用方等同于"挂"上去；
+///   * 同 source 已请求取消但还没退完 → 返回 BadRequest（让调用方稍后重试，避免 task id 复用造成 UI 假死）；
+///   * 否则创建新 operation_id 并 spawn 后台 task。
+pub async fn enqueue_remote_emby_sync(
+    state: &AppState,
+    source_id: Uuid,
+    trigger: SyncTrigger,
+) -> Result<Uuid, AppError> {
     let source = repository::get_remote_emby_source(&state.pool, source_id)
         .await?
         .ok_or_else(|| AppError::NotFound("远端 Emby 源不存在".to_string()))?;
@@ -958,6 +1008,7 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
                 status: "Queued",
                 progress: 0.0,
                 phase: "Queued".to_string(),
+                trigger,
                 total_items: 0,
                 fetched_items: 0,
                 written_files: 0,
@@ -1018,40 +1069,8 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
                 operation.sync_progress_handle = Some(progress.clone());
             }
         }
-        let poller_progress = progress.clone();
-        let poller_operation_id = operation_id_for_task;
-        let poller = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(1000)).await;
-                let snap = poller_progress.snapshot().await;
-                let mut registry = remote_emby_sync_registry().write().await;
-                let Some(operation) = registry.operations.get_mut(&poller_operation_id) else {
-                    break;
-                };
-                if operation.is_done() {
-                    break;
-                }
-                if operation.cancel_requested {
-                    poller_progress.request_cancel();
-                }
-                operation.phase = if snap.phase.is_empty() {
-                    "Running".to_string()
-                } else {
-                    snap.phase
-                };
-                operation.progress = snap.progress.clamp(0.0, 99.5);
-                operation.total_items = snap.total_items;
-                operation.fetched_items = snap.fetched_items;
-                operation.written_files = snap.written_files;
-                operation.skipped_existing = snap.skipped_existing;
-                operation.strm_missing_reprocessed = snap.strm_missing_reprocessed;
-                operation.current_series = snap.current_series;
-                operation.skipped_unchanged_series = snap.skipped_unchanged_series;
-                operation.skipped_unchanged_seasons = snap.skipped_unchanged_seasons;
-                operation.processed_series = snap.processed_series;
-                operation.total_series = snap.total_series;
-            }
-        });
+        let poller =
+            spawn_operation_progress_poller(operation_id_for_task, progress.clone());
 
         let sync_result = remote_emby::sync_source_with_progress(
             &state_for_task,
@@ -1111,6 +1130,209 @@ async fn enqueue_remote_emby_sync(state: &AppState, source_id: Uuid) -> Result<U
     });
 
     Ok(operation_id)
+}
+
+/// 把"调用方在自己协程里 await 远端同步"的场景也注册到 sync registry。
+///
+/// 与 [`enqueue_remote_emby_sync`] 的差异：本函数 **不 spawn task**——调用方
+/// 必须自己 await `sync_source_with_progress(progress)` 拿同步结果，
+/// 拿到结果后再调 [`finalize_external_sync_operation`] 收尾。
+///
+/// 适用场景：
+///   * `routes/admin.rs::incremental_update_library` 全局媒体库扫描：远端 sync 结果
+///     需要被同步 fold 进 `ScanSummary`，没法走 spawn-and-forget；
+///   * 其它"我已经在协程里、想顺便让前端看见"的场景。
+///
+/// 返回 `(operation_id, progress, poller_handle)`：
+///   * `operation_id` 同步任务在 registry 里的主键；
+///   * `progress` 给 `sync_source_with_progress` 用的 `RemoteSyncProgress`；
+///   * `poller_handle` 起好的进度 poller（每秒读 progress 写 operation）；
+///     调用方在 finalize 时不必显式 abort（finalize 会做）。
+pub async fn register_external_sync_operation(
+    state: &AppState,
+    source_id: Uuid,
+    trigger: SyncTrigger,
+) -> Result<
+    (
+        Uuid,
+        remote_emby::RemoteSyncProgress,
+        tokio::task::JoinHandle<()>,
+    ),
+    AppError,
+> {
+    let source = repository::get_remote_emby_source(&state.pool, source_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("远端 Emby 源不存在".to_string()))?;
+    if !source.enabled {
+        return Err(AppError::BadRequest("远端 Emby 源已禁用".to_string()));
+    }
+
+    let progress = remote_emby::RemoteSyncProgress::new();
+    let operation_id = {
+        let mut registry = remote_emby_sync_registry().write().await;
+        if let Some(active_id) = registry.active_operation_ids.get(&source_id).copied() {
+            if let Some(active) = registry.operations.get(&active_id) {
+                if !active.is_done() {
+                    // 软失败：sync_source_with_progress 内部的 try_lock_owned 也会拒，
+                    // 这里只是先一步给上层一个稳定子串便于跳过。
+                    return Err(AppError::BadRequest(format!(
+                        "该远端源已有同步任务在执行 {}",
+                        remote_emby::SOURCE_SYNC_BUSY_TAG
+                    )));
+                }
+            }
+        }
+        let id = Uuid::new_v4();
+        registry.active_operation_ids.insert(source_id, id);
+        registry.operations.insert(
+            id,
+            RemoteEmbySyncOperationState {
+                id,
+                source_id,
+                source_name: source.name.clone(),
+                status: "Running",
+                progress: 1.0,
+                phase: "Preparing".to_string(),
+                trigger,
+                total_items: 0,
+                fetched_items: 0,
+                written_files: 0,
+                skipped_existing: 0,
+                strm_missing_reprocessed: 0,
+                current_series: String::new(),
+                skipped_unchanged_series: 0,
+                skipped_unchanged_seasons: 0,
+                processed_series: 0,
+                total_series: 0,
+                cancel_requested: false,
+                created_at: Utc::now(),
+                started_at: Some(Utc::now()),
+                completed_at: None,
+                result: None,
+                error: None,
+                sync_progress_handle: Some(progress.clone()),
+            },
+        );
+
+        const KEEP_LATEST: usize = 100;
+        while registry.operations.len() > KEEP_LATEST {
+            if let Some(oldest_id) = registry.operations.keys().next().copied() {
+                if registry
+                    .active_operation_ids
+                    .values()
+                    .any(|active| *active == oldest_id)
+                {
+                    break;
+                }
+                registry.operations.remove(&oldest_id);
+            } else {
+                break;
+            }
+        }
+        id
+    };
+
+    let poller = spawn_operation_progress_poller(operation_id, progress.clone());
+    Ok((operation_id, progress, poller))
+}
+
+/// `register_external_sync_operation` 的配套收尾函数：
+///   * abort 进度 poller；
+///   * 把 sync_source_with_progress 的 Result 写回 operation 终态（Succeeded/Failed/Cancelled）；
+///   * 从 active 映射里移除。
+pub async fn finalize_external_sync_operation(
+    operation_id: Uuid,
+    poller: tokio::task::JoinHandle<()>,
+    result: &Result<remote_emby::RemoteEmbySyncResult, AppError>,
+) {
+    poller.abort();
+    let mut registry = remote_emby_sync_registry().write().await;
+    let source_id_to_clear = if let Some(operation) = registry.operations.get_mut(&operation_id) {
+        match result {
+            Ok(r) => {
+                if operation.cancel_requested {
+                    operation.status = "Cancelled";
+                    operation.phase = "Cancelled".to_string();
+                } else {
+                    operation.status = "Succeeded";
+                    operation.phase = "Completed".to_string();
+                }
+                operation.progress = 100.0;
+                operation.written_files = r.written_files as u64;
+                operation.result = Some(RemoteEmbySyncResponse {
+                    source_id: r.source_id.to_string(),
+                    source_name: r.source_name.clone(),
+                    written_files: r.written_files,
+                    source_root: r.source_root.clone(),
+                    scan_summary: r.scan_summary.clone(),
+                });
+                operation.error = None;
+                operation.completed_at = Some(Utc::now());
+            }
+            Err(err) => {
+                if operation.cancel_requested {
+                    operation.status = "Cancelled";
+                    operation.phase = "Cancelled".to_string();
+                    operation.error = None;
+                } else {
+                    operation.status = "Failed";
+                    operation.phase = "Failed".to_string();
+                    operation.error = Some(err.to_string());
+                }
+                operation.progress = 100.0;
+                operation.completed_at = Some(Utc::now());
+            }
+        }
+        operation.sync_progress_handle = None;
+        Some(operation.source_id)
+    } else {
+        None
+    };
+    if let Some(source_id) = source_id_to_clear {
+        if registry.active_operation_ids.get(&source_id).copied() == Some(operation_id) {
+            registry.active_operation_ids.remove(&source_id);
+        }
+    }
+}
+
+/// 进度轮询任务：每秒读 RemoteSyncProgress.snapshot 写回 operation。
+/// 由 enqueue / register_external 共享。退出条件：operation 已 done 或被移除。
+fn spawn_operation_progress_poller(
+    operation_id: Uuid,
+    progress: remote_emby::RemoteSyncProgress,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            let snap = progress.snapshot().await;
+            let mut registry = remote_emby_sync_registry().write().await;
+            let Some(operation) = registry.operations.get_mut(&operation_id) else {
+                break;
+            };
+            if operation.is_done() {
+                break;
+            }
+            if operation.cancel_requested {
+                progress.request_cancel();
+            }
+            operation.phase = if snap.phase.is_empty() {
+                "Running".to_string()
+            } else {
+                snap.phase
+            };
+            operation.progress = snap.progress.clamp(0.0, 99.5);
+            operation.total_items = snap.total_items;
+            operation.fetched_items = snap.fetched_items;
+            operation.written_files = snap.written_files;
+            operation.skipped_existing = snap.skipped_existing;
+            operation.strm_missing_reprocessed = snap.strm_missing_reprocessed;
+            operation.current_series = snap.current_series;
+            operation.skipped_unchanged_series = snap.skipped_unchanged_series;
+            operation.skipped_unchanged_seasons = snap.skipped_unchanged_seasons;
+            operation.processed_series = snap.processed_series;
+            operation.total_series = snap.total_series;
+        }
+    })
 }
 
 fn remote_emby_source_to_dto(source: crate::models::DbRemoteEmbySource) -> RemoteEmbySourceDto {

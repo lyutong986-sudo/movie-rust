@@ -260,7 +260,40 @@ pub async fn incremental_update_library(
             //   - settings/libraries 页：当前正在跑的 source 的远端阶段直接显示在「当前」字样
             //   - settings/scheduled-tasks 页：phase 字段实时反映远端阶段
             //   - 桥接任务在 sync 结束（无论 Ok/Err）后立刻 abort，scanner 自身的 phase 接管
-            let remote_progress = remote_emby::RemoteSyncProgress::new();
+            // PB-Trigger：把全局媒体库扫描（"扫描媒体库"按钮 / 计划任务）触发的
+            // 远端 sync 也注册到 sync registry，让 /settings/remote-emby 能看到
+            // 这一类 Trigger=GlobalScheduled 的 operation。
+            // 用 register_external_sync_operation：当前协程要 await sync 结果以
+            // fold 进 ScanSummary，不能走 spawn-and-forget 的 enqueue 路径。
+            let registered = crate::routes::remote_emby::register_external_sync_operation(
+                state,
+                source.id,
+                crate::routes::remote_emby::SyncTrigger::GlobalScheduled,
+            )
+            .await;
+            let (operation_id, remote_progress, registry_poller) = match registered {
+                Ok(triple) => (Some(triple.0), Some(triple.1), Some(triple.2)),
+                // 注册失败的最常见原因就是"该源已有同步在跑"——用 SOURCE_SYNC_BUSY_TAG 识别后跳过，
+                // 与下游 Err 分支保持同样的软失败语义。其它错误冒泡。
+                Err(err) if err.to_string().contains(remote_emby::SOURCE_SYNC_BUSY_TAG) => {
+                    tracing::info!(
+                        source_id = %source.id,
+                        library_id = %library_id,
+                        "跳过远端源同步：注册 operation 时检测到另一个同步任务正在进行"
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
+            // 没拿到 progress 的兜底（理论上不会发生，但保留以满足类型）
+            let remote_progress = match remote_progress {
+                Some(p) => p,
+                None => remote_emby::RemoteSyncProgress::new(),
+            };
+
+            // 桥接：把 RemoteSyncProgress 翻译成 scanner 自己的 ScanProgress 字段，
+            // 让 /settings/scheduled-tasks /settings/libraries 这两个看 scanner UI 的页面
+            // 也能实时显示远端阶段（与 /settings/remote-emby 的 operation 卡片并行展示）。
             let bridge_handle = progress.as_ref().map(|scan_progress| {
                 let scan_progress = scan_progress.clone();
                 let remote_progress = remote_progress.clone();
@@ -295,6 +328,15 @@ pub async fn incremental_update_library(
             .await;
             if let Some(handle) = bridge_handle {
                 handle.abort();
+            }
+            // 注册失败时 operation_id/registry_poller 都为 None；正常路径上一定有值。
+            if let (Some(op_id), Some(poller)) = (operation_id, registry_poller) {
+                crate::routes::remote_emby::finalize_external_sync_operation(
+                    op_id,
+                    poller,
+                    &sync_result,
+                )
+                .await;
             }
             match sync_result {
                 Ok(result) => {

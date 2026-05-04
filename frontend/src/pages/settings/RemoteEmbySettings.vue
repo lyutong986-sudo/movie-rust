@@ -255,6 +255,49 @@ function sourceStatusColor(source: RemoteEmbySource) {
   return 'neutral';
 }
 
+/**
+ * 把后端 `SyncTrigger` 枚举翻译成 chip 文案 + 颜色 + 图标。
+ *
+ * 用户可以在 /settings/remote-emby 的每个 operation 卡片上一眼看出：
+ * 这次同步是我手动点的、还是自动定时跑的、还是计划任务带的？
+ *
+ * 老后端可能不返回 Trigger 字段——按 Manual 兜底，避免 UI 缺失。
+ */
+function syncTriggerChip(operation?: RemoteEmbySyncOperation | null) {
+  const trigger = operation?.Trigger || 'Manual';
+  switch (trigger) {
+    case 'AutoInterval':
+      return {
+        label: '自动增量',
+        color: 'primary' as const,
+        icon: 'i-lucide-timer-reset',
+        title: '由该源的「自动增量同步间隔」计时器到点触发',
+      };
+    case 'LibraryMonitor':
+      return {
+        label: '实时监控',
+        color: 'info' as const,
+        icon: 'i-lucide-radar',
+        title: '由本地库「启用实时监控」每 5 分钟轮询发现远端变更触发',
+      };
+    case 'GlobalScheduled':
+      return {
+        label: '全局扫描',
+        color: 'secondary' as const,
+        icon: 'i-lucide-calendar-clock',
+        title: '由「扫描媒体库」按钮 / 计划任务触发的库级增量更新带出',
+      };
+    case 'Manual':
+    default:
+      return {
+        label: '手动同步',
+        color: 'neutral' as const,
+        icon: 'i-lucide-hand',
+        title: '用户手动点击「立即同步」/「重试同步」触发',
+      };
+  }
+}
+
 function operationRuntimeSeconds(operation: RemoteEmbySyncOperation) {
   if (!operation.StartedAt) return 0;
   const startedAt = new Date(operation.StartedAt).getTime();
@@ -1255,6 +1298,23 @@ onBeforeUnmount(() => {
             v-if="sourceOperation(source)"
             class="mt-3 grid gap-3 rounded-lg border border-default p-3 text-xs md:grid-cols-3"
           >
+            <!-- 触发来源 chip：本次同步是 / 由谁触发的（手动 / 自动增量 / 实时监控 / 全局扫描）。
+                 让用户在 UI 上一眼看出"为什么这一次同步在跑"，
+                 解决以前定时任务静默后台运行用户完全看不到的问题。 -->
+            <div class="md:col-span-3 flex flex-wrap items-center gap-2">
+              <UBadge
+                :color="syncTriggerChip(sourceOperation(source)).color"
+                variant="soft"
+                size="sm"
+                :icon="syncTriggerChip(sourceOperation(source)).icon"
+                :title="syncTriggerChip(sourceOperation(source)).title"
+              >
+                {{ syncTriggerChip(sourceOperation(source)).label }}
+              </UBadge>
+              <span class="text-muted text-[11px]">
+                {{ syncTriggerChip(sourceOperation(source)).title }}
+              </span>
+            </div>
             <div>
               <p class="text-muted">阶段</p>
               <p class="text-highlighted mt-1 font-medium">

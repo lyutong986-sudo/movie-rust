@@ -7357,19 +7357,30 @@ async fn run_remote_emby_auto_sync_pass(
             elapsed_min,
             "远端 Emby 自动增量同步：触发"
         );
-        match sync_source_with_progress(state, source.id, None).await {
-            Ok(result) => {
+        // PB-Trigger：把"自动定时增量同步"也注册到 sync registry，让 /settings/remote-emby
+        // 能看到它运行（带 Trigger=AutoInterval 标签），不再静默跑后台。
+        // enqueue_remote_emby_sync 自身 spawn task，本 loop 不再 await sync 结果——
+        // 一来 loop 每 60 秒一次本来就是 fire-and-forget 节奏；二来 enqueue 的 per-source
+        // 去重（registry + sync_source_with_progress 内部互斥）已经覆盖"上次还在跑就别再起"。
+        match crate::routes::remote_emby::enqueue_remote_emby_sync(
+            state,
+            source.id,
+            crate::routes::remote_emby::SyncTrigger::AutoInterval,
+        )
+        .await
+        {
+            Ok(operation_id) => {
                 tracing::info!(
                     source_id = %source.id,
-                    written = result.written_files,
-                    "远端 Emby 自动增量同步：完成"
+                    %operation_id,
+                    "远端 Emby 自动增量同步：已入队（异步执行，前端可见）"
                 );
             }
             Err(err) => {
                 tracing::warn!(
                     source_id = %source.id,
                     error = %err,
-                    "远端 Emby 自动增量同步：失败"
+                    "远端 Emby 自动增量同步：入队失败"
                 );
             }
         }
@@ -7439,19 +7450,27 @@ async fn run_remote_library_monitor_pass(
             source_name = %source.name,
             "远端库实时监控：检测到启用监控，触发增量同步"
         );
-        match sync_source_with_progress(state, source.id, None).await {
-            Ok(result) => {
+        // PB-Trigger：实时监控触发的同步同样走 registry，前端 /settings/remote-emby
+        // 能看到 Trigger=LibraryMonitor 的 operation 卡片。
+        match crate::routes::remote_emby::enqueue_remote_emby_sync(
+            state,
+            source.id,
+            crate::routes::remote_emby::SyncTrigger::LibraryMonitor,
+        )
+        .await
+        {
+            Ok(operation_id) => {
                 tracing::info!(
                     source_id = %source.id,
-                    written = result.written_files,
-                    "远端库实时监控：增量同步完成"
+                    %operation_id,
+                    "远端库实时监控：增量同步已入队（异步执行，前端可见）"
                 );
             }
             Err(err) => {
                 tracing::warn!(
                     source_id = %source.id,
                     error = %err,
-                    "远端库实时监控：增量同步失败"
+                    "远端库实时监控：增量同步入队失败"
                 );
             }
         }

@@ -664,6 +664,20 @@ export interface RemoteEmbySyncResponse {
   ScanSummary: ScanSummary;
 }
 
+/**
+ * 远端 Emby 同步任务的触发来源。后端 `routes/remote_emby.rs::SyncTrigger` 序列化产物。
+ *
+ * - Manual：用户在 /settings/remote-emby 点了「立即同步」/「重试同步」。
+ * - AutoInterval：源粒度 `auto_sync_interval_minutes` 计时器到点。
+ * - LibraryMonitor：库粒度 `EnableRealtimeMonitor` 5 分钟轮询。
+ * - GlobalScheduled：全局媒体库扫描 / 计划任务带的远端同步。
+ */
+export type RemoteEmbySyncTrigger =
+  | 'Manual'
+  | 'AutoInterval'
+  | 'LibraryMonitor'
+  | 'GlobalScheduled';
+
 export interface RemoteEmbySyncOperation {
   Id: string;
   SourceId: string;
@@ -671,6 +685,8 @@ export interface RemoteEmbySyncOperation {
   Status: string;
   Progress: number;
   Phase: string;
+  /** 本次同步的触发来源；老后端可能不返回，前端按 `Manual` 兜底。 */
+  Trigger?: RemoteEmbySyncTrigger;
   TotalItems: number;
   FetchedItems: number;
   WrittenFiles: number;
