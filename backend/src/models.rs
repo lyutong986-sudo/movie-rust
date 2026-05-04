@@ -235,6 +235,8 @@ pub struct DbMediaItem {
     pub locked_fields: Vec<String>,
     #[sqlx(default)]
     pub lock_data: bool,
+    #[sqlx(default)]
+    pub display_order: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -388,6 +390,8 @@ pub struct MediaItemRow {
     pub locked_fields: Vec<String>,
     #[sqlx(default)]
     pub lock_data: bool,
+    #[sqlx(default)]
+    pub display_order: Option<String>,
     pub total_count: i64,
 }
 
@@ -446,6 +450,7 @@ impl From<MediaItemRow> for DbMediaItem {
             taglines: value.taglines,
             locked_fields: value.locked_fields,
             lock_data: value.lock_data,
+            display_order: value.display_order,
         }
     }
 }
@@ -1484,6 +1489,8 @@ pub struct BaseItemDto {
     pub special_feature_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_order: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_image_aspect_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

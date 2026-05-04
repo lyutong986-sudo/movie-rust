@@ -266,7 +266,7 @@ async fn get_episodes(
         }
     }
 
-    let mut episode_dtos = if query.is_missing == Some(true) {
+    let (mut episode_dtos, db_items_for_media) = if query.is_missing == Some(true) {
         let mut items = repository::get_missing_episodes(
             &state.pool,
             user_id,
@@ -281,7 +281,7 @@ async fn get_episodes(
         if let Some(season_number) = query.season {
             items.retain(|item| item.parent_index_number == Some(season_number));
         }
-        items
+        (items, Vec::new())
     } else {
         let sql_start = if needs_local_windowing {
             0
@@ -347,7 +347,7 @@ async fn get_episodes(
             repository::get_user_item_data_batch(&state.pool, user_id, &row_ids).await?;
 
         if !needs_local_windowing {
-            let items: Vec<BaseItemDto> = episodes
+            let mut items: Vec<BaseItemDto> = episodes
                 .items
                 .iter()
                 .map(|episode| {
@@ -361,6 +361,15 @@ async fn get_episodes(
                     apply_episode_response_shape(dto, &query)
                 })
                 .collect();
+            if fields_contain_media_sources(query.fields.as_deref()) {
+                populate_media_sources_batch(
+                    &state.pool,
+                    &mut items,
+                    &episodes.items,
+                    state.config.server_id,
+                )
+                .await;
+            }
             return Ok(Json(QueryResult {
                 items,
                 total_record_count: episodes.total_record_count,
@@ -368,7 +377,8 @@ async fn get_episodes(
             }));
         }
 
-        episodes
+        let db_items_for_sources = episodes.items.clone();
+        let dtos = episodes
             .items
             .iter()
             .map(|episode| {
@@ -380,7 +390,8 @@ async fn get_episodes(
                     repository::DtoCountPrefetch::default(),
                 )
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (dtos, db_items_for_sources)
     };
 
     apply_episode_sort(
@@ -394,18 +405,60 @@ async fn get_episodes(
     let total_record_count = episode_dtos.len() as i64;
     let start_index = requested_start as usize;
     let limit = requested_limit as usize;
-    let items = episode_dtos
+    let mut items: Vec<BaseItemDto> = episode_dtos
         .into_iter()
         .skip(start_index)
         .take(limit)
         .map(|item| apply_episode_response_shape(item, &query))
-        .collect::<Vec<_>>();
+        .collect();
+
+    if fields_contain_media_sources(query.fields.as_deref()) {
+        populate_media_sources_batch(
+            &state.pool,
+            &mut items,
+            &db_items_for_media,
+            state.config.server_id,
+        )
+        .await;
+    }
 
     Ok(Json(QueryResult {
         items,
         total_record_count,
         start_index: Some(start_index as i64),
     }))
+}
+
+async fn populate_media_sources_batch(
+    pool: &sqlx::PgPool,
+    items: &mut [BaseItemDto],
+    db_items: &[crate::models::DbMediaItem],
+    server_id: Uuid,
+) {
+    let db_map: std::collections::HashMap<String, &crate::models::DbMediaItem> = db_items
+        .iter()
+        .map(|i| (crate::models::uuid_to_emby_guid(&i.id), i))
+        .collect();
+    for item in items.iter_mut() {
+        if !item.media_sources.is_empty() {
+            continue;
+        }
+        if let Some(db_item) = db_map.get(&item.id) {
+            if crate::repository::is_folder_item_public(db_item) {
+                continue;
+            }
+            if let Ok(sources) =
+                repository::media_sources_for_item(pool, db_item, server_id).await
+            {
+                item.media_sources = sources;
+            }
+        }
+    }
+}
+
+fn fields_contain_media_sources(fields: Option<&str>) -> bool {
+    let requested = parse_list(fields);
+    contains_ignore_case(&requested, "MediaSources")
 }
 
 fn collect_missing_season_numbers(result: &QueryResult<BaseItemDto>) -> BTreeSet<i32> {
@@ -923,7 +976,7 @@ async fn get_episodes_by_season(
     let row_ids: Vec<uuid::Uuid> = episodes.items.iter().map(|r| r.id).collect();
     let user_data_map =
         repository::get_user_item_data_batch(&state.pool, user_id, &row_ids).await?;
-    let episode_dtos: Vec<BaseItemDto> = episodes
+    let mut episode_dtos: Vec<BaseItemDto> = episodes
         .items
         .iter()
         .map(|item| {
@@ -937,6 +990,16 @@ async fn get_episodes_by_season(
             apply_episode_response_shape(dto, &query)
         })
         .collect();
+
+    if fields_contain_media_sources(query.fields.as_deref()) {
+        populate_media_sources_batch(
+            &state.pool,
+            &mut episode_dtos,
+            &episodes.items,
+            state.config.server_id,
+        )
+        .await;
+    }
 
     Ok(Json(QueryResult {
         items: episode_dtos,

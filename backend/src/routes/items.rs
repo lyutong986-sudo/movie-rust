@@ -6443,11 +6443,8 @@ fn build_direct_stream_url(
     serializer.append_pair("PlaySessionId", play_session_id);
     serializer.append_pair("api_key", access_token);
 
-    // 与 Emby 原生客户端的 "Direct Play / Direct Download" 端点对齐：
-    // 路由 routes/videos.rs 已同时挂 `/Videos/{id}/stream.{container}` 与 `/Videos/{id}/original.{container}`，
-    // 后者是 Emby SDK Direct Play 习惯路径，本地/移动端播放器（如 iOS Emby）首选解析。
     format!(
-        "/Videos/{item_emby_id}/original.{container}?Static=true&{}",
+        "/videos/{item_emby_id}/original.{container}?{}",
         serializer.finish()
     )
 }
@@ -7213,7 +7210,7 @@ mod tests {
             Some("DEVICEID"),
         );
 
-        assert!(url.starts_with("/Videos/ITEMID/original.mkv?"));
+        assert!(url.starts_with("/videos/ITEMID/original.mkv?"));
         assert!(url.contains("MediaSourceId=mediasource_ITEMID"));
         assert!(url.contains("PlaySessionId=PLAYSESSION"));
         assert!(url.contains("api_key=TOKEN"));

@@ -1310,7 +1310,8 @@ pub async fn get_items_by_genre(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data, 0::bigint AS total_count
+                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data,
+                display_order, 0::bigint AS total_count
             FROM media_items
             WHERE $1 = ANY(genres) AND library_id = ANY($4)
             ORDER BY sort_name
@@ -1329,7 +1330,8 @@ pub async fn get_items_by_genre(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data, 0::bigint AS total_count
+                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data,
+                display_order, 0::bigint AS total_count
             FROM media_items
             WHERE $1 = ANY(genres)
             ORDER BY sort_name
@@ -1735,7 +1737,8 @@ pub async fn get_items_by_person(
                 mi.studios, mi.tags, mi.production_locations,
                 mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
                 mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-                mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data, 0::bigint AS total_count
+                mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data,
+                mi.display_order, 0::bigint AS total_count
             FROM media_items mi
             WHERE mi.id IN (
                 SELECT DISTINCT pr.media_item_id
@@ -1764,7 +1767,8 @@ pub async fn get_items_by_person(
                 mi.studios, mi.tags, mi.production_locations,
                 mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path, mi.backdrop_path,
                 mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-                mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data, 0::bigint AS total_count
+                mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data,
+                mi.display_order, 0::bigint AS total_count
             FROM media_items mi
             WHERE mi.id IN (
                 SELECT DISTINCT pr.media_item_id
@@ -5407,7 +5411,7 @@ pub async fn count_unplayed_children_batch(
                    WHERE NOT EXISTS (
                        SELECT 1 FROM user_item_data uid
                        WHERE uid.user_id = $1
-                         AND uid.media_item_id = d.id
+                         AND uid.item_id = d.id
                          AND uid.is_played = true
                    )
                )::bigint
@@ -6295,7 +6299,8 @@ pub async fn list_media_items(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data, 0::bigint AS total_count
+            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data,
+            display_order, 0::bigint AS total_count
         FROM media_items
         WHERE 1 = 1
         "#,
@@ -7379,6 +7384,7 @@ pub async fn get_next_up_episodes(
                 mi.backdrop_paths, mi.remote_trailers,
                 mi.date_created, mi.date_modified, mi.image_blur_hashes,
                 mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data,
+                mi.display_order,
                 row_number() OVER (
                     PARTITION BY COALESCE(mi.series_id, mi.parent_id, mi.id)
                     ORDER BY
@@ -7402,7 +7408,8 @@ pub async fn get_next_up_episodes(
             genres, studios, tags, production_locations, width, height,
             bit_rate, size, video_codec, audio_codec, image_primary_path,
             backdrop_path, logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
+            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data,
+            display_order
         FROM ranked
         WHERE next_rank = 1
         ORDER BY series_name NULLS LAST,
@@ -7508,7 +7515,8 @@ pub async fn get_upcoming_episodes(
             mi.genres, mi.studios, mi.tags, mi.production_locations, mi.width, mi.height,
             mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec, mi.image_primary_path,
             mi.backdrop_path, mi.logo_path, mi.thumb_path, mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data
+            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data,
+            mi.display_order
         FROM media_items mi
         WHERE mi.item_type = 'Episode'
           AND mi.premiere_date >= $1
@@ -8059,6 +8067,7 @@ pub async fn get_boxsets_for_item_ids(
             lock_data: Some(false),
             special_feature_count: None,
             child_count: Some(grouped_items.len() as i64),
+            display_order: None,
             primary_image_aspect_ratio: None,
             completion_percentage: None,
             tags: item.tags.clone(),
@@ -8299,7 +8308,8 @@ pub async fn get_media_item(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
+            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data,
+            display_order
         FROM media_items
         WHERE id = $1
         "#,
@@ -8362,7 +8372,8 @@ pub async fn list_media_item_children(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
+            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data,
+            display_order
         FROM media_items
         WHERE parent_id = $1
         ORDER BY index_number, sort_name
@@ -8394,7 +8405,8 @@ pub async fn find_items_for_external_person_credit(
             studios, tags, production_locations,
             width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
             logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
+            date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data,
+            display_order
         FROM media_items
         WHERE item_type = $1
           AND (
@@ -8859,7 +8871,8 @@ pub async fn session_play_queue(
             mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
             mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data
+            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data,
+            mi.display_order
         FROM session_play_queue q
         INNER JOIN sessions s ON s.access_token = q.session_id
         INNER JOIN media_items mi ON mi.id = q.item_id
@@ -8924,7 +8937,8 @@ pub async fn session_runtime_state(
             mi.width, mi.height, mi.bit_rate, mi.size, mi.video_codec, mi.audio_codec,
             mi.image_primary_path, mi.backdrop_path, mi.logo_path, mi.thumb_path,
             mi.art_path, mi.banner_path, mi.disc_path, mi.backdrop_paths, mi.remote_trailers,
-            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data
+            mi.date_created, mi.date_modified, mi.image_blur_hashes, mi.series_id, mi.taglines, mi.locked_fields, mi.lock_data,
+            mi.display_order
         FROM session_play_queue q
         INNER JOIN sessions s ON s.access_token = q.session_id
         INNER JOIN media_items mi ON mi.id = q.item_id
@@ -10121,6 +10135,7 @@ async fn library_to_item_dto_inner(
         lock_data: None,
         special_feature_count: None,
         child_count: Some(locations.len().max(1) as i64),
+        display_order: None,
         primary_image_aspect_ratio: None,
         completion_percentage: None,
         tags: Vec::new(),
@@ -10244,6 +10259,7 @@ pub fn root_item_dto(server_id: Uuid) -> BaseItemDto {
         lock_data: Some(false),
         special_feature_count: Some(0),
         child_count: None,
+        display_order: None,
         primary_image_aspect_ratio: None,
         completion_percentage: None,
         tags: Vec::new(),
@@ -10515,6 +10531,7 @@ pub fn media_item_to_dto_for_list(
         lock_data: if item.lock_data { Some(true) } else { Some(false) },
         special_feature_count: Some(0),
         child_count,
+        display_order: item.display_order.clone(),
         primary_image_aspect_ratio,
         completion_percentage,
         tags: item.tags.clone(),
@@ -10939,6 +10956,7 @@ async fn media_item_to_dto_inner(
         lock_data: if item.lock_data { Some(true) } else { Some(false) },
         special_feature_count: Some(0),
         child_count,
+        display_order: item.display_order.clone(),
         primary_image_aspect_ratio,
         completion_percentage,
         tags: item.tags.clone(),
@@ -11323,6 +11341,7 @@ where
         lock_data: Some(false),
         special_feature_count: None,
         child_count: None,
+        display_order: None,
         primary_image_aspect_ratio: None,
         completion_percentage: None,
         tags: Vec::new(),
@@ -11518,7 +11537,7 @@ async fn media_source_for_item_with_type(
     Ok(source)
 }
 
-async fn media_sources_for_item(
+pub async fn media_sources_for_item(
     pool: &sqlx::PgPool,
     item: &DbMediaItem,
     server_id: Uuid,
@@ -11577,7 +11596,8 @@ async fn version_group_items_for_item(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
+                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data,
+                display_order
             FROM media_items
             WHERE item_type = 'Episode'
               AND media_type = $1
@@ -11634,7 +11654,8 @@ async fn version_group_items_for_item(
                 studios, tags, production_locations,
                 width, height, bit_rate, size, video_codec, audio_codec, image_primary_path, backdrop_path,
                 logo_path, thumb_path, art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
-                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data
+                date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data,
+                display_order
             FROM media_items
             WHERE item_type = $1
               AND media_type = $2
@@ -13999,7 +14020,8 @@ pub async fn find_similar_items(
                production_locations, width, height, bit_rate, video_codec,
                audio_codec, image_primary_path, backdrop_path, logo_path,
                thumb_path, art_path, banner_path, disc_path, backdrop_paths,
-               remote_trailers, date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data, size
+               remote_trailers, date_created, date_modified, image_blur_hashes, series_id, taglines, locked_fields, lock_data, size,
+               display_order
         FROM media_items
         WHERE id != $1 AND item_type = $2
         {lib_filter}
