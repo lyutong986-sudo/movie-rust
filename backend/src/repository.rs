@@ -9870,7 +9870,16 @@ pub async fn upsert_media_item(
                 sort_name = EXCLUDED.sort_name,
                 item_type = EXCLUDED.item_type,
                 media_type = EXCLUDED.media_type,
-                container = EXCLUDED.container,
+                container = CASE
+                    WHEN EXCLUDED.container IS NOT NULL
+                         AND EXCLUDED.container <> ''
+                         AND lower(EXCLUDED.container) <> 'strm'
+                    THEN EXCLUDED.container
+                    ELSE COALESCE(
+                        NULLIF(NULLIF(media_items.container, ''), 'strm'),
+                        EXCLUDED.container
+                    )
+                END,
                 overview = EXCLUDED.overview,
                 production_year = EXCLUDED.production_year,
                 official_rating = EXCLUDED.official_rating,

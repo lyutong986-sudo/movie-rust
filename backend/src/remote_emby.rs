@@ -3960,7 +3960,15 @@ async fn upsert_remote_media_item(
     series_db_id: Option<Uuid>,
     force_overwrite_images: bool,
 ) -> Result<Uuid, AppError> {
-    let container = analysis.and_then(|value| value.format.format_name.as_deref());
+    let container_from_analysis = analysis
+        .and_then(|value| value.format.format_name.clone())
+        .filter(|c| !c.eq_ignore_ascii_case("strm") && !c.is_empty());
+    let container_from_strm = || -> Option<String> {
+        let target = crate::naming::read_strm_target(strm_path)?;
+        crate::naming::extension_from_url(&target)
+    };
+    let container_owned = container_from_analysis.or_else(container_from_strm);
+    let container = container_owned.as_deref();
     let video_codec = analysis.and_then(|value| {
         value
             .streams

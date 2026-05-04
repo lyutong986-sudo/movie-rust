@@ -735,6 +735,20 @@ async fn collect_video_files(root: PathBuf) -> Result<Vec<PathBuf>, AppError> {
 }
 
 /// 合并 NFO 与片夹中的额外壁纸路径（排除主 `backdrop_path`），保持顺序并去重。
+/// 为扫描到的文件推导有效容器格式。
+/// - 普通视频文件（.mp4, .mkv 等）：直接取文件扩展名。
+/// - .strm 文件：读取内容提取目标 URL，从 URL 路径推导真实扩展名（如 mp4/mkv）。
+///   若 strm 读取失败或 URL 无扩展名，返回 None 让 DB 保留已有值。
+fn resolve_effective_container(file: &Path) -> Option<String> {
+    let ext = file.extension().and_then(OsStr::to_str)?;
+    if !ext.eq_ignore_ascii_case("strm") {
+        return Some(ext.to_lowercase());
+    }
+    naming::read_strm_target(file)
+        .as_deref()
+        .and_then(naming::extension_from_url)
+}
+
 fn merge_extra_backdrop_paths(
     primary: &Option<PathBuf>,
     extras: impl Iterator<Item = PathBuf>,
@@ -765,10 +779,7 @@ async fn import_movie_file(
 ) -> Result<(), AppError> {
     let parsed = naming::parse_media_path(file);
     let nfo = read_movie_nfo(file).unwrap_or_default();
-    let container = file
-        .extension()
-        .and_then(OsStr::to_str)
-        .map(str::to_lowercase);
+    let container = resolve_effective_container(file);
     let movie_folder = file.parent().unwrap_or_else(|| Path::new("."));
     let folder_imgs = naming::discover_folder_images(movie_folder);
     let poster = nfo
@@ -1341,10 +1352,7 @@ async fn import_tv_file(
         .await;
     }
 
-    let container = file
-        .extension()
-        .and_then(OsStr::to_str)
-        .map(str::to_lowercase);
+    let container = resolve_effective_container(file);
     let ep_folder = file.parent().unwrap_or_else(|| Path::new("."));
     let ep_folder_imgs = naming::discover_folder_images(ep_folder);
     let poster = episode_nfo
