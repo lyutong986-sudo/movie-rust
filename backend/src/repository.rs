@@ -1450,7 +1450,7 @@ pub async fn get_persons(
             WHERE ($2::text IS NULL OR p.name ILIKE $2)
               AND EXISTS (
                   SELECT 1 FROM person_roles pr
-                  INNER JOIN media_items mi ON mi.id = pr.item_id
+                  INNER JOIN media_items mi ON mi.id = pr.media_item_id
                   WHERE pr.person_id = p.id
                     AND mi.library_id = ANY($1)
               )
@@ -1466,7 +1466,7 @@ pub async fn get_persons(
             WHERE ($2::text IS NULL OR p.name ILIKE $2)
               AND EXISTS (
                   SELECT 1 FROM person_roles pr
-                  INNER JOIN media_items mi ON mi.id = pr.item_id
+                  INNER JOIN media_items mi ON mi.id = pr.media_item_id
                   WHERE pr.person_id = p.id
                     AND mi.library_id = ANY($1)
               )
@@ -1545,7 +1545,7 @@ pub async fn person_visible_to_user(
         SELECT EXISTS (
             SELECT 1
             FROM person_roles pr
-            INNER JOIN media_items mi ON mi.id = pr.item_id
+            INNER JOIN media_items mi ON mi.id = pr.media_item_id
             WHERE pr.person_id = $1
               AND mi.library_id = ANY($2)
         )
