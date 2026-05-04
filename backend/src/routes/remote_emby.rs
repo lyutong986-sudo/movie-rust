@@ -95,7 +95,7 @@ struct DiagnosticSampleItemsQuery {
     parent_id: Option<String>,
     #[serde(default, alias = "fields", alias = "Fields")]
     fields: Option<String>,
-    #[serde(default, alias = "limit", alias = "Limit")]
+    #[serde(default, alias = "limit", alias = "Limit", deserialize_with = "crate::models::deserialize_option_i64_lenient")]
     limit: Option<i64>,
 }
 
@@ -529,7 +529,7 @@ struct ProxyQuery {
 
 #[derive(Debug, Deserialize)]
 struct SyncOperationsQuery {
-    #[serde(default, rename = "Limit", alias = "limit")]
+    #[serde(default, rename = "Limit", alias = "limit", deserialize_with = "crate::models::deserialize_option_i64_lenient")]
     limit: Option<i64>,
 }
 

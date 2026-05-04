@@ -111,9 +111,9 @@ struct UpdatePlaylistRequest {
 
 #[derive(Debug, Deserialize)]
 struct ListItemsQuery {
-    #[serde(default, alias = "startIndex", alias = "StartIndex")]
+    #[serde(default, alias = "startIndex", alias = "StartIndex", deserialize_with = "crate::models::deserialize_option_i64_lenient")]
     start_index: Option<i64>,
-    #[serde(default, alias = "limit", alias = "Limit")]
+    #[serde(default, alias = "limit", alias = "Limit", deserialize_with = "crate::models::deserialize_option_i64_lenient")]
     limit: Option<i64>,
 }
 

@@ -20,9 +20,9 @@ use crate::{
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct GetPersonsQuery {
-    #[serde(default, alias = "StartIndex", alias = "startIndex")]
+    #[serde(default, alias = "StartIndex", alias = "startIndex", deserialize_with = "crate::models::deserialize_option_i32_lenient")]
     start_index: Option<i32>,
-    #[serde(default, alias = "Limit")]
+    #[serde(default, alias = "Limit", deserialize_with = "crate::models::deserialize_option_i32_lenient")]
     limit: Option<i32>,
     #[serde(default, alias = "Fields")]
     fields: Option<String>,

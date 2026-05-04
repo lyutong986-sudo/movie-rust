@@ -373,9 +373,9 @@ struct RemoteImagesQuery {
     language: Option<String>,
     #[serde(default, alias = "enableSeriesImages", deserialize_with = "crate::models::deserialize_option_bool_lenient")]
     enable_series_images: Option<bool>,
-    #[serde(default, alias = "StartIndex", alias = "startIndex")]
+    #[serde(default, alias = "StartIndex", alias = "startIndex", deserialize_with = "crate::models::deserialize_option_i32_lenient")]
     start_index: Option<i32>,
-    #[serde(default, alias = "Limit", alias = "limit")]
+    #[serde(default, alias = "Limit", alias = "limit", deserialize_with = "crate::models::deserialize_option_i32_lenient")]
     limit: Option<i32>,
 }
 

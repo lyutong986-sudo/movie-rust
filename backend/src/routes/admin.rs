@@ -1434,7 +1434,7 @@ struct ScanLibrariesQuery {
 
 #[derive(Debug, Deserialize)]
 struct ScanOperationsQuery {
-    #[serde(default, rename = "Limit", alias = "limit")]
+    #[serde(default, rename = "Limit", alias = "limit", deserialize_with = "crate::models::deserialize_option_i64_lenient")]
     limit: Option<i64>,
 }
 

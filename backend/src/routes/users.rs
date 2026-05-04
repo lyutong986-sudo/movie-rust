@@ -138,9 +138,9 @@ async fn users(
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct UserQuery {
-    #[serde(default, alias = "startIndex")]
+    #[serde(default, alias = "startIndex", deserialize_with = "crate::models::deserialize_option_i64_lenient")]
     start_index: Option<i64>,
-    #[serde(default, alias = "limit")]
+    #[serde(default, alias = "limit", deserialize_with = "crate::models::deserialize_option_i64_lenient")]
     limit: Option<i64>,
     #[serde(default, alias = "searchTerm")]
     search_term: Option<String>,

@@ -6720,9 +6720,9 @@ struct SearchHintsQuery {
     search_term: Option<String>,
     #[serde(default, alias = "userId", alias = "UserId")]
     user_id: Option<String>,
-    #[serde(default, alias = "limit", alias = "Limit")]
+    #[serde(default, alias = "limit", alias = "Limit", deserialize_with = "crate::models::deserialize_option_i64_lenient")]
     limit: Option<i64>,
-    #[serde(default, alias = "startIndex", alias = "StartIndex")]
+    #[serde(default, alias = "startIndex", alias = "StartIndex", deserialize_with = "crate::models::deserialize_option_i64_lenient")]
     start_index: Option<i64>,
     #[serde(
         default,
@@ -6847,9 +6847,9 @@ struct MovieRecommendationsQuery {
     user_id: Option<Uuid>,
     #[serde(default, alias = "parentId", deserialize_with = "crate::models::deserialize_optional_uuid")]
     parent_id: Option<Uuid>,
-    #[serde(default, alias = "categoryLimit")]
+    #[serde(default, alias = "categoryLimit", deserialize_with = "crate::models::deserialize_option_i32_lenient")]
     category_limit: Option<i32>,
-    #[serde(default, alias = "itemLimit")]
+    #[serde(default, alias = "itemLimit", deserialize_with = "crate::models::deserialize_option_i32_lenient")]
     item_limit: Option<i32>,
     #[serde(default, alias = "fields")]
     #[allow(dead_code)]

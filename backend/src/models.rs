@@ -1959,15 +1959,15 @@ pub struct ItemsQuery {
     pub fields: Option<String>,
     #[serde(default, alias = "EnableImages", alias = "enableImages", deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_images: Option<bool>,
-    #[serde(default, alias = "ImageTypeLimit", alias = "imageTypeLimit")]
+    #[serde(default, alias = "ImageTypeLimit", alias = "imageTypeLimit", deserialize_with = "deserialize_option_i64_lenient")]
     pub image_type_limit: Option<i64>,
     #[serde(default, alias = "EnableImageTypes", alias = "enableImageTypes")]
     pub enable_image_types: Option<String>,
     #[serde(default, alias = "EnableUserData", alias = "enableUserData", deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_user_data: Option<bool>,
-    #[serde(default, alias = "StartIndex", alias = "startIndex")]
+    #[serde(default, alias = "StartIndex", alias = "startIndex", deserialize_with = "deserialize_option_i64_lenient")]
     pub start_index: Option<i64>,
-    #[serde(default, alias = "Limit", alias = "limit")]
+    #[serde(default, alias = "Limit", alias = "limit", deserialize_with = "deserialize_option_i64_lenient")]
     pub limit: Option<i64>,
     #[serde(default, alias = "ListItemIds", alias = "listItemIds")]
     pub list_item_ids: Option<String>,
@@ -2403,7 +2403,7 @@ pub struct ImageInfoDto {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ActivityLogQuery {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_i64_lenient")]
     pub limit: Option<i64>,
     #[serde(default)]
     pub user_id: Option<String>,
@@ -2473,7 +2473,7 @@ pub struct SeasonsQuery {
     pub adjacent_to: Option<String>,
     #[serde(default, deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_images: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_i64_lenient")]
     pub image_type_limit: Option<i64>,
     #[serde(default)]
     pub enable_image_types: Option<String>,
@@ -2528,13 +2528,13 @@ pub struct EpisodesQuery {
     pub start_item_id: Option<String>,
     #[serde(default)]
     pub fields: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_i64_lenient")]
     pub start_index: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_i64_lenient")]
     pub limit: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_images: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_option_i64_lenient")]
     pub image_type_limit: Option<i64>,
     #[serde(default)]
     pub enable_image_types: Option<String>,
@@ -2682,6 +2682,80 @@ where
     }
 }
 
+/// 宽松反序列化 `Option<i64>`：接受原生 JSON 数值、字符串形式的整数、
+/// 空字符串(→None)、null(→None)。
+/// Emby 客户端有时会发送 `&Limit&`（空值），标准 serde 无法将空字符串解析为整数。
+pub(crate) fn deserialize_option_i64_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match val {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Some(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Some(f as i64))
+            } else {
+                Err(serde::de::Error::custom(format!(
+                    "无法将数值 {n} 解析为 i64"
+                )))
+            }
+        }
+        Some(serde_json::Value::String(s)) => {
+            if s.trim().is_empty() {
+                return Ok(None);
+            }
+            s.trim()
+                .parse::<i64>()
+                .map(Some)
+                .map_err(|_| serde::de::Error::custom(format!("无法将 '{s}' 解析为 i64")))
+        }
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "无法将 {other} 解析为 i64"
+        ))),
+    }
+}
+
+/// 宽松反序列化 `Option<i32>` — 与 i64 版本相同逻辑，目标类型为 i32。
+pub(crate) fn deserialize_option_i32_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Option<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match val {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Some(i as i32))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Some(f as i32))
+            } else {
+                Err(serde::de::Error::custom(format!(
+                    "无法将数值 {n} 解析为 i32"
+                )))
+            }
+        }
+        Some(serde_json::Value::String(s)) => {
+            if s.trim().is_empty() {
+                return Ok(None);
+            }
+            s.trim()
+                .parse::<i32>()
+                .map(Some)
+                .map_err(|_| serde::de::Error::custom(format!("无法将 '{s}' 解析为 i32")))
+        }
+        Some(other) => Err(serde::de::Error::custom(format!(
+            "无法将 {other} 解析为 i32"
+        ))),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct GetSimilarItems {
@@ -2689,9 +2763,9 @@ pub struct GetSimilarItems {
     pub id: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     pub user_id: Option<Uuid>,
-    #[serde(default, alias = "Limit")]
+    #[serde(default, alias = "Limit", deserialize_with = "deserialize_option_i64_lenient")]
     pub limit: Option<i64>,
-    #[serde(default, alias = "StartIndex", alias = "startIndex")]
+    #[serde(default, alias = "StartIndex", alias = "startIndex", deserialize_with = "deserialize_option_i64_lenient")]
     pub start_index: Option<i64>,
     #[serde(
         default,
@@ -2706,7 +2780,7 @@ pub struct GetSimilarItems {
     pub enable_images: Option<bool>,
     #[serde(default, alias = "EnableUserData", alias = "enableUserData", deserialize_with = "deserialize_option_bool_lenient")]
     pub enable_user_data: Option<bool>,
-    #[serde(default, alias = "ImageTypeLimit", alias = "imageTypeLimit")]
+    #[serde(default, alias = "ImageTypeLimit", alias = "imageTypeLimit", deserialize_with = "deserialize_option_i64_lenient")]
     pub image_type_limit: Option<i64>,
     #[serde(default, alias = "EnableImageTypes", alias = "enableImageTypes")]
     pub enable_image_types: Option<String>,
