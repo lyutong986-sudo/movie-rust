@@ -714,6 +714,28 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
           AND parent_season.item_type = 'Season'
           AND parent_season.parent_id IS NOT NULL
         "#,
+        // PB52-Season Backfill：远端 Emby 同步 / scanner 入库 Episode 时一直没填
+        // `season_id` 字段（UpsertMediaItem 结构体根本没有这个字段，DB 列存在但
+        // 没人写）。结果 `count_recursive_children_batch` 对 Season 用 `WHERE
+        // season_id = ANY($1)` 永远 COUNT(*)=0 → 所有 Season 的 ChildCount /
+        // RecursiveItemCount / UnplayedItemCount 都返回 0；前端「X 集」/「未看 N」
+        // 全部失真。Episode 的 parent_id 在远端同步链路里就是它的 Season UUID
+        // （`ensure_remote_season_folder` 返回的 item_id），所以 `season_id =
+        // parent_id` 是正确的等价关系；scanner 本地路径同理。
+        r#"
+        UPDATE media_items ep
+        SET season_id = ep.parent_id
+        WHERE ep.item_type = 'Episode'
+          AND ep.season_id IS NULL
+          AND ep.parent_id IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM media_items parent_season
+              WHERE parent_season.id = ep.parent_id
+                AND parent_season.item_type = 'Season'
+          )
+        "#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_episode_season
+              ON media_items(season_id) WHERE item_type = 'Episode'"#,
         // pg_trgm 全文搜索加速
         r#"DO $$ BEGIN CREATE EXTENSION IF NOT EXISTS pg_trgm; EXCEPTION WHEN OTHERS THEN NULL; END $$"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_name_trgm ON media_items USING gin (name gin_trgm_ops)"#,

@@ -9770,7 +9770,7 @@ pub async fn upsert_media_item(
                     art_path, banner_path, disc_path, backdrop_paths, remote_trailers,
                     series_name, season_name, index_number,
                     index_number_end, parent_index_number, width, height, video_codec, audio_codec,
-                    series_id,
+                    series_id, season_id,
                     date_modified
                 )
             VALUES
@@ -9783,6 +9783,10 @@ pub async fn upsert_media_item(
                     $35, $36, $37, $38, $39, $40,
                     $41, $42, $43, $44,
                     $45,
+                    -- season_id：Episode 的父就是 Season，直接复用 parent_id 自动推导，
+                    -- 让 count_recursive_children_batch 的 `WHERE season_id = ANY($1)` 立刻能命中。
+                    -- Season / Series / 其它类型留 NULL，避免污染索引扫描。
+                    CASE WHEN $7 = 'Episode' THEN $3 ELSE NULL END,
                     now()
                 )
             ON CONFLICT (id)
@@ -9856,6 +9860,7 @@ pub async fn upsert_media_item(
                 video_codec = EXCLUDED.video_codec,
                 audio_codec = EXCLUDED.audio_codec,
                 series_id = COALESCE(EXCLUDED.series_id, media_items.series_id),
+                season_id = COALESCE(EXCLUDED.season_id, media_items.season_id),
                 date_modified = now()
             "#,
         )

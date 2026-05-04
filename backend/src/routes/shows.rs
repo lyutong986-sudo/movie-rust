@@ -20,7 +20,11 @@ pub fn router() -> Router<AppState> {
         .route("/Seasons/{season_id}/Episodes", get(get_episodes_by_season))
         .route("/Shows/NextUp", get(get_next_up))
         .route("/Shows/Upcoming", get(get_upcoming))
+        // Emby 客户端 / EmbySDK 习惯调用 `/Shows/MissingEpisodes`，老路由名 `/Shows/Missing`
+        // 在第三方客户端（lin_player / Hills 等）下会落到 ServeDir SPA fallback 返回 HTML。
+        // 同时保留旧名以兼容历史前端代码。
         .route("/Shows/Missing", get(get_missing))
+        .route("/Shows/MissingEpisodes", get(get_missing))
 }
 
 async fn get_next_up(

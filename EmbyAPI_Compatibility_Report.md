@@ -43,6 +43,47 @@
 >   // 修复后预期：每行 count == limit
 >   ```
 >
+> ⑭ **2026-05-04 九阶段：基于 ⑬ bug 的全库扫描审计（image 共享范围 + 顺带发现的 4 个新 bug）**：
+> - **背景**：用户提示「现在还没构建新二进制，⑬ 的现存数据可以忽略」并要求继续访问，我用 chrome-devtools MCP 在 `https://test.emby.yun:4443/` 把 16 个 view 全扫一遍，找到了完整的影响面 + 几个独立的新 bug。
+> - **ImageInfos.Path 冲突全库扫描结果**（每库前 80 项 sample）：
+>   | ImageType | 冲突组数 | 受影响 item 数 | 最大组（同一文件被多少 item 共用） |
+>   | --- | --- | --- | --- |
+>   | Primary  | 20 | 318 | `/strm/影视媒体库/无脑短剧/poster.jpg` (62) |
+>   | Backdrop | 54 | 311 | `/strm/影视媒体库/儿童/fanart.jpg` (24) + fanart1/fanart2 同模式 |
+>   | Logo     | 11 | 57  | `/strm/吹大牛Emby/综艺/logo.png` (12) |
+>   | Thumb / Banner / Disc / Art | 0 | 0 | （Series 类几乎不用这些类型） |
+>   `⑬` 的修复 + 启动迁移可同时覆盖以上三类，下次构建上线后会一次性清空脏字段并按修好的目录规则重新落盘到 `<series_dir>/poster.jpg`、`<series_dir>/fanart.jpg`、`<series_dir>/logo.png`。
+> - **新 Bug A：`/Shows/MissingEpisodes` 端点未注册（落到 ServeDir SPA fallback 返回 HTML）**：
+>   - 现象：`fetch('/Shows/MissingEpisodes?UserId=...')` 返回 `200 + Content-Type: text/html + <!doctype html> ...` 而不是 `application/json`。EmbySDK / 第三方客户端按 SDK 标准就调这个端点。
+>   - 根因：`backend/src/routes/shows.rs:23` 只注册了 `/Shows/Missing`，而 EmbySDK 客户端调用的是 `/Shows/MissingEpisodes`。axum 没匹配 → `app.fallback_service(spa)` 接住返回 SPA index.html。
+>   - 修复：保留旧路由不破坏前端，新增 alias：
+>     ```rust
+>     .route("/Shows/Missing", get(get_missing))
+>     .route("/Shows/MissingEpisodes", get(get_missing))
+>     ```
+> - **新 Bug B：所有 Season 的 ChildCount / RecursiveItemCount / UnplayedItemCount 永远返回 0（核心 bug）**：
+>   - 现象：MCP 取「一世独尊」`/Shows/{sid}/Seasons` 返回两个 Season，每个都报 `ChildCount: 0, RecursiveItemCount: 0`，但 `/Shows/{sid}/Episodes` 总数 165 集——明显矛盾。同 Series 下两个 Season 的 IndexNumber 是 1 和 2（数据脏会单独说明），但 ChildCount = 0 是结构性 bug。
+>   - 根因：`media_items.season_id` 列在 `0001_schema.sql` / `ensure_schema_compatibility` 都已声明，但**`UpsertMediaItem` 结构体根本没有 `season_id` 字段**——所有从 sidecar / scanner / remote_emby 入库的 Episode 行 `season_id IS NULL`。`count_recursive_children_batch` 对 Season 走的是 `WHERE season_id = ANY($1) AND item_type = 'Episode' GROUP BY season_id`，全 NULL → 永远返回空 → 进而 `prefetched_counts.child_count = 0`。
+>   - 修复（双层）：
+>     1. **入库层（zero-impact 改造）**：`backend/src/repository.rs::upsert_media_item` 的 INSERT 列表增加 `season_id`，VALUES 里用 `CASE WHEN $7 = 'Episode' THEN $3 ELSE NULL END` 自动从 `(item_type, parent_id)` 推导——不需要修改任何调用方、不动参数顺序、不改 `UpsertMediaItem` 结构体。Episode 的 parent_id 在远端同步链路（`ensure_remote_season_folder` 返回的 item_id）和 scanner 本地路径里都是它的 Season UUID，所以这个等价关系成立。`ON CONFLICT ... DO UPDATE SET season_id = COALESCE(EXCLUDED.season_id, media_items.season_id)` 让重复入库不会覆盖已有 season_id。
+>     2. **历史回填**：`backend/src/main.rs::ensure_schema_compatibility` 加一条 idempotent SQL：
+>        ```sql
+>        UPDATE media_items ep
+>        SET season_id = ep.parent_id
+>        WHERE ep.item_type = 'Episode'
+>          AND ep.season_id IS NULL
+>          AND ep.parent_id IS NOT NULL
+>          AND EXISTS (SELECT 1 FROM media_items s
+>                      WHERE s.id = ep.parent_id AND s.item_type = 'Season');
+>        ```
+>        与 `idx_media_items_episode_season ON media_items(season_id) WHERE item_type='Episode'` 配套，让 batch 查询走索引秒回。
+>   - 预期效果：所有 Season 的 `ChildCount`（已看 + 未看的 Episode 总数）、`RecursiveItemCount`、`UnplayedItemCount` 立刻恢复正确数；前端 Series 详情页 `第 N 季 (X 集 / 未看 Y 集)` 文案恢复显示真实数据。
+> - **未一并修但已记录**（下一阶段处理）：
+>   - **`/Sessions` 返回 542 条**：`repository::list_sessions` 已经过滤 `Interactive + (expires_at IS NULL OR > now())`，但远端同步 / 老版本注入的 `expires_at IS NULL` 行长存活，与 Emby 「当前活跃会话」语义不符。建议追加 `last_activity_at > now() - interval '30 minutes'` 时间窗，向 Emby 默认 1 小时心跳超时对齐。
+>   - **同 Series 下两个 Season 的 Name 都叫「第 1 季」**：远端 Emby 给的 `season_name` 数据脏（IndexNumber=2 但 name="第 1 季"），目前 `ensure_remote_season_folder` 直接信任远端值。建议 `media_item_to_dto_inner` 做 Season 兜底：当 `parse("第 N 季" / "Season N")` 与 `index_number` 不一致时按 IndexNumber 重写。
+>   - **`/Years` 出现 `Name: "1"` 项**：远端导入了 `production_year=1` 的脏数据，是上游问题，本仓不修；前端可考虑 `production_year >= 1900` 过滤。
+> - **验证**：`cargo check -p movie-rust-backend` 通过；下次构建启动后 `ensure_schema_compatibility` 会自动跑回填 SQL，Season.ChildCount 立即起作用，可重复 MCP 脚本验证。
+>
 > ⑬ **2026-05-04 八阶段：多个 Series/Movie 共享同一封面 + 刷新封面跳变（item_image_target_path is_dir() 分支落到父目录共享文件）**：
 > - **现象（MCP chrome-devtools 实测）**：`/library/47856023-FA73-4C74-9D88-D84EAFE10672`（国漫库）多个 Series 卡片肉眼可见封面雷同，刷新后**所有相似卡片同时换成另一张图**。命令式取证：
 >   ```js
