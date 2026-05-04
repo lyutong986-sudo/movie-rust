@@ -217,7 +217,7 @@ async fn get_episodes(
     let mut parent_id = Some(series_id);
     let mut recursive = true;
     let requested_start = query.start_index.unwrap_or(0).max(0);
-    let requested_limit = query.limit.unwrap_or(100).clamp(1, 200);
+    let requested_limit = query.limit.unwrap_or(10000).clamp(1, 10000);
     let needs_local_windowing = should_apply_local_episode_windowing(&query);
     // 如果提供了 SeasonId，则只获取该季；否则递归获取整部剧下的分集。
     if let Some(season_id) = query.season_id {
@@ -657,7 +657,7 @@ fn apply_items_query_to_show_result(
     );
     let total_record_count = items.len() as i64;
     let start_index = query.start_index.unwrap_or(0).max(0) as usize;
-    let limit = query.limit.unwrap_or(100).clamp(1, 200) as usize;
+    let limit = query.limit.unwrap_or(10000).clamp(1, 10000) as usize;
     let items = items
         .into_iter()
         .skip(start_index)
@@ -925,7 +925,7 @@ async fn get_episodes_by_season(
         return Err(AppError::BadRequest("Item is not a season".to_string()));
     }
     let requested_start = query.start_index.unwrap_or(0).max(0);
-    let requested_limit = query.limit.unwrap_or(100).clamp(1, 200);
+    let requested_limit = query.limit.unwrap_or(10000).clamp(1, 10000);
 
     // 获取该季下的所有剧集
     let episodes = repository::list_media_items(

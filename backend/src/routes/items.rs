@@ -836,7 +836,7 @@ async fn list_items_for_user(
                 &requested_item_ids,
                 state.config.server_id,
                 query.start_index.unwrap_or(0).max(0) as i64,
-                query.limit.unwrap_or(100).clamp(1, 200) as i64,
+                query.limit.unwrap_or(10000).clamp(1, 10000) as i64,
             )
             .await?,
         ));
@@ -1293,7 +1293,7 @@ fn item_list_options_from_query(
         filters: query.filters.clone(),
         fields: query.fields.clone(),
         start_index: query.start_index.unwrap_or(0),
-        limit: query.limit.unwrap_or(100),
+        limit: query.limit.unwrap_or(10000),
         // EmbySDK 没有 GroupItemsIntoCollections 这个枚举，默认必须为 false。
         // 旧的 true 会让 SQL 取完整页（LIMIT 60）后再用 provider id 折叠，
         // 出现 TotalRecordCount=660 / Items.len()=59 的错配，
@@ -3856,7 +3856,7 @@ async fn additional_parts(
         user_id,
         state.config.server_id,
         query.start_index.unwrap_or(0).max(0),
-        query.limit.unwrap_or(100).clamp(1, 200),
+        query.limit.unwrap_or(10000).clamp(1, 10000),
     )
     .await?;
     Ok(Json(result))

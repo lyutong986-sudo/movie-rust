@@ -291,7 +291,7 @@ async fn genre_items_for_scope(
             sort_by: Some("SortName".to_string()),
             sort_order: Some("Ascending".to_string()),
             start_index: start_index.unwrap_or(0).max(0) as i64,
-            limit: limit.unwrap_or(100).clamp(1, 200) as i64,
+            limit: limit.unwrap_or(10000).clamp(1, 10000) as i64,
             ..ItemListOptions::default()
         },
     )

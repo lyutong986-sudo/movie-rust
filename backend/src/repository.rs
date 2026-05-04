@@ -1349,7 +1349,7 @@ pub async fn get_items_by_genre(
         sqlx::query_as::<_, DbMediaItem>(query)
             .bind(genre_name)
             .bind(start_index.unwrap_or(0).max(0) as i64)
-            .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
+            .bind(limit.unwrap_or(10000).clamp(1, 10000) as i64)
             .bind(&allowed_library_ids.unwrap())
             .fetch_all(pool)
             .await?
@@ -1357,7 +1357,7 @@ pub async fn get_items_by_genre(
         sqlx::query_as::<_, DbMediaItem>(query)
             .bind(genre_name)
             .bind(start_index.unwrap_or(0).max(0) as i64)
-            .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
+            .bind(limit.unwrap_or(10000).clamp(1, 10000) as i64)
             .fetch_all(pool)
             .await?
     };
@@ -1756,7 +1756,7 @@ pub async fn get_items_by_person(
         )
         .bind(person_id)
         .bind(start_index.unwrap_or(0).max(0) as i64)
-        .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
+        .bind(limit.unwrap_or(10000).clamp(1, 10000) as i64)
         .bind(lib_ids)
         .fetch_all(pool)
         .await?
@@ -1785,7 +1785,7 @@ pub async fn get_items_by_person(
         )
         .bind(person_id)
         .bind(start_index.unwrap_or(0).max(0) as i64)
-        .bind(limit.unwrap_or(100).clamp(1, 200) as i64)
+        .bind(limit.unwrap_or(10000).clamp(1, 10000) as i64)
         .fetch_all(pool)
         .await?
     };
@@ -6064,7 +6064,7 @@ impl Default for ItemListOptions {
             filters: None,
             fields: None,
             start_index: 0,
-            limit: 100,
+            limit: 10000,
             group_items_into_collections: true,
             collapse_box_set_items: false,
             enable_total_record_count: true,
@@ -6244,7 +6244,7 @@ async fn fast_count_media_items(
     if has_search && !has_user_library_filter && options.excluded_library_ids.is_empty() {
         let search_term = options.search_term.as_ref().unwrap().trim();
         let pattern = format!("%{}%", search_term);
-        let probe_limit = options.start_index.max(0) + options.limit.clamp(1, 200) + 1;
+        let probe_limit = options.start_index.max(0) + options.limit.clamp(1, 10000) + 1;
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM (SELECT 1 FROM media_items WHERE name ILIKE $1 OR sort_name ILIKE $1 LIMIT $2) t"
         )
@@ -7195,7 +7195,7 @@ pub async fn list_media_items(
         builder.push(" ").push(sort_order).push(" NULLS LAST");
     }
 
-    let effective_limit = options.limit.max(0).min(1_000);
+    let effective_limit = options.limit.max(0).min(10_000);
     if effective_limit == 0 {
         return Ok(QueryResult {
             items: Vec::new(),
@@ -7617,7 +7617,7 @@ pub async fn get_next_up_episodes(
             .bind(user_id)
             .bind(parent_id)
             .bind(start_index.max(0))
-            .bind(limit.clamp(1, 200))
+            .bind(limit.clamp(1, 10000))
             .bind(allowed_ids_param.as_deref())
             .fetch_one(pool)
             .await?
@@ -7686,7 +7686,7 @@ pub async fn get_next_up_episodes(
         .bind(user_id)
         .bind(parent_id)
         .bind(start_index.max(0))
-        .bind(limit.clamp(1, 200))
+        .bind(limit.clamp(1, 10000))
         .bind(allowed_ids_param.as_deref())
         .fetch_all(pool)
         .await?;
@@ -7759,7 +7759,7 @@ pub async fn get_upcoming_episodes(
         .bind(today)
         .bind(parent_id)
         .bind(start_index.max(0))
-        .bind(limit.clamp(1, 200))
+        .bind(limit.clamp(1, 10000))
         .bind(allowed_library_ids.as_deref())
         .fetch_one(pool)
         .await?;
@@ -7805,7 +7805,7 @@ pub async fn get_upcoming_episodes(
         .bind(today)
         .bind(parent_id)
         .bind(start_index.max(0))
-        .bind(limit.clamp(1, 200))
+        .bind(limit.clamp(1, 10000))
         .bind(allowed_library_ids.as_deref())
     .fetch_all(pool)
     .await?;
@@ -8056,7 +8056,7 @@ pub async fn get_missing_episodes(
     )
     .bind(parent_id)
     .bind(start_index.max(0))
-    .bind(limit.clamp(1, 200))
+    .bind(limit.clamp(1, 10000))
     .bind(&enabled_lib_ids)
     .fetch_all(pool)
     .await?;
@@ -8337,7 +8337,7 @@ pub async fn get_boxsets_for_item_ids(
 
     let total_record_count = results.len() as i64;
     let start = start_index.max(0) as usize;
-    let end = (start + limit.clamp(1, 200) as usize).min(results.len());
+    let end = (start + limit.clamp(1, 10000) as usize).min(results.len());
     let items = if start >= total_record_count as usize {
         Vec::new()
     } else {
@@ -12050,7 +12050,7 @@ pub async fn get_additional_parts_for_item(
 
     let total_record_count = grouped_items.len() as i64;
     let start = start_index.max(0) as usize;
-    let take = limit.clamp(1, 200) as usize;
+    let take = limit.clamp(1, 10000) as usize;
     let page_items: Vec<_> = grouped_items.into_iter().skip(start).take(take).collect();
 
     let row_ids: Vec<Uuid> = page_items.iter().map(|r| r.id).collect();
