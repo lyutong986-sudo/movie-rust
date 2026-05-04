@@ -77,6 +77,20 @@ fn builtin_tasks() -> Vec<TaskDescriptor> {
             }],
         },
         TaskDescriptor {
+            id: "translation-fallback",
+            name: "翻译兜底",
+            description: "对所有未锁定的媒体条目（Movie/Series/Season/Episode）按「翻译兜底」设置批量调用\
+                有道大模型翻译。已是目标语言的字段会被语种粗检测跳过，相同原文命中 \
+                translation_cache 不会重复计费；可在 /settings/translation 调整字段开关 / 触发位 / 限流。\
+                建议放在 metadata-refresh 之后跑（默认 04:00），先让 TMDB 把能补的中文补完。",
+            category: "Metadata",
+            default_triggers: vec![TriggerInfo {
+                trigger_type: "DailyTrigger",
+                time_of_day_ticks: Some(4 * 3600 * 10_000_000),
+                ..TriggerInfo::default()
+            }],
+        },
+        TaskDescriptor {
             id: "cleanup-transcodes",
             name: "清理转码临时目录",
             description: "删除遗留的 HLS / 分片缓存文件。",
@@ -657,6 +671,124 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
             set_progress(&state.pool, task_id, 100.0).await;
             Ok(())
         }
+        "translation-fallback" => {
+            // PB52：独立的翻译兜底调度任务。与 metadata-refresh 解耦后的好处：
+            //   - 单独的进度条 / 取消按钮，UI 可见；
+            //   - 单独的频率（默认 04:00，紧跟 metadata-refresh 完成之后）；
+            //   - 用户可以单独关闭 / 重启它，不影响 TMDB 刷新链路；
+            //   - 翻译 settings 关闭时本任务直接 noop 退出，进度跳到 100%。
+            //
+            // 与其它接入点（手动刷新 / 远端同步 / metadata-refresh 末尾的 inline
+            // 翻译）共享同一个 translation_cache，所以这里大量条目会通过缓存命中
+            // 秒回，不会真打 Youdao。
+            let translator_handle = match state.translator.as_ref() {
+                Some(t) => t,
+                None => {
+                    tracing::info!("translation-fallback: 翻译服务未初始化，跳过");
+                    set_progress(&state.pool, task_id, 100.0).await;
+                    return Ok(());
+                }
+            };
+            let settings = translator_handle.current().await;
+            if !settings.ready() {
+                tracing::info!(
+                    enabled = settings.enabled,
+                    has_app_key = !settings.app_key.is_empty(),
+                    has_app_secret = !settings.app_secret.is_empty(),
+                    "translation-fallback: 翻译未启用或缺 appKey/appSecret，跳过"
+                );
+                set_progress(&state.pool, task_id, 100.0).await;
+                return Ok(());
+            }
+            if !settings.trigger_scheduled_task {
+                tracing::info!(
+                    "translation-fallback: settings.trigger_scheduled_task=false，跳过"
+                );
+                set_progress(&state.pool, task_id, 100.0).await;
+                return Ok(());
+            }
+
+            const PAGE_SIZE: i64 = 200;
+            let mut start_index: i64 = 0;
+            let mut total_count: i64 = 0;
+            let mut processed: i64 = 0;
+            let mut translated: i64 = 0;
+            let mut skipped_locked: i64 = 0;
+            let mut errored: i64 = 0;
+            loop {
+                let page = repository::list_media_items(
+                    &state.pool,
+                    repository::ItemListOptions {
+                        include_types: vec![
+                            "Movie".into(),
+                            "Series".into(),
+                            "Season".into(),
+                            "Episode".into(),
+                        ],
+                        recursive: true,
+                        start_index,
+                        limit: PAGE_SIZE,
+                        enable_total_record_count: start_index == 0,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                if start_index == 0 {
+                    total_count = page.total_record_count.max(1);
+                    tracing::info!(
+                        total_count,
+                        target_lang = %settings.target_lang,
+                        "translation-fallback: 开始全量分页翻译兜底"
+                    );
+                }
+                if page.items.is_empty() {
+                    break;
+                }
+                let page_len = page.items.len() as i64;
+                for item in &page.items {
+                    processed += 1;
+                    if item.lock_data {
+                        skipped_locked += 1;
+                        continue;
+                    }
+                    let pct = (processed as f64 / total_count as f64).min(1.0) * 100.0;
+                    set_progress(&state.pool, task_id, pct).await;
+                    match crate::metadata::translator::translate_item_text_fields(
+                        state,
+                        item.id,
+                        crate::metadata::translator::TranslationTrigger::ScheduledTask,
+                    )
+                    .await
+                    {
+                        Ok(true) => translated += 1,
+                        Ok(false) => {}
+                        Err(err) => {
+                            errored += 1;
+                            tracing::warn!(
+                                item_id = %item.id,
+                                name = %item.name,
+                                error = %err,
+                                "translation-fallback: 单条翻译失败，继续下一条"
+                            );
+                        }
+                    }
+                }
+                if page_len < PAGE_SIZE {
+                    break;
+                }
+                start_index += PAGE_SIZE;
+            }
+            tracing::info!(
+                processed,
+                translated,
+                skipped_locked,
+                errored,
+                target_lang = %settings.target_lang,
+                "translation-fallback: 任务完成"
+            );
+            set_progress(&state.pool, task_id, 100.0).await;
+            Ok(())
+        }
         "cleanup-transcodes" => {
             let dir = &state.config.transcode_dir;
             if let Ok(mut read) = tokio::fs::read_dir(dir).await {
@@ -849,6 +981,7 @@ mod tests {
         for expected in [
             "library-scan",
             "metadata-refresh",
+            "translation-fallback",
             "cleanup-transcodes",
             "cleanup-activity-log",
         ] {

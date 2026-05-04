@@ -60,14 +60,21 @@ async fn put_settings(
     auth::require_admin(&session)?;
     let mut next = payload;
 
-    // PB52：secret 留空（或脱敏占位 `***`）= 不变更，避免前端读取脱敏值后回写
-    // 把 app_secret 真正清空。
+    // PB52：app_key / app_secret 留空（或仅有 `*` 的脱敏占位）= 不变更，
+    // 避免前端读取脱敏值后回写把真值覆盖成 `****`。
     let prev = match state.translator.as_ref() {
         Some(t) => t.current().await,
         None => translator::load_settings(&state.pool).await?,
     };
-    if next.app_secret.trim().is_empty() || next.app_secret.trim_matches('*').is_empty() {
+    if next.app_secret.trim().is_empty()
+        || TranslationSettings::is_redacted_placeholder(&next.app_secret)
+    {
         next.app_secret = prev.app_secret.clone();
+    }
+    if next.app_key.trim().is_empty()
+        || TranslationSettings::is_redacted_placeholder(&next.app_key)
+    {
+        next.app_key = prev.app_key.clone();
     }
 
     // 简单字符串 trim，避免前端把多余空格存进数据库。
@@ -173,9 +180,14 @@ async fn post_translate_items(
         ));
     }
     // 手动触发：无视 trigger 开关——这里就是用户主动按下「翻译」按钮的入口。
-    translator::translate_items_bulk(&state, &payload.item_ids, TranslationTrigger::ManualRefresh)
-        .await?;
+    let translated = translator::translate_items_bulk(
+        &state,
+        &payload.item_ids,
+        TranslationTrigger::ManualRefresh,
+    )
+    .await?;
     Ok(Json(json!({
         "processed": payload.item_ids.len(),
+        "translated": translated,
     })))
 }

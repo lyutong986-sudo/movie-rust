@@ -6,8 +6,9 @@
  * 不做大小写转换。字段较多，按「连接」「字段范围」「触发位」三组拆分到 3 个
  * UCard，避免单卡过长。
  *
- * 注意：`app_secret` 后端读取时会脱敏成 `***`；前端 PUT 时如果保留原值，后端
- * 会识别成「不变更」继续沿用旧密钥。所以保存按钮按下时不需要二次提示。
+ * 注意：`app_key` / `app_secret` 后端读取时会被脱敏成 `****` 占位（16 / 32 个
+ * 星号）。前端 PUT 时如果字段保持脱敏占位，后端会识别成「不变更」继续沿用
+ * 已存储值；用户改密钥时直接清空再粘贴新值即可。
  */
 import { onMounted, reactive, ref } from 'vue';
 import SettingsLayout from '../../layouts/SettingsLayout.vue';
@@ -164,11 +165,24 @@ onMounted(load);
           <UFormField label="源语言（无法识别时使用）">
             <USelect v-model="form.from_lang" :items="FROM_LANG_OPTIONS" value-attribute="value" class="w-full" />
           </UFormField>
-          <UFormField label="App Key" hint="有道智云控制台『应用 ID』">
-            <UInput v-model="form.app_key" placeholder="例如 0123456789abcdef" class="w-full" />
+          <UFormField label="应用ID" hint="有道智云控制台『应用 ID（appKey）』">
+            <UInput
+              v-model="form.app_key"
+              placeholder="****************"
+              class="w-full"
+              autocomplete="off"
+              spellcheck="false"
+            />
           </UFormField>
-          <UFormField label="App Secret" hint="留空 / 保持 *** 不变 = 沿用已存储密钥">
-            <UInput v-model="form.app_secret" type="password" placeholder="***" class="w-full" />
+          <UFormField label="应用秘钥" hint="保留占位 `****` 不变 = 沿用已存储密钥；改值请清空后重新粘贴。">
+            <UInput
+              v-model="form.app_secret"
+              type="password"
+              placeholder="********************************"
+              class="w-full"
+              autocomplete="off"
+              spellcheck="false"
+            />
           </UFormField>
         </div>
       </UCard>
@@ -198,7 +212,7 @@ onMounted(load);
         </p>
         <div class="grid gap-3 sm:grid-cols-3">
           <USwitch v-model="form.trigger_manual_refresh" label="手动『刷新元数据』" />
-          <USwitch v-model="form.trigger_scheduled_task" label="计划任务『元数据刷新』" />
+          <USwitch v-model="form.trigger_scheduled_task" label="计划任务『元数据刷新』/『翻译兜底』" />
           <USwitch v-model="form.trigger_remote_sync" label="远端 Emby 同步" />
         </div>
       </UCard>

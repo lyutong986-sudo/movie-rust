@@ -108,12 +108,24 @@ impl Default for TranslationSettings {
 impl TranslationSettings {
     /// 调用方安全展示用：去掉 secret，避免 GET /admin/translation/settings 把
     /// app_secret 明文回吐到前端。
+    /// 脱敏只用于 GET 给前端，前端 PUT 回来如果字段全是 `*` 我们当成「不变更」。
+    /// 长度（16 / 32）刻意贴合 Youdao 控制台原始 appKey/appSecret 的长度，UI 拷贝
+    /// 出来观感更接近真值，但本身不携带任何信息（仅为占位符）。
     pub fn redacted(&self) -> Self {
         let mut clone = self.clone();
+        if !clone.app_key.is_empty() {
+            clone.app_key = "*".repeat(16);
+        }
         if !clone.app_secret.is_empty() {
-            clone.app_secret = "***".into();
+            clone.app_secret = "*".repeat(32);
         }
         clone
+    }
+
+    /// 判断给定字符串是否为「全 `*`」的脱敏占位符。trim 后只剩 `*` 也算。
+    pub fn is_redacted_placeholder(value: &str) -> bool {
+        let trimmed = value.trim();
+        !trimmed.is_empty() && trimmed.chars().all(|c| c == '*')
     }
 
     pub fn ready(&self) -> bool {
@@ -506,23 +518,24 @@ fn parse_youdao_stream(body: &str) -> Result<String, AppError> {
 /// 对单个 media_items 行进行兜底翻译。
 ///
 /// 行为：
-/// 1. settings.enabled == false 或当前 trigger 未勾选 → 立即返回 Ok(())。
+/// 1. settings.enabled == false / trigger 未勾选 / 服务未就绪 → 直接返回 `Ok(false)`。
 /// 2. 读 media_items name / overview。
 /// 3. 按字段开关 + 语言粗检测决定是否翻译。
 /// 4. 翻译成功后只更新被改动的字段（覆盖式 UPDATE，更新 date_modified）。
 ///
+/// 返回值：`true` = 至少一个字段被实际翻译并写回；`false` = 跳过 / 无需翻译。
 /// 永远 swallow 单条翻译错误并 warn，不让兜底翻译影响主链路。
 pub async fn translate_item_text_fields(
     state: &crate::state::AppState,
     item_id: Uuid,
     trigger: TranslationTrigger,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     let Some(translator) = state.translator.as_ref() else {
-        return Ok(());
+        return Ok(false);
     };
     let settings = translator.current().await;
     if !settings.ready() || !trigger.allowed(&settings) {
-        return Ok(());
+        return Ok(false);
     }
 
     let row: Option<(Option<String>, Option<String>, String)> = sqlx::query_as(
@@ -532,7 +545,7 @@ pub async fn translate_item_text_fields(
     .fetch_optional(&state.pool)
     .await?;
     let Some((name, overview, item_type)) = row else {
-        return Ok(());
+        return Ok(false);
     };
 
     // 字段开关：根据 item_type 与 settings 切换是否要翻译 name / overview。
@@ -586,7 +599,8 @@ pub async fn translate_item_text_fields(
         }
     }
 
-    if new_name.is_some() || new_overview.is_some() {
+    let any_change = new_name.is_some() || new_overview.is_some();
+    if any_change {
         sqlx::query(
             r#"
             UPDATE media_items
@@ -603,18 +617,22 @@ pub async fn translate_item_text_fields(
         .await?;
     }
 
-    Ok(())
+    Ok(any_change)
 }
 
 /// 批量版本：对一组 item id 顺序兜底翻译。仅在触发位允许的情况下逐条调用。
 /// 单条失败不阻断整体（已在 `translate_item_text_fields` 内部 swallow）。
+/// 返回值：实际触发了翻译写回的 item 数（`true` 计数）。
 pub async fn translate_items_bulk(
     state: &crate::state::AppState,
     item_ids: &[Uuid],
     trigger: TranslationTrigger,
-) -> Result<(), AppError> {
+) -> Result<usize, AppError> {
+    let mut translated = 0usize;
     for id in item_ids {
-        translate_item_text_fields(state, *id, trigger).await?;
+        if translate_item_text_fields(state, *id, trigger).await? {
+            translated += 1;
+        }
     }
-    Ok(())
+    Ok(translated)
 }
