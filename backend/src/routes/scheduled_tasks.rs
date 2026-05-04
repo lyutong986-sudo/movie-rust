@@ -625,7 +625,10 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
                 let page_len = page.items.len() as i64;
                 for item in &page.items {
                     processed += 1;
-                    // 锁定条目最优先跳过——即使元数据缺失也不动。
+                    let pct = (processed as f64 / total_count as f64).min(1.0) * 100.0;
+                    if processed % 200 == 0 || processed == total_count {
+                        set_progress(&state.pool, task_id, pct).await;
+                    }
                     if item.lock_data {
                         skipped_locked += 1;
                         continue;
@@ -633,17 +636,14 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
                     let missing = item_has_missing_metadata(item);
                     let is_remote =
                         crate::remote_emby::remote_marker_for_db_item(item).is_some();
-                    // 远端条目：只在「缺数据」时才参与本任务，避免 03:00 扎堆撞上游。
                     if is_remote && !missing {
                         skipped_remote += 1;
                         continue;
                     }
-                    // 本地条目 + 不缺数据 + 7 天内已刷过 → 跳过；缺数据条目无视 stale。
                     if !is_remote && !missing && item.date_modified > stale_cutoff {
                         skipped_fresh += 1;
                         continue;
                     }
-                    let pct = (processed as f64 / total_count as f64).min(1.0) * 100.0;
                     set_progress(&state.pool, task_id, pct).await;
                     if let Err(err) =
                         crate::routes::items::do_refresh_item_metadata(state, item.id).await

@@ -372,6 +372,8 @@ DO $$ BEGIN
 EXCEPTION WHEN OTHERS THEN NULL; END $$;
 CREATE INDEX IF NOT EXISTS idx_media_items_name_trgm ON media_items USING gin (name gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_media_items_sort_trgm ON media_items USING gin (sort_name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_media_items_remote_item_id ON media_items ((provider_ids->>'RemoteEmbyItemId')) WHERE provider_ids->>'RemoteEmbyItemId' IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_media_items_remote_source_id ON media_items ((provider_ids->>'RemoteEmbySourceId')) WHERE provider_ids->>'RemoteEmbySourceId' IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- user_item_data：每个用户对每个条目的播放/收藏状态（Emby UserItemDataDto）

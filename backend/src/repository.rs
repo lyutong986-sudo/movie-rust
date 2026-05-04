@@ -5511,6 +5511,9 @@ pub async fn count_recursive_children_batch(
         for (id, count) in rows {
             result.insert(id, count);
         }
+        for id in &buckets.other_ids {
+            result.entry(*id).or_insert(0);
+        }
     }
 
     Ok(result)
@@ -5624,6 +5627,9 @@ pub async fn count_unplayed_children_batch(
         .await?;
         for (id, count) in rows {
             result.insert(id, count);
+        }
+        for id in &buckets.other_ids {
+            result.entry(*id).or_insert(0);
         }
     }
 
@@ -6871,14 +6877,14 @@ pub async fn list_media_items(
 
     if let Some(min_date) = options.min_start_date {
         builder
-            .push(" AND premiere_date >= ")
+            .push(" AND start_date >= ")
             .push_bind(min_date)
             .push("::date");
     }
 
     if let Some(max_date) = options.max_start_date {
         builder
-            .push(" AND premiere_date <= ")
+            .push(" AND start_date <= ")
             .push_bind(max_date)
             .push("::date");
     }

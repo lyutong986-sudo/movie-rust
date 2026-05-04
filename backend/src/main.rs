@@ -740,6 +740,8 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         r#"DO $$ BEGIN CREATE EXTENSION IF NOT EXISTS pg_trgm; EXCEPTION WHEN OTHERS THEN NULL; END $$"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_name_trgm ON media_items USING gin (name gin_trgm_ops)"#,
         r#"CREATE INDEX IF NOT EXISTS idx_media_items_sort_trgm ON media_items USING gin (sort_name gin_trgm_ops)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_remote_item_id ON media_items ((provider_ids->>'RemoteEmbyItemId')) WHERE provider_ids->>'RemoteEmbyItemId' IS NOT NULL"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_media_items_remote_source_id ON media_items ((provider_ids->>'RemoteEmbySourceId')) WHERE provider_ids->>'RemoteEmbySourceId' IS NOT NULL"#,
         // -------------------------------------------------------------------
         // user_item_data：Emby UserItemDataDto 预留列。
         // -------------------------------------------------------------------
@@ -918,6 +920,20 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             ON session_commands(session_id, created_at)
             WHERE consumed_at IS NULL
         "#,
+        // -------------------------------------------------------------------
+        // display_preferences：用户显示偏好（0001 建表，ensure 补建兜底）。
+        // -------------------------------------------------------------------
+        r#"
+        CREATE TABLE IF NOT EXISTS display_preferences (
+            user_id                  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            display_preferences_id   TEXT NOT NULL,
+            client                   TEXT NOT NULL DEFAULT 'emby',
+            preferences              JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (user_id, display_preferences_id, client)
+        )
+        "#,
+        r#"CREATE INDEX IF NOT EXISTS idx_display_preferences_user ON display_preferences(user_id, updated_at DESC)"#,
         // -------------------------------------------------------------------
         // playlists / playlist_items：用户自定义播放列表。
         // -------------------------------------------------------------------
@@ -1162,10 +1178,27 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
         "#,
     ];
 
+    let mut critical_failures = Vec::new();
     for statement in compatibility_sql {
         if let Err(error) = sqlx::query(statement).execute(pool).await {
-            tracing::error!("Schema 兼容性补齐失败: {error}");
+            let stmt_trimmed = statement.trim();
+            let is_index_only = stmt_trimmed.starts_with("CREATE INDEX")
+                || stmt_trimmed.starts_with("CREATE UNIQUE INDEX");
+            if is_index_only {
+                tracing::warn!("Schema 兼容性补齐（索引）失败（非致命）: {error}");
+            } else {
+                tracing::error!("Schema 兼容性补齐失败: {error}");
+                critical_failures.push(error.to_string());
+            }
         }
+    }
+
+    if !critical_failures.is_empty() {
+        anyhow::bail!(
+            "Schema 兼容性补齐有 {} 条关键语句失败: {}",
+            critical_failures.len(),
+            critical_failures.join("; ")
+        );
     }
 
     Ok(())

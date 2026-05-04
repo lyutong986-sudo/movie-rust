@@ -2480,13 +2480,15 @@ async fn sync_source_inner(
                 let mut stale_series_db_ids: Vec<Uuid> = Vec::new();
                 let mut stale_series_paths: Vec<String> = Vec::new();
                 for (db_id, remote_sid, path) in &local_series {
-                    if let Some(sid) = remote_sid {
-                        if !remote_series_ids.contains(sid) {
-                            stale_series_db_ids.push(*db_id);
-                            if let Some(p) = path {
-                                if !p.is_empty() {
-                                    stale_series_paths.push(p.clone());
-                                }
+                    let is_stale = match remote_sid {
+                        Some(sid) => !remote_series_ids.contains(sid),
+                        None => true,
+                    };
+                    if is_stale {
+                        stale_series_db_ids.push(*db_id);
+                        if let Some(p) = path {
+                            if !p.is_empty() {
+                                stale_series_paths.push(p.clone());
                             }
                         }
                     }

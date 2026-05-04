@@ -5210,3 +5210,52 @@ Err(e) => {
 `cargo check` 通过（0 errors，55 pre-existing warnings unchanged）。
 
 ---
+
+## 全链路审计修复 — 第三阶段（2026-05-04）
+
+### P1 — 功能错误（补充）
+
+#### P1-3. count_recursive_children_batch other_ids 缺 0 补全
+- **文件**: `backend/src/repository.rs` `count_recursive_children_batch` + `count_unplayed_children_batch`
+- **问题**: `other_ids` 递归分支在 GROUP BY 无行时不为对应 parent 写入 0，与 `series_ids`/`season_ids` 分支不对称。调用方缺 key 导致 Collection/Folder 子项数显示为 null。
+- **修复**: 两个函数的 `other_ids` 分支均补 `for id in &buckets.other_ids { result.entry(*id).or_insert(0); }`。
+
+#### P1-4. min_start_date/max_start_date 用错列
+- **文件**: `backend/src/repository.rs` `apply_item_where_conditions`
+- **问题**: `min_start_date`/`max_start_date` 过滤条件落在 `premiere_date` 上而非表列 `start_date`。
+- **修复**: 改为 `AND start_date >= / <=`。
+
+#### P1-7. Series 删除依赖 RemoteEmbySeriesId 可能残留
+- **文件**: `backend/src/remote_emby.rs` L2482-2491
+- **问题**: 本地 Series 缺少 `RemoteEmbySeriesId` 时不进入差集删除，远端已删的 Series 长期残留。
+- **修复**: `remote_sid = None` 的远端同步 Series 直接视为 stale（无法匹配任何远端 series）。
+
+### P2 — 性能/一致性
+
+#### P2-1. ensure_schema_compatibility 失败静默不阻止启动
+- **文件**: `backend/src/main.rs` `ensure_schema_compatibility`
+- **问题**: DDL 失败只 `tracing::error`，进程继续以"半残"状态运行。
+- **修复**: 区分索引创建（非致命 warn）和其它语句（致命 error），收集关键失败后 `anyhow::bail!` 中止启动。
+
+#### P2-8. provider_ids JSON 反查无表达式索引
+- **文件**: `backend/migrations/0001_schema.sql` + `backend/src/main.rs`
+- **问题**: `find_item_id_by_remote_emby_id` 使用 `provider_ids->>'RemoteEmbyItemId'`，无索引时大表全扫描。
+- **修复**: 添加 `idx_media_items_remote_item_id` 和 `idx_media_items_remote_source_id` 两个 partial expression index。
+
+### P3 — 设计/可观测性
+
+#### P3-4. display_preferences 表仅在 0001_schema.sql
+- **文件**: `backend/src/main.rs` `ensure_schema_compatibility`
+- **问题**: 迁移失败仅跑 ensure 时该表不存在。
+- **修复**: 在 ensure 中补 `CREATE TABLE IF NOT EXISTS display_preferences` + 索引。
+
+#### P3-7. metadata-refresh 进度条在大量 skip 时停滞
+- **文件**: `backend/src/routes/scheduled_tasks.rs`
+- **问题**: `set_progress` 仅在条目通过 skip 检查后才调用，大量 skip 时进度条长期不动。
+- **修复**: 每处理 200 条统一更新一次进度（含 skip 项），refresh 实际执行前再更新一次精确进度。
+
+### 编译验证
+
+`cargo check` 通过（0 errors，55 pre-existing warnings unchanged）。
+
+---
