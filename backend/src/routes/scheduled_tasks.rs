@@ -64,8 +64,10 @@ fn builtin_tasks() -> Vec<TaskDescriptor> {
         TaskDescriptor {
             id: "metadata-refresh",
             name: "元数据刷新",
-            description: "对本地媒体库（Movie/Series/Season/Episode）中元数据过期 7 天及以上的条目，\
-                通过 TMDB 等外部源刷新；远端 Emby 条目交由远端同步链路单独处理，\
+            description: "对本地媒体库（Movie/Series/Season/Episode）的「缺失元数据」与「过期 7 天及以上」的条目，\
+                调用 TMDB 等外部源补全/刷新；缺失元数据的条目即使是远端 Emby 条目也会被纳入兜底，\
+                避免远端 Emby 与 TMDB 都没有的占位条目永远卡在空白状态；\
+                有完整数据的远端 Emby 条目仍交由远端同步链路单独处理，\
                 锁定元数据的条目跳过。",
             category: "Metadata",
             default_triggers: vec![TriggerInfo {
@@ -429,6 +431,47 @@ async fn set_progress(pool: &sqlx::PgPool, task_id: &str, pct: f64) {
         repository::set_setting_value(pool, &format!("task:{task_id}:progress"), json!(pct)).await;
 }
 
+/// PB52-Missing：判断一个 media_items 行是否「缺元数据」，需要 metadata-refresh
+/// 任务即使在远端来源 / 7 天内动过的情况下也强制走一次刷新链路。
+///
+/// 判定标准（任一命中即视为缺失）：
+/// - `overview` 为空 / 全空白 —— 最强烈的缺数据信号，远端 + TMDB 都没拉到东西。
+/// - Movie / Series 的 `provider_ids` 里完全没有 TMDB id —— 仍是 filename-导入的
+///   占位条目，没有 TMDB id 就走不了任何外部刷新链。
+///   Episode / Season 不在此范围：它们的 TMDB id 是借父 Series 的，单条没 TMDB id
+///   是常态，不算缺失。
+///
+/// 设计约束：宽松判，宁可让本地条目多刷一次，也不要让真正缺数据的远端条目
+/// 永远卡在空白状态——这恰恰是用户报告的「有些媒体没有 tmdb 也没有远程媒体库」
+/// 的根因。
+fn item_has_missing_metadata(item: &crate::models::DbMediaItem) -> bool {
+    let overview_empty = item
+        .overview
+        .as_deref()
+        .map(str::trim)
+        .map(str::is_empty)
+        .unwrap_or(true);
+    if overview_empty {
+        return true;
+    }
+    let kind = item.item_type.as_str();
+    let needs_tmdb_id =
+        kind.eq_ignore_ascii_case("Movie") || kind.eq_ignore_ascii_case("Series");
+    if !needs_tmdb_id {
+        return false;
+    }
+    let has_tmdb = item
+        .provider_ids
+        .as_object()
+        .map(|obj| {
+            ["Tmdb", "TMDb", "tmdb"]
+                .iter()
+                .any(|key| obj.get(*key).is_some_and(|v: &Value| !v.is_null()))
+        })
+        .unwrap_or(false);
+    !has_tmdb
+}
+
 async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
     match task_id {
         "library-scan" => {
@@ -490,26 +533,28 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
             Ok(())
         }
         "metadata-refresh" => {
-            // PB51-Refresh：彻底重做 metadata-refresh 调度任务。
+            // PB51-Refresh + PB52-Missing：metadata-refresh 调度任务。
             //
-            // 之前实现的三个硬伤（已修复）：
-            //   1) `limit: 200`，不分页 → 大库（如 549K 条）每天只摸前 200 条，
-            //      其余条目永远不会被定时任务覆盖。
+            // 历史包袱（已修复）：
+            //   1) `limit: 200`，不分页 → 大库（如 549K 条）每天只摸前 200 条。
             //   2) 仅 Movie/Series → Episode/Season 元数据漂移走不到这一刷。
-            //   3) 不区分远端与本地 → 远端条目在 03:00 集中触发上游 Emby，叠加
-            //      remote-emby AutoInterval / GlobalScheduled 的同步，是上次「触发
-            //      封号」的同源风险。
+            //   3) 不区分远端与本地 → 远端条目在 03:00 集中撞上游 Emby，
+            //      与 AutoInterval / GlobalScheduled 同步叠加 = 触发封号。
             //
-            // 新链路（用户选 C 路线）：
-            //   - 全量分页：稳定按 start_index 步进，不依赖 SQL stale 过滤，避免
-            //     pagination-while-mutating 的 offset 错位。
-            //   - In-loop 跳过 remote-Emby：交回 remote-emby 同步链路统一处理。
-            //   - In-loop 跳过 lock_data：尊重用户「锁定元数据」语义。
-            //   - In-loop 跳过 staleness 阈值内的条目（< STALE_DAYS 天内已动过）：
-            //     避免每天都把同样条目刷一遍。
+            // 当前链路：
+            //   - 全量分页：稳定按 start_index 步进，不依赖 SQL stale 过滤。
             //   - 包含 Movie / Series / Season / Episode 四类。
-            //   - Per-page progress：以 processed/total 上报百分比，UI 可见动态。
+            //   - 跳过 lock_data：尊重用户「锁定元数据」语义（始终生效）。
+            //   - 双轨判定：
+            //       * 「缺失元数据」(item_has_missing_metadata) → 不论来源、不论 staleness
+            //         都进 do_refresh_item_metadata 走「远端 → TMDB → 翻译」三段式
+            //         兜底链路，让远端没数据 + 没 TMDB id 的占位条目能被补全。
+            //       * 「数据完整 + 远端来源」→ 跳过（交回 remote-emby 同步链路）。
+            //       * 「数据完整 + 本地 + 已新（< STALE_DAYS 内动过）」→ 跳过。
+            //       * 其余（数据完整 + 本地 + stale）→ 进刷新。
             //   - 单条失败仅 warn，不中断整个任务。
+            //   - 翻译兜底通过 do_refresh_item_metadata_with 内部接入点自动接入，
+            //     本任务无需额外处理。
             const PAGE_SIZE: i64 = 200;
             const STALE_DAYS: i64 = 7;
             let stale_cutoff = Utc::now() - chrono::Duration::days(STALE_DAYS);
@@ -517,6 +562,7 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
             let mut total_count: i64 = 0;
             let mut processed: i64 = 0;
             let mut refreshed: i64 = 0;
+            let mut refreshed_missing: i64 = 0;
             let mut skipped_remote: i64 = 0;
             let mut skipped_locked: i64 = 0;
             let mut skipped_fresh: i64 = 0;
@@ -554,21 +600,21 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
                 let page_len = page.items.len() as i64;
                 for item in &page.items {
                     processed += 1;
-                    // C 路线核心：远端 Emby 条目交给 remote-emby 同步链路处理，
-                    // 本任务不在 03:00 二次撞远端，避免 WAF / 速率限制叠加。
-                    if crate::remote_emby::remote_marker_for_db_item(item).is_some() {
-                        skipped_remote += 1;
-                        continue;
-                    }
-                    // lock_data 条目 do_refresh_item_metadata_with 内部也会跳过；
-                    // 这里提前过滤省掉一次 DB 往返，并便于统计。
+                    // 锁定条目最优先跳过——即使元数据缺失也不动。
                     if item.lock_data {
                         skipped_locked += 1;
                         continue;
                     }
-                    // staleness 阈值：N 天内动过的本地条目认为"够新"，本轮不刷。
-                    // 触发刷新会改写 date_modified → 自动落到 fresh 区间，下一日不再重复刷。
-                    if item.date_modified > stale_cutoff {
+                    let missing = item_has_missing_metadata(item);
+                    let is_remote =
+                        crate::remote_emby::remote_marker_for_db_item(item).is_some();
+                    // 远端条目：只在「缺数据」时才参与本任务，避免 03:00 扎堆撞上游。
+                    if is_remote && !missing {
+                        skipped_remote += 1;
+                        continue;
+                    }
+                    // 本地条目 + 不缺数据 + 7 天内已刷过 → 跳过；缺数据条目无视 stale。
+                    if !is_remote && !missing && item.date_modified > stale_cutoff {
                         skipped_fresh += 1;
                         continue;
                     }
@@ -581,11 +627,16 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
                         tracing::warn!(
                             item_id = %item.id,
                             name = %item.name,
+                            missing,
+                            is_remote,
                             error = %err,
                             "metadata-refresh: 单条刷新失败，继续下一条"
                         );
                     } else {
                         refreshed += 1;
+                        if missing {
+                            refreshed_missing += 1;
+                        }
                     }
                 }
                 if page_len < PAGE_SIZE {
@@ -596,6 +647,7 @@ async fn run_task(state: &AppState, task_id: &str) -> Result<(), AppError> {
             tracing::info!(
                 processed,
                 refreshed,
+                refreshed_missing,
                 skipped_remote,
                 skipped_locked,
                 skipped_fresh,
