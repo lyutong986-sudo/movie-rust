@@ -75,12 +75,11 @@ async fn run_file_watcher(state: &AppState) -> Result<(), crate::error::AppError
             _ = debounce_timer.tick() => {
                 if !dirty_libraries.is_empty() {
                     // 远端 Emby 同步进行中时，新写入的 strm 文件会成批触发本路径。
-                    // 紧接着 `scanner::analyze_imported_media` / `extract_chapter_images`
-                    // 已经会通过 `remote_marker_for_db_item` 单条跳过远端条目，但同步
-                    // 期间 DB upsert 与 file_watcher 的扫描并发操作 media_items 行容易
-                    // 让计数偏差，且本地非远端库的扫描也没必要在这窗口期插队。
-                    // 同步收尾后下一轮 tick（15s 内）会再次进入这里继续触发，所以
-                    // 不会丢事件。
+                    // 即便 `scanner::analyze_imported_media` 对远端 STRM 单条跳过 ffprobe，
+                    // 章节图提取也已经下线到 `routes/items.rs::playback_info` 按需触发，
+                    // 同步期间 DB upsert 与 file_watcher 的扫描并发操作 media_items 行
+                    // 仍容易让计数偏差，本地非远端库扫描也没必要在这窗口期插队。
+                    // 同步收尾后下一轮 tick（15s 内）会再次进入这里继续触发，不会丢事件。
                     if crate::routes::remote_emby::is_any_remote_sync_active().await {
                         tracing::debug!(
                             pending_libraries = dirty_libraries.len(),

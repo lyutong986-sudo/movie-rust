@@ -909,9 +909,11 @@ async fn import_movie_file(
     }
     analyze_imported_media(pool, runtime, movie_id, file).await?;
 
-    if library_options.enable_chapter_image_extraction {
-        extract_chapter_images(pool, config, movie_id, file).await;
-    }
+    // 章节缩略图统一移到 `routes/items.rs::playback_info` 由用户点击"播放"时按需触发，
+    // 扫描阶段不再对每个 Movie 的 chapter 都跑一次 `ffmpeg -ss N -i URL`：
+    //   1) 远端 STRM 每条 Movie 几十次 chapter seek，全库批量扫描会被远端服务器判作播放滥用 → 封号；
+    //   2) 实际有"看 trickplay 缩略图"需求的条目占比很小，按需提取节省扫描时间和远端流量；
+    //   3) 用户主动播放时再探测，时机和"用户期待看到章节图"对齐。
 
     Ok(())
 }
@@ -1528,10 +1530,7 @@ async fn import_tv_file(
     sync_nfo_people(pool, episode_id, episode_people).await?;
     analyze_imported_media(pool, runtime, episode_id, file).await?;
 
-    if library_options.enable_chapter_image_extraction {
-        extract_chapter_images(pool, config, episode_id, file).await;
-    }
-
+    // 章节缩略图改由 `routes/items.rs::playback_info` 按需触发，扫描阶段不再处理。详见 import_movie_file。
     Ok(())
 }
 
@@ -3327,7 +3326,18 @@ mod tests {
 
 /// 提取章节缩略图：对每个章节使用 ffmpeg 截图并保存到缓存目录。
 /// `.strm` 且内容为 `http/https` URL（含本机远端 Emby 代理）时对该 URL 拉流截图。
-async fn extract_chapter_images(
+/// 提取章节缩略图（trickplay）。
+///
+/// 设计约束：本函数只允许由 **用户主动播放（PlaybackInfo）** 触发，**不要在
+/// 扫描器 / 文件监听器 / 批处理路径** 调用，否则会在远端 STRM 上触发雪崩式
+/// `ffmpeg -ss N -i <url>` 拖动 GET → 远端服务器风控 → 账号封禁。
+///
+/// 关于 STRM 远端 Emby 条目的安全性：远端同步写出来的 STRM 内容是 **本地代理 URL**，
+/// 不是远端直链。所以 ffmpeg 实际命中的是我们自己的 backend，由
+/// `remote_emby::proxy_item_stream_internal_with_source` 转发到远端时已带上
+/// source 配置的 UA + X-Emby-Token + Authorization → 指纹和正常播放一致。
+/// 单个用户单次播放触发的章节图提取流量 = 一次正常拖动播放，远端可接受。
+pub(crate) async fn extract_chapter_images(
     pool: &sqlx::PgPool,
     config: &Config,
     item_id: uuid::Uuid,
@@ -3335,34 +3345,6 @@ async fn extract_chapter_images(
 ) {
     if !file.exists() {
         return;
-    }
-
-    // 远端 Emby 条目：每章一次 `ffmpeg -ss N -i <remote URL> -frames:v 1` 会逐
-    // chapter 对远端发起一次"播放式拖动 GET"，单条剧集就可能 20+ 次远端 seek，
-    // 比 analyze_imported_media 的 ffprobe 触发风控更严重。统一在入口拦截。
-    if naming::is_strm(file) {
-        match repository::get_media_item(pool, item_id).await {
-            Ok(Some(item)) => {
-                if crate::remote_emby::remote_marker_for_db_item(&item).is_some() {
-                    tracing::debug!(
-                        item_id = %item_id,
-                        file = %file.display(),
-                        "扫描跳过远端 Emby 条目的章节缩略图 ffmpeg（避免触发远端封禁）"
-                    );
-                    return;
-                }
-            }
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(
-                    item_id = %item_id,
-                    file = %file.display(),
-                    error = %error,
-                    "扫描查 media_items 失败，跳过 STRM 章节缩略图提取以避免封号风险"
-                );
-                return;
-            }
-        }
     }
 
     enum FfmpegInput {

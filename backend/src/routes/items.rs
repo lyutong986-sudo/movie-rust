@@ -14,7 +14,7 @@ use crate::{
         PlaybackInfoResponse, QueryResult, TranscodingInfoDto, UpdateUserItemDataRequest,
         UserItemDataDto, UserItemDataQuery,
     },
-    naming, remote_emby,
+    naming,
     repository::{self, ItemListOptions, UpdateUserDataInput},
     state::AppState,
     work_limiter::{WorkLimiterConfig, WorkLimiterKind},
@@ -5090,82 +5090,151 @@ async fn playback_info(
         return Err(AppError::BadRequest("目录条目没有播放源".to_string()));
     }
 
-    let needs_metadata =
-        item.video_codec.is_none() || item.audio_codec.is_none() || item.runtime_ticks.is_none();
-    if needs_metadata {
-        if remote_emby::remote_marker_for_db_item(&item).is_some() {
-            tracing::debug!("PlaybackInfo 跳过远端条目本地探测: {}", item.path);
+    // PlaybackInfo 探测策略（按用户需求重做，2026 修订）：
+    //
+    // 历史问题：旧版只在 codec/runtime 缺失时探测，且对远端 Emby 条目直接跳过。结果
+    //   1) 远端同步给的 BaseItemDto 偶尔字段错（codec/duration/分辨率），用户播放时仍看到旧/错误信息；
+    //   2) 真正能纠错的入口是 ffprobe/ffmpeg 直读容器，这事必须在播放前同步发生。
+    // 与此同时：扫描器侧已下线远端 STRM 的 ffprobe + chapter-extract（见 scanner.rs），
+    // 探测从"批量"模式回归"按需"模式，不会再触发远端封号。
+    //
+    // 新策略（每次 PlaybackInfo 都跑一次）：
+    //   * 本地文件：`analyze_media_file(path)`（ffprobe 直读本地容器，零远端流量）。
+    //   * STRM：`analyze_remote_media(target_url)`。STRM 内容是 *本地代理 URL*，ffprobe
+    //     命中本地代理，由 `proxy_item_stream_internal_with_source` 注入 source 配置的
+    //     UA + X-Emby-Token + Authorization → 远端看到的指纹和正常播放完全一致。
+    //   * 远端 Emby 条目同样走 STRM 路径（不再 short-circuit）—— 远端给的源信息可能错，
+    //     按需用真实容器修一次。
+    //
+    // 防误连击：60 秒同 item TTL 去重，避免投屏/多设备/前端连点造成重复探测。
+    const PROBE_DEDUP_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+    fn last_probe_at() -> &'static dashmap::DashMap<Uuid, std::time::Instant> {
+        use std::sync::OnceLock;
+        static MAP: OnceLock<dashmap::DashMap<Uuid, std::time::Instant>> = OnceLock::new();
+        MAP.get_or_init(dashmap::DashMap::new)
+    }
+
+    let item_path = item.path.clone();
+    let path = std::path::Path::new(&item_path);
+    let path_exists = path.exists();
+    let mut should_probe = path_exists;
+    if should_probe {
+        let now = std::time::Instant::now();
+        let recently_probed = last_probe_at()
+            .get(&item_id)
+            .map(|entry| *entry.value())
+            .map(|prev| now.duration_since(prev) < PROBE_DEDUP_TTL)
+            .unwrap_or(false);
+        if recently_probed {
+            tracing::debug!(
+                item_id = %item_id,
+                "PlaybackInfo 跳过探测：60s 内已探测过同一条目，直接复用既有元数据"
+            );
+            should_probe = false;
         } else {
-            work_limiter_config(&state).await?;
-            let item_path = item.path.clone();
-            let path = std::path::Path::new(&item_path);
-            if path.exists() {
-                if naming::is_strm(path) {
-                    // 对于.strm文件，尝试分析远程URL
-                    match std::fs::read_to_string(path) {
-                        Ok(content) => {
-                            if let Some(target_url) = naming::strm_target_from_text(&content) {
-                                tracing::debug!("分析.strm文件远程URL: {}", target_url);
-                                let _analysis_permit = state
-                                    .work_limiters
-                                    .acquire(WorkLimiterKind::MediaAnalysis)
-                                    .await;
-                                match media_analyzer::analyze_remote_media(&target_url).await {
-                                    Ok(analysis) => {
-                                        repository::update_media_item_metadata(
-                                            &state.pool,
-                                            item_id,
-                                            &analysis,
-                                        )
-                                        .await?;
-                                        item = repository::get_media_item(&state.pool, item_id)
-                                            .await?
-                                            .ok_or_else(|| {
-                                                AppError::NotFound("媒体条目不存在".to_string())
-                                            })?;
-                                        tracing::info!(
-                                            "已更新.strm文件远程媒体元数据: {}",
-                                            path.display()
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "无法分析.strm远程媒体 {}: {}",
-                                            target_url,
-                                            e
-                                        );
-                                    }
-                                }
-                            } else {
-                                tracing::debug!(".strm文件中未找到有效URL: {}", path.display());
-                            }
+            last_probe_at().insert(item_id, now);
+        }
+    } else {
+        tracing::debug!(item_id = %item_id, path = %path.display(), "PlaybackInfo 跳过探测：路径不存在");
+    }
+
+    let mut analysis_for_chapters: Option<media_analyzer::MediaAnalysisResult> = None;
+    if should_probe {
+        work_limiter_config(&state).await?;
+        let _analysis_permit = state
+            .work_limiters
+            .acquire(WorkLimiterKind::MediaAnalysis)
+            .await;
+        let analysis_result: Option<Result<media_analyzer::MediaAnalysisResult, _>> =
+            if naming::is_strm(path) {
+                match std::fs::read_to_string(path) {
+                    Ok(content) => match naming::strm_target_from_text(&content) {
+                        Some(target_url) => {
+                            tracing::debug!(
+                                item_id = %item_id,
+                                target = %target_url,
+                                "PlaybackInfo 同步探测 .strm 源"
+                            );
+                            Some(media_analyzer::analyze_remote_media(&target_url).await)
                         }
-                        Err(e) => {
-                            tracing::warn!("无法读取.strm文件 {}: {}", path.display(), e);
+                        None => {
+                            tracing::debug!(".strm 文件中未找到有效 URL: {}", path.display());
+                            None
                         }
-                    }
-                } else {
-                    // 对于普通文件，进行本地分析
-                    let _analysis_permit = state
-                        .work_limiters
-                        .acquire(WorkLimiterKind::MediaAnalysis)
-                        .await;
-                    match media_analyzer::analyze_media_file(path).await {
-                        Ok(analysis) => {
-                            repository::update_media_item_metadata(&state.pool, item_id, &analysis)
-                                .await?;
-                            item = repository::get_media_item(&state.pool, item_id)
-                                .await?
-                                .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
-                        }
-                        Err(e) => {
-                            tracing::warn!("无法分析媒体文件 {}: {}", path.display(), e);
-                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("无法读取 .strm 文件 {}: {}", path.display(), e);
+                        None
                     }
                 }
             } else {
-                tracing::debug!("跳过媒体文件分析（文件不存在）: {}", path.display());
+                tracing::debug!(item_id = %item_id, path = %path.display(), "PlaybackInfo 同步探测本地文件");
+                Some(media_analyzer::analyze_media_file(path).await)
+            };
+        drop(_analysis_permit);
+
+        match analysis_result {
+            Some(Ok(analysis)) => {
+                if let Err(err) =
+                    repository::update_media_item_metadata(&state.pool, item_id, &analysis).await
+                {
+                    tracing::warn!(
+                        item_id = %item_id,
+                        error = %err,
+                        "PlaybackInfo 写回媒体元数据失败，沿用旧记录"
+                    );
+                } else {
+                    item = repository::get_media_item(&state.pool, item_id)
+                        .await?
+                        .ok_or_else(|| AppError::NotFound("媒体条目不存在".to_string()))?;
+                    tracing::info!(
+                        item_id = %item_id,
+                        path = %path.display(),
+                        "PlaybackInfo 已用 ffprobe 同步刷新媒体详情"
+                    );
+                }
+                analysis_for_chapters = Some(analysis);
             }
+            Some(Err(e)) => {
+                tracing::warn!(
+                    item_id = %item_id,
+                    path = %path.display(),
+                    error = %e,
+                    "PlaybackInfo 探测失败，沿用现有元数据继续返回播放源"
+                );
+            }
+            None => {}
+        }
+    }
+
+    // 章节缩略图（trickplay）按需异步提取：
+    //   * 只有探测到了至少一条 chapter 才触发；
+    //   * 用 tokio::spawn 后台执行，不阻塞 PlaybackInfo 响应，用户拿到 URL 立刻可以开播；
+    //   * STRM 走本地代理（自带 spoofing），单用户单次播放 ≈ 一次正常播放流量，远端可接受；
+    //   * 同 item 60s TTL 已经在上面拦过，不会被连点叠加。
+    if path_exists {
+        let has_chapters = analysis_for_chapters
+            .as_ref()
+            .map(|a| !a.chapters.is_empty())
+            .unwrap_or(false);
+        let trigger_chapters = has_chapters || {
+            // 没有刚跑探测（被 TTL 跳过）也尝试补：DB 里可能已经有 chapter 行但 image 还没生成。
+            !should_probe
+        };
+        if trigger_chapters {
+            let pool_clone = state.pool.clone();
+            let config_clone = state.config.clone();
+            let chapter_path = path.to_path_buf();
+            let chapter_item_id = item_id;
+            tokio::spawn(async move {
+                crate::scanner::extract_chapter_images(
+                    &pool_clone,
+                    &config_clone,
+                    chapter_item_id,
+                    &chapter_path,
+                )
+                .await;
+            });
         }
     }
 
