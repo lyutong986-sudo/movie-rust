@@ -874,8 +874,17 @@ fn item_image_target_path(
         _ => return None,
     };
 
+    // Bug 修复 (2026-05-04 PB52-Img)：`folder = item_path.parent()`，当 `item_path`
+    // 本身是目录时（典型场景：远端 Emby 同步的 Series / Movie 文件夹模式，
+    // `item.path = view_workspace/<series_name>/`），错误地把 poster 落到
+    // `<series_name>` 的**父目录** —— 也就是整个 view 根目录 / library 分类目录。
+    // 同分类下所有 Series 都会写到同一个 `<分类>/poster.jpg`，互相覆盖；
+    // 浏览器层表现为「多个媒体共享同一封面 + 刷新后所有封面同时变」。
+    //
+    // 修复：is_dir() 分支应当把 poster 落到 `item_path` **内部**（Emby/Jellyfin
+    // 「电影文件夹 / Series 目录」NFO 结构标准用法），而不是父目录。
     if item_path.is_dir() {
-        Some(folder.join(format!("{filename}.{extension}")))
+        Some(item_path.join(format!("{filename}.{extension}")))
     } else {
         Some(folder.join(format!("{stem}-{filename}.{extension}")))
     }

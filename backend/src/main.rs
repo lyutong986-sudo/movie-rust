@@ -1036,6 +1036,108 @@ async fn ensure_schema_compatibility(pool: &sqlx::PgPool) -> Result<()> {
             PRIMARY KEY (source_hash, target_lang, provider)
         )"#,
         r#"CREATE INDEX IF NOT EXISTS idx_translation_cache_created_at ON translation_cache(created_at)"#,
+        // -------------------------------------------------------------------
+        // PB52-Img 数据修复：item_image_target_path 历史 bug 让多个 Series/Movie
+        // 的本地 image_*_path 落到 *父目录共享文件*（如 `/strm/.../国漫/poster.jpg`），
+        // 同分类下所有 item 互相覆盖。修代码后下次访问会重写到正确路径，但 DB 里
+        // 旧的「多 item 指向同一文件」字段必须清空，否则 serve_local_path 仍会读到
+        // 那张被最后一次写入覆盖的图，前端表现为 *多媒体共享同一封面 + 刷新封面跳变*。
+        //
+        // 策略：仅清「同一本地路径被 ≥ 2 个 item 引用」的字段，远端 URL（http://*）
+        // 不动；单 item 独占的本地路径也不动，最大限度保留正确缓存。
+        // 字段清空后 spawn_remote_image_persist 在下次请求时按修复后的目录规则
+        // 重新落盘，自然恢复。
+        r#"
+        WITH dup_primary AS (
+            SELECT image_primary_path
+            FROM media_items
+            WHERE image_primary_path IS NOT NULL
+              AND image_primary_path NOT LIKE 'http://%'
+              AND image_primary_path NOT LIKE 'https://%'
+            GROUP BY image_primary_path
+            HAVING COUNT(*) > 1
+        )
+        UPDATE media_items SET image_primary_path = NULL
+        WHERE image_primary_path IN (SELECT image_primary_path FROM dup_primary)
+        "#,
+        r#"
+        WITH dup_backdrop AS (
+            SELECT backdrop_path
+            FROM media_items
+            WHERE backdrop_path IS NOT NULL
+              AND backdrop_path NOT LIKE 'http://%'
+              AND backdrop_path NOT LIKE 'https://%'
+            GROUP BY backdrop_path
+            HAVING COUNT(*) > 1
+        )
+        UPDATE media_items SET backdrop_path = NULL
+        WHERE backdrop_path IN (SELECT backdrop_path FROM dup_backdrop)
+        "#,
+        r#"
+        WITH dup_logo AS (
+            SELECT logo_path
+            FROM media_items
+            WHERE logo_path IS NOT NULL
+              AND logo_path NOT LIKE 'http://%'
+              AND logo_path NOT LIKE 'https://%'
+            GROUP BY logo_path
+            HAVING COUNT(*) > 1
+        )
+        UPDATE media_items SET logo_path = NULL
+        WHERE logo_path IN (SELECT logo_path FROM dup_logo)
+        "#,
+        r#"
+        WITH dup_thumb AS (
+            SELECT thumb_path
+            FROM media_items
+            WHERE thumb_path IS NOT NULL
+              AND thumb_path NOT LIKE 'http://%'
+              AND thumb_path NOT LIKE 'https://%'
+            GROUP BY thumb_path
+            HAVING COUNT(*) > 1
+        )
+        UPDATE media_items SET thumb_path = NULL
+        WHERE thumb_path IN (SELECT thumb_path FROM dup_thumb)
+        "#,
+        r#"
+        WITH dup_banner AS (
+            SELECT banner_path
+            FROM media_items
+            WHERE banner_path IS NOT NULL
+              AND banner_path NOT LIKE 'http://%'
+              AND banner_path NOT LIKE 'https://%'
+            GROUP BY banner_path
+            HAVING COUNT(*) > 1
+        )
+        UPDATE media_items SET banner_path = NULL
+        WHERE banner_path IN (SELECT banner_path FROM dup_banner)
+        "#,
+        r#"
+        WITH dup_disc AS (
+            SELECT disc_path
+            FROM media_items
+            WHERE disc_path IS NOT NULL
+              AND disc_path NOT LIKE 'http://%'
+              AND disc_path NOT LIKE 'https://%'
+            GROUP BY disc_path
+            HAVING COUNT(*) > 1
+        )
+        UPDATE media_items SET disc_path = NULL
+        WHERE disc_path IN (SELECT disc_path FROM dup_disc)
+        "#,
+        r#"
+        WITH dup_art AS (
+            SELECT art_path
+            FROM media_items
+            WHERE art_path IS NOT NULL
+              AND art_path NOT LIKE 'http://%'
+              AND art_path NOT LIKE 'https://%'
+            GROUP BY art_path
+            HAVING COUNT(*) > 1
+        )
+        UPDATE media_items SET art_path = NULL
+        WHERE art_path IN (SELECT art_path FROM dup_art)
+        "#,
     ];
 
     for statement in compatibility_sql {

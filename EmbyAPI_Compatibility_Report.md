@@ -43,6 +43,59 @@
 >   // 修复后预期：每行 count == limit
 >   ```
 >
+> ⑬ **2026-05-04 八阶段：多个 Series/Movie 共享同一封面 + 刷新封面跳变（item_image_target_path is_dir() 分支落到父目录共享文件）**：
+> - **现象（MCP chrome-devtools 实测）**：`/library/47856023-FA73-4C74-9D88-D84EAFE10672`（国漫库）多个 Series 卡片肉眼可见封面雷同，刷新后**所有相似卡片同时换成另一张图**。命令式取证：
+>   ```js
+>   for (let r = 0; r < 3; r++) for (const id of ['57560DAD...一世之尊', '395D9BAF...一世独尊']) {
+>     const x = await fetch(`/Items/${id}/Images/Primary?cb=${Math.random()}`, { cache: 'no-store' });
+>     // 6 次响应：完全相同的字节 (hash=234c1ba3, len=349081, ETag="69f89058-55399")
+>   }
+>   ```
+>   `GET /Items/{id}/Images` 也直接证实了：两个不同 itemId 的 `Primary.Path` 都是 `/strm/影视媒体库/国漫/poster.jpg`——**同一文件**。响应 ETag 是 `mtime-size` 格式（与后端 `serve_local_path::etag_raw = format!("{:x}-{:x}", mtime, size)` 一致），所以请求确实进了 axum 后端，问题在 `image_primary_path` 数据库字段。
+> - **根因（`backend/src/routes/images.rs::item_image_target_path` 第 877-881 行）**：
+>   ```rust
+>   if item_path.is_dir() {
+>       Some(folder.join(format!("{filename}.{extension}")))      // ← BUG：folder = item_path.parent()
+>   } else {
+>       Some(folder.join(format!("{stem}-{filename}.{extension}")))
+>   }
+>   ```
+>   `folder = item_path.parent()`。当 `item_path` 本身是目录（远端 Emby 同步的 Series / Movie 文件夹模式：`item.path = view_workspace/<series_name>/`），`folder` 就指向了 **view 根目录**，落到 `<view_root>/poster.jpg`。同 view（同分类）下所有 Series 都写到同一个文件，互相覆盖。每个 Series 第一次访问 Primary 触发 `spawn_remote_image_persist` → 把自己的图覆盖了上一个 Series 的图 → DB 里每个 item 的 `image_primary_path` 都被写成同一个共享路径 → 客户端拿到的永远是「最后一次落盘的那张图」。刷新时另一个 Series 又触发 persist 把它覆盖 → 所有 item 同时换成那张新图。
+> - **修复（核心代码）**：`is_dir()` 分支应当把 image 落到 `item_path` 内部（Emby/Jellyfin NFO 标准里"电影文件夹 / Series 目录"的固定结构），而不是父目录：
+>   ```rust
+>   if item_path.is_dir() {
+>       Some(item_path.join(format!("{filename}.{extension}")))      // ← FIX
+>   } else {
+>       Some(folder.join(format!("{stem}-{filename}.{extension}")))
+>   }
+>   ```
+>   修复后路径：
+>   - Series 目录：`<view>/<series>/poster.jpg` / `<view>/<series>/fanart.jpg`（每个 Series 独占）
+>   - Movie 文件夹：`<movies>/<title (year)>/poster.jpg`（每个 Movie 独占）
+>   - 单文件 Movie/Series：`<dir>/<stem>-poster.jpg`（保持不变，Emby NFO 单文件标准）
+>   - Episode / Season 分支不变（`folder.join(..)` + 自带 stem/season prefix 已经唯一）
+> - **修复（数据清理）**：`backend/src/main.rs::ensure_schema_compatibility` 末尾追加 7 条 idempotent 的清理 SQL，把 DB 里被 ≥ 2 个 item 引用的本地 image 字段（`image_primary_path` / `backdrop_path` / `logo_path` / `thumb_path` / `banner_path` / `disc_path` / `art_path`）一律置 NULL。远端 URL（`http://*` / `https://*`）和单 item 独占的本地路径都保留，最大限度减少破坏。下次客户端访问时，`serve_item_image` 在 `image_primary_path` 为 NULL 时会回退到 fallback（远端 URL 或 placeholder），并触发 `spawn_remote_image_persist` 用修好的目录规则**重新落盘**到正确位置。
+>   ```sql
+>   WITH dup_primary AS (
+>       SELECT image_primary_path FROM media_items
+>       WHERE image_primary_path IS NOT NULL
+>         AND image_primary_path NOT LIKE 'http%'
+>       GROUP BY image_primary_path HAVING COUNT(*) > 1
+>   )
+>   UPDATE media_items SET image_primary_path = NULL
+>   WHERE image_primary_path IN (SELECT image_primary_path FROM dup_primary);
+>   -- 同模式重复 backdrop_path / logo_path / thumb_path / banner_path / disc_path / art_path
+>   ```
+> - **预期效果**：
+>   - `GET /Items/{a}/Images/Primary` 与 `GET /Items/{b}/Images/Primary`（a ≠ b）字节不再相同。
+>   - `GET /Items/{id}/Images` 中 `Primary.Path` 落到该 item 自己的 `<series_dir>/poster.jpg` 而非 `<view_root>/poster.jpg`。
+>   - 多次刷新页面，单个 Series 卡片的封面**稳定**（不再跳变）。
+> - **影响 / 风险**：
+>   - 升级首启动会瞬时清掉一批本地 image 路径字段，前端首屏会有几秒「图加载中→placeholder→真实图」的过渡——这是预期的，因为 spawn_remote_image_persist 是异步落盘。
+>   - 旧的 `<view_root>/poster.jpg` 物理文件**不会被删**（避免误删用户手动放置的 NFO 资源），但下次正确落盘后它就成了无 DB 引用的孤儿文件，可手动 rm 或留作历史。
+>   - 单文件场景未受波及（else 分支用 stem 唯一）；Episode / Season 分支因为 stem / season prefix 早就唯一也未受影响。Movie 文件夹模式的同源 bug 一并修复。
+> - **验证**：`cargo check -p movie-rust-backend` 通过；启动后 MCP 实测 6 次同 itemId 的 fetch 返回稳定 hash + 不同 itemId 之间 hash 不再碰撞。
+>
 > ⑫ **2026-05-04 七阶段：「翻译兜底」调度任务 3 秒就 Completed 的链路审计（首页折叠后立即 break + OFFSET 翻页漂移）**：
 > - **现象**：UI `/dashboard/scheduler` 显示 `翻译兜底 / Completed / 上次耗时 3 秒`，但库里有上百条非中文标题/简介。3 秒明显跑不完任何实质翻译，怀疑链路有 bug。
 > - **根因 1（致命：首页折叠后 page_len < PAGE_SIZE 直接 break）**：`backend/src/routes/scheduled_tasks.rs::run_task("translation-fallback")` 旧实现里：
